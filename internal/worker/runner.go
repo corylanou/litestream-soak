@@ -73,6 +73,10 @@ func (r *Runner) populate(ctx context.Context) error {
 		return nil
 	}
 
+	if err := os.MkdirAll(r.cfg.DataDir, 0755); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
+
 	slog.Info("Populating database", "target_size", r.cfg.InitialSize)
 	cmd := exec.CommandContext(ctx, "litestream-test", "populate",
 		"-db", r.cfg.DBPath,
@@ -83,8 +87,7 @@ func (r *Runner) populate(ctx context.Context) error {
 	return cmd.Run()
 }
 
-var litestreamConfigTmpl = template.Must(template.New("config").Parse(`
-socket:
+var litestreamConfigTmpl = template.Must(template.New("config").Parse(`socket:
   enabled: true
   path: {{.SocketPath}}
 
@@ -93,13 +96,24 @@ dbs:
     snapshot:
       interval: {{.SnapshotInterval}}
     replicas:
-      - url: s3://{{.TigrisBucket}}/{{.TigrisPath}}
+{{- if eq .ReplicaType "file"}}
+      - path: {{.ReplicaPath}}
         sync-interval: {{.SyncInterval}}
-        endpoint: {{.TigrisEndpoint}}
+{{- else}}
+      - url: s3://{{.S3Bucket}}/{{.S3Path}}
+        sync-interval: {{.SyncInterval}}
+        endpoint: {{.S3Endpoint}}
         force-path-style: true
+{{- end}}
 `))
 
 func (r *Runner) writeLitestreamConfig() error {
+	if r.cfg.ReplicaType == "file" {
+		if err := os.MkdirAll(r.cfg.ReplicaPath, 0755); err != nil {
+			return fmt.Errorf("create replica dir: %w", err)
+		}
+	}
+
 	f, err := os.Create(r.cfg.ConfigPath)
 	if err != nil {
 		return fmt.Errorf("create config file: %w", err)
@@ -110,18 +124,22 @@ func (r *Runner) writeLitestreamConfig() error {
 		SocketPath       string
 		DBPath           string
 		SnapshotInterval string
-		TigrisBucket     string
-		TigrisPath       string
+		ReplicaType      string
+		ReplicaPath      string
+		S3Bucket         string
+		S3Path           string
 		SyncInterval     string
-		TigrisEndpoint   string
+		S3Endpoint       string
 	}{
 		SocketPath:       r.cfg.SocketPath,
 		DBPath:           r.cfg.DBPath,
 		SnapshotInterval: r.cfg.SnapshotInterval.String(),
-		TigrisBucket:     r.cfg.TigrisBucket,
-		TigrisPath:       r.cfg.TigrisPath,
+		ReplicaType:      r.cfg.ReplicaType,
+		ReplicaPath:      r.cfg.ReplicaPath,
+		S3Bucket:         r.cfg.S3Bucket,
+		S3Path:           r.cfg.S3Path,
 		SyncInterval:     r.cfg.SyncInterval.String(),
-		TigrisEndpoint:   r.cfg.TigrisEndpoint,
+		S3Endpoint:       r.cfg.S3Endpoint,
 	}
 
 	return litestreamConfigTmpl.Execute(f, data)
@@ -134,10 +152,12 @@ func (r *Runner) startLitestream(ctx context.Context) error {
 	r.litestreamCmd.Stdout = os.Stdout
 	r.litestreamCmd.Stderr = os.Stderr
 
-	r.litestreamCmd.Env = append(os.Environ(),
-		"AWS_ACCESS_KEY_ID="+r.cfg.TigrisAccessKey,
-		"AWS_SECRET_ACCESS_KEY="+r.cfg.TigrisSecretKey,
-	)
+	if r.cfg.ReplicaType == "s3" {
+		r.litestreamCmd.Env = append(os.Environ(),
+			"AWS_ACCESS_KEY_ID="+r.cfg.S3AccessKey,
+			"AWS_SECRET_ACCESS_KEY="+r.cfg.S3SecretKey,
+		)
+	}
 
 	return r.litestreamCmd.Start()
 }

@@ -1,7 +1,9 @@
 LITESTREAM_SHA ?= main
+LITESTREAM_REPO ?= ../../../benbjohnson/litestream
 WORKER_IMAGE ?= registry.fly.io/litestream-soak:worker-$(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+LOCAL_DATA_DIR ?= /tmp/litestream-soak
 
-.PHONY: build build-worker test vet clean
+.PHONY: build build-worker build-deps test vet clean run-local clean-local docker-worker
 
 build:
 	go build -o bin/soakworker ./cmd/soakworker
@@ -9,6 +11,12 @@ build:
 
 build-worker:
 	go build -o bin/soakworker ./cmd/soakworker
+
+build-deps:
+	cd $(LITESTREAM_REPO) && go build -o $(CURDIR)/bin/litestream ./cmd/litestream
+	cd $(LITESTREAM_REPO) && go build -o $(CURDIR)/bin/litestream-test ./cmd/litestream-test
+
+build-all: build build-deps
 
 test:
 	go test ./...
@@ -18,6 +26,23 @@ vet:
 
 clean:
 	rm -rf bin/
+
+clean-local:
+	rm -rf $(LOCAL_DATA_DIR)
+
+run-local: build-worker
+	@mkdir -p $(LOCAL_DATA_DIR)
+	PATH="$(CURDIR)/bin:$(PATH)" \
+	DATA_DIR="$(LOCAL_DATA_DIR)" \
+	REPLICA_TYPE=file \
+	REPLICA_PATH="$(LOCAL_DATA_DIR)/replicas" \
+	PROFILE=low-volume \
+	INITIAL_SIZE=1MB \
+	VERIFY_INTERVAL=1m \
+	SNAPSHOT_INTERVAL=2m \
+	WORKER_ID=local-test \
+	GIT_SHA=local \
+	./bin/soakworker
 
 docker-worker:
 	docker build -f Dockerfile.worker --build-arg LITESTREAM_SHA=$(LITESTREAM_SHA) -t $(WORKER_IMAGE) .

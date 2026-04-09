@@ -33,12 +33,16 @@ type Config struct {
 	VerifyInterval time.Duration
 	VerifyType     string // quick, integrity, checksum, full
 
-	// Tigris S3
-	TigrisBucket    string
-	TigrisEndpoint  string
-	TigrisAccessKey string
-	TigrisSecretKey string
-	TigrisPath      string
+	// Replica config
+	ReplicaType string // "file" or "s3"
+	ReplicaPath string // for file:// replicas (local directory)
+
+	// S3/Tigris config (only used when ReplicaType == "s3")
+	S3Bucket    string
+	S3Endpoint  string
+	S3AccessKey string
+	S3SecretKey string
+	S3Path      string
 
 	// Litestream config
 	SnapshotInterval time.Duration
@@ -69,10 +73,13 @@ func DefaultConfig() Config {
 		LoadDuration: 87600 * time.Hour, // ~10 years
 
 		VerifyInterval: 30 * time.Minute,
-		VerifyType:     "full",
+		VerifyType:     "integrity",
 
-		TigrisEndpoint: "https://fly.storage.tigris.dev",
-		TigrisPath:     "soak",
+		ReplicaType: "file",
+		ReplicaPath: "/data/replicas",
+
+		S3Endpoint: "https://fly.storage.tigris.dev",
+		S3Path:     "soak",
 
 		SnapshotInterval: 10 * time.Minute,
 		SyncInterval:     1 * time.Second,
@@ -162,20 +169,26 @@ func ConfigFromEnv() (Config, error) {
 		c.VerifyType = v
 	}
 
-	if v := os.Getenv("TIGRIS_BUCKET"); v != "" {
-		c.TigrisBucket = v
+	if v := os.Getenv("REPLICA_TYPE"); v != "" {
+		c.ReplicaType = v
 	}
-	if v := os.Getenv("TIGRIS_ENDPOINT"); v != "" {
-		c.TigrisEndpoint = v
+	if v := os.Getenv("REPLICA_PATH"); v != "" {
+		c.ReplicaPath = v
+	}
+	if v := os.Getenv("S3_BUCKET"); v != "" {
+		c.S3Bucket = v
+	}
+	if v := os.Getenv("S3_ENDPOINT"); v != "" {
+		c.S3Endpoint = v
 	}
 	if v := os.Getenv("AWS_ACCESS_KEY_ID"); v != "" {
-		c.TigrisAccessKey = v
+		c.S3AccessKey = v
 	}
 	if v := os.Getenv("AWS_SECRET_ACCESS_KEY"); v != "" {
-		c.TigrisSecretKey = v
+		c.S3SecretKey = v
 	}
-	if v := os.Getenv("TIGRIS_PATH"); v != "" {
-		c.TigrisPath = v
+	if v := os.Getenv("S3_PATH"); v != "" {
+		c.S3Path = v
 	}
 
 	if v := os.Getenv("SNAPSHOT_INTERVAL"); v != "" {
@@ -197,13 +210,16 @@ func ConfigFromEnv() (Config, error) {
 		c.MetricsAddr = v
 	}
 
-	if c.TigrisBucket == "" {
-		return c, fmt.Errorf("TIGRIS_BUCKET is required")
+	if c.ReplicaType == "s3" && c.S3Bucket == "" {
+		return c, fmt.Errorf("S3_BUCKET is required when REPLICA_TYPE=s3")
 	}
 
 	return c, nil
 }
 
 func (c Config) ReplicaURL() string {
-	return fmt.Sprintf("s3://%s/%s", c.TigrisBucket, c.TigrisPath)
+	if c.ReplicaType == "file" {
+		return "file://" + c.ReplicaPath
+	}
+	return fmt.Sprintf("s3://%s/%s", c.S3Bucket, c.S3Path)
 }
