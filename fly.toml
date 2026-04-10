@@ -1,0 +1,26 @@
+app = "litestream-soak"
+primary_region = "ord"
+
+[build]
+  dockerfile = "Dockerfile.worker"
+
+[env]
+  WORKER_ID = "worker-main-low-vol"
+  GIT_SHA = "main"
+  SOURCE = "main"
+  PROFILE = "low-volume"
+  INITIAL_SIZE = "5MB"
+  VERIFY_INTERVAL = "30m"
+  SNAPSHOT_INTERVAL = "10m"
+  REPLICA_TYPE = "s3"
+  S3_BUCKET = "litestream-soak-replicas"
+  S3_PATH = "soak/low-volume"
+  S3_ENDPOINT = "https://fly.storage.tigris.dev"
+
+[[metrics]]
+  port = 9091
+  path = "/metrics"
+
+[mounts]
+  source = "soak_data"
+  destination = "/data"
