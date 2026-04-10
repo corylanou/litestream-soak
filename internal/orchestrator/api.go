@@ -15,8 +15,9 @@ import (
 )
 
 type API struct {
-	db  *model.DB
-	fly *flyapi.Client
+	db      *model.DB
+	fly     *flyapi.Client
+	metrics *controlMetrics
 }
 
 type WorkerDetailResponse struct {
@@ -47,7 +48,11 @@ type IncidentBundle struct {
 }
 
 func NewAPI(db *model.DB, fly *flyapi.Client) *API {
-	return &API{db: db, fly: fly}
+	return &API{
+		db:      db,
+		fly:     fly,
+		metrics: newControlMetrics(db),
+	}
 }
 
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
@@ -147,6 +152,9 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if worker, err := a.db.GetWorker(workerID); err == nil {
+		a.metrics.observeWorker(*worker)
+	}
 
 	w.WriteHeader(http.StatusAccepted)
 }
@@ -212,6 +220,10 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	if err := a.db.RecordEvent(workerID, eventType, message, string(details)); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if worker, err := a.db.GetWorker(workerID); err == nil {
+		a.metrics.observeWorker(*worker)
+		a.metrics.observeVerification(*worker, *verification)
 	}
 
 	w.WriteHeader(http.StatusAccepted)

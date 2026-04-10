@@ -95,7 +95,7 @@
       "id": 2,
       "targets": [
         {
-          "expr": "soak_verification_last_result{worker_id=\"$worker\"}",
+          "expr": "soak_control_worker_last_verification_result{worker_id=\"$worker\"}",
           "legendFormat": "last result"
         }
       ],
@@ -135,7 +135,7 @@
       "id": 3,
       "targets": [
         {
-          "expr": "time() - max(timestamp(soak_verification_last_result{worker_id=\"$worker\"}))",
+          "expr": "time() - max(soak_control_worker_last_verification_completed_unixtime{worker_id=\"$worker\"})",
           "legendFormat": "age"
         }
       ],
@@ -971,14 +971,14 @@
           "text": "worker-main-low-vol",
           "value": "worker-main-low-vol"
         },
-        "definition": "label_values(soak_worker_info, worker_id)",
+        "definition": "label_values(soak_control_worker_info, worker_id)",
         "hide": 0,
         "includeAll": false,
         "label": "Worker",
         "multi": false,
         "name": "worker",
         "options": [],
-        "query": "label_values(soak_worker_info, worker_id)",
+        "query": "label_values(soak_control_worker_info, worker_id)",
         "refresh": 1,
         "regex": "",
         "sort": 1,
