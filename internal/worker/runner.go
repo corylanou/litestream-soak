@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -247,7 +246,6 @@ func (r *Runner) pollDBStats() {
 	client := r.ipcClient()
 
 	r.pollTXID(client)
-	r.pollSyncStatus(client)
 	r.pollInfo(client)
 	r.pollList(client)
 }
@@ -277,31 +275,6 @@ func (r *Runner) pollTXID(client *http.Client) {
 		return
 	}
 	SetDBTXID(float64(result.TXID))
-}
-
-func (r *Runner) pollSyncStatus(client *http.Client) {
-	body, _ := json.Marshal(map[string]any{
-		"path": r.cfg.DBPath,
-		"wait": false,
-	})
-	resp, err := client.Post("http://localhost/sync", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		TXID           uint64 `json:"txid"`
-		ReplicatedTXID uint64 `json:"replicated_txid"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return
-	}
-	SetDBTXID(float64(result.TXID))
-	SetReplicatedTXID(float64(result.ReplicatedTXID))
-	if result.TXID >= result.ReplicatedTXID {
-		SetReplicationLag(float64(result.TXID - result.ReplicatedTXID))
-	}
 }
 
 func (r *Runner) pollInfo(client *http.Client) {

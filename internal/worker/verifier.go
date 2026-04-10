@@ -40,6 +40,7 @@ func (v *Verifier) RunCycle(ctx context.Context) (bool, error) {
 	slog.Info("Starting verification cycle")
 
 	if err := v.pauseLoad(); err != nil {
+		v.logResult(start, false, fmt.Sprintf("pause load: %v", err))
 		return false, fmt.Errorf("pause load: %w", err)
 	}
 	defer v.resumeLoad()
@@ -51,6 +52,7 @@ func (v *Verifier) RunCycle(ctx context.Context) (bool, error) {
 	}
 
 	if err := v.waitForSync(ctx); err != nil {
+		v.logResult(start, false, fmt.Sprintf("wait for sync: %v", err))
 		return false, fmt.Errorf("wait for sync: %w", err)
 	}
 
@@ -60,18 +62,45 @@ func (v *Verifier) RunCycle(ctx context.Context) (bool, error) {
 
 	if err != nil {
 		slog.Error("Verification failed", "error", err, "duration", time.Since(start))
+		v.logResult(start, false, err.Error())
 		return false, err
 	}
 
 	if passed {
 		slog.Info("Verification passed", "duration", time.Since(start))
+		v.logResult(start, true, "")
 	} else {
 		slog.Error("Verification FAILED", "duration", time.Since(start))
+		v.logResult(start, false, "validation returned false")
 	}
 
 	os.Remove(v.cfg.DBPath + ".restored")
 
 	return passed, nil
+}
+
+func (v *Verifier) logResult(start time.Time, passed bool, errMsg string) {
+	logPath := v.cfg.DataDir + "/verification.log"
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		slog.Error("Failed to open verification log", "error", err)
+		return
+	}
+	defer f.Close()
+
+	result := "PASS"
+	if !passed {
+		result = "FAIL"
+	}
+
+	dbSize := int64(0)
+	if info, err := os.Stat(v.cfg.DBPath); err == nil {
+		dbSize = info.Size()
+	}
+
+	entry := fmt.Sprintf("%s | %s | duration=%s | db_size=%d | error=%s\n",
+		start.UTC().Format(time.RFC3339), result, time.Since(start).Round(time.Millisecond), dbSize, errMsg)
+	f.WriteString(entry)
 }
 
 func (v *Verifier) pauseLoad() error {
