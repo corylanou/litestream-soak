@@ -178,14 +178,15 @@ func (v *Verifier) validate(ctx context.Context) (bool, error) {
 	}
 
 	cmd := exec.CommandContext(ctx, "litestream-test", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	output, err := cmd.CombinedOutput()
 
-	if err := cmd.Run(); err != nil {
+	slog.Info("Validate output", "output", string(output))
+
+	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return false, fmt.Errorf("validation failed with exit code %d", exitErr.ExitCode())
+			return false, fmt.Errorf("validation failed (exit %d): %s", exitErr.ExitCode(), string(output))
 		}
-		return false, fmt.Errorf("run validate: %w", err)
+		return false, fmt.Errorf("run validate: %w: %s", err, string(output))
 	}
 
 	return true, nil
