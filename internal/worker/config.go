@@ -56,7 +56,7 @@ type Config struct {
 
 	// Replay
 	LoadMode       string  // "synthetic", "replay", "both"
-	ReplayDataset  string  // "taxi", "gharchive"
+	ReplayDataset  string  // "taxi", "gharchive", "orders"
 	ReplayDataPath string  // path to dataset file
 	ReplayDataURL  string  // remote dataset URL downloaded on demand
 	ReplaySpeed    float64 // speed multiplier (1.0 = real-time)
@@ -162,6 +162,13 @@ func ConfigFromEnv() (Config, error) {
 			c.PayloadSize = 2048
 			c.Workers = 4
 			c.InitialSize = "20MB"
+		case "read-heavy":
+			c.WriteRate = 80
+			c.Pattern = "constant"
+			c.PayloadSize = 512
+			c.ReadRatio = 0.95
+			c.Workers = 6
+			c.InitialSize = "10MB"
 		}
 	}
 

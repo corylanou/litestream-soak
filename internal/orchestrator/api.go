@@ -43,6 +43,18 @@ type FailureResponse struct {
 	TriageCommands   []string           `json:"triage_commands,omitempty"`
 }
 
+type WorkerSummaryResponse struct {
+	Worker                  model.Worker        `json:"worker"`
+	Workload                workload.Config     `json:"workload"`
+	LastVerification        *model.Verification `json:"last_verification,omitempty"`
+	LatestFailure           *model.Verification `json:"latest_failure,omitempty"`
+	CurrentFailureStage     string              `json:"current_failure_stage,omitempty"`
+	CurrentFailureSignature string              `json:"current_failure_signature,omitempty"`
+	LatestFailureStage      string              `json:"latest_failure_stage,omitempty"`
+	LatestFailureSignature  string              `json:"latest_failure_signature,omitempty"`
+	TriageCommands          []string            `json:"triage_commands,omitempty"`
+}
+
 type IncidentBundle struct {
 	GeneratedAt         time.Time            `json:"generated_at"`
 	Worker              model.Worker         `json:"worker"`
@@ -75,6 +87,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ui", a.handleHome)
 	mux.HandleFunc("GET /ui/workers/{id}", a.handleWorkerPage)
 	mux.HandleFunc("GET /api/workers", a.handleListWorkers)
+	mux.HandleFunc("GET /api/worker-summaries", a.handleListWorkerSummaries)
 	mux.HandleFunc("GET /api/workers/{id}", a.handleGetWorker)
 	mux.HandleFunc("GET /api/workers/{id}/incident", a.handleGetIncident)
 	mux.HandleFunc("GET /api/workers/{id}/prompt", a.handleGetPrompt)
@@ -92,6 +105,26 @@ func (a *API) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAPIJSON(w, workers)
+}
+
+func (a *API) handleListWorkerSummaries(w http.ResponseWriter, r *http.Request) {
+	workers, err := a.db.ListWorkers(r.URL.Query().Get("status"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	summaries := make([]WorkerSummaryResponse, 0, len(workers))
+	for _, worker := range workers {
+		summary, err := a.buildWorkerSummary(worker)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		summaries = append(summaries, summary)
+	}
+
+	writeAPIJSON(w, summaries)
 }
 
 func (a *API) handleListEvents(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +197,39 @@ func (a *API) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAPIJSON(w, response)
+}
+
+func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, error) {
+	summary := WorkerSummaryResponse{
+		Worker:         worker,
+		Workload:       resolveWorkerWorkload(worker),
+		TriageCommands: buildTriageCommands(worker, worker.FlyMachineID != ""),
+	}
+
+	verifications, err := a.db.ListVerifications(worker.ID, 1)
+	if err != nil {
+		return summary, err
+	}
+	if len(verifications) > 0 {
+		verification := verifications[0]
+		summary.LastVerification = &verification
+		if !verification.Passed || verification.Status == "failed" {
+			summary.CurrentFailureStage = inferFailureStage(&verification)
+			summary.CurrentFailureSignature = inferFailureSignature(&verification)
+		}
+	}
+
+	latestFailure, err := a.db.GetLatestFailedVerification(worker.ID)
+	if err != nil {
+		return summary, err
+	}
+	if latestFailure != nil {
+		summary.LatestFailure = latestFailure
+		summary.LatestFailureStage = inferFailureStage(latestFailure)
+		summary.LatestFailureSignature = inferFailureSignature(latestFailure)
+	}
+
+	return summary, nil
 }
 
 func (a *API) handleGetIncident(w http.ResponseWriter, r *http.Request) {
@@ -300,7 +366,7 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 
 	response := &WorkerDetailResponse{
 		Worker:              *worker,
-		Workload:            workload.ParseConfig(worker.ProfileConfig),
+		Workload:            resolveWorkerWorkload(*worker),
 		RecentVerifications: verifications,
 		RecentEvents:        events,
 		TriageCommands:      buildTriageCommands(*worker, false),

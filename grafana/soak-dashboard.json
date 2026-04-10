@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Worker-labeled signal board for the Litestream soak project. Use Grafana to see fleet posture, workload shape, drift, lag, and restarts. Use the control plane for incident detail and prompt export.",
+  "description": "Worker-labeled signal board for the Litestream soak project. Use Grafana to see fleet posture, workload shape, recent failure classes, drift, lag, and restarts. Use the control plane for incident detail and prompt export.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 2,
@@ -30,6 +30,12 @@
       "title": "Failure Feed",
       "type": "link",
       "url": "https://litestream-soak-ctl.fly.dev/api/failures"
+    },
+    {
+      "targetBlank": true,
+      "title": "Worker Summaries",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/worker-summaries"
     }
   ],
   "panels": [
@@ -46,7 +52,7 @@
       },
       "id": 1,
       "options": {
-        "content": "### Operator Flow\n- Filter to a worker first.\n- Start with **Last Verification**, **Verification Age**, **Current Sync Age**, and the restart counters.\n- If the worker is bad, jump to **Selected Worker** or **Prompt Bundle** in the dashboard links.\n- State timelines answer when the worker changed state. Trend panels answer whether it was lagging, recycling, or simply paused.",
+        "content": "### Operator Flow\n- Filter to a worker first.\n- Start with **Last Verification**, **Verification Age**, **Current Sync Age**, and the restart counters.\n- Use **Current Failure Labels** for active breakage and **Fleet Last Failure Classes** for the most recent failure shape, even if the worker recovered.\n- Use **Fleet Workload Shapes** to confirm the exact load mode, replay dataset, write rate, payload size, and concurrency behind the incident.\n- If the worker is bad, jump to **Selected Worker**, **Worker Summaries**, or **Prompt Bundle** in the dashboard links.",
         "mode": "markdown"
       },
       "title": "Runbook",
@@ -1021,7 +1027,7 @@
       },
       "targets": [
         {
-          "expr": "soak_control_worker_status{worker_id=\"$worker\"}",
+          "expr": "soak_control_worker_status{worker_id=\"$worker\"} == 1",
           "format": "table",
           "instant": true,
           "legendFormat": "{{status}}"
@@ -1056,7 +1062,7 @@
       },
       "targets": [
         {
-          "expr": "soak_control_worker_failure_info{worker_id=\"$worker\"}",
+          "expr": "soak_control_worker_failure_info{worker_id=\"$worker\"} == 1",
           "format": "table",
           "instant": true,
           "legendFormat": "{{failure_stage}} / {{failure_signature}}"
@@ -1091,7 +1097,7 @@
       },
       "targets": [
         {
-          "expr": "soak_control_worker_status",
+          "expr": "soak_control_worker_status == 1",
           "format": "table",
           "instant": true
         }
@@ -1125,7 +1131,7 @@
       },
       "targets": [
         {
-          "expr": "soak_control_worker_failure_info",
+          "expr": "soak_control_worker_failure_info == 1",
           "format": "table",
           "instant": true
         }
@@ -1159,12 +1165,82 @@
       },
       "targets": [
         {
-          "expr": "soak_control_worker_workload_info",
+          "expr": "soak_control_worker_workload_info == 1",
           "format": "table",
           "instant": true
         }
       ],
       "title": "Fleet Workload Shapes",
+      "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 53
+      },
+      "id": 28,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "soak_control_worker_last_failure_info == 1",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Fleet Last Failure Classes",
+      "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 53
+      },
+      "id": 29,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "sort_desc(time() - soak_control_worker_last_failure_unixtime)",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Fleet Last Failure Age",
       "type": "table"
     }
   ],

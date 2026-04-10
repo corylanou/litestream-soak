@@ -312,7 +312,7 @@ func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA string)
 			}
 		}
 
-		workloadCfg := workload.ParseConfig(w.ProfileConfig)
+		workloadCfg := resolveWorkerWorkload(w)
 
 		newWorker, err := m.CreateWorker(ctx, WorkerRequest{
 			WorkerID:    w.Name,

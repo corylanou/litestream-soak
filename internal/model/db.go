@@ -211,6 +211,7 @@ func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
 			git_sha = excluded.git_sha,
 			profile_name = excluded.profile_name,
 			profile_config = CASE
+				WHEN workers.profile_config <> '{}' THEN workers.profile_config
 				WHEN excluded.profile_config <> '{}' THEN excluded.profile_config
 				ELSE workers.profile_config
 			END,
@@ -348,6 +349,42 @@ func (d *DB) ListVerifications(workerID string, limit int) ([]Verification, erro
 		verifications = append(verifications, v)
 	}
 	return verifications, nil
+}
+
+func (d *DB) GetLatestFailedVerification(workerID string) (*Verification, error) {
+	var verification Verification
+	var completedAt sql.NullTime
+
+	err := d.db.QueryRow(`
+		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message
+		FROM verifications
+		WHERE worker_id = ? AND (passed = 0 OR status = 'failed')
+		ORDER BY started_at DESC
+		LIMIT 1`,
+		workerID,
+	).Scan(
+		&verification.ID,
+		&verification.WorkerID,
+		&verification.StartedAt,
+		&completedAt,
+		&verification.Status,
+		&verification.CheckType,
+		&verification.SourceChecksum,
+		&verification.RestoredChecksum,
+		&verification.Passed,
+		&verification.DurationMS,
+		&verification.ErrorMessage,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if completedAt.Valid {
+		verification.CompletedAt = &completedAt.Time
+	}
+	return &verification, nil
 }
 
 func (d *DB) CreateDeployment(dep *Deployment) (int64, error) {

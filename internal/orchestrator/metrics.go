@@ -1,19 +1,21 @@
 package orchestrator
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/corylanou/litestream-soak/internal/model"
-	"github.com/corylanou/litestream-soak/internal/workload"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type controlMetrics struct {
-	mu               sync.Mutex
-	statusByWorker   map[string]string
-	workloadByWorker map[string]labelMetricState
-	failureByWorker  map[string]failureMetricState
+	mu                  sync.Mutex
+	statusByWorker      map[string]string
+	workloadByWorker    map[string]labelMetricState
+	failureByWorker     map[string]failureMetricState
+	lastFailureByWorker map[string]failureMetricState
 }
 
 type labelMetricState struct {
@@ -38,7 +40,7 @@ var (
 	controlWorkerWorkloadInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_control_worker_workload_info",
 		Help: "Configured workload shape for a control-plane worker.",
-	}, []string{"worker_id", "profile", "source", "app_name", "region", "load_mode", "replay_dataset", "pattern"})
+	}, []string{"worker_id", "profile", "source", "app_name", "region", "load_mode", "replay_dataset", "pattern", "write_rate", "payload_size", "load_workers", "replay_speed", "memory_mb", "cpus"})
 
 	controlWorkerLastHeartbeat = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_control_worker_last_heartbeat_unixtime",
@@ -64,13 +66,24 @@ var (
 		Name: "soak_control_worker_failure_info",
 		Help: "Current failure classification tracked by the control plane.",
 	}, []string{"worker_id", "profile", "source", "app_name", "region", "failure_stage", "failure_signature"})
+
+	controlWorkerLastFailureInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_last_failure_info",
+		Help: "Most recent failure classification seen for a worker.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region", "failure_stage", "failure_signature"})
+
+	controlWorkerLastFailure = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_last_failure_unixtime",
+		Help: "Unix timestamp of the most recent failed verification seen for a worker.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
 )
 
 func NewControlMetrics(db *model.DB) *controlMetrics {
 	m := &controlMetrics{
-		statusByWorker:   make(map[string]string),
-		workloadByWorker: make(map[string]labelMetricState),
-		failureByWorker:  make(map[string]failureMetricState),
+		statusByWorker:      make(map[string]string),
+		workloadByWorker:    make(map[string]labelMetricState),
+		failureByWorker:     make(map[string]failureMetricState),
+		lastFailureByWorker: make(map[string]failureMetricState),
 	}
 	m.syncFromDB(db)
 	return m
@@ -87,15 +100,26 @@ func (m *controlMetrics) syncFromDB(db *model.DB) {
 
 		verifications, err := db.ListVerifications(worker.ID, 1)
 		if err != nil || len(verifications) == 0 {
+			latestFailed, err := db.GetLatestFailedVerification(worker.ID)
+			if err == nil && latestFailed != nil {
+				m.observeLastFailure(worker, *latestFailed)
+			}
 			continue
 		}
 		m.observeVerification(worker, verifications[0])
+
+		if verifications[0].Passed {
+			latestFailed, err := db.GetLatestFailedVerification(worker.ID)
+			if err == nil && latestFailed != nil {
+				m.observeLastFailure(worker, *latestFailed)
+			}
+		}
 	}
 }
 
 func (m *controlMetrics) observeWorker(worker model.Worker) {
 	labels := workerMetricLabels(worker)
-	workloadCfg := workload.ParseConfig(worker.ProfileConfig)
+	workloadCfg := resolveWorkerWorkload(worker)
 	workloadLabels := []string{
 		worker.ID,
 		worker.ProfileName,
@@ -105,6 +129,12 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 		workloadCfg.MetricLoadMode(),
 		workloadCfg.MetricReplayDataset(),
 		workloadCfg.MetricPattern(),
+		metricIntLabel(workloadCfg.WriteRate),
+		metricIntLabel(workloadCfg.PayloadSize),
+		metricIntLabel(workloadCfg.Workers),
+		metricFloatLabel(workloadCfg.ReplaySpeed),
+		metricIntLabel(workloadCfg.MemoryMB),
+		metricIntLabel(workloadCfg.CPUs),
 	}
 
 	controlWorkerInfo.WithLabelValues(worker.ID, worker.GitSHA, worker.ProfileName, worker.Source, workerAppName(worker), workerRegion(worker)).Set(1)
@@ -153,6 +183,7 @@ func (m *controlMetrics) observeVerification(worker model.Worker, verification m
 			controlWorkerFailureInfo.WithLabelValues(previous.labels...).Set(0)
 		}
 		controlWorkerFailureInfo.WithLabelValues(failureLabels...).Set(1)
+		m.observeLastFailure(worker, verification)
 	}
 
 	controlWorkerLastVerificationDuration.WithLabelValues(labels...).Set(float64(verification.DurationMS) / 1000)
@@ -174,6 +205,31 @@ func (m *controlMetrics) clearFailure(workerID string) {
 
 	if len(previous.labels) > 0 {
 		controlWorkerFailureInfo.WithLabelValues(previous.labels...).Set(0)
+	}
+}
+
+func (m *controlMetrics) observeLastFailure(worker model.Worker, verification model.Verification) {
+	labels := workerMetricLabels(worker)
+	stage := inferFailureStage(&verification)
+	signature := inferFailureSignature(&verification)
+	lastFailureLabels := append(labels, metricValueOrUnknown(stage), metricValueOrUnknown(signature))
+
+	m.mu.Lock()
+	previous := m.lastFailureByWorker[worker.ID]
+	m.lastFailureByWorker[worker.ID] = failureMetricState{labels: lastFailureLabels}
+	m.mu.Unlock()
+
+	if len(previous.labels) > 0 && !sameMetricLabels(previous.labels, lastFailureLabels) {
+		controlWorkerLastFailureInfo.WithLabelValues(previous.labels...).Set(0)
+	}
+	controlWorkerLastFailureInfo.WithLabelValues(lastFailureLabels...).Set(1)
+
+	if verification.CompletedAt != nil && !verification.CompletedAt.IsZero() {
+		controlWorkerLastFailure.WithLabelValues(labels...).Set(float64(verification.CompletedAt.Unix()))
+		return
+	}
+	if !verification.StartedAt.IsZero() {
+		controlWorkerLastFailure.WithLabelValues(labels...).Set(float64(verification.StartedAt.Unix()))
 	}
 }
 
@@ -206,6 +262,26 @@ func metricValueOrUnknown(v string) string {
 		return "unknown"
 	}
 	return v
+}
+
+func metricIntLabel(v int) string {
+	if v <= 0 {
+		return "0"
+	}
+	return fmt.Sprintf("%d", v)
+}
+
+func metricFloatLabel(v float64) string {
+	if v <= 0 {
+		return "0"
+	}
+	label := fmt.Sprintf("%.2f", v)
+	label = strings.TrimRight(label, "0")
+	label = strings.TrimRight(label, ".")
+	if label == "" {
+		return "0"
+	}
+	return label
 }
 
 func sameMetricLabels(left, right []string) bool {

@@ -276,6 +276,8 @@ func (r *Runner) startReplay(ctx context.Context) error {
 		adapter = replay.NewTaxiAdapter(r.cfg.ReplayDataPath)
 	case "gharchive":
 		adapter = replay.NewGHArchiveAdapter(r.cfg.ReplayDataPath)
+	case "orders":
+		adapter = replay.NewOrdersAdapter(r.cfg.ReplayDataPath)
 	default:
 		return fmt.Errorf("unknown replay dataset: %s", r.cfg.ReplayDataset)
 	}

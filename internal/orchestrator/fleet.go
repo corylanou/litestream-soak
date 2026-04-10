@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/workload"
 )
@@ -99,6 +100,29 @@ func DefaultMainFleet() FleetSpec {
 				},
 			},
 			{
+				WorkerID:    "worker-main-read-heavy",
+				Name:        "worker-main-read-heavy",
+				Source:      "main",
+				GitSHA:      "main",
+				ProfileName: "read-heavy",
+				Region:      "ord",
+				Workload: workload.Config{
+					LoadMode:         "synthetic",
+					WriteRate:        80,
+					Pattern:          "constant",
+					PayloadSize:      512,
+					ReadRatio:        0.95,
+					Workers:          6,
+					InitialSize:      "10MB",
+					VerifyInterval:   "30m",
+					VerifyType:       "integrity",
+					SnapshotInterval: "10m",
+					SyncInterval:     "1s",
+					MemoryMB:         1024,
+					CPUs:             1,
+				},
+			},
+			{
 				WorkerID:    "worker-main-gharchive",
 				Name:        "worker-main-gharchive",
 				Source:      "main",
@@ -142,6 +166,77 @@ func DefaultMainFleet() FleetSpec {
 					ReplayDataset:    "gharchive",
 					ReplayDataURL:    "https://data.gharchive.org/2025-01-01-0.json.gz",
 					ReplaySpeed:      120,
+					ReplayLoop:       true,
+					MemoryMB:         1024,
+					CPUs:             1,
+				},
+			},
+			{
+				WorkerID:    "worker-main-taxi-mixed",
+				Name:        "worker-main-taxi-mixed",
+				Source:      "main",
+				GitSHA:      "main",
+				ProfileName: "taxi-mixed",
+				Region:      "ord",
+				Workload: workload.Config{
+					LoadMode:         "both",
+					WriteRate:        40,
+					Pattern:          "wave",
+					PayloadSize:      1024,
+					ReadRatio:        0.4,
+					Workers:          2,
+					InitialSize:      "10MB",
+					VerifyInterval:   "30m",
+					VerifyType:       "integrity",
+					SnapshotInterval: "10m",
+					SyncInterval:     "1s",
+					ReplayDataset:    "taxi",
+					ReplayDataPath:   "/opt/soak/datasets/taxi_sample.csv",
+					ReplaySpeed:      60,
+					ReplayLoop:       true,
+					MemoryMB:         1024,
+					CPUs:             1,
+				},
+			},
+			{
+				WorkerID:    "worker-main-taxi-replay",
+				Name:        "worker-main-taxi-replay",
+				Source:      "main",
+				GitSHA:      "main",
+				ProfileName: "taxi-replay",
+				Region:      "ord",
+				Workload: workload.Config{
+					LoadMode:         "replay",
+					InitialSize:      "5MB",
+					VerifyInterval:   "30m",
+					VerifyType:       "integrity",
+					SnapshotInterval: "10m",
+					SyncInterval:     "1s",
+					ReplayDataset:    "taxi",
+					ReplayDataPath:   "/opt/soak/datasets/taxi_sample.csv",
+					ReplaySpeed:      90,
+					ReplayLoop:       true,
+					MemoryMB:         1024,
+					CPUs:             1,
+				},
+			},
+			{
+				WorkerID:    "worker-main-orders-replay",
+				Name:        "worker-main-orders-replay",
+				Source:      "main",
+				GitSHA:      "main",
+				ProfileName: "orders-replay",
+				Region:      "ord",
+				Workload: workload.Config{
+					LoadMode:         "replay",
+					InitialSize:      "5MB",
+					VerifyInterval:   "30m",
+					VerifyType:       "integrity",
+					SnapshotInterval: "10m",
+					SyncInterval:     "1s",
+					ReplayDataset:    "orders",
+					ReplayDataPath:   "/opt/soak/datasets/orders_sample.jsonl",
+					ReplaySpeed:      45,
 					ReplayLoop:       true,
 					MemoryMB:         1024,
 					CPUs:             1,
@@ -221,15 +316,32 @@ func (m *Manager) currentWorkerImage(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("list machines: %w", err)
 	}
 
+	var newestStarted *flyapi.Machine
 	for _, machine := range machines {
-		if strings.TrimSpace(machine.Config.Image) != "" && machine.State == "started" {
-			return machine.Config.Image, nil
+		if strings.TrimSpace(machine.Config.Image) == "" || machine.State != "started" {
+			continue
+		}
+		if newestStarted == nil || machine.UpdatedAt.After(newestStarted.UpdatedAt) {
+			candidate := machine
+			newestStarted = &candidate
 		}
 	}
+	if newestStarted != nil {
+		return newestStarted.Config.Image, nil
+	}
+
+	var newestAny *flyapi.Machine
 	for _, machine := range machines {
-		if strings.TrimSpace(machine.Config.Image) != "" {
-			return machine.Config.Image, nil
+		if strings.TrimSpace(machine.Config.Image) == "" {
+			continue
 		}
+		if newestAny == nil || machine.UpdatedAt.After(newestAny.UpdatedAt) {
+			candidate := machine
+			newestAny = &candidate
+		}
+	}
+	if newestAny != nil {
+		return newestAny.Config.Image, nil
 	}
 
 	return "", fmt.Errorf("no worker image found in %s", m.fly.AppName())
