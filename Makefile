@@ -44,5 +44,23 @@ run-local: build-worker
 	GIT_SHA=local \
 	./bin/soakworker
 
+test-replay: build-worker
+	@rm -rf /tmp/litestream-soak-replay
+	@mkdir -p /tmp/litestream-soak-replay
+	PATH="$(CURDIR)/bin:$(PATH)" \
+	DATA_DIR="/tmp/litestream-soak-replay" \
+	REPLICA_TYPE=file \
+	REPLICA_PATH="/tmp/litestream-soak-replay/replicas" \
+	LOAD_MODE=replay \
+	REPLAY_DATASET=taxi \
+	REPLAY_DATA_PATH="/tmp/litestream-soak/datasets/taxi-2024-01-sample.csv" \
+	REPLAY_SPEED=1000 \
+	INITIAL_SIZE=1MB \
+	VERIFY_INTERVAL=5m \
+	SNAPSHOT_INTERVAL=2m \
+	WORKER_ID=replay-test \
+	GIT_SHA=local \
+	./bin/soakworker
+
 docker-worker:
 	docker build -f Dockerfile.worker --build-arg LITESTREAM_SHA=$(LITESTREAM_SHA) -t $(WORKER_IMAGE) .

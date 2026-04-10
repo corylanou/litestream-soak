@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"time"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -67,7 +69,7 @@ func NewEngine(cfg Config, adapter Adapter) *Engine {
 
 func (e *Engine) Run(ctx context.Context) error {
 	var err error
-	e.db, err = sql.Open("sqlite3", e.cfg.DBPath+"?_journal_mode=WAL")
+	e.db, err = sql.Open("sqlite", e.cfg.DBPath+"?_journal_mode=WAL")
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
