@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"text/template"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/replay"
 )
 
 type Runner struct {
@@ -61,10 +63,18 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("wait for first sync: %w", err)
 	}
 
-	if err := r.startLoad(ctx); err != nil {
-		return fmt.Errorf("start load: %w", err)
+	if r.cfg.LoadMode == "synthetic" || r.cfg.LoadMode == "both" {
+		if err := r.startLoad(ctx); err != nil {
+			return fmt.Errorf("start load: %w", err)
+		}
+		defer r.stopLoad()
 	}
-	defer r.stopLoad()
+
+	if r.cfg.LoadMode == "replay" || r.cfg.LoadMode == "both" {
+		if err := r.startReplay(ctx); err != nil {
+			return fmt.Errorf("start replay: %w", err)
+		}
+	}
 
 	r.verifier = NewVerifier(r.cfg, r.loadCmd)
 
@@ -222,6 +232,39 @@ func (r *Runner) startLoad(ctx context.Context) error {
 	}
 
 	SetLoadRunning(true)
+	return nil
+}
+
+func (r *Runner) startReplay(ctx context.Context) error {
+	if r.cfg.ReplayDataset == "" || r.cfg.ReplayDataPath == "" {
+		return fmt.Errorf("REPLAY_DATASET and REPLAY_DATA_PATH are required for replay mode")
+	}
+
+	var adapter replay.Adapter
+	switch r.cfg.ReplayDataset {
+	case "taxi":
+		adapter = replay.NewTaxiAdapter(r.cfg.ReplayDataPath)
+	case "gharchive":
+		adapter = replay.NewGHArchiveAdapter(r.cfg.ReplayDataPath)
+	default:
+		return fmt.Errorf("unknown replay dataset: %s", r.cfg.ReplayDataset)
+	}
+
+	engine := replay.NewEngine(replay.Config{
+		Dataset:         r.cfg.ReplayDataset,
+		DataPath:        r.cfg.ReplayDataPath,
+		DBPath:          r.cfg.DBPath,
+		SpeedMultiplier: r.cfg.ReplaySpeed,
+		Loop:            r.cfg.ReplayLoop,
+	}, adapter)
+
+	go func() {
+		if err := engine.Run(ctx); err != nil {
+			slog.Error("Replay engine failed", "dataset", r.cfg.ReplayDataset, "error", err)
+		}
+	}()
+
+	slog.Info("Replay engine started", "dataset", r.cfg.ReplayDataset, "speed", r.cfg.ReplaySpeed)
 	return nil
 }
 

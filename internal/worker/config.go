@@ -48,6 +48,13 @@ type Config struct {
 	SnapshotInterval time.Duration
 	SyncInterval     time.Duration
 
+	// Replay
+	LoadMode        string  // "synthetic", "replay", "both"
+	ReplayDataset   string  // "taxi", "gharchive"
+	ReplayDataPath  string  // path to dataset file
+	ReplaySpeed     float64 // speed multiplier (1.0 = real-time)
+	ReplayLoop      bool
+
 	// Metrics
 	MetricsAddr string
 }
@@ -71,6 +78,10 @@ func DefaultConfig() Config {
 		InitialSize: "5MB",
 
 		LoadDuration: 87600 * time.Hour, // ~10 years
+
+		LoadMode:    "synthetic",
+		ReplaySpeed: 10.0,
+		ReplayLoop:  true,
 
 		VerifyInterval: 30 * time.Minute,
 		VerifyType:     "integrity",
@@ -204,6 +215,24 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid SYNC_INTERVAL: %w", err)
 		}
 		c.SyncInterval = d
+	}
+
+	if v := os.Getenv("LOAD_MODE"); v != "" {
+		c.LoadMode = v
+	}
+	if v := os.Getenv("REPLAY_DATASET"); v != "" {
+		c.ReplayDataset = v
+	}
+	if v := os.Getenv("REPLAY_DATA_PATH"); v != "" {
+		c.ReplayDataPath = v
+	}
+	if v := os.Getenv("REPLAY_SPEED"); v != "" {
+		if _, err := fmt.Sscanf(v, "%f", &c.ReplaySpeed); err != nil {
+			return c, fmt.Errorf("invalid REPLAY_SPEED: %w", err)
+		}
+	}
+	if v := os.Getenv("REPLAY_LOOP"); v == "false" || v == "0" {
+		c.ReplayLoop = false
 	}
 
 	if v := os.Getenv("METRICS_ADDR"); v != "" {
