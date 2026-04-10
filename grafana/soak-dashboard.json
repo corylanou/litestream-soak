@@ -148,117 +148,44 @@
       ]
     },
     {
-      "title": "Sync Rate",
+      "title": "Replication Lag (TXIDs)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 20 },
       "targets": [
         {
-          "expr": "rate(litestream_sync_count[5m])",
-          "legendFormat": "syncs/sec"
+          "expr": "soak_replication_lag_txids",
+          "legendFormat": "lag"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "ops" }
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "lag" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] }
+        ]
       }
     },
     {
-      "title": "Sync Errors",
+      "title": "Replicated TXID vs DB TXID",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 20 },
       "targets": [
         {
-          "expr": "rate(litestream_sync_error_count[5m])",
-          "legendFormat": "errors/sec"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "ops" },
-        "overrides": [
-          { "matcher": { "id": "byName", "options": "errors/sec" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
-        ]
-      }
-    },
-    {
-      "title": "Sync Latency",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 20 },
-      "targets": [
+          "expr": "soak_db_txid",
+          "legendFormat": "db txid"
+        },
         {
-          "expr": "rate(litestream_sync_seconds[5m]) / rate(litestream_sync_count[5m])",
-          "legendFormat": "avg sync duration"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "s" }
-      }
-    },
-    {
-      "title": "Checkpoint Rate",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 28 },
-      "targets": [
-        {
-          "expr": "rate(litestream_checkpoint_count[5m])",
-          "legendFormat": "{{mode}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "ops" }
-      }
-    },
-    {
-      "title": "Compaction Verify Errors",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 28 },
-      "targets": [
-        {
-          "expr": "increase(litestream_compaction_verify_error_count[5m])",
-          "legendFormat": "{{db}}"
-        }
-      ],
-      "fieldConfig": {
-        "overrides": [
-          { "matcher": { "id": "byFrameRefID", "options": "A" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
-        ]
-      }
-    },
-    {
-      "title": "L0 Retention Files",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 28 },
-      "targets": [
-        {
-          "expr": "litestream_l0_retention_files_total",
-          "legendFormat": "{{db}} {{status}}"
+          "expr": "soak_replicated_txid",
+          "legendFormat": "replicated txid"
         }
       ]
     },
     {
-      "title": "Replica Operation Throughput",
+      "title": "Last Sync Age",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 20 },
       "targets": [
         {
-          "expr": "rate(litestream_replica_operation_bytes[5m])",
-          "legendFormat": "{{replica_type}} {{operation}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "Bps" }
-      }
-    },
-    {
-      "title": "Replica Operation Duration (p50/p99)",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.5, rate(litestream_replica_operation_duration_seconds_bucket[5m]))",
-          "legendFormat": "p50 {{operation}}"
-        },
-        {
-          "expr": "histogram_quantile(0.99, rate(litestream_replica_operation_duration_seconds_bucket[5m]))",
-          "legendFormat": "p99 {{operation}}"
+          "expr": "soak_last_sync_age_seconds",
+          "legendFormat": "seconds since last sync"
         }
       ],
       "fieldConfig": {
@@ -266,33 +193,49 @@
       }
     },
     {
-      "title": "Replica Operation Errors",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 44 },
+      "title": "Litestream Uptime",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 28 },
       "targets": [
         {
-          "expr": "rate(litestream_replica_operation_errors_total[5m])",
-          "legendFormat": "{{replica_type}} {{operation}} {{code}}"
+          "expr": "soak_litestream_uptime_seconds",
+          "legendFormat": "uptime"
         }
       ],
       "fieldConfig": {
-        "overrides": [
-          { "matcher": { "id": "byFrameRefID", "options": "A" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
-        ]
+        "defaults": { "unit": "s" }
       }
     },
     {
-      "title": "Total WAL Bytes Written",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 44 },
+      "title": "DB Status",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 28 },
       "targets": [
         {
-          "expr": "rate(litestream_total_wal_bytes[5m])",
-          "legendFormat": "{{db}}"
+          "expr": "soak_db_status",
+          "legendFormat": "{{status}}"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "Bps" }
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "1": { "text": "Active", "color": "green" } } }
+          ]
+        }
+      }
+    },
+    {
+      "title": "TXID Rate (writes/sec estimate)",
+      "type": "timeseries",
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 28 },
+      "targets": [
+        {
+          "expr": "rate(soak_db_txid[5m])",
+          "legendFormat": "txid/sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" }
       }
     }
   ],

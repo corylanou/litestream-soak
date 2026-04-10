@@ -51,6 +51,31 @@ var (
 		Name: "soak_db_txid",
 		Help: "Current transaction ID from litestream.",
 	})
+
+	replicatedTXID = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "soak_replicated_txid",
+		Help: "Last replicated transaction ID.",
+	})
+
+	replicationLag = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "soak_replication_lag_txids",
+		Help: "Replication lag in transaction IDs (db_txid - replicated_txid).",
+	})
+
+	lastSyncAge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "soak_last_sync_age_seconds",
+		Help: "Seconds since last successful replica sync.",
+	})
+
+	litestreamUptime = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "soak_litestream_uptime_seconds",
+		Help: "Litestream process uptime.",
+	})
+
+	dbStatus = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_db_status",
+		Help: "Database status (1=replicating, 0=other).",
+	}, []string{"status"})
 )
 
 func SetWorkerInfo(cfg Config) {
@@ -90,4 +115,25 @@ func SetWALSize(bytes int64) {
 
 func SetDBTXID(txid float64) {
 	dbTXID.Set(txid)
+}
+
+func SetReplicatedTXID(txid float64) {
+	replicatedTXID.Set(txid)
+}
+
+func SetReplicationLag(lag float64) {
+	replicationLag.Set(lag)
+}
+
+func SetLastSyncAge(seconds float64) {
+	lastSyncAge.Set(seconds)
+}
+
+func SetLitestreamUptime(seconds float64) {
+	litestreamUptime.Set(seconds)
+}
+
+func SetDBStatus(status string) {
+	dbStatus.Reset()
+	dbStatus.WithLabelValues(status).Set(1)
 }

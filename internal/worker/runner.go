@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -243,7 +244,16 @@ func (r *Runner) pollDBStats() {
 		SetWALSize(info.Size())
 	}
 
-	client := &http.Client{
+	client := r.ipcClient()
+
+	r.pollTXID(client)
+	r.pollSyncStatus(client)
+	r.pollInfo(client)
+	r.pollList(client)
+}
+
+func (r *Runner) ipcClient() *http.Client {
+	return &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return net.Dial("unix", r.cfg.SocketPath)
@@ -251,21 +261,87 @@ func (r *Runner) pollDBStats() {
 		},
 		Timeout: 5 * time.Second,
 	}
-	resp, err := client.Get("http://localhost/txid")
+}
+
+func (r *Runner) pollTXID(client *http.Client) {
+	resp, err := client.Get("http://localhost/txid?path=" + r.cfg.DBPath)
 	if err != nil {
 		return
 	}
 	defer resp.Body.Close()
 
 	var result struct {
-		TXID string `json:"txid"`
+		TXID uint64 `json:"txid"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return
 	}
-	var txid int64
-	fmt.Sscanf(result.TXID, "%x", &txid)
-	SetDBTXID(float64(txid))
+	SetDBTXID(float64(result.TXID))
+}
+
+func (r *Runner) pollSyncStatus(client *http.Client) {
+	body, _ := json.Marshal(map[string]any{
+		"path": r.cfg.DBPath,
+		"wait": false,
+	})
+	resp, err := client.Post("http://localhost/sync", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		TXID           uint64 `json:"txid"`
+		ReplicatedTXID uint64 `json:"replicated_txid"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return
+	}
+	SetDBTXID(float64(result.TXID))
+	SetReplicatedTXID(float64(result.ReplicatedTXID))
+	if result.TXID >= result.ReplicatedTXID {
+		SetReplicationLag(float64(result.TXID - result.ReplicatedTXID))
+	}
+}
+
+func (r *Runner) pollInfo(client *http.Client) {
+	resp, err := client.Get("http://localhost/info")
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		UptimeSeconds int64 `json:"uptime_seconds"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return
+	}
+	SetLitestreamUptime(float64(result.UptimeSeconds))
+}
+
+func (r *Runner) pollList(client *http.Client) {
+	resp, err := client.Get("http://localhost/list")
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Databases []struct {
+			Status     string     `json:"status"`
+			LastSyncAt *time.Time `json:"last_sync_at,omitempty"`
+		} `json:"databases"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return
+	}
+	for _, db := range result.Databases {
+		SetDBStatus(db.Status)
+		if db.LastSyncAt != nil {
+			SetLastSyncAge(time.Since(*db.LastSyncAt).Seconds())
+		}
+	}
 }
 
 func (r *Runner) runVerifyLoop(ctx context.Context) error {
