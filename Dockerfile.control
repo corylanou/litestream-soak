@@ -1,0 +1,15 @@
+FROM golang:1.25 AS builder
+WORKDIR /src/soak
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -ldflags "-s -w" -o /usr/local/bin/soakctl ./cmd/soakctl
+
+FROM debian:bookworm-slim
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=builder /usr/local/bin/soakctl /usr/local/bin/soakctl
+VOLUME /data
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/soakctl"]
