@@ -17,22 +17,22 @@ var (
 	replayRowsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "soak_replay_rows_total",
 		Help: "Total rows replayed by dataset.",
-	}, []string{"dataset"})
+	}, []string{"dataset", "worker_id", "profile", "source"})
 
 	replayErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "soak_replay_errors_total",
 		Help: "Total replay errors by dataset.",
-	}, []string{"dataset"})
+	}, []string{"dataset", "worker_id", "profile", "source"})
 
 	replayLagSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_replay_lag_seconds",
 		Help: "Delay between scheduled and actual insert time.",
-	}, []string{"dataset"})
+	}, []string{"dataset", "worker_id", "profile", "source"})
 
 	replayActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_replay_active",
 		Help: "Whether a replay dataset is currently running (1=yes).",
-	}, []string{"dataset"})
+	}, []string{"dataset", "worker_id", "profile", "source"})
 )
 
 type Config struct {
@@ -41,6 +41,9 @@ type Config struct {
 	DBPath          string
 	SpeedMultiplier float64
 	Loop            bool
+	WorkerID        string
+	ProfileName     string
+	Source          string
 }
 
 type Adapter interface {
@@ -80,8 +83,9 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 
 	name := e.adapter.Name()
-	replayActive.WithLabelValues(name).Set(1)
-	defer replayActive.WithLabelValues(name).Set(0)
+	labels := e.metricLabels(name)
+	replayActive.WithLabelValues(labels...).Set(1)
+	defer replayActive.WithLabelValues(labels...).Set(0)
 
 	slog.Info("Starting replay", "dataset", name, "speed", e.cfg.SpeedMultiplier, "loop", e.cfg.Loop)
 
@@ -103,6 +107,7 @@ func (e *Engine) Run(ctx context.Context) error {
 
 func (e *Engine) replayOnce(ctx context.Context) error {
 	name := e.adapter.Name()
+	labels := e.metricLabels(name)
 	iter, err := e.adapter.Rows()
 	if err != nil {
 		return fmt.Errorf("open rows: %w", err)
@@ -138,13 +143,13 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 
 		start := time.Now()
 		if err := iter.Insert(e.db); err != nil {
-			replayErrorsTotal.WithLabelValues(name).Inc()
+			replayErrorsTotal.WithLabelValues(labels...).Inc()
 			slog.Error("Replay insert failed", "dataset", name, "error", err)
 			continue
 		}
 
-		replayRowsTotal.WithLabelValues(name).Inc()
-		replayLagSeconds.WithLabelValues(name).Set(time.Since(start).Seconds())
+		replayRowsTotal.WithLabelValues(labels...).Inc()
+		replayLagSeconds.WithLabelValues(labels...).Set(time.Since(start).Seconds())
 		count++
 
 		if count%10000 == 0 {
@@ -158,4 +163,8 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 
 	slog.Info("Replay pass complete", "dataset", name, "total_rows", count)
 	return nil
+}
+
+func (e *Engine) metricLabels(dataset string) []string {
+	return []string{dataset, e.cfg.WorkerID, e.cfg.ProfileName, e.cfg.Source}
 }

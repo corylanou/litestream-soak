@@ -7,9 +7,13 @@ import (
 )
 
 type Config struct {
-	WorkerID string
-	GitSHA   string
-	Source   string // "main" or "pr"
+	WorkerID   string
+	WorkerName string
+	GitSHA     string
+	Source     string // "main" or "pr"
+	AppName    string
+	MachineID  string
+	Region     string
 
 	// Paths
 	DataDir    string
@@ -49,20 +53,24 @@ type Config struct {
 	SyncInterval     time.Duration
 
 	// Replay
-	LoadMode        string  // "synthetic", "replay", "both"
-	ReplayDataset   string  // "taxi", "gharchive"
-	ReplayDataPath  string  // path to dataset file
-	ReplaySpeed     float64 // speed multiplier (1.0 = real-time)
-	ReplayLoop      bool
+	LoadMode       string  // "synthetic", "replay", "both"
+	ReplayDataset  string  // "taxi", "gharchive"
+	ReplayDataPath string  // path to dataset file
+	ReplaySpeed    float64 // speed multiplier (1.0 = real-time)
+	ReplayLoop     bool
 
 	// Metrics
 	MetricsAddr string
+
+	// Control plane
+	ControlBaseURL string
 }
 
 func DefaultConfig() Config {
 	return Config{
-		WorkerID: "worker-1",
-		Source:   "main",
+		WorkerID:   "worker-1",
+		WorkerName: "worker-1",
+		Source:     "main",
 
 		DataDir:    "/data",
 		DBPath:     "/data/test.db",
@@ -105,11 +113,23 @@ func ConfigFromEnv() (Config, error) {
 	if v := os.Getenv("WORKER_ID"); v != "" {
 		c.WorkerID = v
 	}
+	if v := os.Getenv("WORKER_NAME"); v != "" {
+		c.WorkerName = v
+	}
 	if v := os.Getenv("GIT_SHA"); v != "" {
 		c.GitSHA = v
 	}
 	if v := os.Getenv("SOURCE"); v != "" {
 		c.Source = v
+	}
+	if v := os.Getenv("FLY_APP_NAME"); v != "" {
+		c.AppName = v
+	}
+	if v := os.Getenv("FLY_MACHINE_ID"); v != "" {
+		c.MachineID = v
+	}
+	if v := os.Getenv("FLY_REGION"); v != "" {
+		c.Region = v
 	}
 	if v := os.Getenv("DATA_DIR"); v != "" {
 		c.DataDir = v
@@ -237,6 +257,13 @@ func ConfigFromEnv() (Config, error) {
 
 	if v := os.Getenv("METRICS_ADDR"); v != "" {
 		c.MetricsAddr = v
+	}
+	if v := os.Getenv("CONTROL_BASE_URL"); v != "" {
+		c.ControlBaseURL = v
+	}
+
+	if c.WorkerName == "" {
+		c.WorkerName = c.WorkerID
 	}
 
 	if c.ReplicaType == "s3" && c.S3Bucket == "" {

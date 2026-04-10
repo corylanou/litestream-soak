@@ -5,16 +5,19 @@ import "time"
 type WorkerStatus string
 
 const (
-	WorkerPending   WorkerStatus = "pending"
-	WorkerBuilding  WorkerStatus = "building"
-	WorkerStarting  WorkerStatus = "starting"
-	WorkerRunning   WorkerStatus = "running"
-	WorkerStopped   WorkerStatus = "stopped"
-	WorkerFailed    WorkerStatus = "failed"
+	WorkerPending  WorkerStatus = "pending"
+	WorkerBuilding WorkerStatus = "building"
+	WorkerStarting WorkerStatus = "starting"
+	WorkerRunning  WorkerStatus = "running"
+	WorkerDegraded WorkerStatus = "degraded"
+	WorkerStopped  WorkerStatus = "stopped"
+	WorkerFailed   WorkerStatus = "failed"
 )
 
 type Worker struct {
 	ID              string       `json:"id"`
+	AppName         string       `json:"app_name,omitempty"`
+	Region          string       `json:"region,omitempty"`
 	FlyMachineID    string       `json:"fly_machine_id"`
 	FlyVolumeID     string       `json:"fly_volume_id"`
 	Name            string       `json:"name"`

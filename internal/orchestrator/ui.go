@@ -1,0 +1,1007 @@
+package orchestrator
+
+import (
+	"fmt"
+	"html/template"
+	"net/http"
+	"net/url"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/corylanou/litestream-soak/internal/model"
+)
+
+type homePageData struct {
+	GeneratedAt  time.Time
+	Summary      homeSummary
+	Spotlight    *FailureResponse
+	FailureQueue []FailureResponse
+	Workers      []homeWorker
+	Events       []model.Event
+}
+
+type homeSummary struct {
+	TotalWorkers     int
+	HealthyWorkers   int
+	AttentionWorkers int
+	RecentFailures   int
+}
+
+type homeWorker struct {
+	Worker             model.Worker
+	LatestVerification *model.Verification
+}
+
+type workerPageData struct {
+	GeneratedAt time.Time
+	Incident    *IncidentBundle
+}
+
+var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
+	"eventClass":        eventClass,
+	"failureText":       failureText,
+	"formatDuration":    formatDurationMS,
+	"formatTime":        formatUITime,
+	"formatTimePtr":     formatUITimePtr,
+	"heartbeatClass":    heartbeatClass,
+	"json":              mustJSON,
+	"pathEscape":        url.PathEscape,
+	"shorten":           shortenText,
+	"statusClass":       statusClass,
+	"timeAgo":           formatTimeAgoPtr,
+	"timeAgoValue":      formatTimeAgo,
+	"trimSHA":           trimSHA,
+	"verificationClass": verificationClass,
+	"verificationLabel": verificationLabel,
+	"workerName":        workerName,
+}).Parse(homePageTemplate + workerPageTemplate))
+
+func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
+	workers, err := a.db.ListWorkers("")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	failures, err := a.db.ListRecentFailedVerifications(8)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	events, err := a.db.ListEvents(12)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	workerCards := make([]homeWorker, 0, len(workers))
+	summary := homeSummary{
+		TotalWorkers:   len(workers),
+		RecentFailures: len(failures),
+	}
+
+	for _, worker := range workers {
+		card := homeWorker{Worker: worker}
+		verifications, err := a.db.ListVerifications(worker.ID, 1)
+		if err == nil && len(verifications) > 0 {
+			latest := verifications[0]
+			card.LatestVerification = &latest
+		}
+
+		if worker.Status == model.WorkerRunning {
+			summary.HealthyWorkers++
+		} else {
+			summary.AttentionWorkers++
+		}
+
+		workerCards = append(workerCards, card)
+	}
+
+	sort.SliceStable(workerCards, func(i, j int) bool {
+		left := workerCards[i]
+		right := workerCards[j]
+		if workerRank(left.Worker.Status) != workerRank(right.Worker.Status) {
+			return workerRank(left.Worker.Status) < workerRank(right.Worker.Status)
+		}
+		return heartbeatUnix(left.Worker.LastHeartbeatAt) > heartbeatUnix(right.Worker.LastHeartbeatAt)
+	})
+
+	failureCards := make([]FailureResponse, 0, len(failures))
+	for _, verification := range failures {
+		card := FailureResponse{Verification: verification}
+		worker, err := a.db.GetWorker(verification.WorkerID)
+		if err == nil {
+			card.Worker = worker
+		}
+		failureCards = append(failureCards, card)
+	}
+
+	var spotlight *FailureResponse
+	queue := make([]FailureResponse, 0)
+	if len(failureCards) > 0 {
+		spotlight = &failureCards[0]
+		if len(failureCards) > 1 {
+			queue = failureCards[1:]
+		}
+	}
+
+	renderHTML(w, "home", homePageData{
+		GeneratedAt:  time.Now().UTC(),
+		Summary:      summary,
+		Spotlight:    spotlight,
+		FailureQueue: queue,
+		Workers:      workerCards,
+		Events:       events,
+	})
+}
+
+func (a *API) handleWorkerPage(w http.ResponseWriter, r *http.Request) {
+	bundle, status, err := a.buildIncidentBundle(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), status)
+		return
+	}
+
+	renderHTML(w, "worker", workerPageData{
+		GeneratedAt: time.Now().UTC(),
+		Incident:    bundle,
+	})
+}
+
+func renderHTML(w http.ResponseWriter, name string, data any) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := uiTemplates.ExecuteTemplate(w, name, data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func formatUITime(value time.Time) string {
+	return value.Local().Format("2006-01-02 15:04:05 MST")
+}
+
+func formatUITimePtr(value *time.Time) string {
+	if value == nil || value.IsZero() {
+		return "never"
+	}
+	return formatUITime(*value)
+}
+
+func formatTimeAgo(value time.Time) string {
+	if value.IsZero() {
+		return "never"
+	}
+
+	delta := time.Since(value)
+	if delta < 0 {
+		delta = -delta
+	}
+
+	switch {
+	case delta < time.Minute:
+		return fmt.Sprintf("%ds ago", int(delta.Seconds()))
+	case delta < time.Hour:
+		return fmt.Sprintf("%dm ago", int(delta.Minutes()))
+	case delta < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(delta.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(delta.Hours()/24))
+	}
+}
+
+func formatTimeAgoPtr(value *time.Time) string {
+	if value == nil || value.IsZero() {
+		return "never"
+	}
+	return formatTimeAgo(*value)
+}
+
+func trimSHA(value string) string {
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:12]
+}
+
+func shortenText(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) <= limit {
+		return value
+	}
+	return strings.TrimSpace(value[:limit-1]) + "..."
+}
+
+func statusClass(value any) string {
+	switch strings.ToLower(fmt.Sprint(value)) {
+	case "running":
+		return "status-good"
+	case "degraded", "starting", "building", "pending":
+		return "status-warn"
+	case "failed", "stopped":
+		return "status-bad"
+	default:
+		return "status-neutral"
+	}
+}
+
+func heartbeatClass(value *time.Time) string {
+	if value == nil || value.IsZero() {
+		return "status-neutral"
+	}
+	age := time.Since(*value)
+	switch {
+	case age <= 45*time.Second:
+		return "status-good"
+	case age <= 2*time.Minute:
+		return "status-warn"
+	default:
+		return "status-bad"
+	}
+}
+
+func eventClass(value string) string {
+	switch {
+	case strings.Contains(value, "failed"):
+		return "status-bad"
+	case strings.Contains(value, "passed"):
+		return "status-good"
+	default:
+		return "status-neutral"
+	}
+}
+
+func verificationClass(value any) string {
+	verification := coerceVerification(value)
+	if verification == nil {
+		return "status-neutral"
+	}
+	if verification.Passed {
+		return "status-good"
+	}
+	return "status-bad"
+}
+
+func verificationLabel(value any) string {
+	verification := coerceVerification(value)
+	if verification == nil {
+		return "no data"
+	}
+	if verification.Passed {
+		return "pass"
+	}
+	return "fail"
+}
+
+func failureText(value any) string {
+	verification := coerceVerification(value)
+	if verification == nil {
+		return "verification failed"
+	}
+	if strings.TrimSpace(verification.ErrorMessage) != "" {
+		return verification.ErrorMessage
+	}
+	if strings.TrimSpace(verification.Status) != "" {
+		return verification.Status
+	}
+	return "verification failed"
+}
+
+func workerName(worker *model.Worker, workerID string) string {
+	if worker == nil {
+		return workerID
+	}
+	if worker.Name != "" {
+		return worker.Name
+	}
+	return worker.ID
+}
+
+func formatDurationMS(ms int) string {
+	if ms <= 0 {
+		return "n/a"
+	}
+
+	d := time.Duration(ms) * time.Millisecond
+	if d < time.Second {
+		return d.String()
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	return d.Round(time.Second).String()
+}
+
+func coerceVerification(value any) *model.Verification {
+	switch verification := value.(type) {
+	case model.Verification:
+		return &verification
+	case *model.Verification:
+		return verification
+	default:
+		return nil
+	}
+}
+
+func workerRank(status model.WorkerStatus) int {
+	switch status {
+	case model.WorkerFailed:
+		return 0
+	case model.WorkerDegraded:
+		return 1
+	case model.WorkerStarting, model.WorkerBuilding, model.WorkerPending:
+		return 2
+	case model.WorkerRunning:
+		return 3
+	default:
+		return 4
+	}
+}
+
+func heartbeatUnix(value *time.Time) int64 {
+	if value == nil {
+		return 0
+	}
+	return value.Unix()
+}
+
+const homePageTemplate = `{{define "home"}}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Litestream Soak</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-raised: #1c2129;
+      --border: #30363d;
+      --border-subtle: #21262d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --faint: #484f58;
+      --green: #3fb950;
+      --green-dim: rgba(63,185,80,0.15);
+      --amber: #d29922;
+      --amber-dim: rgba(210,153,34,0.15);
+      --red: #f85149;
+      --red-dim: rgba(248,81,73,0.12);
+      --blue: #58a6ff;
+      --blue-dim: rgba(88,166,255,0.1);
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: "SF Mono", "Cascadia Code", "Fira Code", Consolas, "Liberation Mono", monospace;
+      --radius: 6px;
+      --radius-lg: 8px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 1.5; }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+    code, pre, .mono { font-family: var(--mono); font-size: 12px; }
+
+    .shell { max-width: 1280px; margin: 0 auto; padding: 0 16px; }
+
+    /* Top bar */
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+    .topbar-brand { font-weight: 600; font-size: 14px; letter-spacing: -0.01em; }
+    .topbar-right { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); }
+    .topbar-link { color: var(--muted); font-size: 12px; }
+    .topbar-link:hover { color: var(--text); }
+    .refresh-indicator { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+    .refresh-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: pulse 2s ease-in-out infinite; }
+    .refresh-dot.paused { background: var(--muted); animation: none; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    /* Status strip */
+    .status-strip { display: flex; align-items: center; gap: 20px; padding: 10px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); margin-bottom: 16px; font-size: 13px; }
+    .status-strip .ss-label { color: var(--muted); }
+    .status-strip .ss-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+    .ss-good { color: var(--green); }
+    .ss-warn { color: var(--amber); }
+    .ss-bad { color: var(--red); }
+
+    /* Incident spotlight */
+    .incident-alert { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 16px; background: var(--red-dim); border: 1px solid rgba(248,81,73,0.3); border-radius: var(--radius-lg); margin-bottom: 16px; }
+    .incident-alert-body { flex: 1; min-width: 0; }
+    .incident-alert-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+    .incident-alert-meta { color: var(--muted); font-size: 12px; }
+    .incident-alert-actions { display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
+    .clear-banner { padding: 10px 16px; background: var(--green-dim); border: 1px solid rgba(63,185,80,0.25); border-radius: var(--radius-lg); margin-bottom: 16px; font-size: 13px; color: var(--green); font-weight: 500; }
+
+    /* Buttons */
+    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 12px; font-family: inherit; font-weight: 500; cursor: pointer; text-decoration: none; white-space: nowrap; }
+    .btn:hover { background: var(--surface-raised); text-decoration: none; border-color: var(--faint); }
+    .btn-primary { background: rgba(88,166,255,0.15); border-color: rgba(88,166,255,0.3); color: var(--blue); }
+    .btn-primary:hover { background: rgba(88,166,255,0.25); }
+    .btn-danger { background: var(--red-dim); border-color: rgba(248,81,73,0.3); color: var(--red); }
+
+    /* Section headers */
+    .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+    .section-title { font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: 0.02em; text-transform: uppercase; }
+
+    /* Worker table */
+    .worker-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .worker-table th { text-align: left; padding: 8px 12px; font-size: 11px; font-weight: 600; color: var(--faint); text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--border); }
+    .worker-table td { padding: 10px 12px; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; }
+    .worker-table tr.clickable-row { cursor: pointer; }
+    .worker-table tr.clickable-row:hover td { background: var(--surface); }
+    .worker-table tr.row-bad td { background: var(--red-dim); }
+    .worker-table tr.row-bad:hover td { background: rgba(248,81,73,0.18); }
+    .worker-table tr.row-warn td { background: var(--amber-dim); }
+    .worker-table tr.row-warn:hover td { background: rgba(210,153,34,0.2); }
+
+    /* Status dots */
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot-good { background: var(--green); }
+    .dot-warn { background: var(--amber); }
+    .dot-bad { background: var(--red); }
+    .dot-neutral { background: var(--faint); }
+
+    /* Badges */
+    .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
+    .badge-good { background: var(--green-dim); color: var(--green); }
+    .badge-warn { background: var(--amber-dim); color: var(--amber); }
+    .badge-bad { background: var(--red-dim); color: var(--red); }
+    .badge-neutral { background: rgba(139,148,158,0.15); color: var(--muted); }
+
+    /* Panels */
+    .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; }
+
+    /* Bottom grid */
+    .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+
+    /* Feed items */
+    .feed-item { padding: 8px 0; border-bottom: 1px solid var(--border-subtle); font-size: 13px; }
+    .feed-item:last-child { border-bottom: none; }
+    .feed-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .feed-body { flex: 1; min-width: 0; }
+    .feed-title { font-weight: 500; }
+    .feed-meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .feed-msg { color: var(--muted); font-size: 12px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .feed-time { color: var(--faint); font-size: 11px; flex-shrink: 0; white-space: nowrap; }
+    .feed-actions { display: flex; gap: 8px; margin-top: 4px; }
+    .feed-actions a { font-size: 12px; }
+
+    /* Empty states */
+    .empty { padding: 16px 0; color: var(--faint); font-size: 13px; text-align: center; }
+
+    /* Footer */
+    .footer { padding: 16px 0; margin-top: 24px; border-top: 1px solid var(--border-subtle); color: var(--faint); font-size: 11px; text-align: center; }
+
+    @media (max-width: 900px) {
+      .bottom-grid { grid-template-columns: 1fr; }
+      .status-strip { flex-wrap: wrap; gap: 10px 18px; }
+      .incident-alert { flex-direction: column; }
+    }
+    @media (max-width: 640px) {
+      .worker-table th:nth-child(n+5), .worker-table td:nth-child(n+5) { display: none; }
+      .topbar { flex-direction: column; align-items: flex-start; gap: 6px; }
+    }
+  </style>
+  <script>
+    let refreshInterval = 30;
+    let countdown = refreshInterval;
+    let paused = false;
+    let timer;
+
+    function startCountdown() {
+      const el = document.getElementById("refresh-count");
+      const dot = document.getElementById("refresh-dot");
+      timer = setInterval(function() {
+        if (paused) return;
+        countdown--;
+        if (el) el.textContent = countdown + "s";
+        if (countdown <= 0) {
+          sessionStorage.setItem("scrollY", window.scrollY);
+          location.reload();
+        }
+      }, 1000);
+    }
+
+    function toggleRefresh() {
+      paused = !paused;
+      const el = document.getElementById("refresh-count");
+      const dot = document.getElementById("refresh-dot");
+      if (paused) {
+        if (dot) dot.classList.add("paused");
+        if (el) el.textContent = "paused";
+      } else {
+        countdown = refreshInterval;
+        if (dot) dot.classList.remove("paused");
+        if (el) el.textContent = countdown + "s";
+      }
+    }
+
+    document.addEventListener("DOMContentLoaded", function() {
+      var saved = sessionStorage.getItem("scrollY");
+      if (saved) { window.scrollTo(0, parseInt(saved, 10)); sessionStorage.removeItem("scrollY"); }
+      startCountdown();
+
+      document.querySelectorAll(".clickable-row").forEach(function(row) {
+        row.addEventListener("click", function(e) {
+          if (e.target.tagName === "A") return;
+          var href = row.dataset.href;
+          if (href) window.location = href;
+        });
+      });
+    });
+  </script>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div class="topbar-brand">Litestream Soak</div>
+      <div class="topbar-right">
+        <span class="refresh-indicator" onclick="toggleRefresh()" title="Click to pause/resume auto-refresh">
+          <span class="refresh-dot" id="refresh-dot"></span>
+          <span id="refresh-count">30s</span>
+        </span>
+        <a class="topbar-link" href="/api/workers">API</a>
+        <a class="topbar-link" href="/api/failures">Failures</a>
+        <a class="topbar-link" href="/api/events">Events</a>
+      </div>
+    </div>
+
+    <div class="status-strip">
+      <span><span class="ss-label">Workers</span> <span class="ss-value">{{.Summary.TotalWorkers}}</span></span>
+      <span><span class="ss-label">Healthy</span> <span class="ss-value ss-good">{{.Summary.HealthyWorkers}}</span></span>
+      <span><span class="ss-label">Attention</span> <span class="ss-value{{if gt .Summary.AttentionWorkers 0}} ss-warn{{end}}">{{.Summary.AttentionWorkers}}</span></span>
+      <span><span class="ss-label">Failures</span> <span class="ss-value{{if gt .Summary.RecentFailures 0}} ss-bad{{end}}">{{.Summary.RecentFailures}}</span></span>
+    </div>
+
+    {{if .Spotlight}}
+    <div class="incident-alert">
+      <div class="incident-alert-body">
+        <div class="incident-alert-title">{{workerName .Spotlight.Worker .Spotlight.Verification.WorkerID}}: {{shorten (failureText .Spotlight.Verification) 120}}</div>
+        <div class="incident-alert-meta">{{timeAgoValue .Spotlight.Verification.StartedAt}} · {{.Spotlight.Verification.CheckType}} · {{formatDuration .Spotlight.Verification.DurationMS}}</div>
+      </div>
+      <div class="incident-alert-actions">
+        <a class="btn btn-danger" href="/ui/workers/{{pathEscape .Spotlight.Verification.WorkerID}}">Open</a>
+        <a class="btn" href="/api/workers/{{pathEscape .Spotlight.Verification.WorkerID}}/prompt">Copy Prompt</a>
+      </div>
+    </div>
+    {{else}}
+    <div class="clear-banner">All workers passing verification</div>
+    {{end}}
+
+    <div class="section-head">
+      <span class="section-title">Workers</span>
+    </div>
+
+    {{if .Workers}}
+    <div class="panel" style="padding:0; overflow-x:auto;">
+      <table class="worker-table">
+        <thead>
+          <tr>
+            <th style="width:32px;"></th>
+            <th>Name</th>
+            <th>Status</th>
+            <th>Heartbeat</th>
+            <th>Last Check</th>
+            <th>Profile</th>
+            <th>Source</th>
+            <th>SHA</th>
+            <th style="width:80px;"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Workers}}
+          <tr class="clickable-row {{if eq (statusClass .Worker.Status) "status-bad"}}row-bad{{else if eq (statusClass .Worker.Status) "status-warn"}}row-warn{{end}}" data-href="/ui/workers/{{pathEscape .Worker.ID}}">
+            <td><span class="dot dot-{{if eq (statusClass .Worker.Status) "status-good"}}good{{else if eq (statusClass .Worker.Status) "status-warn"}}warn{{else if eq (statusClass .Worker.Status) "status-bad"}}bad{{else}}neutral{{end}}"></span></td>
+            <td><strong>{{.Worker.Name}}</strong></td>
+            <td><span class="badge badge-{{if eq (statusClass .Worker.Status) "status-good"}}good{{else if eq (statusClass .Worker.Status) "status-warn"}}warn{{else if eq (statusClass .Worker.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Worker.Status}}</span></td>
+            <td><span class="{{heartbeatClass .Worker.LastHeartbeatAt}}">{{timeAgo .Worker.LastHeartbeatAt}}</span></td>
+            <td>
+              {{if .LatestVerification}}<span class="badge badge-{{if eq (verificationClass .LatestVerification) "status-good"}}good{{else if eq (verificationClass .LatestVerification) "status-bad"}}bad{{else}}neutral{{end}}">{{verificationLabel .LatestVerification}}</span> <span style="color:var(--muted); font-size:12px;">{{timeAgoValue .LatestVerification.StartedAt}}</span>
+              {{else}}<span style="color:var(--faint);">none</span>{{end}}
+            </td>
+            <td>{{.Worker.ProfileName}}</td>
+            <td>{{.Worker.Source}}</td>
+            <td><code class="mono">{{trimSHA .Worker.GitSHA}}</code></td>
+            <td><a href="/api/workers/{{pathEscape .Worker.ID}}/prompt" onclick="event.stopPropagation();" class="btn" style="padding:2px 8px;">Prompt</a></td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="panel"><p class="empty">No workers have reported to the control plane yet.</p></div>
+    {{end}}
+
+    <div class="bottom-grid">
+      <div>
+        <div class="section-head">
+          <span class="section-title">Failure Queue</span>
+        </div>
+        <div class="panel">
+          {{if .FailureQueue}}
+          {{range .FailureQueue}}
+          <div class="feed-item">
+            <div class="feed-row">
+              <div class="feed-body">
+                <div class="feed-title">{{workerName .Worker .Verification.WorkerID}}</div>
+                <div class="feed-meta">{{.Verification.CheckType}} · {{formatDuration .Verification.DurationMS}}</div>
+                <div class="feed-msg">{{shorten (failureText .Verification) 140}}</div>
+                <div class="feed-actions">
+                  <a href="/ui/workers/{{pathEscape .Verification.WorkerID}}">Open</a>
+                  <a href="/api/workers/{{pathEscape .Verification.WorkerID}}/prompt">Prompt</a>
+                </div>
+              </div>
+              <span class="feed-time">{{timeAgoValue .Verification.StartedAt}}</span>
+            </div>
+          </div>
+          {{end}}
+          {{else}}
+          <p class="empty">No failed verifications queued</p>
+          {{end}}
+        </div>
+      </div>
+
+      <div>
+        <div class="section-head">
+          <span class="section-title">Event Feed</span>
+        </div>
+        <div class="panel">
+          {{if .Events}}
+          {{range .Events}}
+          <div class="feed-item">
+            <div class="feed-row">
+              <div class="feed-body">
+                <span class="badge badge-{{if eq (eventClass .EventType) "status-good"}}good{{else if eq (eventClass .EventType) "status-bad"}}bad{{else}}neutral{{end}}">{{.EventType}}</span>
+                <div class="feed-msg">{{shorten .Message 140}}</div>
+                {{if .WorkerID}}<div class="feed-meta"><code class="mono">{{.WorkerID}}</code></div>{{end}}
+              </div>
+              <span class="feed-time">{{timeAgoValue .CreatedAt}}</span>
+            </div>
+          </div>
+          {{end}}
+          {{else}}
+          <p class="empty">No events recorded</p>
+          {{end}}
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">Generated {{formatTime .GeneratedAt}}</div>
+  </div>
+</body>
+</html>
+{{end}}`
+
+const workerPageTemplate = `{{define "worker"}}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Incident.Worker.Name}} · Litestream Soak</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-raised: #1c2129;
+      --border: #30363d;
+      --border-subtle: #21262d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --faint: #484f58;
+      --green: #3fb950;
+      --green-dim: rgba(63,185,80,0.15);
+      --amber: #d29922;
+      --amber-dim: rgba(210,153,34,0.15);
+      --red: #f85149;
+      --red-dim: rgba(248,81,73,0.12);
+      --blue: #58a6ff;
+      --blue-dim: rgba(88,166,255,0.1);
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: "SF Mono", "Cascadia Code", "Fira Code", Consolas, "Liberation Mono", monospace;
+      --radius: 6px;
+      --radius-lg: 8px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 1.5; }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+    code, pre, textarea, .mono { font-family: var(--mono); font-size: 12px; }
+    h1, h2, h3, p { margin: 0; }
+
+    .shell { max-width: 1280px; margin: 0 auto; padding: 0 16px; }
+
+    /* Top bar */
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; font-size: 13px; }
+    .topbar-nav { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+    .topbar-nav a { color: var(--muted); }
+    .topbar-nav a:hover { color: var(--text); }
+    .topbar-sep { color: var(--faint); }
+    .topbar-right { display: flex; align-items: center; gap: 10px; }
+    .topbar-link { color: var(--muted); font-size: 12px; }
+    .topbar-link:hover { color: var(--text); }
+
+    /* Buttons */
+    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 12px; font-family: inherit; font-weight: 500; cursor: pointer; text-decoration: none; white-space: nowrap; }
+    .btn:hover { background: var(--surface-raised); text-decoration: none; border-color: var(--faint); }
+    .btn-primary { background: rgba(88,166,255,0.15); border-color: rgba(88,166,255,0.3); color: var(--blue); }
+    .btn-primary:hover { background: rgba(88,166,255,0.25); }
+    .btn-copy { background: rgba(63,185,80,0.15); border-color: rgba(63,185,80,0.3); color: var(--green); font-weight: 600; padding: 6px 16px; }
+    .btn-copy:hover { background: rgba(63,185,80,0.25); }
+    .btn-copy.copied { background: var(--green); color: var(--bg); border-color: var(--green); }
+
+    /* Worker header */
+    .worker-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+    .worker-header-left { flex: 1; min-width: 0; }
+    .worker-title { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .worker-meta-strip { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--muted); }
+    .worker-meta-strip code { color: var(--text); }
+    .meta-label { color: var(--faint); }
+
+    /* Badges */
+    .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
+    .badge-good { background: var(--green-dim); color: var(--green); }
+    .badge-warn { background: var(--amber-dim); color: var(--amber); }
+    .badge-bad { background: var(--red-dim); color: var(--red); }
+    .badge-neutral { background: rgba(139,148,158,0.15); color: var(--muted); }
+
+    /* Incident alert */
+    .incident-alert { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 16px; background: var(--red-dim); border: 1px solid rgba(248,81,73,0.3); border-radius: var(--radius-lg); margin-bottom: 16px; }
+    .incident-alert-body { flex: 1; min-width: 0; }
+    .incident-alert-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+    .incident-alert-meta { color: var(--muted); font-size: 12px; }
+
+    /* Layout */
+    .layout { display: grid; grid-template-columns: 1fr 340px; gap: 16px; align-items: start; }
+    .main-stack { display: grid; gap: 16px; }
+    .sidebar { display: grid; gap: 16px; position: sticky; top: 16px; }
+
+    /* Panels */
+    .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; }
+    .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .panel-title { font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: 0.02em; text-transform: uppercase; }
+
+    /* Timeline */
+    .tl-item { padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
+    .tl-item:last-child { border-bottom: none; }
+    .tl-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+    .tl-left { display: flex; align-items: center; gap: 8px; }
+    .tl-time { color: var(--faint); font-size: 11px; white-space: nowrap; }
+    .tl-facts { display: flex; gap: 16px; font-size: 12px; color: var(--muted); }
+    .tl-fact-label { color: var(--faint); }
+
+    /* Details/disclosure */
+    details { border-radius: var(--radius); border: 1px solid var(--border-subtle); background: var(--surface-raised); margin-top: 8px; }
+    details + details { margin-top: 6px; }
+    summary { cursor: pointer; list-style: none; padding: 8px 12px; font-size: 12px; font-weight: 500; color: var(--muted); }
+    summary::-webkit-details-marker { display: none; }
+    summary::before { content: "\25B6\FE0E "; font-size: 10px; margin-right: 4px; }
+    details[open] > summary::before { content: "\25BC\FE0E "; }
+    .details-body { padding: 0 12px 12px; }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; overflow: auto; background: var(--bg); border: 1px solid var(--border-subtle); border-radius: var(--radius); padding: 10px 12px; font-size: 11px; line-height: 1.5; color: var(--muted); max-height: 400px; }
+    textarea { width: 100%; min-height: 240px; resize: vertical; background: var(--bg); border: 1px solid var(--border-subtle); border-radius: var(--radius); padding: 10px 12px; font-size: 11px; line-height: 1.5; color: var(--text); }
+
+    /* Key-value list */
+    .kv-list { font-size: 13px; }
+    .kv-row { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border-subtle); }
+    .kv-row:last-child { border-bottom: none; }
+    .kv-label { color: var(--muted); flex-shrink: 0; }
+    .kv-value { text-align: right; word-break: break-all; }
+    .kv-value code { color: var(--text); }
+
+    /* Dot */
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot-good { background: var(--green); }
+    .dot-warn { background: var(--amber); }
+    .dot-bad { background: var(--red); }
+    .dot-neutral { background: var(--faint); }
+
+    /* Empty */
+    .empty { padding: 12px 0; color: var(--faint); font-size: 13px; }
+
+    /* Footer */
+    .footer { padding: 16px 0; margin-top: 24px; border-top: 1px solid var(--border-subtle); color: var(--faint); font-size: 11px; text-align: center; }
+
+    @media (max-width: 960px) {
+      .layout { grid-template-columns: 1fr; }
+      .sidebar { position: static; }
+      .worker-header { flex-direction: column; }
+    }
+    @media (max-width: 640px) {
+      .topbar { flex-direction: column; align-items: flex-start; gap: 6px; }
+      .incident-alert { flex-direction: column; }
+    }
+  </style>
+  <script>
+    async function copyPrompt(btn) {
+      var box = document.getElementById("prompt-box");
+      try {
+        await navigator.clipboard.writeText(box.value);
+      } catch(e) {
+        box.focus(); box.select(); document.execCommand("copy");
+      }
+      btn.textContent = "Copied"; btn.classList.add("copied");
+      setTimeout(function() { btn.textContent = "Copy AI Prompt"; btn.classList.remove("copied"); }, 1800);
+    }
+  </script>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div class="topbar-nav">
+        <a href="/ui">Litestream Soak</a>
+        <span class="topbar-sep">/</span>
+        <span>{{.Incident.Worker.Name}}</span>
+      </div>
+      <div class="topbar-right">
+        <a class="topbar-link" href="/api/workers/{{pathEscape .Incident.Worker.ID}}">JSON</a>
+        <a class="topbar-link" href="/api/workers/{{pathEscape .Incident.Worker.ID}}/incident">Incident</a>
+        <a class="topbar-link" href="/api/workers/{{pathEscape .Incident.Worker.ID}}/prompt">Prompt</a>
+      </div>
+    </div>
+
+    <div class="worker-header">
+      <div class="worker-header-left">
+        <div class="worker-title">
+          {{.Incident.Worker.Name}}
+          <span class="badge badge-{{if eq (statusClass .Incident.Worker.Status) "status-good"}}good{{else if eq (statusClass .Incident.Worker.Status) "status-warn"}}warn{{else if eq (statusClass .Incident.Worker.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Incident.Worker.Status}}</span>
+          <span class="badge badge-{{if eq (heartbeatClass .Incident.Worker.LastHeartbeatAt) "status-good"}}good{{else if eq (heartbeatClass .Incident.Worker.LastHeartbeatAt) "status-warn"}}warn{{else if eq (heartbeatClass .Incident.Worker.LastHeartbeatAt) "status-bad"}}bad{{else}}neutral{{end}}">{{timeAgo .Incident.Worker.LastHeartbeatAt}}</span>
+        </div>
+        <div class="worker-meta-strip">
+          <span><span class="meta-label">Profile</span> {{.Incident.Worker.ProfileName}}</span>
+          <span><span class="meta-label">Source</span> {{.Incident.Worker.Source}}</span>
+          <span><span class="meta-label">SHA</span> <code class="mono">{{trimSHA .Incident.Worker.GitSHA}}</code></span>
+          {{if .Incident.Worker.FlyMachineID}}<span><span class="meta-label">Machine</span> <code class="mono">{{.Incident.Worker.FlyMachineID}}</code></span>{{end}}
+        </div>
+      </div>
+      <button class="btn btn-copy" type="button" onclick="copyPrompt(this)">Copy AI Prompt</button>
+    </div>
+
+    {{if .Incident.LatestFailure}}
+    <div class="incident-alert">
+      <div class="incident-alert-body">
+        <div class="incident-alert-title">{{failureText .Incident.LatestFailure}}</div>
+        <div class="incident-alert-meta">{{formatTime .Incident.LatestFailure.StartedAt}} · {{.Incident.LatestFailure.CheckType}} · {{formatDuration .Incident.LatestFailure.DurationMS}}</div>
+      </div>
+      <span class="badge badge-bad">failed</span>
+    </div>
+    {{end}}
+
+    <div class="layout">
+      <div class="main-stack">
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">Verification Timeline</span>
+            <span style="color:var(--faint); font-size:12px;">{{len .Incident.RecentVerifications}} recent</span>
+          </div>
+          {{if .Incident.RecentVerifications}}
+          {{range .Incident.RecentVerifications}}
+          <div class="tl-item">
+            <div class="tl-head">
+              <div class="tl-left">
+                <span class="dot dot-{{if .Passed}}good{{else}}bad{{end}}"></span>
+                <span class="badge badge-{{if .Passed}}good{{else}}bad{{end}}">{{if .Passed}}pass{{else}}fail{{end}}</span>
+                <span style="font-size:13px;">{{.CheckType}}</span>
+              </div>
+              <span class="tl-time">{{timeAgoValue .StartedAt}}</span>
+            </div>
+            <div class="tl-facts">
+              <span><span class="tl-fact-label">Duration</span> {{formatDuration .DurationMS}}</span>
+              <span><span class="tl-fact-label">Status</span> {{.Status}}</span>
+              {{if .CompletedAt}}<span><span class="tl-fact-label">Completed</span> {{formatTimePtr .CompletedAt}}</span>{{end}}
+            </div>
+            {{if .ErrorMessage}}
+            <details>
+              <summary>Error details</summary>
+              <div class="details-body"><pre>{{.ErrorMessage}}</pre></div>
+            </details>
+            {{end}}
+          </div>
+          {{end}}
+          {{else}}
+          <p class="empty">No verification history recorded.</p>
+          {{end}}
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">Event Timeline</span>
+            <span style="color:var(--faint); font-size:12px;">{{len .Incident.RecentEvents}} recent</span>
+          </div>
+          {{if .Incident.RecentEvents}}
+          {{range .Incident.RecentEvents}}
+          <div class="tl-item">
+            <div class="tl-head">
+              <div class="tl-left">
+                <span class="badge badge-{{if eq (eventClass .EventType) "status-good"}}good{{else if eq (eventClass .EventType) "status-bad"}}bad{{else}}neutral{{end}}">{{.EventType}}</span>
+              </div>
+              <span class="tl-time">{{timeAgoValue .CreatedAt}}</span>
+            </div>
+            <div style="font-size:13px; color:var(--muted); margin-top:2px;">{{.Message}}</div>
+            {{if .Details}}
+            <details>
+              <summary>Event details</summary>
+              <div class="details-body"><pre>{{.Details}}</pre></div>
+            </details>
+            {{end}}
+          </div>
+          {{end}}
+          {{else}}
+          <p class="empty">No events recorded for this worker.</p>
+          {{end}}
+        </div>
+      </div>
+
+      <div class="sidebar">
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">AI Prompt</span>
+          </div>
+          <button class="btn btn-copy" type="button" onclick="copyPrompt(this)" style="width:100%; justify-content:center; margin-bottom:10px;">Copy AI Prompt</button>
+          <details>
+            <summary>Inspect prompt text</summary>
+            <div class="details-body">
+              <textarea id="prompt-box" readonly>{{.Incident.Prompt}}</textarea>
+            </div>
+          </details>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">Worker Details</span>
+          </div>
+          <div class="kv-list">
+            <div class="kv-row"><span class="kv-label">Worker ID</span><span class="kv-value"><code class="mono">{{.Incident.Worker.ID}}</code></span></div>
+            <div class="kv-row"><span class="kv-label">Profile</span><span class="kv-value">{{.Incident.Worker.ProfileName}}</span></div>
+            <div class="kv-row"><span class="kv-label">Source</span><span class="kv-value">{{.Incident.Worker.Source}}</span></div>
+            <div class="kv-row"><span class="kv-label">Git SHA</span><span class="kv-value"><code class="mono">{{.Incident.Worker.GitSHA}}</code></span></div>
+            <div class="kv-row"><span class="kv-label">Machine</span><span class="kv-value"><code class="mono">{{if .Incident.Worker.FlyMachineID}}{{.Incident.Worker.FlyMachineID}}{{else}}--{{end}}</code></span></div>
+            <div class="kv-row"><span class="kv-label">Volume</span><span class="kv-value"><code class="mono">{{if .Incident.Worker.FlyVolumeID}}{{.Incident.Worker.FlyVolumeID}}{{else}}--{{end}}</code></span></div>
+            <div class="kv-row"><span class="kv-label">Created</span><span class="kv-value">{{formatTime .Incident.Worker.CreatedAt}}</span></div>
+            <div class="kv-row"><span class="kv-label">Last Heartbeat</span><span class="kv-value">{{formatTimePtr .Incident.Worker.LastHeartbeatAt}}</span></div>
+            {{if .Incident.Worker.ErrorMessage}}<div class="kv-row"><span class="kv-label">Error</span><span class="kv-value" style="color:var(--red);">{{.Incident.Worker.ErrorMessage}}</span></div>{{end}}
+          </div>
+        </div>
+
+        {{if .Incident.MachineError}}
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">Machine Error</span>
+          </div>
+          <div style="font-size:13px; color:var(--red);">{{.Incident.MachineError}}</div>
+        </div>
+        {{end}}
+
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">Machine</span>
+          </div>
+          {{if .Incident.Machine}}
+          <details>
+            <summary>Machine JSON</summary>
+            <div class="details-body"><pre>{{json .Incident.Machine}}</pre></div>
+          </details>
+          {{else}}
+          <p class="empty">{{if .Incident.MachineError}}See error above.{{else}}No machine data available.{{end}}</p>
+          {{end}}
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">Raw Evidence</span>
+          </div>
+          <details>
+            <summary>Full incident JSON</summary>
+            <div class="details-body"><pre>{{json .Incident}}</pre></div>
+          </details>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">Generated {{formatTime .GeneratedAt}}</div>
+  </div>
+</body>
+</html>
+{{end}}`

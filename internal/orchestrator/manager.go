@@ -12,15 +12,15 @@ import (
 )
 
 type WorkerRequest struct {
-	Name        string
-	Source      string
-	GitSHA      string
-	PRNumber    int
-	ProfileName string
-	ImageRef    string
-	Region      string
+	Name         string
+	Source       string
+	GitSHA       string
+	PRNumber     int
+	ProfileName  string
+	ImageRef     string
+	Region       string
 	VolumeSizeGB int
-	ExpiresAt   *string
+	ExpiresAt    *string
 
 	// Profile overrides
 	WriteRate   int
@@ -31,25 +31,31 @@ type WorkerRequest struct {
 }
 
 type Manager struct {
-	fly      *flyapi.Client
-	db       *model.DB
-	appName  string
-	s3Bucket string
-	s3Endpoint string
+	fly            *flyapi.Client
+	db             *model.DB
+	appName        string
+	s3Bucket       string
+	s3Endpoint     string
+	controlBaseURL string
 }
 
-func NewManager(fly *flyapi.Client, db *model.DB, appName, s3Bucket, s3Endpoint string) *Manager {
+func NewManager(fly *flyapi.Client, db *model.DB, appName, s3Bucket, s3Endpoint, controlBaseURL string) *Manager {
 	return &Manager{
-		fly:        fly,
-		db:         db,
-		appName:    appName,
-		s3Bucket:   s3Bucket,
-		s3Endpoint: s3Endpoint,
+		fly:            fly,
+		db:             db,
+		appName:        appName,
+		s3Bucket:       s3Bucket,
+		s3Endpoint:     s3Endpoint,
+		controlBaseURL: controlBaseURL,
 	}
 }
 
 func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.Worker, error) {
 	workerID := uuid.New().String()
+	region := req.Region
+	if region == "" {
+		region = "ord"
+	}
 
 	profileConfig, _ := json.Marshal(map[string]any{
 		"write_rate":   req.WriteRate,
@@ -61,6 +67,7 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 
 	worker := &model.Worker{
 		ID:            workerID,
+		AppName:       m.appName,
 		Name:          req.Name,
 		Status:        model.WorkerPending,
 		Source:        req.Source,
@@ -68,6 +75,7 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 		PRNumber:      req.PRNumber,
 		ProfileName:   req.ProfileName,
 		ProfileConfig: string(profileConfig),
+		Region:        region,
 	}
 
 	if err := m.db.CreateWorker(worker); err != nil {
@@ -76,10 +84,6 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 
 	m.db.RecordEvent(workerID, "worker_creating", fmt.Sprintf("Creating worker %s with profile %s", req.Name, req.ProfileName), "")
 
-	region := req.Region
-	if region == "" {
-		region = "ord"
-	}
 	volSize := req.VolumeSizeGB
 	if volSize == 0 {
 		volSize = 10
@@ -99,16 +103,18 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 	s3Path := fmt.Sprintf("soak/%s", req.Name)
 	env := map[string]string{
 		"WORKER_ID":         workerID,
+		"WORKER_NAME":       req.Name,
 		"GIT_SHA":           req.GitSHA,
 		"SOURCE":            req.Source,
 		"PROFILE":           req.ProfileName,
 		"INITIAL_SIZE":      req.InitialSize,
 		"VERIFY_INTERVAL":   "30m",
-		"SNAPSHOT_INTERVAL":  "10m",
+		"SNAPSHOT_INTERVAL": "10m",
 		"REPLICA_TYPE":      "s3",
 		"S3_BUCKET":         m.s3Bucket,
 		"S3_PATH":           s3Path,
 		"S3_ENDPOINT":       m.s3Endpoint,
+		"CONTROL_BASE_URL":  m.controlBaseURL,
 	}
 
 	if req.WriteRate > 0 {
@@ -235,16 +241,16 @@ func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA string)
 		initialSize, _ := profileConfig["initial_size"].(string)
 
 		newWorker, err := m.CreateWorker(ctx, WorkerRequest{
-			Name:         w.Name,
-			Source:       "main",
-			GitSHA:       newSHA,
-			ProfileName:  w.ProfileName,
-			ImageRef:     newImageRef,
-			WriteRate:    int(writeRate),
-			Pattern:      pattern,
-			PayloadSize:  int(payloadSize),
-			Workers:      int(workers),
-			InitialSize:  initialSize,
+			Name:        w.Name,
+			Source:      "main",
+			GitSHA:      newSHA,
+			ProfileName: w.ProfileName,
+			ImageRef:    newImageRef,
+			WriteRate:   int(writeRate),
+			Pattern:     pattern,
+			PayloadSize: int(payloadSize),
+			Workers:     int(workers),
+			InitialSize: initialSize,
 		})
 		if err != nil {
 			slog.Error("Failed to create updated worker", "name", w.Name, "error", err)

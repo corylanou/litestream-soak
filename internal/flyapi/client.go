@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -30,6 +31,22 @@ func NewClient(appName, token string) *Client {
 	}
 }
 
+func (c *Client) AppName() string {
+	return c.appName
+}
+
+func (c *Client) ForApp(appName string) *Client {
+	if appName == "" || appName == c.appName {
+		return c
+	}
+	return &Client{
+		baseURL:    c.baseURL,
+		appName:    appName,
+		token:      c.token,
+		httpClient: c.httpClient,
+	}
+}
+
 func (c *Client) ListMachines(ctx context.Context) ([]Machine, error) {
 	var machines []Machine
 	if err := c.do(ctx, "GET", fmt.Sprintf("/apps/%s/machines", c.appName), nil, &machines); err != nil {
@@ -41,6 +58,16 @@ func (c *Client) ListMachines(ctx context.Context) ([]Machine, error) {
 func (c *Client) GetMachine(ctx context.Context, id string) (*Machine, error) {
 	var machine Machine
 	if err := c.do(ctx, "GET", fmt.Sprintf("/apps/%s/machines/%s", c.appName, id), nil, &machine); err != nil {
+		if strings.Contains(err.Error(), "API error 404") {
+			machines, listErr := c.ListMachines(ctx)
+			if listErr == nil {
+				for _, candidate := range machines {
+					if candidate.ID == id {
+						return &candidate, nil
+					}
+				}
+			}
+		}
 		return nil, fmt.Errorf("get machine %s: %w", id, err)
 	}
 	return &machine, nil

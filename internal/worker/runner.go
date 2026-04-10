@@ -10,11 +10,23 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"text/template"
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/replay"
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
+
+type runtimeSnapshot struct {
+	UptimeSeconds           float64
+	DBSizeBytes             int64
+	WALSizeBytes            int64
+	DBTXID                  uint64
+	DBStatus                string
+	LastSyncAgeSeconds      float64
+	LitestreamUptimeSeconds float64
+}
 
 type Runner struct {
 	cfg Config
@@ -22,6 +34,9 @@ type Runner struct {
 	litestreamCmd *exec.Cmd
 	loadCmd       *exec.Cmd
 	verifier      *Verifier
+	reporter      *Reporter
+	snapshotMu    sync.Mutex
+	snapshot      runtimeSnapshot
 }
 
 func NewRunner(cfg Config) *Runner {
@@ -31,6 +46,7 @@ func NewRunner(cfg Config) *Runner {
 func (r *Runner) Run(ctx context.Context) error {
 	SetWorkerInfo(r.cfg)
 	startTime := time.Now()
+	r.reporter = NewReporter(r.cfg)
 
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
@@ -40,8 +56,11 @@ func (r *Runner) Run(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				SetUptime(time.Since(startTime).Seconds())
+				uptime := time.Since(startTime).Seconds()
+				SetUptime(uptime)
+				r.setUptime(uptime)
 				r.pollDBStats()
+				r.sendHeartbeat(ctx)
 			}
 		}
 	}()
@@ -232,6 +251,7 @@ func (r *Runner) startLoad(ctx context.Context) error {
 	}
 
 	SetLoadRunning(true)
+	r.sendHeartbeat(ctx)
 	return nil
 }
 
@@ -256,6 +276,9 @@ func (r *Runner) startReplay(ctx context.Context) error {
 		DBPath:          r.cfg.DBPath,
 		SpeedMultiplier: r.cfg.ReplaySpeed,
 		Loop:            r.cfg.ReplayLoop,
+		WorkerID:        r.cfg.WorkerID,
+		ProfileName:     r.cfg.ProfileName,
+		Source:          r.cfg.Source,
 	}, adapter)
 
 	go func() {
@@ -281,9 +304,11 @@ func (r *Runner) stopLoad() {
 func (r *Runner) pollDBStats() {
 	if info, err := os.Stat(r.cfg.DBPath); err == nil {
 		SetDBSize(info.Size())
+		r.setDBSize(info.Size())
 	}
 	if info, err := os.Stat(r.cfg.DBPath + "-wal"); err == nil {
 		SetWALSize(info.Size())
+		r.setWALSize(info.Size())
 	}
 
 	client := r.ipcClient()
@@ -318,6 +343,7 @@ func (r *Runner) pollTXID(client *http.Client) {
 		return
 	}
 	SetDBTXID(float64(result.TXID))
+	r.setDBTXID(result.TXID)
 }
 
 func (r *Runner) pollInfo(client *http.Client) {
@@ -334,6 +360,7 @@ func (r *Runner) pollInfo(client *http.Client) {
 		return
 	}
 	SetLitestreamUptime(float64(result.UptimeSeconds))
+	r.setLitestreamUptime(float64(result.UptimeSeconds))
 }
 
 func (r *Runner) pollList(client *http.Client) {
@@ -354,8 +381,11 @@ func (r *Runner) pollList(client *http.Client) {
 	}
 	for _, db := range result.Databases {
 		SetDBStatus(db.Status)
+		r.setDBStatus(db.Status)
 		if db.LastSyncAt != nil {
-			SetLastSyncAge(time.Since(*db.LastSyncAt).Seconds())
+			age := time.Since(*db.LastSyncAt).Seconds()
+			SetLastSyncAge(age)
+			r.setLastSyncAge(age)
 		}
 	}
 }
@@ -372,13 +402,114 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 			slog.Info("Verification loop stopped")
 			return nil
 		case <-ticker.C:
-			passed, err := r.verifier.RunCycle(ctx)
+			result, err := r.verifier.RunCycle(ctx)
+			r.sendVerification(ctx, result)
 			if err != nil {
 				slog.Error("Verification cycle error", "error", err)
 			}
-			if !passed {
+			if !result.Passed {
 				slog.Error("VERIFICATION FAILED — replication integrity compromised")
 			}
 		}
 	}
+}
+
+func (r *Runner) sendHeartbeat(ctx context.Context) {
+	if r.reporter == nil || !r.reporter.Enabled() {
+		return
+	}
+
+	snapshot := r.currentSnapshot()
+	reportCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := r.reporter.SendHeartbeat(reportCtx, reporting.HeartbeatPayload{
+		SentAt:                  time.Now().UTC(),
+		UptimeSeconds:           snapshot.UptimeSeconds,
+		DBSizeBytes:             snapshot.DBSizeBytes,
+		WALSizeBytes:            snapshot.WALSizeBytes,
+		DBTXID:                  snapshot.DBTXID,
+		DBStatus:                snapshot.DBStatus,
+		LastSyncAgeSeconds:      snapshot.LastSyncAgeSeconds,
+		LitestreamUptimeSeconds: snapshot.LitestreamUptimeSeconds,
+	}); err != nil {
+		slog.Warn("Failed to send heartbeat", "error", err)
+	}
+}
+
+func (r *Runner) sendVerification(ctx context.Context, result VerificationResult) {
+	if r.reporter == nil || !r.reporter.Enabled() {
+		return
+	}
+
+	snapshot := r.currentSnapshot()
+	reportCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := r.reporter.SendVerification(reportCtx, reporting.VerificationPayload{
+		StartedAt:               result.StartedAt,
+		CompletedAt:             result.CompletedAt,
+		CheckType:               result.CheckType,
+		Status:                  result.Status,
+		Passed:                  result.Passed,
+		Summary:                 result.Summary,
+		ErrorMessage:            result.ErrorMessage,
+		DurationMS:              result.DurationMS,
+		DBSizeBytes:             result.DBSizeBytes,
+		WALSizeBytes:            result.WALSizeBytes,
+		DBTXID:                  snapshot.DBTXID,
+		DBStatus:                snapshot.DBStatus,
+		LastSyncAgeSeconds:      snapshot.LastSyncAgeSeconds,
+		LitestreamUptimeSeconds: snapshot.LitestreamUptimeSeconds,
+	}); err != nil {
+		slog.Warn("Failed to send verification report", "error", err)
+	}
+}
+
+func (r *Runner) currentSnapshot() runtimeSnapshot {
+	r.snapshotMu.Lock()
+	defer r.snapshotMu.Unlock()
+	return r.snapshot
+}
+
+func (r *Runner) setUptime(seconds float64) {
+	r.snapshotMu.Lock()
+	defer r.snapshotMu.Unlock()
+	r.snapshot.UptimeSeconds = seconds
+}
+
+func (r *Runner) setDBSize(bytes int64) {
+	r.snapshotMu.Lock()
+	defer r.snapshotMu.Unlock()
+	r.snapshot.DBSizeBytes = bytes
+}
+
+func (r *Runner) setWALSize(bytes int64) {
+	r.snapshotMu.Lock()
+	defer r.snapshotMu.Unlock()
+	r.snapshot.WALSizeBytes = bytes
+}
+
+func (r *Runner) setDBTXID(txid uint64) {
+	r.snapshotMu.Lock()
+	defer r.snapshotMu.Unlock()
+	r.snapshot.DBTXID = txid
+}
+
+func (r *Runner) setDBStatus(status string) {
+	r.snapshotMu.Lock()
+	defer r.snapshotMu.Unlock()
+	r.snapshot.DBStatus = status
+}
+
+func (r *Runner) setLastSyncAge(seconds float64) {
+	r.snapshotMu.Lock()
+	defer r.snapshotMu.Unlock()
+	r.snapshot.LastSyncAgeSeconds = seconds
+}
+
+func (r *Runner) setLitestreamUptime(seconds float64) {
+	r.snapshotMu.Lock()
+	defer r.snapshotMu.Unlock()
+	r.snapshot.LitestreamUptimeSeconds = seconds
 }

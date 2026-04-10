@@ -3,16 +3,16 @@ package flyapi
 import "time"
 
 type Machine struct {
-	ID         string            `json:"id"`
-	Name       string            `json:"name"`
-	State      string            `json:"state"`
-	Region     string            `json:"region"`
-	InstanceID string            `json:"instance_id"`
-	Config     MachineConfig     `json:"config"`
-	ImageRef   ImageRef          `json:"image_ref"`
-	CreatedAt  time.Time         `json:"created_at"`
-	UpdatedAt  time.Time         `json:"updated_at"`
-	Events     []MachineEvent    `json:"events"`
+	ID         string         `json:"id"`
+	Name       string         `json:"name"`
+	State      string         `json:"state"`
+	Region     string         `json:"region"`
+	InstanceID string         `json:"instance_id"`
+	Config     MachineConfig  `json:"config"`
+	ImageRef   ImageRef       `json:"image_ref"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+	Events     []MachineEvent `json:"events"`
 }
 
 type MachineConfig struct {
@@ -58,9 +58,9 @@ type ImageRef struct {
 }
 
 type MachineEvent struct {
-	Type      string    `json:"type"`
-	Status    string    `json:"status"`
-	Timestamp time.Time `json:"timestamp"`
+	Type      string `json:"type"`
+	Status    string `json:"status"`
+	Timestamp int64  `json:"timestamp"`
 }
 
 type Volume struct {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -23,7 +22,7 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	appName := envOrDefault("FLY_APP_NAME", "litestream-soak")
+	workerAppName := envOrDefault("WORKER_APP_NAME", "litestream-soak")
 	flyToken := os.Getenv("FLY_API_TOKEN")
 	if flyToken == "" {
 		slog.Error("FLY_API_TOKEN is required")
@@ -33,6 +32,7 @@ func main() {
 	dbPath := envOrDefault("DB_PATH", "/data/soakctl.db")
 	s3Bucket := envOrDefault("S3_BUCKET", os.Getenv("BUCKET_NAME"))
 	s3Endpoint := envOrDefault("S3_ENDPOINT", os.Getenv("AWS_ENDPOINT_URL_S3"))
+	controlBaseURL := envOrDefault("CONTROL_BASE_URL", "https://litestream-soak-ctl.fly.dev")
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	listenAddr := envOrDefault("LISTEN_ADDR", ":8080")
 
@@ -43,10 +43,11 @@ func main() {
 	}
 	defer db.Close()
 
-	fly := flyapi.NewClient(appName, flyToken)
-	mgr := orchestrator.NewManager(fly, db, appName, s3Bucket, s3Endpoint)
-	deployer := orchestrator.NewDeployer(mgr, db, appName)
+	fly := flyapi.NewClient(workerAppName, flyToken)
+	mgr := orchestrator.NewManager(fly, db, workerAppName, s3Bucket, s3Endpoint, controlBaseURL)
+	deployer := orchestrator.NewDeployer(mgr, db, workerAppName)
 	webhookHandler := orchestrator.NewWebhookHandler(webhookSecret, mgr, deployer)
+	api := orchestrator.NewAPI(db, fly)
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /webhooks/github", webhookHandler)
@@ -55,24 +56,7 @@ func main() {
 		fmt.Fprintln(w, "ok")
 	})
 	mux.Handle("GET /metrics", promhttp.Handler())
-
-	// API endpoints
-	mux.HandleFunc("GET /api/workers", func(w http.ResponseWriter, r *http.Request) {
-		workers, err := db.ListWorkers("")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, workers)
-	})
-	mux.HandleFunc("GET /api/events", func(w http.ResponseWriter, r *http.Request) {
-		events, err := db.ListEvents(50)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, events)
-	})
+	api.RegisterRoutes(mux)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -90,8 +74,9 @@ func main() {
 
 	slog.Info("soakctl starting",
 		"listen", listenAddr,
-		"app", appName,
+		"worker_app", workerAppName,
 		"s3_bucket", s3Bucket,
+		"control_base_url", controlBaseURL,
 	)
 
 	server := &http.Server{Addr: listenAddr, Handler: mux}
@@ -111,17 +96,4 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	if err := encodeJSON(w, v); err != nil {
-		slog.Error("Failed to encode JSON", "error", err)
-	}
-}
-
-func encodeJSON(w http.ResponseWriter, v any) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
 }

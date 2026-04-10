@@ -5,9 +5,10 @@ primary_region = "ord"
   dockerfile = "Dockerfile.control"
 
 [env]
-  FLY_APP_NAME = "litestream-soak"
+  WORKER_APP_NAME = "litestream-soak"
   DB_PATH = "/data/soakctl.db"
   LISTEN_ADDR = ":8080"
+  CONTROL_BASE_URL = "https://litestream-soak-ctl.fly.dev"
 
 [http_service]
   internal_port = 8080

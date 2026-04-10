@@ -2,252 +2,995 @@
   "annotations": {
     "list": []
   },
+  "description": "Worker-labeled signal board for the Litestream soak project. Use Grafana to detect drift, lag, and restarts. Use the control plane for incident detail and prompt export.",
   "editable": true,
   "fiscalYearStartMonth": 0,
-  "graphTooltip": 1,
-  "links": [],
+  "graphTooltip": 2,
+  "links": [
+    {
+      "targetBlank": true,
+      "title": "Control Plane",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/ui"
+    },
+    {
+      "targetBlank": true,
+      "title": "Selected Worker",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${worker}"
+    },
+    {
+      "targetBlank": true,
+      "title": "Prompt Bundle",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/workers/${worker}/prompt"
+    },
+    {
+      "targetBlank": true,
+      "title": "Failure Feed",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/failures"
+    }
+  ],
   "panels": [
     {
-      "title": "Worker Status",
-      "type": "stat",
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
-      "targets": [
-        {
-          "expr": "soak_worker_info",
-          "legendFormat": "{{worker_id}} ({{profile}})"
-        }
-      ],
       "fieldConfig": {
-        "defaults": {
-          "mappings": [{ "type": "value", "options": { "1": { "text": "Running", "color": "green" } } }]
-        }
-      }
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "content": "### Operator Flow\n- Filter to a worker first.\n- Start with **Last Verification**, **Verification Age**, **Current Sync Age**, and the restart counters.\n- If the worker is bad, jump to **Selected Worker** or **Prompt Bundle** in the dashboard links.\n- State timelines answer when the worker changed state. Trend panels answer whether it was lagging, recycling, or simply paused.",
+        "mode": "markdown"
+      },
+      "title": "Runbook",
+      "type": "text"
     },
     {
-      "title": "Worker Uptime",
-      "type": "stat",
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
-      "targets": [
-        {
-          "expr": "soak_worker_uptime_seconds",
-          "legendFormat": "uptime"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "s" }
-      }
-    },
-    {
-      "title": "Last Verification",
-      "type": "stat",
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
-      "targets": [
-        {
-          "expr": "soak_verification_last_result",
-          "legendFormat": "result"
-        }
-      ],
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "1": { "text": "PASS", "color": "green" }, "0": { "text": "FAIL", "color": "red" } } }
-          ]
-        }
-      }
-    },
-    {
-      "title": "Load Running",
-      "type": "stat",
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "FAIL"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "PASS"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 0,
+        "y": 4
+      },
+      "id": 2,
       "targets": [
         {
-          "expr": "soak_load_running",
+          "expr": "soak_verification_last_result{worker_id=\"$worker\"}",
+          "legendFormat": "last result"
+        }
+      ],
+      "title": "Last Verification",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 2400
+              },
+              {
+                "color": "red",
+                "value": 3600
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 3,
+        "y": 4
+      },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "time() - max(timestamp(soak_verification_last_result{worker_id=\"$worker\"}))",
+          "legendFormat": "age"
+        }
+      ],
+      "title": "Verification Age",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 6,
+        "y": 4
+      },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "increase(soak_verification_total{worker_id=\"$worker\",result=\"failed\"}[24h])",
+          "legendFormat": "failed"
+        }
+      ],
+      "title": "Failures (24h)",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 9,
+        "y": 4
+      },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "resets(soak_worker_uptime_seconds{worker_id=\"$worker\"}[24h])",
+          "legendFormat": "worker"
+        }
+      ],
+      "title": "Worker Restarts (24h)",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 12,
+        "y": 4
+      },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "resets(soak_litestream_uptime_seconds{worker_id=\"$worker\"}[24h])",
+          "legendFormat": "litestream"
+        }
+      ],
+      "title": "Litestream Restarts (24h)",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 15
+              },
+              {
+                "color": "red",
+                "value": 60
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 15,
+        "y": 4
+      },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "soak_last_sync_age_seconds{worker_id=\"$worker\"}",
+          "legendFormat": "sync age"
+        }
+      ],
+      "title": "Current Sync Age",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "Not Replicating"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "Replicating"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 18,
+        "y": 4
+      },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "max(soak_db_status{worker_id=\"$worker\",status=\"replicating\"})",
+          "legendFormat": "replicating"
+        }
+      ],
+      "title": "DB Replication",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "yellow",
+                  "text": "Paused"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "Running"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "yellow",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 21,
+        "y": 4
+      },
+      "id": 9,
+      "targets": [
+        {
+          "expr": "soak_load_running{worker_id=\"$worker\"}",
           "legendFormat": "load"
         }
       ],
+      "title": "Load State",
+      "type": "stat"
+    },
+    {
       "fieldConfig": {
         "defaults": {
-          "mappings": [
-            { "type": "value", "options": { "1": { "text": "Running", "color": "green" }, "0": { "text": "Paused", "color": "yellow" } } }
-          ]
-        }
-      }
-    },
-    {
-      "title": "Verification Results",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
-      "targets": [
-        {
-          "expr": "increase(soak_verification_total[5m])",
-          "legendFormat": "{{result}}"
-        }
-      ],
-      "fieldConfig": {
-        "overrides": [
-          { "matcher": { "id": "byName", "options": "passed" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "failed" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
-        ]
-      }
-    },
-    {
-      "title": "Verification Duration",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
-      "targets": [
-        {
-          "expr": "rate(soak_verification_duration_seconds_sum[5m]) / rate(soak_verification_duration_seconds_count[5m])",
-          "legendFormat": "avg duration"
+          "unit": "ops"
         },
-        {
-          "expr": "histogram_quantile(0.99, rate(soak_verification_duration_seconds_bucket[5m]))",
-          "legendFormat": "p99"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "s" }
-      }
-    },
-    {
-      "title": "Database Size",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 12 },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 8
+      },
+      "id": 10,
       "targets": [
         {
-          "expr": "soak_db_size_bytes",
-          "legendFormat": "{{db}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "bytes" }
-      }
-    },
-    {
-      "title": "WAL Size",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 12 },
-      "targets": [
-        {
-          "expr": "soak_wal_size_bytes",
-          "legendFormat": "{{db}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "bytes" }
-      }
-    },
-    {
-      "title": "Transaction ID",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 12 },
-      "targets": [
-        {
-          "expr": "soak_db_txid",
-          "legendFormat": "{{db}}"
-        }
-      ]
-    },
-    {
-      "title": "Replication Lag (TXIDs)",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 20 },
-      "targets": [
-        {
-          "expr": "soak_replication_lag_txids",
-          "legendFormat": "lag"
-        }
-      ],
-      "fieldConfig": {
-        "overrides": [
-          { "matcher": { "id": "byName", "options": "lag" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] }
-        ]
-      }
-    },
-    {
-      "title": "Replicated TXID vs DB TXID",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 20 },
-      "targets": [
-        {
-          "expr": "soak_db_txid",
-          "legendFormat": "db txid"
-        },
-        {
-          "expr": "soak_replicated_txid",
-          "legendFormat": "replicated txid"
-        }
-      ]
-    },
-    {
-      "title": "Last Sync Age",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 20 },
-      "targets": [
-        {
-          "expr": "soak_last_sync_age_seconds",
-          "legendFormat": "seconds since last sync"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "s" }
-      }
-    },
-    {
-      "title": "Litestream Uptime",
-      "type": "stat",
-      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 28 },
-      "targets": [
-        {
-          "expr": "soak_litestream_uptime_seconds",
-          "legendFormat": "uptime"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "s" }
-      }
-    },
-    {
-      "title": "DB Status",
-      "type": "stat",
-      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 28 },
-      "targets": [
-        {
-          "expr": "soak_db_status",
-          "legendFormat": "{{status}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [
-            { "type": "value", "options": { "1": { "text": "Active", "color": "green" } } }
-          ]
-        }
-      }
-    },
-    {
-      "title": "TXID Rate (writes/sec estimate)",
-      "type": "timeseries",
-      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 28 },
-      "targets": [
-        {
-          "expr": "rate(soak_db_txid[5m])",
+          "expr": "clamp_min(rate(soak_db_txid{worker_id=\"$worker\"}[5m]), 0)",
           "legendFormat": "txid/sec"
         }
       ],
+      "title": "Write Rate",
+      "type": "stat"
+    },
+    {
       "fieldConfig": {
-        "defaults": { "unit": "ops" }
-      }
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 8
+      },
+      "id": 11,
+      "targets": [
+        {
+          "expr": "soak_db_size_bytes{worker_id=\"$worker\"}",
+          "legendFormat": "db"
+        }
+      ],
+      "title": "DB Size",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 8
+      },
+      "id": 12,
+      "targets": [
+        {
+          "expr": "soak_wal_size_bytes{worker_id=\"$worker\"}",
+          "legendFormat": "wal"
+        }
+      ],
+      "title": "WAL Size",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 8
+      },
+      "id": 13,
+      "targets": [
+        {
+          "expr": "increase(soak_verification_duration_seconds_sum{worker_id=\"$worker\"}[6h]) / clamp_min(increase(soak_verification_duration_seconds_count{worker_id=\"$worker\"}[6h]), 1)",
+          "legendFormat": "6h avg"
+        }
+      ],
+      "title": "Verification Avg (6h)",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "FAIL"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "PASS"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 14,
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "never",
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "soak_verification_last_result{worker_id=\"$worker\"}",
+          "legendFormat": "verification"
+        }
+      ],
+      "title": "Verification State Over Time",
+      "type": "state-timeline"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "yellow",
+                  "text": "Paused"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "Running"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 15,
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "never",
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "soak_load_running{worker_id=\"$worker\"}",
+          "legendFormat": "load"
+        }
+      ],
+      "title": "Load State Over Time",
+      "type": "state-timeline"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "passed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "increase(soak_verification_total{worker_id=\"$worker\"}[30m])",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "title": "Verification Outcomes",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "6h avg"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "6h p95"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "id": 17,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "increase(soak_verification_duration_seconds_sum{worker_id=\"$worker\"}[6h]) / clamp_min(increase(soak_verification_duration_seconds_count{worker_id=\"$worker\"}[6h]), 1)",
+          "legendFormat": "6h avg"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (increase(soak_verification_duration_seconds_bucket{worker_id=\"$worker\"}[6h])))",
+          "legendFormat": "6h p95"
+        }
+      ],
+      "title": "Verification Duration",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 15
+              },
+              {
+                "color": "red",
+                "value": 60
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "id": 18,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "soak_last_sync_age_seconds{worker_id=\"$worker\"}",
+          "legendFormat": "sync age"
+        }
+      ],
+      "title": "Sync Age Trend",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "db"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "wal"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "id": 19,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "soak_db_size_bytes{worker_id=\"$worker\"}",
+          "legendFormat": "db"
+        },
+        {
+          "expr": "soak_wal_size_bytes{worker_id=\"$worker\"}",
+          "legendFormat": "wal"
+        }
+      ],
+      "title": "DB and WAL Size",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "clamp_min(rate(soak_db_txid{worker_id=\"$worker\"}[5m]), 0)",
+          "legendFormat": "txid/sec"
+        }
+      ],
+      "title": "Write Rate Trend",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "worker"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "litestream"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "soak_worker_uptime_seconds{worker_id=\"$worker\"}",
+          "legendFormat": "worker"
+        },
+        {
+          "expr": "soak_litestream_uptime_seconds{worker_id=\"$worker\"}",
+          "legendFormat": "litestream"
+        }
+      ],
+      "title": "Process Uptime",
+      "type": "timeseries"
     }
   ],
+  "refresh": "30s",
   "schemaVersion": 39,
-  "tags": ["litestream", "soak"],
+  "tags": [
+    "litestream",
+    "soak",
+    "fly"
+  ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "worker-main-low-vol",
+          "value": "worker-main-low-vol"
+        },
+        "definition": "label_values(soak_worker_info, worker_id)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Worker",
+        "multi": false,
+        "name": "worker",
+        "options": [],
+        "query": "label_values(soak_worker_info, worker_id)",
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
   },
   "time": {
-    "from": "now-6h",
+    "from": "now-24h",
     "to": "now"
   },
-  "title": "Litestream Soak Testing",
-  "uid": "litestream-soak"
+  "title": "Litestream Soak Signal Board",
+  "uid": "litestream-soak",
+  "version": 3
 }

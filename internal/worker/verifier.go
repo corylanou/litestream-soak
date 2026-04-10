@@ -10,9 +10,23 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 )
+
+type VerificationResult struct {
+	StartedAt    time.Time
+	CompletedAt  time.Time
+	CheckType    string
+	Status       string
+	Passed       bool
+	Summary      string
+	ErrorMessage string
+	DurationMS   int
+	DBSizeBytes  int64
+	WALSizeBytes int64
+}
 
 type Verifier struct {
 	cfg        Config
@@ -35,13 +49,22 @@ func NewVerifier(cfg Config, loadCmd *exec.Cmd) *Verifier {
 	}
 }
 
-func (v *Verifier) RunCycle(ctx context.Context) (bool, error) {
+func (v *Verifier) RunCycle(ctx context.Context) (VerificationResult, error) {
 	start := time.Now()
+	result := VerificationResult{
+		StartedAt: start.UTC(),
+		CheckType: v.cfg.VerifyType,
+		Status:    "running",
+	}
 	slog.Info("Starting verification cycle")
 
 	if err := v.pauseLoad(); err != nil {
-		v.logResult(start, false, fmt.Sprintf("pause load: %v", err))
-		return false, fmt.Errorf("pause load: %w", err)
+		result.Status = "failed"
+		result.ErrorMessage = fmt.Sprintf("pause load: %v", err)
+		result.Summary = summarizeVerificationMessage(result.ErrorMessage)
+		v.finalizeResult(&result)
+		v.logResult(start, false, result.ErrorMessage)
+		return result, fmt.Errorf("pause load: %w", err)
 	}
 	defer v.resumeLoad()
 
@@ -52,8 +75,12 @@ func (v *Verifier) RunCycle(ctx context.Context) (bool, error) {
 	}
 
 	if err := v.waitForSync(ctx); err != nil {
-		v.logResult(start, false, fmt.Sprintf("wait for sync: %v", err))
-		return false, fmt.Errorf("wait for sync: %w", err)
+		result.Status = "failed"
+		result.ErrorMessage = fmt.Sprintf("wait for sync: %v", err)
+		result.Summary = summarizeVerificationMessage(result.ErrorMessage)
+		v.finalizeResult(&result)
+		v.logResult(start, false, result.ErrorMessage)
+		return result, fmt.Errorf("wait for sync: %w", err)
 	}
 
 	passed, err := v.validate(ctx)
@@ -61,22 +88,34 @@ func (v *Verifier) RunCycle(ctx context.Context) (bool, error) {
 	RecordVerification(passed, duration)
 
 	if err != nil {
+		result.Status = "failed"
+		result.ErrorMessage = err.Error()
+		result.Summary = summarizeVerificationMessage(result.ErrorMessage)
+		v.finalizeResult(&result)
 		slog.Error("Verification failed", "error", err, "duration", time.Since(start))
-		v.logResult(start, false, err.Error())
-		return false, err
+		v.logResult(start, false, result.ErrorMessage)
+		return result, err
 	}
 
 	if passed {
+		result.Status = "passed"
+		result.Passed = true
+		result.Summary = "verification passed"
+		v.finalizeResult(&result)
 		slog.Info("Verification passed", "duration", time.Since(start))
 		v.logResult(start, true, "")
 	} else {
+		result.Status = "failed"
+		result.ErrorMessage = "validation returned false"
+		result.Summary = summarizeVerificationMessage(result.ErrorMessage)
+		v.finalizeResult(&result)
 		slog.Error("Verification FAILED", "duration", time.Since(start))
 		v.logResult(start, false, "validation returned false")
 	}
 
 	os.Remove(v.cfg.DBPath + ".restored")
 
-	return passed, nil
+	return result, nil
 }
 
 func (v *Verifier) logResult(start time.Time, passed bool, errMsg string) {
@@ -190,4 +229,33 @@ func (v *Verifier) validate(ctx context.Context) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func (v *Verifier) finalizeResult(result *VerificationResult) {
+	result.CompletedAt = time.Now().UTC()
+	result.DurationMS = int(result.CompletedAt.Sub(result.StartedAt).Milliseconds())
+	result.DBSizeBytes = fileSize(v.cfg.DBPath)
+	result.WALSizeBytes = fileSize(v.cfg.DBPath + "-wal")
+}
+
+func fileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+func summarizeVerificationMessage(msg string) string {
+	for _, line := range strings.Split(msg, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if len(line) > 240 {
+			return line[:240]
+		}
+		return line
+	}
+	return ""
 }
