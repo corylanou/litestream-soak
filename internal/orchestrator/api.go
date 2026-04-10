@@ -36,10 +36,13 @@ type IncidentBundle struct {
 	GeneratedAt         time.Time            `json:"generated_at"`
 	Worker              model.Worker         `json:"worker"`
 	LatestFailure       *model.Verification  `json:"latest_failure,omitempty"`
+	FailureStage        string               `json:"failure_stage,omitempty"`
+	FailureSignature    string               `json:"failure_signature,omitempty"`
 	RecentVerifications []model.Verification `json:"recent_verifications"`
 	RecentEvents        []model.Event        `json:"recent_events"`
 	Machine             *flyapi.Machine      `json:"machine,omitempty"`
 	MachineError        string               `json:"machine_error,omitempty"`
+	TriageCommands      []string             `json:"triage_commands,omitempty"`
 	Prompt              string               `json:"prompt"`
 }
 
@@ -272,10 +275,13 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 		GeneratedAt:         time.Now().UTC(),
 		Worker:              detail.Worker,
 		LatestFailure:       latestFailure,
+		FailureStage:        inferFailureStage(latestFailure),
+		FailureSignature:    inferFailureSignature(latestFailure),
 		RecentVerifications: detail.RecentVerifications,
 		RecentEvents:        detail.RecentEvents,
 		Machine:             detail.Machine,
 		MachineError:        detail.MachineError,
+		TriageCommands:      buildTriageCommands(detail.Worker, detail.Machine != nil),
 	}
 	bundle.Prompt = buildPrompt(bundle)
 	return bundle, http.StatusOK, nil
@@ -287,12 +293,31 @@ func buildPrompt(bundle *IncidentBundle) string {
 		"Determine whether the failure most likely comes from Litestream, restore/replication behavior, Fly runtime conditions, or the soak harness itself.",
 		"Recommend the next commands or log locations to inspect. Do not assume the goal is to fix code immediately; prioritize fast triage.",
 		"",
+		"Summary:",
+		fmt.Sprintf("- generated_at: %s", bundle.GeneratedAt.Format(time.RFC3339)),
+		fmt.Sprintf("- worker_id: %s", bundle.Worker.ID),
+		fmt.Sprintf("- app_name: %s", valueOrUnknown(bundle.Worker.AppName)),
+		fmt.Sprintf("- region: %s", valueOrUnknown(bundle.Worker.Region)),
+		fmt.Sprintf("- machine_id: %s", valueOrUnknown(bundle.Worker.FlyMachineID)),
+		fmt.Sprintf("- status: %s", bundle.Worker.Status),
+		fmt.Sprintf("- last_heartbeat_at: %s", formatTime(bundle.Worker.LastHeartbeatAt)),
+		fmt.Sprintf("- failure_stage: %s", valueOrUnknown(bundle.FailureStage)),
+		fmt.Sprintf("- failure_signature: %s", valueOrUnknown(bundle.FailureSignature)),
+		"",
 		"Worker:",
 		mustJSON(bundle.Worker),
 	}
 
 	if bundle.LatestFailure != nil {
-		sections = append(sections, "", "Latest failed verification:", mustJSON(bundle.LatestFailure))
+		sections = append(
+			sections,
+			"",
+			"Latest failed verification:",
+			mustJSON(bundle.LatestFailure),
+			"",
+			"Immediate triage commands:",
+			strings.Join(bundle.TriageCommands, "\n"),
+		)
 	}
 
 	sections = append(sections, "", "Recent verifications:", mustJSON(bundle.RecentVerifications))
@@ -314,6 +339,87 @@ func mustJSON(v any) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return string(body)
+}
+
+func inferFailureStage(verification *model.Verification) string {
+	if verification == nil {
+		return ""
+	}
+
+	text := strings.ToLower(verification.ErrorMessage)
+	switch {
+	case strings.Contains(text, "restore failed") || strings.Contains(text, "check_type=restore"):
+		return "restore"
+	case strings.Contains(text, "integrity check") || strings.Contains(text, "check_type=integrity_check"):
+		return "integrity_check"
+	case strings.Contains(text, "validation failed"):
+		return "validation"
+	case verification.CheckType != "":
+		return verification.CheckType
+	default:
+		return ""
+	}
+}
+
+func inferFailureSignature(verification *model.Verification) string {
+	if verification == nil {
+		return ""
+	}
+
+	text := strings.ToLower(verification.ErrorMessage)
+	switch {
+	case strings.Contains(text, "wrong # of entries in index"):
+		return "sqlite_index_mismatch"
+	case strings.Contains(text, "listobjectsv2") || strings.Contains(text, "requestcanceled"):
+		return "replica_s3_timeout"
+	case strings.Contains(text, "ltx continuity"):
+		return "ltx_continuity"
+	default:
+		return firstMeaningfulLine(verification.ErrorMessage)
+	}
+}
+
+func buildTriageCommands(worker model.Worker, hasMachine bool) []string {
+	commands := make([]string, 0, 4)
+	appName := strings.TrimSpace(worker.AppName)
+	if appName == "" {
+		appName = "litestream-soak"
+	}
+
+	if worker.FlyMachineID != "" {
+		commands = append(commands, fmt.Sprintf("fly machine status %s -a %s", worker.FlyMachineID, appName))
+		commands = append(commands, fmt.Sprintf("fly logs -a %s -i %s", appName, worker.FlyMachineID))
+	}
+	if hasMachine {
+		commands = append(commands, fmt.Sprintf("fly ssh console -a %s", appName))
+	}
+	commands = append(commands, fmt.Sprintf("curl -sS https://litestream-soak-ctl.fly.dev/api/workers/%s/incident | jq .", worker.ID))
+
+	return commands
+}
+
+func firstMeaningfulLine(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			return line
+		}
+	}
+	return ""
+}
+
+func formatTime(t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return "unknown"
+	}
+	return t.Format(time.RFC3339)
+}
+
+func valueOrUnknown(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "unknown"
+	}
+	return v
 }
 
 func readLimit(r *http.Request, fallback int) int {
