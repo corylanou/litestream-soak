@@ -33,16 +33,18 @@ type WorkerRequest struct {
 type Manager struct {
 	fly            *flyapi.Client
 	db             *model.DB
+	metrics        *controlMetrics
 	appName        string
 	s3Bucket       string
 	s3Endpoint     string
 	controlBaseURL string
 }
 
-func NewManager(fly *flyapi.Client, db *model.DB, appName, s3Bucket, s3Endpoint, controlBaseURL string) *Manager {
+func NewManager(fly *flyapi.Client, db *model.DB, metrics *controlMetrics, appName, s3Bucket, s3Endpoint, controlBaseURL string) *Manager {
 	return &Manager{
 		fly:            fly,
 		db:             db,
+		metrics:        metrics,
 		appName:        appName,
 		s3Bucket:       s3Bucket,
 		s3Endpoint:     s3Endpoint,
@@ -81,6 +83,7 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 	if err := m.db.CreateWorker(worker); err != nil {
 		return nil, fmt.Errorf("create worker record: %w", err)
 	}
+	m.observeWorkerByID(workerID)
 
 	m.db.RecordEvent(workerID, "worker_creating", fmt.Sprintf("Creating worker %s with profile %s", req.Name, req.ProfileName), "")
 
@@ -97,6 +100,7 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 	})
 	if err != nil {
 		m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error())
+		m.observeWorkerByID(workerID)
 		return nil, fmt.Errorf("create volume: %w", err)
 	}
 
@@ -154,6 +158,7 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 	if err != nil {
 		m.fly.DestroyVolume(ctx, vol.ID)
 		m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error())
+		m.observeWorkerByID(workerID)
 		return nil, fmt.Errorf("create machine: %w", err)
 	}
 
@@ -161,6 +166,7 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 		return nil, fmt.Errorf("update worker machine: %w", err)
 	}
 	m.db.UpdateWorkerStatus(workerID, model.WorkerRunning, "")
+	m.observeWorkerByID(workerID)
 	m.db.RecordEvent(workerID, "worker_started", fmt.Sprintf("Worker %s started (machine %s)", req.Name, machine.ID), "")
 
 	slog.Info("Worker created", "name", req.Name, "machine_id", machine.ID, "volume_id", vol.ID, "profile", req.ProfileName)
@@ -181,6 +187,7 @@ func (m *Manager) StopWorker(ctx context.Context, workerID string) error {
 	}
 
 	m.db.UpdateWorkerStatus(workerID, model.WorkerStopped, "")
+	m.observeWorkerByID(workerID)
 	m.db.RecordEvent(workerID, "worker_stopped", fmt.Sprintf("Worker %s stopped", worker.Name), "")
 	return nil
 }
@@ -204,6 +211,7 @@ func (m *Manager) DestroyWorker(ctx context.Context, workerID string) error {
 	}
 
 	m.db.UpdateWorkerStatus(workerID, model.WorkerStopped, "")
+	m.observeWorkerByID(workerID)
 	m.db.RecordEvent(workerID, "worker_destroyed", fmt.Sprintf("Worker %s destroyed", worker.Name), "")
 	return nil
 }
@@ -258,8 +266,27 @@ func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA string)
 		}
 
 		m.db.UpdateWorkerStatus(w.ID, model.WorkerStopped, "replaced by rolling update")
+		m.observeWorkerByID(w.ID)
 		slog.Info("Worker updated", "name", w.Name, "new_id", newWorker.ID)
 	}
 
 	return nil
+}
+
+func (m *Manager) observeWorkerByID(workerID string) {
+	if m.metrics == nil {
+		return
+	}
+
+	worker, err := m.db.GetWorker(workerID)
+	if err != nil {
+		return
+	}
+	m.metrics.observeWorker(*worker)
+
+	verifications, err := m.db.ListVerifications(workerID, 1)
+	if err != nil || len(verifications) == 0 {
+		return
+	}
+	m.metrics.observeVerification(*worker, verifications[0])
 }

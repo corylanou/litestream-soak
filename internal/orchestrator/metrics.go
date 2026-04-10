@@ -55,7 +55,7 @@ var (
 	}, []string{"worker_id", "profile", "source", "app_name", "region", "failure_stage", "failure_signature"})
 )
 
-func newControlMetrics(db *model.DB) *controlMetrics {
+func NewControlMetrics(db *model.DB) *controlMetrics {
 	m := &controlMetrics{
 		statusByWorker:  make(map[string]string),
 		failureByWorker: make(map[string]failureMetricState),

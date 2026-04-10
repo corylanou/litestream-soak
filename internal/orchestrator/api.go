@@ -22,6 +22,10 @@ type API struct {
 
 type WorkerDetailResponse struct {
 	Worker              model.Worker         `json:"worker"`
+	LatestFailure       *model.Verification  `json:"latest_failure,omitempty"`
+	FailureStage        string               `json:"failure_stage,omitempty"`
+	FailureSignature    string               `json:"failure_signature,omitempty"`
+	TriageCommands      []string             `json:"triage_commands,omitempty"`
 	RecentVerifications []model.Verification `json:"recent_verifications"`
 	RecentEvents        []model.Event        `json:"recent_events"`
 	Machine             *flyapi.Machine      `json:"machine,omitempty"`
@@ -29,8 +33,11 @@ type WorkerDetailResponse struct {
 }
 
 type FailureResponse struct {
-	Worker       *model.Worker      `json:"worker,omitempty"`
-	Verification model.Verification `json:"verification"`
+	Worker           *model.Worker      `json:"worker,omitempty"`
+	Verification     model.Verification `json:"verification"`
+	FailureStage     string             `json:"failure_stage,omitempty"`
+	FailureSignature string             `json:"failure_signature,omitempty"`
+	TriageCommands   []string           `json:"triage_commands,omitempty"`
 }
 
 type IncidentBundle struct {
@@ -47,11 +54,14 @@ type IncidentBundle struct {
 	Prompt              string               `json:"prompt"`
 }
 
-func NewAPI(db *model.DB, fly *flyapi.Client) *API {
+func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics) *API {
+	if metrics == nil {
+		metrics = NewControlMetrics(db)
+	}
 	return &API{
 		db:      db,
 		fly:     fly,
-		metrics: newControlMetrics(db),
+		metrics: metrics,
 	}
 }
 
@@ -96,10 +106,15 @@ func (a *API) handleListFailures(w http.ResponseWriter, r *http.Request) {
 
 	failures := make([]FailureResponse, 0, len(verifications))
 	for _, verification := range verifications {
-		failure := FailureResponse{Verification: verification}
+		failure := FailureResponse{
+			Verification:     verification,
+			FailureStage:     inferFailureStage(&verification),
+			FailureSignature: inferFailureSignature(&verification),
+		}
 		worker, err := a.db.GetWorker(verification.WorkerID)
 		if err == nil {
 			failure.Worker = worker
+			failure.TriageCommands = buildTriageCommands(*worker, false)
 		}
 		failures = append(failures, failure)
 	}
@@ -249,6 +264,18 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 		Worker:              *worker,
 		RecentVerifications: verifications,
 		RecentEvents:        events,
+		TriageCommands:      buildTriageCommands(*worker, false),
+	}
+
+	for _, verification := range verifications {
+		if verification.Passed && verification.Status != "failed" {
+			continue
+		}
+		verificationCopy := verification
+		response.LatestFailure = &verificationCopy
+		response.FailureStage = inferFailureStage(&verificationCopy)
+		response.FailureSignature = inferFailureSignature(&verificationCopy)
+		break
 	}
 
 	if worker.FlyMachineID != "" {
@@ -262,6 +289,7 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 			response.MachineError = err.Error()
 		} else {
 			response.Machine = machine
+			response.TriageCommands = buildTriageCommands(*worker, true)
 		}
 	}
 

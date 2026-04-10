@@ -954,6 +954,116 @@
       ],
       "title": "Process Uptime",
       "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 120
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 42
+      },
+      "id": 22,
+      "targets": [
+        {
+          "expr": "time() - max(soak_control_worker_last_heartbeat_unixtime{worker_id=\"$worker\"})",
+          "legendFormat": "heartbeat age"
+        }
+      ],
+      "title": "Heartbeat Age",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 9,
+        "x": 6,
+        "y": 42
+      },
+      "id": 23,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "soak_control_worker_status{worker_id=\"$worker\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "title": "Control Status Labels",
+      "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 9,
+        "x": 15,
+        "y": 42
+      },
+      "id": 24,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "soak_control_worker_failure_info{worker_id=\"$worker\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{failure_stage}} / {{failure_signature}}"
+        }
+      ],
+      "title": "Current Failure Labels",
+      "type": "table"
     }
   ],
   "refresh": "30s",
@@ -992,5 +1102,5 @@
   },
   "title": "Litestream Soak Signal Board",
   "uid": "litestream-soak",
-  "version": 3
+  "version": 4
 }

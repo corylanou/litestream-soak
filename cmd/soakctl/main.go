@@ -43,11 +43,12 @@ func main() {
 	}
 	defer db.Close()
 
+	metrics := orchestrator.NewControlMetrics(db)
 	fly := flyapi.NewClient(workerAppName, flyToken)
-	mgr := orchestrator.NewManager(fly, db, workerAppName, s3Bucket, s3Endpoint, controlBaseURL)
+	mgr := orchestrator.NewManager(fly, db, metrics, workerAppName, s3Bucket, s3Endpoint, controlBaseURL)
 	deployer := orchestrator.NewDeployer(mgr, db, workerAppName)
 	webhookHandler := orchestrator.NewWebhookHandler(webhookSecret, mgr, deployer)
-	api := orchestrator.NewAPI(db, fly)
+	api := orchestrator.NewAPI(db, fly, metrics)
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /webhooks/github", webhookHandler)
