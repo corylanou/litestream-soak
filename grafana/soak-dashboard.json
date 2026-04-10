@@ -114,7 +114,7 @@
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 12 },
       "targets": [
         {
-          "expr": "litestream_db_size",
+          "expr": "soak_db_size_bytes",
           "legendFormat": "{{db}}"
         }
       ],
@@ -128,7 +128,7 @@
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 12 },
       "targets": [
         {
-          "expr": "litestream_wal_size",
+          "expr": "soak_wal_size_bytes",
           "legendFormat": "{{db}}"
         }
       ],
@@ -142,7 +142,7 @@
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 12 },
       "targets": [
         {
-          "expr": "litestream_txid",
+          "expr": "soak_db_txid",
           "legendFormat": "{{db}}"
         }
       ]

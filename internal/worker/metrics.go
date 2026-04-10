@@ -36,6 +36,21 @@ var (
 		Name: "soak_load_running",
 		Help: "Whether the load generator is currently running (1=yes, 0=paused).",
 	})
+
+	dbSize = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "soak_db_size_bytes",
+		Help: "Current database file size in bytes.",
+	})
+
+	walSize = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "soak_wal_size_bytes",
+		Help: "Current WAL file size in bytes.",
+	})
+
+	dbTXID = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "soak_db_txid",
+		Help: "Current transaction ID from litestream.",
+	})
 )
 
 func SetWorkerInfo(cfg Config) {
@@ -63,4 +78,16 @@ func SetLoadRunning(running bool) {
 	} else {
 		loadRunning.Set(0)
 	}
+}
+
+func SetDBSize(bytes int64) {
+	dbSize.Set(float64(bytes))
+}
+
+func SetWALSize(bytes int64) {
+	walSize.Set(float64(bytes))
+}
+
+func SetDBTXID(txid float64) {
+	dbTXID.Set(txid)
 }

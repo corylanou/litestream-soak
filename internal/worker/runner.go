@@ -2,8 +2,11 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
@@ -36,6 +39,7 @@ func (r *Runner) Run(ctx context.Context) error {
 				return
 			case <-ticker.C:
 				SetUptime(time.Since(startTime).Seconds())
+				r.pollDBStats()
 			}
 		}
 	}()
@@ -229,6 +233,39 @@ func (r *Runner) stopLoad() {
 	r.loadCmd.Process.Signal(os.Interrupt)
 	r.loadCmd.Wait()
 	SetLoadRunning(false)
+}
+
+func (r *Runner) pollDBStats() {
+	if info, err := os.Stat(r.cfg.DBPath); err == nil {
+		SetDBSize(info.Size())
+	}
+	if info, err := os.Stat(r.cfg.DBPath + "-wal"); err == nil {
+		SetWALSize(info.Size())
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("unix", r.cfg.SocketPath)
+			},
+		},
+		Timeout: 5 * time.Second,
+	}
+	resp, err := client.Get("http://localhost/txid")
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		TXID string `json:"txid"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return
+	}
+	var txid int64
+	fmt.Sscanf(result.TXID, "%x", &txid)
+	SetDBTXID(float64(txid))
 }
 
 func (r *Runner) runVerifyLoop(ctx context.Context) error {
