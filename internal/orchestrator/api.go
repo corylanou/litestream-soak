@@ -12,6 +12,7 @@ import (
 	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/reporting"
+	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
 type API struct {
@@ -23,6 +24,7 @@ type API struct {
 
 type WorkerDetailResponse struct {
 	Worker              model.Worker         `json:"worker"`
+	Workload            workload.Config      `json:"workload"`
 	LatestFailure       *model.Verification  `json:"latest_failure,omitempty"`
 	FailureStage        string               `json:"failure_stage,omitempty"`
 	FailureSignature    string               `json:"failure_signature,omitempty"`
@@ -44,6 +46,7 @@ type FailureResponse struct {
 type IncidentBundle struct {
 	GeneratedAt         time.Time            `json:"generated_at"`
 	Worker              model.Worker         `json:"worker"`
+	Workload            workload.Config      `json:"workload"`
 	LatestFailure       *model.Verification  `json:"latest_failure,omitempty"`
 	FailureStage        string               `json:"failure_stage,omitempty"`
 	FailureSignature    string               `json:"failure_signature,omitempty"`
@@ -297,6 +300,7 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 
 	response := &WorkerDetailResponse{
 		Worker:              *worker,
+		Workload:            workload.ParseConfig(worker.ProfileConfig),
 		RecentVerifications: verifications,
 		RecentEvents:        events,
 		TriageCommands:      buildTriageCommands(*worker, false),
@@ -349,6 +353,7 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 	bundle := &IncidentBundle{
 		GeneratedAt:         time.Now().UTC(),
 		Worker:              detail.Worker,
+		Workload:            detail.Workload,
 		LatestFailure:       latestFailure,
 		FailureStage:        inferFailureStage(latestFailure),
 		FailureSignature:    inferFailureSignature(latestFailure),
@@ -376,6 +381,9 @@ func buildPrompt(bundle *IncidentBundle) string {
 		fmt.Sprintf("- machine_id: %s", valueOrUnknown(bundle.Worker.FlyMachineID)),
 		fmt.Sprintf("- status: %s", bundle.Worker.Status),
 		fmt.Sprintf("- last_heartbeat_at: %s", formatTime(bundle.Worker.LastHeartbeatAt)),
+		fmt.Sprintf("- load_mode: %s", valueOrUnknown(bundle.Workload.MetricLoadMode())),
+		fmt.Sprintf("- replay_dataset: %s", valueOrUnknown(bundle.Workload.MetricReplayDataset())),
+		fmt.Sprintf("- load_pattern: %s", valueOrUnknown(bundle.Workload.MetricPattern())),
 		fmt.Sprintf("- failure_stage: %s", valueOrUnknown(bundle.FailureStage)),
 		fmt.Sprintf("- failure_signature: %s", valueOrUnknown(bundle.FailureSignature)),
 		"",
@@ -397,6 +405,7 @@ func buildPrompt(bundle *IncidentBundle) string {
 
 	sections = append(sections, "", "Recent verifications:", mustJSON(bundle.RecentVerifications))
 	sections = append(sections, "", "Recent events:", mustJSON(bundle.RecentEvents))
+	sections = append(sections, "", "Workload:", mustJSON(bundle.Workload))
 
 	if bundle.Machine != nil {
 		sections = append(sections, "", "Current Fly machine:", mustJSON(bundle.Machine))

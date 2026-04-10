@@ -2,16 +2,19 @@ package orchestrator
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
+	"strings"
 
 	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/workload"
 	"github.com/google/uuid"
 )
 
 type WorkerRequest struct {
+	WorkerID     string
 	Name         string
 	Source       string
 	GitSHA       string
@@ -21,13 +24,7 @@ type WorkerRequest struct {
 	Region       string
 	VolumeSizeGB int
 	ExpiresAt    *string
-
-	// Profile overrides
-	WriteRate   int
-	Pattern     string
-	PayloadSize int
-	Workers     int
-	InitialSize string
+	Workload     workload.Config
 }
 
 type Manager struct {
@@ -55,19 +52,36 @@ func NewManager(fly *flyapi.Client, db *model.DB, metrics *controlMetrics, alert
 }
 
 func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.Worker, error) {
-	workerID := uuid.New().String()
+	workerID := strings.TrimSpace(req.WorkerID)
+	if workerID == "" {
+		workerID = uuid.New().String()
+	}
 	region := req.Region
 	if region == "" {
 		region = "ord"
 	}
-
-	profileConfig, _ := json.Marshal(map[string]any{
-		"write_rate":   req.WriteRate,
-		"pattern":      req.Pattern,
-		"payload_size": req.PayloadSize,
-		"workers":      req.Workers,
-		"initial_size": req.InitialSize,
-	})
+	workloadCfg := req.Workload
+	if workloadCfg.InitialSize == "" {
+		workloadCfg.InitialSize = "5MB"
+	}
+	if workloadCfg.VerifyInterval == "" {
+		workloadCfg.VerifyInterval = "30m"
+	}
+	if workloadCfg.SnapshotInterval == "" {
+		workloadCfg.SnapshotInterval = "10m"
+	}
+	if workloadCfg.SyncInterval == "" {
+		workloadCfg.SyncInterval = "1s"
+	}
+	if workloadCfg.LoadMode == "" {
+		workloadCfg.LoadMode = "synthetic"
+	}
+	if workloadCfg.CPUs == 0 {
+		workloadCfg.CPUs = 1
+	}
+	if workloadCfg.MemoryMB == 0 {
+		workloadCfg.MemoryMB = 1024
+	}
 
 	worker := &model.Worker{
 		ID:            workerID,
@@ -78,7 +92,7 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 		GitSHA:        req.GitSHA,
 		PRNumber:      req.PRNumber,
 		ProfileName:   req.ProfileName,
-		ProfileConfig: string(profileConfig),
+		ProfileConfig: workloadCfg.JSON(),
 		Region:        region,
 	}
 
@@ -95,7 +109,7 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 	}
 
 	vol, err := m.fly.CreateVolume(ctx, flyapi.CreateVolumeRequest{
-		Name:      fmt.Sprintf("soak_%s", req.Name),
+		Name:      flyVolumeName(req.Name),
 		SizeGB:    volSize,
 		Region:    region,
 		Encrypted: true,
@@ -113,9 +127,12 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 		"GIT_SHA":           req.GitSHA,
 		"SOURCE":            req.Source,
 		"PROFILE":           req.ProfileName,
-		"INITIAL_SIZE":      req.InitialSize,
-		"VERIFY_INTERVAL":   "30m",
-		"SNAPSHOT_INTERVAL": "10m",
+		"INITIAL_SIZE":      workloadCfg.InitialSize,
+		"VERIFY_INTERVAL":   workloadCfg.VerifyInterval,
+		"VERIFY_TYPE":       workloadCfg.VerifyType,
+		"SNAPSHOT_INTERVAL": workloadCfg.SnapshotInterval,
+		"SYNC_INTERVAL":     workloadCfg.SyncInterval,
+		"LOAD_MODE":         workloadCfg.LoadMode,
 		"REPLICA_TYPE":      "s3",
 		"S3_BUCKET":         m.s3Bucket,
 		"S3_PATH":           s3Path,
@@ -123,17 +140,35 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 		"CONTROL_BASE_URL":  m.controlBaseURL,
 	}
 
-	if req.WriteRate > 0 {
-		env["WRITE_RATE"] = fmt.Sprintf("%d", req.WriteRate)
+	if workloadCfg.WriteRate > 0 {
+		env["WRITE_RATE"] = fmt.Sprintf("%d", workloadCfg.WriteRate)
 	}
-	if req.Pattern != "" {
-		env["PATTERN"] = req.Pattern
+	if workloadCfg.Pattern != "" {
+		env["PATTERN"] = workloadCfg.Pattern
 	}
-	if req.PayloadSize > 0 {
-		env["PAYLOAD_SIZE"] = fmt.Sprintf("%d", req.PayloadSize)
+	if workloadCfg.PayloadSize > 0 {
+		env["PAYLOAD_SIZE"] = fmt.Sprintf("%d", workloadCfg.PayloadSize)
 	}
-	if req.Workers > 0 {
-		env["LOAD_WORKERS"] = fmt.Sprintf("%d", req.Workers)
+	if workloadCfg.ReadRatio > 0 {
+		env["READ_RATIO"] = fmt.Sprintf("%.2f", workloadCfg.ReadRatio)
+	}
+	if workloadCfg.Workers > 0 {
+		env["LOAD_WORKERS"] = fmt.Sprintf("%d", workloadCfg.Workers)
+	}
+	if workloadCfg.ReplayDataset != "" {
+		env["REPLAY_DATASET"] = workloadCfg.ReplayDataset
+	}
+	if workloadCfg.ReplayDataPath != "" {
+		env["REPLAY_DATA_PATH"] = workloadCfg.ReplayDataPath
+	}
+	if workloadCfg.ReplayDataURL != "" {
+		env["REPLAY_DATA_URL"] = workloadCfg.ReplayDataURL
+	}
+	if workloadCfg.ReplaySpeed > 0 {
+		env["REPLAY_SPEED"] = fmt.Sprintf("%.2f", workloadCfg.ReplaySpeed)
+	}
+	if !workloadCfg.ReplayLoop {
+		env["REPLAY_LOOP"] = "false"
 	}
 
 	machine, err := m.fly.CreateMachine(ctx, flyapi.CreateMachineRequest{
@@ -144,8 +179,8 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 			Env:   env,
 			Guest: flyapi.Guest{
 				CPUKind:  "shared",
-				CPUs:     1,
-				MemoryMB: 256,
+				CPUs:     workloadCfg.CPUs,
+				MemoryMB: workloadCfg.MemoryMB,
 			},
 			Mounts: []flyapi.Mount{{
 				Volume: vol.ID,
@@ -174,6 +209,42 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 	slog.Info("Worker created", "name", req.Name, "machine_id", machine.ID, "volume_id", vol.ID, "profile", req.ProfileName)
 
 	return worker, nil
+}
+
+func flyVolumeName(workerName string) string {
+	var b strings.Builder
+	b.Grow(len(workerName) + 5)
+	b.WriteString("soak_")
+
+	lastUnderscore := true
+	for _, r := range strings.ToLower(workerName) {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+			lastUnderscore = false
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastUnderscore = false
+		default:
+			if !lastUnderscore {
+				b.WriteByte('_')
+				lastUnderscore = true
+			}
+		}
+	}
+
+	name := strings.Trim(b.String(), "_")
+	if name == "" {
+		name = "soak_worker"
+	}
+	if len(name) <= 30 {
+		return name
+	}
+
+	sum := fnv.New32a()
+	_, _ = sum.Write([]byte(workerName))
+	suffix := fmt.Sprintf("%05x", sum.Sum32()%0x100000)
+	return fmt.Sprintf("%s_%s", name[:24], suffix)
 }
 
 func (m *Manager) StopWorker(ctx context.Context, workerID string) error {
@@ -241,26 +312,16 @@ func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA string)
 			}
 		}
 
-		var profileConfig map[string]any
-		json.Unmarshal([]byte(w.ProfileConfig), &profileConfig)
-
-		writeRate, _ := profileConfig["write_rate"].(float64)
-		pattern, _ := profileConfig["pattern"].(string)
-		payloadSize, _ := profileConfig["payload_size"].(float64)
-		workers, _ := profileConfig["workers"].(float64)
-		initialSize, _ := profileConfig["initial_size"].(string)
+		workloadCfg := workload.ParseConfig(w.ProfileConfig)
 
 		newWorker, err := m.CreateWorker(ctx, WorkerRequest{
+			WorkerID:    w.Name,
 			Name:        w.Name,
 			Source:      "main",
 			GitSHA:      newSHA,
 			ProfileName: w.ProfileName,
 			ImageRef:    newImageRef,
-			WriteRate:   int(writeRate),
-			Pattern:     pattern,
-			PayloadSize: int(payloadSize),
-			Workers:     int(workers),
-			InitialSize: initialSize,
+			Workload:    workloadCfg,
 		})
 		if err != nil {
 			slog.Error("Failed to create updated worker", "name", w.Name, "error", err)

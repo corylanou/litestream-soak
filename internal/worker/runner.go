@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"text/template"
 	"time"
@@ -256,8 +260,14 @@ func (r *Runner) startLoad(ctx context.Context) error {
 }
 
 func (r *Runner) startReplay(ctx context.Context) error {
-	if r.cfg.ReplayDataset == "" || r.cfg.ReplayDataPath == "" {
-		return fmt.Errorf("REPLAY_DATASET and REPLAY_DATA_PATH are required for replay mode")
+	if r.cfg.ReplayDataset == "" {
+		return fmt.Errorf("REPLAY_DATASET is required for replay mode")
+	}
+	if err := r.prepareReplayData(ctx); err != nil {
+		return fmt.Errorf("prepare replay data: %w", err)
+	}
+	if r.cfg.ReplayDataPath == "" {
+		return fmt.Errorf("REPLAY_DATA_PATH or REPLAY_DATA_URL is required for replay mode")
 	}
 
 	var adapter replay.Adapter
@@ -288,6 +298,81 @@ func (r *Runner) startReplay(ctx context.Context) error {
 	}()
 
 	slog.Info("Replay engine started", "dataset", r.cfg.ReplayDataset, "speed", r.cfg.ReplaySpeed)
+	return nil
+}
+
+func (r *Runner) prepareReplayData(ctx context.Context) error {
+	if strings.TrimSpace(r.cfg.ReplayDataPath) != "" {
+		if _, err := os.Stat(r.cfg.ReplayDataPath); err == nil {
+			return nil
+		}
+		if strings.TrimSpace(r.cfg.ReplayDataURL) == "" {
+			return fmt.Errorf("replay data path %s not found", r.cfg.ReplayDataPath)
+		}
+	}
+	if strings.TrimSpace(r.cfg.ReplayDataURL) == "" {
+		return nil
+	}
+
+	dataURL, err := url.Parse(r.cfg.ReplayDataURL)
+	if err != nil {
+		return fmt.Errorf("parse replay data url: %w", err)
+	}
+
+	name := filepath.Base(dataURL.Path)
+	if name == "." || name == "/" || name == "" {
+		return fmt.Errorf("replay data url must include a file name")
+	}
+
+	targetDir := filepath.Join(r.cfg.DataDir, "datasets")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("create replay dataset dir: %w", err)
+	}
+
+	targetPath := filepath.Join(targetDir, name)
+	if _, err := os.Stat(targetPath); err == nil {
+		r.cfg.ReplayDataPath = targetPath
+		return nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.cfg.ReplayDataURL, nil)
+	if err != nil {
+		return fmt.Errorf("create replay data request: %w", err)
+	}
+
+	slog.Info("Downloading replay dataset", "dataset", r.cfg.ReplayDataset, "url", r.cfg.ReplayDataURL, "target", targetPath)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("download replay data: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download replay data returned %d", resp.StatusCode)
+	}
+
+	tmpPath := targetPath + ".download"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("create replay dataset file: %w", err)
+	}
+
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write replay dataset: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close replay dataset: %w", err)
+	}
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("activate replay dataset: %w", err)
+	}
+
+	r.cfg.ReplayDataPath = targetPath
 	return nil
 }
 

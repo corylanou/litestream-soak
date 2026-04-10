@@ -31,14 +31,15 @@ func NewReporter(cfg Config) *Reporter {
 			Timeout: 5 * time.Second,
 		},
 		identity: reporting.WorkerIdentity{
-			WorkerID:    cfg.WorkerID,
-			Name:        cfg.WorkerName,
-			Source:      cfg.Source,
-			GitSHA:      cfg.GitSHA,
-			ProfileName: cfg.ProfileName,
-			AppName:     cfg.AppName,
-			MachineID:   cfg.MachineID,
-			Region:      cfg.Region,
+			WorkerID:      cfg.WorkerID,
+			Name:          cfg.WorkerName,
+			Source:        cfg.Source,
+			GitSHA:        cfg.GitSHA,
+			ProfileName:   cfg.ProfileName,
+			ProfileConfig: cfg.WorkloadConfig().JSON(),
+			AppName:       cfg.AppName,
+			MachineID:     cfg.MachineID,
+			Region:        cfg.Region,
 		},
 	}
 }

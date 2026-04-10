@@ -134,8 +134,23 @@ func (d *DB) Close() error {
 func (d *DB) CreateWorker(w *Worker) error {
 	_, err := d.db.Exec(`
 		INSERT INTO workers (id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		w.ID, w.AppName, w.Region, w.FlyMachineID, w.FlyVolumeID, w.Name, w.Status, w.Source, w.GitSHA, w.PRNumber, w.ProfileName, w.ProfileConfig, w.ExpiresAt,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			app_name = excluded.app_name,
+			region = excluded.region,
+			fly_machine_id = COALESCE(excluded.fly_machine_id, workers.fly_machine_id),
+			fly_volume_id = COALESCE(excluded.fly_volume_id, workers.fly_volume_id),
+			name = excluded.name,
+			status = excluded.status,
+			source = excluded.source,
+			git_sha = excluded.git_sha,
+			pr_number = excluded.pr_number,
+			profile_name = excluded.profile_name,
+			profile_config = excluded.profile_config,
+			expires_at = excluded.expires_at,
+			error_message = '',
+			updated_at = datetime('now')`,
+		w.ID, w.AppName, w.Region, nullIntString(w.FlyMachineID), nullIntString(w.FlyVolumeID), w.Name, w.Status, w.Source, w.GitSHA, w.PRNumber, w.ProfileName, w.ProfileConfig, w.ExpiresAt,
 	)
 	return err
 }
@@ -153,7 +168,7 @@ func (d *DB) UpdateWorkerMachine(id, machineID, volumeID string) error {
 	_, err := d.db.Exec(`
 		UPDATE workers SET fly_machine_id = ?, fly_volume_id = ?, updated_at = datetime('now')
 		WHERE id = ?`,
-		machineID, volumeID, id,
+		nullIntString(machineID), nullIntString(volumeID), id,
 	)
 	return err
 }
@@ -173,9 +188,14 @@ func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
 		name = identity.WorkerID
 	}
 
+	profileConfig := identity.ProfileConfig
+	if strings.TrimSpace(profileConfig) == "" {
+		profileConfig = "{}"
+	}
+
 	_, err := d.db.Exec(`
-		INSERT INTO workers (id, app_name, region, fly_machine_id, name, status, source, git_sha, profile_name, last_heartbeat_at)
-		VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, datetime('now'))
+		INSERT INTO workers (id, app_name, region, fly_machine_id, name, status, source, git_sha, profile_name, profile_config, last_heartbeat_at)
+		VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, datetime('now'))
 		ON CONFLICT(id) DO UPDATE SET
 			app_name = CASE
 				WHEN excluded.app_name <> '' THEN excluded.app_name
@@ -185,24 +205,26 @@ func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
 				WHEN excluded.region <> '' THEN excluded.region
 				ELSE workers.region
 			END,
-			fly_machine_id = CASE
-				WHEN excluded.fly_machine_id <> '' THEN excluded.fly_machine_id
-				ELSE workers.fly_machine_id
-			END,
+			fly_machine_id = COALESCE(excluded.fly_machine_id, workers.fly_machine_id),
 			name = excluded.name,
 			source = excluded.source,
 			git_sha = excluded.git_sha,
 			profile_name = excluded.profile_name,
+			profile_config = CASE
+				WHEN excluded.profile_config <> '{}' THEN excluded.profile_config
+				ELSE workers.profile_config
+			END,
 			last_heartbeat_at = datetime('now'),
 			updated_at = datetime('now')`,
 		identity.WorkerID,
 		identity.AppName,
 		identity.Region,
-		identity.MachineID,
+		nullIntString(identity.MachineID),
 		name,
 		identity.Source,
 		identity.GitSHA,
 		identity.ProfileName,
+		profileConfig,
 	)
 	return err
 }

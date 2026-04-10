@@ -35,6 +35,7 @@ func main() {
 	controlBaseURL := envOrDefault("CONTROL_BASE_URL", "https://litestream-soak-ctl.fly.dev")
 	alertWebhookURL := os.Getenv("SOAK_ALERT_WEBHOOK_URL")
 	alertWebhookToken := os.Getenv("SOAK_ALERT_WEBHOOK_BEARER_TOKEN")
+	fleetEnabled := envOrDefault("SOAK_MAIN_FLEET_ENABLED", "false") == "true"
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	listenAddr := envOrDefault("LISTEN_ADDR", ":8080")
 
@@ -75,6 +76,9 @@ func main() {
 
 	go mgr.RunExpiryLoop(ctx)
 	go mgr.RunHeartbeatMonitor(ctx, 5*time.Minute)
+	if fleetEnabled {
+		go mgr.RunFleetReconciler(ctx, orchestrator.DefaultMainFleet(), 10*time.Minute)
+	}
 
 	slog.Info("soakctl starting",
 		"listen", listenAddr,
@@ -82,6 +86,7 @@ func main() {
 		"s3_bucket", s3Bucket,
 		"control_base_url", controlBaseURL,
 		"alerts_enabled", alerts.Enabled(),
+		"fleet_enabled", fleetEnabled,
 	)
 
 	server := &http.Server{Addr: listenAddr, Handler: mux}

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
 type Config struct {
@@ -56,6 +58,7 @@ type Config struct {
 	LoadMode       string  // "synthetic", "replay", "both"
 	ReplayDataset  string  // "taxi", "gharchive"
 	ReplayDataPath string  // path to dataset file
+	ReplayDataURL  string  // remote dataset URL downloaded on demand
 	ReplaySpeed    float64 // speed multiplier (1.0 = real-time)
 	ReplayLoop     bool
 
@@ -246,6 +249,9 @@ func ConfigFromEnv() (Config, error) {
 	if v := os.Getenv("REPLAY_DATA_PATH"); v != "" {
 		c.ReplayDataPath = v
 	}
+	if v := os.Getenv("REPLAY_DATA_URL"); v != "" {
+		c.ReplayDataURL = v
+	}
 	if v := os.Getenv("REPLAY_SPEED"); v != "" {
 		if _, err := fmt.Sscanf(v, "%f", &c.ReplaySpeed); err != nil {
 			return c, fmt.Errorf("invalid REPLAY_SPEED: %w", err)
@@ -278,4 +284,25 @@ func (c Config) ReplicaURL() string {
 		return "file://" + c.ReplicaPath
 	}
 	return fmt.Sprintf("s3://%s/%s", c.S3Bucket, c.S3Path)
+}
+
+func (c Config) WorkloadConfig() workload.Config {
+	return workload.Config{
+		LoadMode:         c.LoadMode,
+		WriteRate:        c.WriteRate,
+		Pattern:          c.Pattern,
+		PayloadSize:      c.PayloadSize,
+		ReadRatio:        c.ReadRatio,
+		Workers:          c.Workers,
+		InitialSize:      c.InitialSize,
+		VerifyInterval:   c.VerifyInterval.String(),
+		VerifyType:       c.VerifyType,
+		SnapshotInterval: c.SnapshotInterval.String(),
+		SyncInterval:     c.SyncInterval.String(),
+		ReplayDataset:    c.ReplayDataset,
+		ReplayDataPath:   c.ReplayDataPath,
+		ReplayDataURL:    c.ReplayDataURL,
+		ReplaySpeed:      c.ReplaySpeed,
+		ReplayLoop:       c.ReplayLoop,
+	}
 }

@@ -3,14 +3,15 @@ package reporting
 import "time"
 
 type WorkerIdentity struct {
-	WorkerID    string `json:"worker_id"`
-	Name        string `json:"name"`
-	Source      string `json:"source"`
-	GitSHA      string `json:"git_sha"`
-	ProfileName string `json:"profile_name"`
-	AppName     string `json:"app_name,omitempty"`
-	MachineID   string `json:"machine_id,omitempty"`
-	Region      string `json:"region,omitempty"`
+	WorkerID      string `json:"worker_id"`
+	Name          string `json:"name"`
+	Source        string `json:"source"`
+	GitSHA        string `json:"git_sha"`
+	ProfileName   string `json:"profile_name"`
+	ProfileConfig string `json:"profile_config,omitempty"`
+	AppName       string `json:"app_name,omitempty"`
+	MachineID     string `json:"machine_id,omitempty"`
+	Region        string `json:"region,omitempty"`
 }
 
 type HeartbeatPayload struct {

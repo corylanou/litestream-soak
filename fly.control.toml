@@ -9,6 +9,7 @@ primary_region = "ord"
   DB_PATH = "/data/soakctl.db"
   LISTEN_ADDR = ":8080"
   CONTROL_BASE_URL = "https://litestream-soak-ctl.fly.dev"
+  SOAK_MAIN_FLEET_ENABLED = "true"
 
 [http_service]
   internal_port = 8080
