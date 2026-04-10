@@ -17,6 +17,11 @@ primary_region = "ord"
   S3_PATH = "soak/low-volume"
   S3_ENDPOINT = "https://fly.storage.tigris.dev"
 
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
+
 [[metrics]]
   port = 9091
   path = "/metrics"
