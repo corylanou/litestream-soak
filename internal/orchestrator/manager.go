@@ -34,17 +34,19 @@ type Manager struct {
 	fly            *flyapi.Client
 	db             *model.DB
 	metrics        *controlMetrics
+	alerts         *AlertDispatcher
 	appName        string
 	s3Bucket       string
 	s3Endpoint     string
 	controlBaseURL string
 }
 
-func NewManager(fly *flyapi.Client, db *model.DB, metrics *controlMetrics, appName, s3Bucket, s3Endpoint, controlBaseURL string) *Manager {
+func NewManager(fly *flyapi.Client, db *model.DB, metrics *controlMetrics, alerts *AlertDispatcher, appName, s3Bucket, s3Endpoint, controlBaseURL string) *Manager {
 	return &Manager{
 		fly:            fly,
 		db:             db,
 		metrics:        metrics,
+		alerts:         alerts,
 		appName:        appName,
 		s3Bucket:       s3Bucket,
 		s3Endpoint:     s3Endpoint,

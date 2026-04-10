@@ -66,10 +66,28 @@ CREATE TABLE IF NOT EXISTS events (
     created_at DATETIME NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker_id TEXT REFERENCES workers(id),
+    verification_id INTEGER REFERENCES verifications(id),
+    alert_type TEXT NOT NULL,
+    fingerprint TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    failure_stage TEXT,
+    failure_signature TEXT,
+    message TEXT,
+    payload TEXT,
+    error_message TEXT,
+    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+    sent_at DATETIME
+);
+
 CREATE INDEX IF NOT EXISTS idx_verifications_worker ON verifications(worker_id);
 CREATE INDEX IF NOT EXISTS idx_events_worker ON events(worker_id);
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
+CREATE INDEX IF NOT EXISTS idx_alerts_worker ON alerts(worker_id);
+CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at);
 `
 
 type DB struct {
@@ -267,12 +285,21 @@ func (d *DB) ListExpiredWorkers() ([]Worker, error) {
 }
 
 func (d *DB) RecordVerification(v *Verification) error {
-	_, err := d.db.Exec(`
+	result, err := d.db.Exec(`
 		INSERT INTO verifications (worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		v.WorkerID, v.StartedAt, v.CompletedAt, v.Status, v.CheckType, v.SourceChecksum, v.RestoredChecksum, v.Passed, v.DurationMS, v.ErrorMessage,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+	v.ID = int(id)
+	return nil
 }
 
 func (d *DB) ListVerifications(workerID string, limit int) ([]Verification, error) {
@@ -436,6 +463,120 @@ func (d *DB) ListRecentFailedVerifications(limit int) ([]Verification, error) {
 	return verifications, nil
 }
 
+func (d *DB) CreateAlert(alert *AlertDelivery) (int64, bool, error) {
+	result, err := d.db.Exec(`
+		INSERT OR IGNORE INTO alerts (worker_id, verification_id, alert_type, fingerprint, status, failure_stage, failure_signature, message, payload, error_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		nullIntString(alert.WorkerID),
+		nullInt(alert.VerificationID),
+		alert.AlertType,
+		alert.Fingerprint,
+		alert.Status,
+		nullIntString(alert.FailureStage),
+		nullIntString(alert.FailureSignature),
+		nullIntString(alert.Message),
+		nullIntString(alert.Payload),
+		nullIntString(alert.ErrorMessage),
+	)
+	if err != nil {
+		return 0, false, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, false, err
+	}
+	if rowsAffected == 0 {
+		return 0, false, nil
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, false, err
+	}
+	return id, true, nil
+}
+
+func (d *DB) UpdateAlertDelivery(id int64, status, payload, errMsg string, sentAt *time.Time) error {
+	_, err := d.db.Exec(`
+		UPDATE alerts
+		SET status = ?, payload = ?, error_message = ?, sent_at = ?
+		WHERE id = ?`,
+		status,
+		nullIntString(payload),
+		nullIntString(errMsg),
+		sentAt,
+		id,
+	)
+	return err
+}
+
+func (d *DB) ListAlerts(limit int) ([]AlertDelivery, error) {
+	rows, err := d.db.Query(`
+		SELECT id, worker_id, verification_id, alert_type, fingerprint, status, failure_stage, failure_signature, message, payload, error_message, created_at, sent_at
+		FROM alerts
+		ORDER BY created_at DESC
+		LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	alerts := make([]AlertDelivery, 0)
+	for rows.Next() {
+		var alert AlertDelivery
+		var workerID, failureStage, failureSignature, message, payload, errorMessage sql.NullString
+		var verificationID sql.NullInt64
+		var sentAt sql.NullTime
+		if err := rows.Scan(
+			&alert.ID,
+			&workerID,
+			&verificationID,
+			&alert.AlertType,
+			&alert.Fingerprint,
+			&alert.Status,
+			&failureStage,
+			&failureSignature,
+			&message,
+			&payload,
+			&errorMessage,
+			&alert.CreatedAt,
+			&sentAt,
+		); err != nil {
+			return nil, err
+		}
+		if workerID.Valid {
+			alert.WorkerID = workerID.String
+		}
+		if verificationID.Valid {
+			alert.VerificationID = int(verificationID.Int64)
+		}
+		if failureStage.Valid {
+			alert.FailureStage = failureStage.String
+		}
+		if failureSignature.Valid {
+			alert.FailureSignature = failureSignature.String
+		}
+		if message.Valid {
+			alert.Message = message.String
+		}
+		if payload.Valid {
+			alert.Payload = payload.String
+		}
+		if errorMessage.Valid {
+			alert.ErrorMessage = errorMessage.String
+		}
+		if sentAt.Valid {
+			alert.SentAt = &sentAt.Time
+		}
+		alerts = append(alerts, alert)
+	}
+
+	return alerts, nil
+}
+
 func (d *DB) listWorkersBySource(source string) ([]Worker, error) {
 	rows, err := d.db.Query(`
 		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message
@@ -558,4 +699,18 @@ func scanWorker(scanner workerScanner, w *Worker) error {
 	}
 
 	return nil
+}
+
+func nullInt(value int) interface{} {
+	if value == 0 {
+		return nil
+	}
+	return value
+}
+
+func nullIntString(value string) interface{} {
+	if value == "" {
+		return nil
+	}
+	return value
 }

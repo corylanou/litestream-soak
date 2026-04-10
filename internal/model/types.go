@@ -68,3 +68,19 @@ type Event struct {
 	Details   string    `json:"details,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+type AlertDelivery struct {
+	ID               int        `json:"id"`
+	WorkerID         string     `json:"worker_id,omitempty"`
+	VerificationID   int        `json:"verification_id,omitempty"`
+	AlertType        string     `json:"alert_type"`
+	Fingerprint      string     `json:"fingerprint"`
+	Status           string     `json:"status"`
+	FailureStage     string     `json:"failure_stage,omitempty"`
+	FailureSignature string     `json:"failure_signature,omitempty"`
+	Message          string     `json:"message,omitempty"`
+	Payload          string     `json:"payload,omitempty"`
+	ErrorMessage     string     `json:"error_message,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	SentAt           *time.Time `json:"sent_at,omitempty"`
+}

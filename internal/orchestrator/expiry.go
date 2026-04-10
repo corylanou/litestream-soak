@@ -66,5 +66,11 @@ func (m *Manager) checkStaleWorkers(ctx context.Context, timeout time.Duration) 
 		}
 		m.db.RecordEvent(w.ID, "worker_stale", "Worker missed heartbeat deadline", "")
 		m.observeWorkerByID(w.ID)
+		if m.alerts != nil {
+			latestWorker, err := m.db.GetWorker(w.ID)
+			if err == nil {
+				m.alerts.NotifyWorkerStale(*latestWorker)
+			}
+		}
 	}
 }

@@ -18,6 +18,7 @@ type API struct {
 	db      *model.DB
 	fly     *flyapi.Client
 	metrics *controlMetrics
+	alerts  *AlertDispatcher
 }
 
 type WorkerDetailResponse struct {
@@ -54,7 +55,7 @@ type IncidentBundle struct {
 	Prompt              string               `json:"prompt"`
 }
 
-func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics) *API {
+func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *AlertDispatcher) *API {
 	if metrics == nil {
 		metrics = NewControlMetrics(db)
 	}
@@ -62,6 +63,7 @@ func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics) *API {
 		db:      db,
 		fly:     fly,
 		metrics: metrics,
+		alerts:  alerts,
 	}
 }
 
@@ -77,6 +79,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/workers/{id}/verifications", a.handleVerification)
 	mux.HandleFunc("GET /api/events", a.handleListEvents)
 	mux.HandleFunc("GET /api/failures", a.handleListFailures)
+	mux.HandleFunc("GET /api/alerts", a.handleListAlerts)
 }
 
 func (a *API) handleListWorkers(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +123,35 @@ func (a *API) handleListFailures(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAPIJSON(w, failures)
+}
+
+func (a *API) handleListAlerts(w http.ResponseWriter, r *http.Request) {
+	alerts, err := a.db.ListAlerts(readLimit(r, 20))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	type alertResponse struct {
+		Worker         *model.Worker       `json:"worker,omitempty"`
+		Alert          model.AlertDelivery `json:"alert"`
+		TriageCommands []string            `json:"triage_commands,omitempty"`
+	}
+
+	response := make([]alertResponse, 0, len(alerts))
+	for _, alert := range alerts {
+		item := alertResponse{Alert: alert}
+		if alert.WorkerID != "" {
+			worker, err := a.db.GetWorker(alert.WorkerID)
+			if err == nil {
+				item.Worker = worker
+				item.TriageCommands = buildTriageCommands(*worker, worker.FlyMachineID != "")
+			}
+		}
+		response = append(response, item)
+	}
+
+	writeAPIJSON(w, response)
 }
 
 func (a *API) handleGetWorker(w http.ResponseWriter, r *http.Request) {
@@ -239,6 +271,9 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	if worker, err := a.db.GetWorker(workerID); err == nil {
 		a.metrics.observeWorker(*worker)
 		a.metrics.observeVerification(*worker, *verification)
+		if a.alerts != nil {
+			a.alerts.NotifyVerificationFailure(*worker, *verification)
+		}
 	}
 
 	w.WriteHeader(http.StatusAccepted)

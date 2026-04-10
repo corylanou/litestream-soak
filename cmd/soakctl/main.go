@@ -33,6 +33,8 @@ func main() {
 	s3Bucket := envOrDefault("S3_BUCKET", os.Getenv("BUCKET_NAME"))
 	s3Endpoint := envOrDefault("S3_ENDPOINT", os.Getenv("AWS_ENDPOINT_URL_S3"))
 	controlBaseURL := envOrDefault("CONTROL_BASE_URL", "https://litestream-soak-ctl.fly.dev")
+	alertWebhookURL := os.Getenv("SOAK_ALERT_WEBHOOK_URL")
+	alertWebhookToken := os.Getenv("SOAK_ALERT_WEBHOOK_BEARER_TOKEN")
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	listenAddr := envOrDefault("LISTEN_ADDR", ":8080")
 
@@ -44,11 +46,12 @@ func main() {
 	defer db.Close()
 
 	metrics := orchestrator.NewControlMetrics(db)
+	alerts := orchestrator.NewAlertDispatcher(db, controlBaseURL, alertWebhookURL, alertWebhookToken)
 	fly := flyapi.NewClient(workerAppName, flyToken)
-	mgr := orchestrator.NewManager(fly, db, metrics, workerAppName, s3Bucket, s3Endpoint, controlBaseURL)
+	mgr := orchestrator.NewManager(fly, db, metrics, alerts, workerAppName, s3Bucket, s3Endpoint, controlBaseURL)
 	deployer := orchestrator.NewDeployer(mgr, db, workerAppName)
 	webhookHandler := orchestrator.NewWebhookHandler(webhookSecret, mgr, deployer)
-	api := orchestrator.NewAPI(db, fly, metrics)
+	api := orchestrator.NewAPI(db, fly, metrics, alerts)
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /webhooks/github", webhookHandler)
@@ -78,6 +81,7 @@ func main() {
 		"worker_app", workerAppName,
 		"s3_bucket", s3Bucket,
 		"control_base_url", controlBaseURL,
+		"alerts_enabled", alerts.Enabled(),
 	)
 
 	server := &http.Server{Addr: listenAddr, Handler: mux}
