@@ -8,3 +8,4 @@ tmp/
 *.db-shm
 *.restored
 .env
+.envrc
