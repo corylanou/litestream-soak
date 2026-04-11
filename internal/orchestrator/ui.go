@@ -10,11 +10,14 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
 type homePageData struct {
 	GeneratedAt  time.Time
 	Summary      homeSummary
+	Diagnosis    diagnosisSnapshot
+	Coverage     coverageSnapshot
 	Spotlight    *FailureResponse
 	FailureQueue []FailureResponse
 	Workers      []homeWorker
@@ -29,13 +32,24 @@ type homeSummary struct {
 }
 
 type homeWorker struct {
-	Worker             model.Worker
-	LatestVerification *model.Verification
+	Worker                   model.Worker
+	LatestVerification       *model.Verification
+	Workload                 workload.Config
+	CurrentFailureStage      string
+	CurrentFailureSignature  string
+	CurrentProbableSubsystem string
 }
 
 type workerPageData struct {
 	GeneratedAt time.Time
 	Incident    *IncidentBundle
+}
+
+type helpPageData struct {
+	GeneratedAt time.Time
+	Diagnosis   diagnosisSnapshot
+	Coverage    coverageSnapshot
+	PromptModes []promptModeInfo
 }
 
 var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
@@ -46,6 +60,7 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"formatTimePtr":     formatUITimePtr,
 	"heartbeatClass":    heartbeatClass,
 	"json":              mustJSON,
+	"joinList":          strings.Join,
 	"pathEscape":        url.PathEscape,
 	"shorten":           shortenText,
 	"statusClass":       statusClass,
@@ -55,10 +70,10 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"verificationClass": verificationClass,
 	"verificationLabel": verificationLabel,
 	"workerName":        workerName,
-}).Parse(homePageTemplate + workerPageTemplate))
+}).Parse(homePageTemplate + workerPageTemplate + helpPageTemplate))
 
 func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
-	workers, err := a.db.ListWorkers("")
+	summaries, err := a.listWorkerSummaries("")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -76,21 +91,23 @@ func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	workerCards := make([]homeWorker, 0, len(workers))
+	workerCards := make([]homeWorker, 0, len(summaries))
 	summary := homeSummary{
-		TotalWorkers:   len(workers),
+		TotalWorkers:   len(summaries),
 		RecentFailures: len(failures),
 	}
 
-	for _, worker := range workers {
-		card := homeWorker{Worker: worker}
-		verifications, err := a.db.ListVerifications(worker.ID, 1)
-		if err == nil && len(verifications) > 0 {
-			latest := verifications[0]
-			card.LatestVerification = &latest
+	for _, workerSummary := range summaries {
+		card := homeWorker{
+			Worker:                   workerSummary.Worker,
+			LatestVerification:       workerSummary.LastVerification,
+			Workload:                 workerSummary.Workload,
+			CurrentFailureStage:      workerSummary.CurrentFailureStage,
+			CurrentFailureSignature:  workerSummary.CurrentFailureSignature,
+			CurrentProbableSubsystem: workerSummary.CurrentProbableSubsystem,
 		}
 
-		if worker.Status == model.WorkerRunning {
+		if workerSummary.Worker.Status == model.WorkerRunning {
 			summary.HealthyWorkers++
 		} else {
 			summary.AttentionWorkers++
@@ -110,7 +127,12 @@ func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
 
 	failureCards := make([]FailureResponse, 0, len(failures))
 	for _, verification := range failures {
-		card := FailureResponse{Verification: verification}
+		card := FailureResponse{
+			Verification:      verification,
+			FailureStage:      inferFailureStage(&verification),
+			FailureSignature:  inferFailureSignature(&verification),
+			ProbableSubsystem: inferProbableSubsystem(inferFailureStage(&verification), inferFailureSignature(&verification)),
+		}
 		worker, err := a.db.GetWorker(verification.WorkerID)
 		if err == nil {
 			card.Worker = worker
@@ -130,6 +152,8 @@ func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
 	renderHTML(w, "home", homePageData{
 		GeneratedAt:  time.Now().UTC(),
 		Summary:      summary,
+		Diagnosis:    buildDiagnosisSnapshot(summaries),
+		Coverage:     buildCoverageSnapshot(summaries),
 		Spotlight:    spotlight,
 		FailureQueue: queue,
 		Workers:      workerCards,
@@ -147,6 +171,21 @@ func (a *API) handleWorkerPage(w http.ResponseWriter, r *http.Request) {
 	renderHTML(w, "worker", workerPageData{
 		GeneratedAt: time.Now().UTC(),
 		Incident:    bundle,
+	})
+}
+
+func (a *API) handleHelpPage(w http.ResponseWriter, r *http.Request) {
+	summaries, err := a.listWorkerSummaries("")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	renderHTML(w, "help", helpPageData{
+		GeneratedAt: time.Now().UTC(),
+		Diagnosis:   buildDiagnosisSnapshot(summaries),
+		Coverage:    buildCoverageSnapshot(summaries),
+		PromptModes: buildPromptModes(string(promptModeTriage)),
 	})
 }
 
@@ -450,6 +489,18 @@ const homePageTemplate = `{{define "home"}}
 
     /* Panels */
     .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; }
+    .guide-grid { display: grid; grid-template-columns: 1.35fr 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+    .guide-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; }
+    .guide-card h2 { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+    .guide-card p { color: var(--muted); font-size: 13px; }
+    .guide-card ul { margin: 10px 0 0 18px; color: var(--muted); font-size: 13px; }
+    .guide-card li + li { margin-top: 6px; }
+    .guide-card .lead { color: var(--text); font-weight: 500; }
+    .chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: var(--surface-raised); border: 1px solid var(--border-subtle); color: var(--text); font-size: 12px; }
+    .chip strong { color: var(--blue); }
+    .diag-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .diag-meta .badge { text-transform: none; letter-spacing: 0; }
 
     /* Bottom grid */
     .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
@@ -473,6 +524,7 @@ const homePageTemplate = `{{define "home"}}
     .footer { padding: 16px 0; margin-top: 24px; border-top: 1px solid var(--border-subtle); color: var(--faint); font-size: 11px; text-align: center; }
 
     @media (max-width: 900px) {
+      .guide-grid { grid-template-columns: 1fr; }
       .bottom-grid { grid-template-columns: 1fr; }
       .status-strip { flex-wrap: wrap; gap: 10px 18px; }
       .incident-alert { flex-direction: column; }
@@ -540,6 +592,7 @@ const homePageTemplate = `{{define "home"}}
           <span class="refresh-dot" id="refresh-dot"></span>
           <span id="refresh-count">30s</span>
         </span>
+        <a class="topbar-link" href="/ui/help">Help</a>
         <a class="topbar-link" href="/api/workers">API</a>
         <a class="topbar-link" href="/api/failures">Failures</a>
         <a class="topbar-link" href="/api/events">Events</a>
@@ -553,11 +606,67 @@ const homePageTemplate = `{{define "home"}}
       <span><span class="ss-label">Failures</span> <span class="ss-value{{if gt .Summary.RecentFailures 0}} ss-bad{{end}}">{{.Summary.RecentFailures}}</span></span>
     </div>
 
+    <div class="guide-grid">
+      <div class="guide-card">
+        <h2>Current Diagnosis</h2>
+        <p class="lead">{{.Diagnosis.Headline}}</p>
+        <p style="margin-top:8px;">{{.Diagnosis.Summary}}</p>
+        {{if .Diagnosis.ProbableSubsystem}}
+        <div class="diag-meta">
+          <span class="badge badge-warn">{{.Diagnosis.ProbableSubsystem}}</span>
+          {{if .Diagnosis.DominantStage}}<span class="badge badge-neutral">stage: {{.Diagnosis.DominantStage}}</span>{{end}}
+          {{if .Diagnosis.DominantSignature}}<span class="badge badge-bad">{{shorten .Diagnosis.DominantSignature 80}}</span>{{end}}
+        </div>
+        {{end}}
+        {{if .Diagnosis.WhyLikely}}
+        <ul>
+          {{range .Diagnosis.WhyLikely}}
+          <li>{{.}}</li>
+          {{end}}
+        </ul>
+        {{end}}
+      </div>
+
+      <div class="guide-card">
+        <h2>Start Here</h2>
+        <p>Use the control plane for incident context and Grafana for cluster shape.</p>
+        <ul>
+          <li>Open a worker marked <strong>degraded</strong>.</li>
+          <li>Check failure stage, signature, and probable subsystem.</li>
+          <li>Copy the AI prompt or incident JSON.</li>
+          <li>Run the listed Fly triage commands before changing code.</li>
+        </ul>
+        <div class="chip-row">
+          <a class="btn btn-primary" href="/ui/help">Operator Help</a>
+          <a class="btn" href="/api/worker-summaries">Worker Summaries</a>
+        </div>
+      </div>
+
+      <div class="guide-card">
+        <h2>Coverage</h2>
+        <p>The active fleet should span multiple load modes and data shapes.</p>
+        {{if .Coverage.LoadModes}}
+        <div class="chip-row">
+          {{range .Coverage.LoadModes}}
+          <span class="chip"><strong>{{.Count}}</strong> {{.Label}}</span>
+          {{end}}
+        </div>
+        {{end}}
+        {{if .Coverage.ReplayDatasets}}
+        <div class="chip-row">
+          {{range .Coverage.ReplayDatasets}}
+          <span class="chip"><strong>{{.Count}}</strong> {{.Label}}</span>
+          {{end}}
+        </div>
+        {{end}}
+      </div>
+    </div>
+
     {{if .Spotlight}}
     <div class="incident-alert">
       <div class="incident-alert-body">
         <div class="incident-alert-title">{{workerName .Spotlight.Worker .Spotlight.Verification.WorkerID}}: {{shorten (failureText .Spotlight.Verification) 120}}</div>
-        <div class="incident-alert-meta">{{timeAgoValue .Spotlight.Verification.StartedAt}} · {{.Spotlight.Verification.CheckType}} · {{formatDuration .Spotlight.Verification.DurationMS}}</div>
+        <div class="incident-alert-meta">{{timeAgoValue .Spotlight.Verification.StartedAt}} · {{.Spotlight.FailureStage}} · {{.Spotlight.ProbableSubsystem}} · {{formatDuration .Spotlight.Verification.DurationMS}}</div>
       </div>
       <div class="incident-alert-actions">
         <a class="btn btn-danger" href="/ui/workers/{{pathEscape .Spotlight.Verification.WorkerID}}">Open</a>
@@ -569,7 +678,7 @@ const homePageTemplate = `{{define "home"}}
     {{end}}
 
     <div class="section-head">
-      <span class="section-title">Workers</span>
+      <span class="section-title">Fleet</span>
     </div>
 
     {{if .Workers}}
@@ -583,8 +692,8 @@ const homePageTemplate = `{{define "home"}}
             <th>Heartbeat</th>
             <th>Last Check</th>
             <th>Profile</th>
-            <th>Source</th>
-            <th>SHA</th>
+            <th>Workload</th>
+            <th>Signal</th>
             <th style="width:80px;"></th>
           </tr>
         </thead>
@@ -600,8 +709,14 @@ const homePageTemplate = `{{define "home"}}
               {{else}}<span style="color:var(--faint);">none</span>{{end}}
             </td>
             <td>{{.Worker.ProfileName}}</td>
-            <td>{{.Worker.Source}}</td>
-            <td><code class="mono">{{trimSHA .Worker.GitSHA}}</code></td>
+            <td>{{.Workload.MetricLoadMode}}{{if ne .Workload.MetricReplayDataset "none"}} · {{.Workload.MetricReplayDataset}}{{end}}</td>
+            <td>
+              {{if .CurrentFailureSignature}}
+              <span class="badge badge-bad">{{shorten .CurrentFailureSignature 48}}</span>
+              {{else}}
+              <span class="badge badge-good">healthy</span>
+              {{end}}
+            </td>
             <td><a href="/api/workers/{{pathEscape .Worker.ID}}/prompt" onclick="event.stopPropagation();" class="btn" style="padding:2px 8px;">Prompt</a></td>
           </tr>
           {{end}}
@@ -624,7 +739,7 @@ const homePageTemplate = `{{define "home"}}
             <div class="feed-row">
               <div class="feed-body">
                 <div class="feed-title">{{workerName .Worker .Verification.WorkerID}}</div>
-                <div class="feed-meta">{{.Verification.CheckType}} · {{formatDuration .Verification.DurationMS}}</div>
+                <div class="feed-meta">{{.FailureStage}} · {{.ProbableSubsystem}} · {{formatDuration .Verification.DurationMS}}</div>
                 <div class="feed-msg">{{shorten (failureText .Verification) 140}}</div>
                 <div class="feed-actions">
                   <a href="/ui/workers/{{pathEscape .Verification.WorkerID}}">Open</a>
@@ -731,6 +846,7 @@ const workerPageTemplate = `{{define "worker"}}
     .btn-copy { background: rgba(63,185,80,0.15); border-color: rgba(63,185,80,0.3); color: var(--green); font-weight: 600; padding: 6px 16px; }
     .btn-copy:hover { background: rgba(63,185,80,0.25); }
     .btn-copy.copied { background: var(--green); color: var(--bg); border-color: var(--green); }
+    .mode-btn.active { background: rgba(88,166,255,0.2); border-color: rgba(88,166,255,0.35); color: var(--blue); }
 
     /* Worker header */
     .worker-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
@@ -752,6 +868,15 @@ const workerPageTemplate = `{{define "worker"}}
     .incident-alert-body { flex: 1; min-width: 0; }
     .incident-alert-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
     .incident-alert-meta { color: var(--muted); font-size: 12px; }
+    .guide-banner { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; margin-bottom: 16px; }
+    .guide-copy { color: var(--muted); font-size: 13px; }
+    .guide-copy p + p { margin-top: 8px; }
+    .guide-copy ul { margin: 10px 0 0 18px; }
+    .guide-copy li + li { margin-top: 6px; }
+    .guide-facts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .mode-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+    .mode-summary { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
 
     /* Layout */
     .layout { display: grid; grid-template-columns: 1fr 340px; gap: 16px; align-items: start; }
@@ -805,6 +930,7 @@ const workerPageTemplate = `{{define "worker"}}
     .footer { padding: 16px 0; margin-top: 24px; border-top: 1px solid var(--border-subtle); color: var(--faint); font-size: 11px; text-align: center; }
 
     @media (max-width: 960px) {
+      .guide-banner { grid-template-columns: 1fr; }
       .layout { grid-template-columns: 1fr; }
       .sidebar { position: static; }
       .worker-header { flex-direction: column; }
@@ -825,6 +951,21 @@ const workerPageTemplate = `{{define "worker"}}
       btn.textContent = "Copied"; btn.classList.add("copied");
       setTimeout(function() { btn.textContent = "Copy AI Prompt"; btn.classList.remove("copied"); }, 1800);
     }
+
+    async function loadPromptMode(btn) {
+      var mode = btn.dataset.mode;
+      var summary = btn.dataset.summary;
+      var label = btn.dataset.label;
+      var box = document.getElementById("prompt-box");
+      var endpoint = "/api/workers/{{pathEscape .Incident.Worker.ID}}/prompt?mode=" + encodeURIComponent(mode);
+      var resp = await fetch(endpoint);
+      if (!resp.ok) return;
+      box.value = await resp.text();
+      document.getElementById("prompt-mode-label").textContent = label;
+      document.getElementById("prompt-mode-summary").textContent = summary;
+      document.querySelectorAll(".mode-btn").forEach(function(el) { el.classList.remove("active"); });
+      btn.classList.add("active");
+    }
   </script>
 </head>
 <body>
@@ -836,6 +977,7 @@ const workerPageTemplate = `{{define "worker"}}
         <span>{{.Incident.Worker.Name}}</span>
       </div>
       <div class="topbar-right">
+        <a class="topbar-link" href="/ui/help">Help</a>
         <a class="topbar-link" href="/api/workers/{{pathEscape .Incident.Worker.ID}}">JSON</a>
         <a class="topbar-link" href="/api/workers/{{pathEscape .Incident.Worker.ID}}/incident">Incident</a>
         <a class="topbar-link" href="/api/workers/{{pathEscape .Incident.Worker.ID}}/prompt">Prompt</a>
@@ -863,11 +1005,48 @@ const workerPageTemplate = `{{define "worker"}}
     <div class="incident-alert">
       <div class="incident-alert-body">
         <div class="incident-alert-title">{{failureText .Incident.LatestFailure}}</div>
-        <div class="incident-alert-meta">{{formatTime .Incident.LatestFailure.StartedAt}} · {{.Incident.LatestFailure.CheckType}} · {{formatDuration .Incident.LatestFailure.DurationMS}}</div>
+        <div class="incident-alert-meta">{{formatTime .Incident.LatestFailure.StartedAt}} · {{.Incident.FailureStage}} · {{.Incident.Guide.ProbableSubsystem}} · {{formatDuration .Incident.LatestFailure.DurationMS}}</div>
       </div>
       <span class="badge badge-bad">failed</span>
     </div>
     {{end}}
+
+    <div class="guide-banner">
+      <div class="panel guide-copy">
+        <div class="panel-head">
+          <span class="panel-title">What To Do Next</span>
+        </div>
+        <p style="color:var(--text); font-weight:600;">{{.Incident.Guide.Headline}}</p>
+        <p>{{.Incident.Guide.Summary}}</p>
+        <div class="guide-facts">
+          {{if .Incident.Guide.ProbableSubsystem}}<span class="badge badge-warn">{{.Incident.Guide.ProbableSubsystem}}</span>{{end}}
+          {{if .Incident.FailureStage}}<span class="badge badge-neutral">stage: {{.Incident.FailureStage}}</span>{{end}}
+          {{if .Incident.FailureSignature}}<span class="badge badge-bad">{{shorten .Incident.FailureSignature 96}}</span>{{end}}
+        </div>
+        {{if .Incident.Guide.WhyLikely}}
+        <ul>
+          {{range .Incident.Guide.WhyLikely}}
+          <li>{{.}}</li>
+          {{end}}
+        </ul>
+        {{end}}
+      </div>
+
+      <div class="panel guide-copy">
+        <div class="panel-head">
+          <span class="panel-title">Operator Workflow</span>
+        </div>
+        <ul>
+          {{range .Incident.Guide.NextSteps}}
+          <li>{{.}}</li>
+          {{end}}
+        </ul>
+        <div class="chip-row" style="margin-top:12px;">
+          <a class="btn btn-primary" href="/ui/help">Open Help</a>
+          <a class="btn" href="/api/workers/{{pathEscape .Incident.Worker.ID}}/incident">Incident JSON</a>
+        </div>
+      </div>
+    </div>
 
     <div class="layout">
       <div class="main-stack">
@@ -937,8 +1116,14 @@ const workerPageTemplate = `{{define "worker"}}
       <div class="sidebar">
         <div class="panel">
           <div class="panel-head">
-            <span class="panel-title">AI Prompt</span>
+            <span class="panel-title">AI Debugging</span>
           </div>
+          <div class="mode-row">
+            {{range .Incident.PromptModes}}
+            <button class="btn mode-btn{{if .Recommended}} active{{end}}" type="button" data-mode="{{.ID}}" data-label="{{.Label}}" data-summary="{{.Summary}}" onclick="loadPromptMode(this)">{{.Label}}</button>
+            {{end}}
+          </div>
+          <div class="mode-summary"><strong id="prompt-mode-label">{{range .Incident.PromptModes}}{{if .Recommended}}{{.Label}}{{end}}{{end}}</strong> <span id="prompt-mode-summary">{{range .Incident.PromptModes}}{{if .Recommended}}{{.Summary}}{{end}}{{end}}</span></div>
           <button class="btn btn-copy" type="button" onclick="copyPrompt(this)" style="width:100%; justify-content:center; margin-bottom:10px;">Copy AI Prompt</button>
           <details>
             <summary>Inspect prompt text</summary>
@@ -946,6 +1131,22 @@ const workerPageTemplate = `{{define "worker"}}
               <textarea id="prompt-box" readonly>{{.Incident.Prompt}}</textarea>
             </div>
           </details>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">Workload Shape</span>
+          </div>
+          <div class="kv-list">
+            <div class="kv-row"><span class="kv-label">Load mode</span><span class="kv-value">{{.Incident.Workload.MetricLoadMode}}</span></div>
+            <div class="kv-row"><span class="kv-label">Replay dataset</span><span class="kv-value">{{.Incident.Workload.MetricReplayDataset}}</span></div>
+            <div class="kv-row"><span class="kv-label">Pattern</span><span class="kv-value">{{.Incident.Workload.MetricPattern}}</span></div>
+            <div class="kv-row"><span class="kv-label">Write rate</span><span class="kv-value">{{if .Incident.Workload.WriteRate}}{{.Incident.Workload.WriteRate}}{{else}}--{{end}}</span></div>
+            <div class="kv-row"><span class="kv-label">Payload size</span><span class="kv-value">{{if .Incident.Workload.PayloadSize}}{{.Incident.Workload.PayloadSize}}{{else}}--{{end}}</span></div>
+            <div class="kv-row"><span class="kv-label">Workers</span><span class="kv-value">{{if .Incident.Workload.Workers}}{{.Incident.Workload.Workers}}{{else}}--{{end}}</span></div>
+            <div class="kv-row"><span class="kv-label">Replay speed</span><span class="kv-value">{{if .Incident.Workload.ReplaySpeed}}{{.Incident.Workload.ReplaySpeed}}{{else}}--{{end}}</span></div>
+            <div class="kv-row"><span class="kv-label">Sync interval</span><span class="kv-value">{{if .Incident.Workload.SyncInterval}}{{.Incident.Workload.SyncInterval}}{{else}}--{{end}}</span></div>
+          </div>
         </div>
 
         <div class="panel">
@@ -997,6 +1198,181 @@ const workerPageTemplate = `{{define "worker"}}
             <div class="details-body"><pre>{{json .Incident}}</pre></div>
           </details>
         </div>
+      </div>
+    </div>
+
+    <div class="footer">Generated {{formatTime .GeneratedAt}}</div>
+  </div>
+</body>
+</html>
+{{end}}`
+
+const helpPageTemplate = `{{define "help"}}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Operator Help · Litestream Soak</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-raised: #1c2129;
+      --border: #30363d;
+      --border-subtle: #21262d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --faint: #484f58;
+      --green: #3fb950;
+      --amber: #d29922;
+      --red: #f85149;
+      --blue: #58a6ff;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: "SF Mono", "Cascadia Code", "Fira Code", Consolas, "Liberation Mono", monospace;
+      --radius: 8px;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { font-family: var(--mono); font-size: 12px; }
+    .shell { max-width: 1240px; margin: 0 auto; padding: 0 16px 32px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); margin-bottom: 20px; font-size: 13px; }
+    .topbar-nav { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+    .topbar-nav a { color: var(--muted); }
+    .hero { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; margin-bottom: 16px; }
+    .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+    .panel h1, .panel h2, .panel h3 { margin: 0 0 8px; }
+    .panel p { margin: 0; color: var(--muted); }
+    .panel p + p { margin-top: 8px; }
+    .panel ul, .panel ol { margin: 10px 0 0 18px; color: var(--muted); }
+    .panel li + li { margin-top: 6px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .badge-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border-subtle); background: var(--surface-raised); }
+    .badge strong { color: var(--blue); }
+    .callout { color: var(--text); font-weight: 600; }
+    .footer { padding-top: 18px; margin-top: 24px; border-top: 1px solid var(--border-subtle); color: var(--faint); font-size: 11px; text-align: center; }
+    @media (max-width: 900px) {
+      .hero, .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div class="topbar-nav">
+        <a href="/ui">Litestream Soak</a>
+        <span>/</span>
+        <span>Operator Help</span>
+      </div>
+      <div class="topbar-nav">
+        <a href="/api/diagnosis">Diagnosis JSON</a>
+        <a href="/api/worker-summaries">Worker Summaries</a>
+      </div>
+    </div>
+
+    <div class="hero">
+      <div class="panel">
+        <h1>How To Use This System</h1>
+        <p class="callout">{{.Diagnosis.Headline}}</p>
+        <p>{{.Diagnosis.Summary}}</p>
+        <div class="badge-row">
+          {{if .Diagnosis.ProbableSubsystem}}<span class="badge">{{.Diagnosis.ProbableSubsystem}}</span>{{end}}
+          {{if .Diagnosis.DominantStage}}<span class="badge">stage: {{.Diagnosis.DominantStage}}</span>{{end}}
+          {{if .Diagnosis.DominantSignature}}<span class="badge">{{shorten .Diagnosis.DominantSignature 96}}</span>{{end}}
+        </div>
+        {{if .Diagnosis.WhyLikely}}
+        <ul>
+          {{range .Diagnosis.WhyLikely}}
+          <li>{{.}}</li>
+          {{end}}
+        </ul>
+        {{end}}
+      </div>
+
+      <div class="panel">
+        <h2>Coverage Snapshot</h2>
+        <p>The fleet should cover multiple load modes and replay shapes so failures are easier to cluster.</p>
+        {{if .Coverage.LoadModes}}
+        <div class="badge-row">
+          {{range .Coverage.LoadModes}}
+          <span class="badge"><strong>{{.Count}}</strong> {{.Label}}</span>
+          {{end}}
+        </div>
+        {{end}}
+        {{if .Coverage.ReplayDatasets}}
+        <div class="badge-row">
+          {{range .Coverage.ReplayDatasets}}
+          <span class="badge"><strong>{{.Count}}</strong> {{.Label}}</span>
+          {{end}}
+        </div>
+        {{end}}
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <h2>Operator Workflow</h2>
+        <ol>
+          <li>Start on <code>/ui</code> and find workers marked <code>degraded</code>.</li>
+          <li>Open the failing worker page and record the failure stage, signature, and workload shape.</li>
+          <li>Use Grafana to see whether the failure is isolated or clustered by profile or replay dataset.</li>
+          <li>Copy the AI prompt or incident JSON, then run the listed Fly triage commands.</li>
+        </ol>
+      </div>
+
+      <div class="panel">
+        <h2>Control Plane vs Grafana</h2>
+        <ul>
+          <li>Use the control plane for worker identity, incident context, machine metadata, and next commands.</li>
+          <li>Use Grafana for fleet posture, workload shape comparison, sync age drift, restart counters, and failure clustering.</li>
+          <li>If the same signature appears across multiple profiles at once, suspect a shared subsystem first.</li>
+        </ul>
+      </div>
+
+      <div class="panel">
+        <h2>How To Use AI</h2>
+        <p>Each worker page includes multiple prompt modes. Pick the prompt that matches your current question.</p>
+        <ul>
+          {{range .PromptModes}}
+          <li><strong>{{.Label}}</strong>: {{.Summary}}</li>
+          {{end}}
+        </ul>
+        <p>Ask the model to rank hypotheses, cite evidence from the incident bundle, and give exact next commands before proposing code changes.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Failure Families</h2>
+        <ul>
+          <li><strong>sync</strong>: Litestream control socket missing or timing out. Check <code>/data/litestream.sock</code>, the Litestream process, and restart behavior.</li>
+          <li><strong>restore</strong>: replica object fetch, restore plan, or missing LTX trouble. Check restore logs and object-store behavior.</li>
+          <li><strong>integrity_check</strong>: restore completed but validation failed. Focus on restore correctness and integrity output.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top:16px;">
+      <div class="panel">
+        <h2>Useful Endpoints</h2>
+        <ul>
+          <li><code>/ui</code></li>
+          <li><code>/api/worker-summaries</code></li>
+          <li><code>/api/failures</code></li>
+          <li><code>/api/workers/{id}/incident</code></li>
+          <li><code>/api/workers/{id}/prompt?mode=triage|litestream|harness</code></li>
+        </ul>
+      </div>
+
+      <div class="panel">
+        <h2>What Good Looks Like</h2>
+        <ul>
+          <li>You can explain the failing workload shape without SSHing anywhere.</li>
+          <li>You can tell whether the issue is clustered or isolated before opening logs.</li>
+          <li>You can hand the AI prompt bundle to another engineer and they can start immediately.</li>
+        </ul>
       </div>
     </div>
 

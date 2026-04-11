@@ -16,6 +16,7 @@ Litestream. The goal is to answer:
 Control plane:
 
 - `https://litestream-soak-ctl.fly.dev/ui`
+- `https://litestream-soak-ctl.fly.dev/ui/help`
 
 The control plane is protected with HTTP basic auth. Keep the username and
 password in your local `.envrc`.
@@ -59,6 +60,7 @@ This page is the incident page. It gives you:
 
 These are the fastest machine-readable views:
 
+- `/api/diagnosis`
 - `/api/worker-summaries`
 - `/api/failures`
 - `/api/workers/{id}`
@@ -75,6 +77,9 @@ hand to an LLM.
 Use `/api/workers/{id}/prompt` when you want a copy-paste triage prompt
 immediately.
 
+Use `/ui/help` for the embedded operator guide and `/api/diagnosis` for the
+live machine-readable diagnosis summary that powers the home page.
+
 ## How The Control Plane Helps Debug
 
 The control plane helps in four ways:
@@ -89,6 +94,12 @@ The control plane helps in four ways:
 The incident prompt is built from the worker, workload, latest failure, recent
 verifications, recent events, machine metadata, and triage commands in
 `internal/orchestrator/api.go`.
+
+Each worker page now exposes three AI prompt modes:
+
+- `Fast triage`
+- `Litestream deep dive`
+- `Harness sanity check`
 
 ## How Grafana Helps Debug
 

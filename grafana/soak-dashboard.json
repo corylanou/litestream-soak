@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Worker-labeled signal board for the Litestream soak project. Use Grafana to see fleet posture, workload shape, recent failure classes, drift, lag, and restarts. Use the control plane for incident detail and prompt export.",
+  "description": "Worker-labeled signal board for the Litestream soak project. Use Grafana to see fleet posture, workload shape, recent failure classes, drift, lag, and restarts. Use the control plane for incident detail, operator help, and prompt export.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 2,
@@ -12,6 +12,12 @@
       "title": "Control Plane",
       "type": "link",
       "url": "https://litestream-soak-ctl.fly.dev/ui"
+    },
+    {
+      "targetBlank": true,
+      "title": "Operator Help",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/ui/help"
     },
     {
       "targetBlank": true,
@@ -36,6 +42,12 @@
       "title": "Worker Summaries",
       "type": "link",
       "url": "https://litestream-soak-ctl.fly.dev/api/worker-summaries"
+    },
+    {
+      "targetBlank": true,
+      "title": "Diagnosis JSON",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/diagnosis"
     }
   ],
   "panels": [
@@ -52,7 +64,7 @@
       },
       "id": 1,
       "options": {
-        "content": "### Operator Flow\n- Filter to a worker first.\n- Start with **Last Verification**, **Verification Age**, **Current Sync Age**, and the restart counters.\n- Use **Current Failure Labels** for active breakage and **Fleet Last Failure Classes** for the most recent failure shape, even if the worker recovered.\n- Use **Fleet Workload Shapes** to confirm the exact load mode, replay dataset, write rate, payload size, and concurrency behind the incident.\n- If the worker is bad, jump to **Selected Worker**, **Worker Summaries**, or **Prompt Bundle** in the dashboard links.",
+        "content": "### Operator Flow\n- Filter to a worker first.\n- Start with **Last Verification**, **Verification Age**, **Current Sync Age**, and the restart counters.\n- Use **Current Failure Labels** for active breakage and **Fleet Last Failure Classes** for the most recent failure shape, even if the worker recovered.\n- Use **Fleet Workload Shapes** to confirm the exact load mode, replay dataset, write rate, payload size, and concurrency behind the incident.\n- If the worker is bad, jump to **Selected Worker**, **Worker Summaries**, **Operator Help**, or **Prompt Bundle** in the dashboard links.",
         "mode": "markdown"
       },
       "title": "Runbook",

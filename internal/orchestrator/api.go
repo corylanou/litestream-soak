@@ -28,6 +28,7 @@ type WorkerDetailResponse struct {
 	LatestFailure       *model.Verification  `json:"latest_failure,omitempty"`
 	FailureStage        string               `json:"failure_stage,omitempty"`
 	FailureSignature    string               `json:"failure_signature,omitempty"`
+	ProbableSubsystem   string               `json:"probable_subsystem,omitempty"`
 	TriageCommands      []string             `json:"triage_commands,omitempty"`
 	RecentVerifications []model.Verification `json:"recent_verifications"`
 	RecentEvents        []model.Event        `json:"recent_events"`
@@ -36,23 +37,26 @@ type WorkerDetailResponse struct {
 }
 
 type FailureResponse struct {
-	Worker           *model.Worker      `json:"worker,omitempty"`
-	Verification     model.Verification `json:"verification"`
-	FailureStage     string             `json:"failure_stage,omitempty"`
-	FailureSignature string             `json:"failure_signature,omitempty"`
-	TriageCommands   []string           `json:"triage_commands,omitempty"`
+	Worker            *model.Worker      `json:"worker,omitempty"`
+	Verification      model.Verification `json:"verification"`
+	FailureStage      string             `json:"failure_stage,omitempty"`
+	FailureSignature  string             `json:"failure_signature,omitempty"`
+	ProbableSubsystem string             `json:"probable_subsystem,omitempty"`
+	TriageCommands    []string           `json:"triage_commands,omitempty"`
 }
 
 type WorkerSummaryResponse struct {
-	Worker                  model.Worker        `json:"worker"`
-	Workload                workload.Config     `json:"workload"`
-	LastVerification        *model.Verification `json:"last_verification,omitempty"`
-	LatestFailure           *model.Verification `json:"latest_failure,omitempty"`
-	CurrentFailureStage     string              `json:"current_failure_stage,omitempty"`
-	CurrentFailureSignature string              `json:"current_failure_signature,omitempty"`
-	LatestFailureStage      string              `json:"latest_failure_stage,omitempty"`
-	LatestFailureSignature  string              `json:"latest_failure_signature,omitempty"`
-	TriageCommands          []string            `json:"triage_commands,omitempty"`
+	Worker                   model.Worker        `json:"worker"`
+	Workload                 workload.Config     `json:"workload"`
+	LastVerification         *model.Verification `json:"last_verification,omitempty"`
+	LatestFailure            *model.Verification `json:"latest_failure,omitempty"`
+	CurrentFailureStage      string              `json:"current_failure_stage,omitempty"`
+	CurrentFailureSignature  string              `json:"current_failure_signature,omitempty"`
+	CurrentProbableSubsystem string              `json:"current_probable_subsystem,omitempty"`
+	LatestFailureStage       string              `json:"latest_failure_stage,omitempty"`
+	LatestFailureSignature   string              `json:"latest_failure_signature,omitempty"`
+	LatestProbableSubsystem  string              `json:"latest_probable_subsystem,omitempty"`
+	TriageCommands           []string            `json:"triage_commands,omitempty"`
 }
 
 type IncidentBundle struct {
@@ -60,8 +64,11 @@ type IncidentBundle struct {
 	Worker              model.Worker         `json:"worker"`
 	Workload            workload.Config      `json:"workload"`
 	LatestFailure       *model.Verification  `json:"latest_failure,omitempty"`
+	ActiveFailure       bool                 `json:"active_failure"`
 	FailureStage        string               `json:"failure_stage,omitempty"`
 	FailureSignature    string               `json:"failure_signature,omitempty"`
+	Guide               incidentGuide        `json:"guide"`
+	PromptModes         []promptModeInfo     `json:"prompt_modes,omitempty"`
 	RecentVerifications []model.Verification `json:"recent_verifications"`
 	RecentEvents        []model.Event        `json:"recent_events"`
 	Machine             *flyapi.Machine      `json:"machine,omitempty"`
@@ -85,9 +92,11 @@ func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *A
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /", a.handleHome)
 	mux.HandleFunc("GET /ui", a.handleHome)
+	mux.HandleFunc("GET /ui/help", a.handleHelpPage)
 	mux.HandleFunc("GET /ui/workers/{id}", a.handleWorkerPage)
 	mux.HandleFunc("GET /api/workers", a.handleListWorkers)
 	mux.HandleFunc("GET /api/worker-summaries", a.handleListWorkerSummaries)
+	mux.HandleFunc("GET /api/diagnosis", a.handleGetDiagnosis)
 	mux.HandleFunc("GET /api/workers/{id}", a.handleGetWorker)
 	mux.HandleFunc("GET /api/workers/{id}/incident", a.handleGetIncident)
 	mux.HandleFunc("GET /api/workers/{id}/prompt", a.handleGetPrompt)
@@ -108,23 +117,31 @@ func (a *API) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleListWorkerSummaries(w http.ResponseWriter, r *http.Request) {
-	workers, err := a.db.ListWorkers(r.URL.Query().Get("status"))
+	summaries, err := a.listWorkerSummaries(r.URL.Query().Get("status"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	writeAPIJSON(w, summaries)
+}
+
+func (a *API) listWorkerSummaries(status string) ([]WorkerSummaryResponse, error) {
+	workers, err := a.db.ListWorkers(status)
+	if err != nil {
+		return nil, err
 	}
 
 	summaries := make([]WorkerSummaryResponse, 0, len(workers))
 	for _, worker := range workers {
 		summary, err := a.buildWorkerSummary(worker)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			return nil, err
 		}
 		summaries = append(summaries, summary)
 	}
 
-	writeAPIJSON(w, summaries)
+	return summaries, nil
 }
 
 func (a *API) handleListEvents(w http.ResponseWriter, r *http.Request) {
@@ -146,9 +163,10 @@ func (a *API) handleListFailures(w http.ResponseWriter, r *http.Request) {
 	failures := make([]FailureResponse, 0, len(verifications))
 	for _, verification := range verifications {
 		failure := FailureResponse{
-			Verification:     verification,
-			FailureStage:     inferFailureStage(&verification),
-			FailureSignature: inferFailureSignature(&verification),
+			Verification:      verification,
+			FailureStage:      inferFailureStage(&verification),
+			FailureSignature:  inferFailureSignature(&verification),
+			ProbableSubsystem: inferProbableSubsystem(inferFailureStage(&verification), inferFailureSignature(&verification)),
 		}
 		worker, err := a.db.GetWorker(verification.WorkerID)
 		if err == nil {
@@ -213,9 +231,10 @@ func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, er
 	if len(verifications) > 0 {
 		verification := verifications[0]
 		summary.LastVerification = &verification
-		if !verification.Passed || verification.Status == "failed" {
+		if activeFailure(&verification) {
 			summary.CurrentFailureStage = inferFailureStage(&verification)
 			summary.CurrentFailureSignature = inferFailureSignature(&verification)
+			summary.CurrentProbableSubsystem = inferProbableSubsystem(summary.CurrentFailureStage, summary.CurrentFailureSignature)
 		}
 	}
 
@@ -227,6 +246,7 @@ func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, er
 		summary.LatestFailure = latestFailure
 		summary.LatestFailureStage = inferFailureStage(latestFailure)
 		summary.LatestFailureSignature = inferFailureSignature(latestFailure)
+		summary.LatestProbableSubsystem = inferProbableSubsystem(summary.LatestFailureStage, summary.LatestFailureSignature)
 	}
 
 	return summary, nil
@@ -247,9 +267,24 @@ func (a *API) handleGetPrompt(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
+	mode := parsePromptMode(r.URL.Query().Get("mode"), bundle.Guide.RecommendedPromptMode)
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte(bundle.Prompt))
+	_, _ = w.Write([]byte(buildPrompt(bundle, mode)))
+}
+
+func (a *API) handleGetDiagnosis(w http.ResponseWriter, r *http.Request) {
+	summaries, err := a.listWorkerSummaries(r.URL.Query().Get("status"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeAPIJSON(w, map[string]any{
+		"generated_at": time.Now().UTC(),
+		"diagnosis":    buildDiagnosisSnapshot(summaries),
+		"coverage":     buildCoverageSnapshot(summaries),
+	})
 }
 
 func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -380,6 +415,7 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 		response.LatestFailure = &verificationCopy
 		response.FailureStage = inferFailureStage(&verificationCopy)
 		response.FailureSignature = inferFailureSignature(&verificationCopy)
+		response.ProbableSubsystem = inferProbableSubsystem(response.FailureStage, response.FailureSignature)
 		break
 	}
 
@@ -408,8 +444,12 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 	}
 
 	var latestFailure *model.Verification
-	for _, verification := range detail.RecentVerifications {
-		if !verification.Passed || verification.Status == "failed" {
+	activeFailureDetected := false
+	for i, verification := range detail.RecentVerifications {
+		if i == 0 && activeFailure(&verification) {
+			activeFailureDetected = true
+		}
+		if activeFailure(&verification) {
 			verificationCopy := verification
 			latestFailure = &verificationCopy
 			break
@@ -421,6 +461,7 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 		Worker:              detail.Worker,
 		Workload:            detail.Workload,
 		LatestFailure:       latestFailure,
+		ActiveFailure:       activeFailureDetected,
 		FailureStage:        inferFailureStage(latestFailure),
 		FailureSignature:    inferFailureSignature(latestFailure),
 		RecentVerifications: detail.RecentVerifications,
@@ -429,58 +470,10 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 		MachineError:        detail.MachineError,
 		TriageCommands:      buildTriageCommands(detail.Worker, detail.Machine != nil),
 	}
-	bundle.Prompt = buildPrompt(bundle)
+	bundle.Guide = buildIncidentGuide(bundle)
+	bundle.PromptModes = buildPromptModes(bundle.Guide.RecommendedPromptMode)
+	bundle.Prompt = buildPrompt(bundle, parsePromptMode("", bundle.Guide.RecommendedPromptMode))
 	return bundle, http.StatusOK, nil
-}
-
-func buildPrompt(bundle *IncidentBundle) string {
-	sections := []string{
-		"You are diagnosing a Litestream soak test failure.",
-		"Determine whether the failure most likely comes from Litestream, restore/replication behavior, Fly runtime conditions, or the soak harness itself.",
-		"Recommend the next commands or log locations to inspect. Do not assume the goal is to fix code immediately; prioritize fast triage.",
-		"",
-		"Summary:",
-		fmt.Sprintf("- generated_at: %s", bundle.GeneratedAt.Format(time.RFC3339)),
-		fmt.Sprintf("- worker_id: %s", bundle.Worker.ID),
-		fmt.Sprintf("- app_name: %s", valueOrUnknown(bundle.Worker.AppName)),
-		fmt.Sprintf("- region: %s", valueOrUnknown(bundle.Worker.Region)),
-		fmt.Sprintf("- machine_id: %s", valueOrUnknown(bundle.Worker.FlyMachineID)),
-		fmt.Sprintf("- status: %s", bundle.Worker.Status),
-		fmt.Sprintf("- last_heartbeat_at: %s", formatTime(bundle.Worker.LastHeartbeatAt)),
-		fmt.Sprintf("- load_mode: %s", valueOrUnknown(bundle.Workload.MetricLoadMode())),
-		fmt.Sprintf("- replay_dataset: %s", valueOrUnknown(bundle.Workload.MetricReplayDataset())),
-		fmt.Sprintf("- load_pattern: %s", valueOrUnknown(bundle.Workload.MetricPattern())),
-		fmt.Sprintf("- failure_stage: %s", valueOrUnknown(bundle.FailureStage)),
-		fmt.Sprintf("- failure_signature: %s", valueOrUnknown(bundle.FailureSignature)),
-		"",
-		"Worker:",
-		mustJSON(bundle.Worker),
-	}
-
-	if bundle.LatestFailure != nil {
-		sections = append(
-			sections,
-			"",
-			"Latest failed verification:",
-			mustJSON(bundle.LatestFailure),
-			"",
-			"Immediate triage commands:",
-			strings.Join(bundle.TriageCommands, "\n"),
-		)
-	}
-
-	sections = append(sections, "", "Recent verifications:", mustJSON(bundle.RecentVerifications))
-	sections = append(sections, "", "Recent events:", mustJSON(bundle.RecentEvents))
-	sections = append(sections, "", "Workload:", mustJSON(bundle.Workload))
-
-	if bundle.Machine != nil {
-		sections = append(sections, "", "Current Fly machine:", mustJSON(bundle.Machine))
-	}
-	if bundle.MachineError != "" {
-		sections = append(sections, "", "Machine fetch error:", bundle.MachineError)
-	}
-
-	return strings.Join(sections, "\n")
 }
 
 func mustJSON(v any) string {
@@ -498,6 +491,8 @@ func inferFailureStage(verification *model.Verification) string {
 
 	text := strings.ToLower(verification.ErrorMessage)
 	switch {
+	case strings.Contains(text, "wait for sync") || strings.Contains(text, "sync request") || strings.Contains(text, "litestream.sock"):
+		return "sync"
 	case strings.Contains(text, "restore failed") || strings.Contains(text, "check_type=restore"):
 		return "restore"
 	case strings.Contains(text, "integrity check") || strings.Contains(text, "check_type=integrity_check"):
@@ -518,8 +513,14 @@ func inferFailureSignature(verification *model.Verification) string {
 
 	text := strings.ToLower(verification.ErrorMessage)
 	switch {
+	case strings.Contains(text, "litestream.sock") && strings.Contains(text, "connect: connection refused"):
+		return "litestream_sync_socket_refused"
+	case strings.Contains(text, "wait for sync") && (strings.Contains(text, "context deadline exceeded") || strings.Contains(text, "client.timeout exceeded")):
+		return "litestream_sync_timeout"
 	case strings.Contains(text, "wrong # of entries in index"):
 		return "sqlite_index_mismatch"
+	case strings.Contains(text, "open ltx file: file does not exist"):
+		return "replica_ltx_missing"
 	case strings.Contains(text, "listobjectsv2") || strings.Contains(text, "requestcanceled"):
 		return "replica_s3_timeout"
 	case strings.Contains(text, "ltx continuity"):
