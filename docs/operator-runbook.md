@@ -34,6 +34,8 @@ Start on `/ui`.
 The home page is the fastest answer to "is anything wrong right now?" It shows:
 
 - total workers, healthy workers, and workers needing attention
+- a live-updating diagnosis summary that refreshes without a full page reload
+- active failure clusters with confidence, affected workload shapes, and a representative worker
 - an incident spotlight for the most urgent recent failure
 - a worker table with status, heartbeat age, last check, and profile
 - a failure queue with recent failed verifications
@@ -71,6 +73,9 @@ Use `/api/worker-summaries` to understand fleet posture in one request. It
 includes workload config, last verification, latest failure, classified failure
 stage/signature, and triage commands.
 
+Use `/api/diagnosis` to inspect the fleet-level diagnosis, active clusters, and
+coverage snapshot that drive the home page.
+
 Use `/api/workers/{id}/incident` when you want the full bundle to inspect or
 hand to an LLM.
 
@@ -86,10 +91,13 @@ The control plane helps in four ways:
 
 1. It keeps the latest worker workload next to the failure, so you can see
    whether the problem came from a synthetic, replay, or mixed worker.
-2. It classifies the latest failure into a failure stage and failure signature.
-3. It preserves recent verification history so you can tell whether the worker
+2. It groups active failures into live clusters, so you can see whether the
+   same signature is spreading across multiple workers or whether you are
+   looking at multiple unrelated failure families.
+3. It classifies the latest failure into a failure stage and failure signature.
+4. It preserves recent verification history so you can tell whether the worker
    is stuck, flapping, or recovered.
-4. It gives exact next-step commands for the affected Fly machine.
+5. It gives exact next-step commands for the affected Fly machine.
 
 The incident prompt is built from the worker, workload, latest failure, recent
 verifications, recent events, machine metadata, and triage commands in

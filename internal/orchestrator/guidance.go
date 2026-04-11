@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
 )
@@ -32,18 +33,44 @@ type incidentGuide struct {
 	NextSteps             []string `json:"next_steps,omitempty"`
 }
 
+type diagnosisWorkerRef struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	ProfileName string `json:"profile_name,omitempty"`
+}
+
+type diagnosisCluster struct {
+	Key                  string               `json:"key,omitempty"`
+	Headline             string               `json:"headline,omitempty"`
+	Summary              string               `json:"summary,omitempty"`
+	Stage                string               `json:"stage,omitempty"`
+	Signature            string               `json:"signature,omitempty"`
+	ProbableSubsystem    string               `json:"probable_subsystem,omitempty"`
+	Confidence           string               `json:"confidence,omitempty"`
+	WorkerCount          int                  `json:"worker_count,omitempty"`
+	RepresentativeWorker diagnosisWorkerRef   `json:"representative_worker"`
+	Workers              []diagnosisWorkerRef `json:"workers,omitempty"`
+	AffectedProfiles     []string             `json:"affected_profiles,omitempty"`
+	AffectedDatasets     []string             `json:"affected_datasets,omitempty"`
+	AffectedLoadModes    []string             `json:"affected_load_modes,omitempty"`
+	WhyLikely            []string             `json:"why_likely,omitempty"`
+	NextSteps            []string             `json:"next_steps,omitempty"`
+}
+
 type diagnosisSnapshot struct {
-	Headline          string   `json:"headline,omitempty"`
-	Summary           string   `json:"summary,omitempty"`
-	ProbableSubsystem string   `json:"probable_subsystem,omitempty"`
-	AffectedWorkers   int      `json:"affected_workers,omitempty"`
-	DominantStage     string   `json:"dominant_stage,omitempty"`
-	DominantSignature string   `json:"dominant_signature,omitempty"`
-	AffectedProfiles  []string `json:"affected_profiles,omitempty"`
-	AffectedDatasets  []string `json:"affected_datasets,omitempty"`
-	AffectedLoadModes []string `json:"affected_load_modes,omitempty"`
-	WhyLikely         []string `json:"why_likely,omitempty"`
-	NextSteps         []string `json:"next_steps,omitempty"`
+	Headline          string             `json:"headline,omitempty"`
+	Summary           string             `json:"summary,omitempty"`
+	ProbableSubsystem string             `json:"probable_subsystem,omitempty"`
+	Confidence        string             `json:"confidence,omitempty"`
+	AffectedWorkers   int                `json:"affected_workers,omitempty"`
+	DominantStage     string             `json:"dominant_stage,omitempty"`
+	DominantSignature string             `json:"dominant_signature,omitempty"`
+	AffectedProfiles  []string           `json:"affected_profiles,omitempty"`
+	AffectedDatasets  []string           `json:"affected_datasets,omitempty"`
+	AffectedLoadModes []string           `json:"affected_load_modes,omitempty"`
+	WhyLikely         []string           `json:"why_likely,omitempty"`
+	NextSteps         []string           `json:"next_steps,omitempty"`
+	Clusters          []diagnosisCluster `json:"clusters,omitempty"`
 }
 
 type coverageCount struct {
@@ -140,14 +167,8 @@ func buildIncidentGuide(bundle *IncidentBundle) incidentGuide {
 }
 
 func buildDiagnosisSnapshot(summaries []WorkerSummaryResponse) diagnosisSnapshot {
-	active := make([]WorkerSummaryResponse, 0)
-	for _, summary := range summaries {
-		if strings.TrimSpace(summary.CurrentFailureSignature) != "" {
-			active = append(active, summary)
-		}
-	}
-
-	if len(active) == 0 {
+	clusters := buildDiagnosisClusters(summaries)
+	if len(clusters) == 0 {
 		return diagnosisSnapshot{
 			Headline:          "All workers are currently passing verification",
 			Summary:           "Use Grafana to inspect last-failure history and workload shape, or open the control-plane help page to onboard a new operator.",
@@ -160,61 +181,157 @@ func buildDiagnosisSnapshot(summaries []WorkerSummaryResponse) diagnosisSnapshot
 		}
 	}
 
-	signature, signatureCount := topCurrentFailure(active, func(summary WorkerSummaryResponse) string {
-		return summary.CurrentFailureSignature
-	})
-	stage, _ := topCurrentFailure(active, func(summary WorkerSummaryResponse) string {
-		return summary.CurrentFailureStage
-	})
-	subsystem := inferProbableSubsystem(stage, signature)
+	totalAffectedWorkers := 0
+	profiles := make([]string, 0)
+	datasets := make([]string, 0)
+	loadModes := make([]string, 0)
+	for _, cluster := range clusters {
+		totalAffectedWorkers += cluster.WorkerCount
+		profiles = append(profiles, cluster.AffectedProfiles...)
+		datasets = append(datasets, cluster.AffectedDatasets...)
+		loadModes = append(loadModes, cluster.AffectedLoadModes...)
+	}
 
-	profiles := uniqueSortedStrings(func() []string {
-		values := make([]string, 0, len(active))
-		for _, summary := range active {
-			values = append(values, summary.Worker.ProfileName)
-		}
-		return values
-	}())
-	datasets := uniqueSortedStrings(func() []string {
-		values := make([]string, 0, len(active))
-		for _, summary := range active {
-			dataset := summary.Workload.MetricReplayDataset()
-			if dataset != "none" {
-				values = append(values, dataset)
-			}
-		}
-		return values
-	}())
-	loadModes := uniqueSortedStrings(func() []string {
-		values := make([]string, 0, len(active))
-		for _, summary := range active {
-			values = append(values, summary.Workload.MetricLoadMode())
-		}
-		return values
-	}())
+	topCluster := clusters[0]
+	headline := fmt.Sprintf("%d workers currently point to %s", totalAffectedWorkers, topCluster.ProbableSubsystem)
+	summary := fmt.Sprintf("The dominant live cluster is %s during %s. Start with %s, then use Grafana to confirm whether the issue is clustered by profile or workload shape.", topCluster.Signature, valueOrUnknown(topCluster.Stage), topCluster.RepresentativeWorker.Name)
+	if len(clusters) > 1 {
+		headline = fmt.Sprintf("%d active failure clusters across %d workers", len(clusters), totalAffectedWorkers)
+		summary = fmt.Sprintf("The dominant live cluster is %s during %s, pointing to %s. There are %d additional active cluster(s) that should be reviewed before treating this as one isolated issue.", topCluster.Signature, valueOrUnknown(topCluster.Stage), topCluster.ProbableSubsystem, len(clusters)-1)
+	}
 
 	why := []string{
-		fmt.Sprintf("%d workers are currently failing verification.", len(active)),
-		fmt.Sprintf("%s is the dominant current signature across %d worker(s).", signature, signatureCount),
-		fmt.Sprintf("The current cluster spans profiles %s.", strings.Join(profiles, ", ")),
+		fmt.Sprintf("%d workers are currently failing verification across %d active cluster(s).", totalAffectedWorkers, len(clusters)),
+		fmt.Sprintf("%s is the dominant current signature across %d worker(s).", topCluster.Signature, topCluster.WorkerCount),
+		fmt.Sprintf("The dominant cluster spans profiles %s.", strings.Join(topCluster.AffectedProfiles, ", ")),
 	}
-	if len(datasets) > 0 {
-		why = append(why, fmt.Sprintf("The affected replay datasets are %s.", strings.Join(datasets, ", ")))
+	if len(topCluster.AffectedDatasets) > 0 {
+		why = append(why, fmt.Sprintf("The dominant cluster touches replay datasets %s.", strings.Join(topCluster.AffectedDatasets, ", ")))
+	}
+	if len(clusters) > 1 {
+		why = append(why, fmt.Sprintf("%d additional cluster(s) are active, so the fleet currently has more than one failure family.", len(clusters)-1))
 	}
 
 	return diagnosisSnapshot{
-		Headline:          fmt.Sprintf("%d workers currently point to %s", len(active), subsystem),
-		Summary:           fmt.Sprintf("The dominant live failure is %s during %s. Start with one affected worker, then use Grafana to confirm whether the issue is clustered by profile or workload shape.", signature, valueOrUnknown(stage)),
-		ProbableSubsystem: subsystem,
-		AffectedWorkers:   len(active),
-		DominantStage:     stage,
-		DominantSignature: signature,
-		AffectedProfiles:  profiles,
-		AffectedDatasets:  datasets,
-		AffectedLoadModes: loadModes,
+		Headline:          headline,
+		Summary:           summary,
+		ProbableSubsystem: topCluster.ProbableSubsystem,
+		Confidence:        topCluster.Confidence,
+		AffectedWorkers:   totalAffectedWorkers,
+		DominantStage:     topCluster.Stage,
+		DominantSignature: topCluster.Signature,
+		AffectedProfiles:  uniqueSortedStrings(profiles),
+		AffectedDatasets:  uniqueSortedStrings(datasets),
+		AffectedLoadModes: uniqueSortedStrings(loadModes),
 		WhyLikely:         why,
-		NextSteps:         diagnosisNextSteps(subsystem, active[0]),
+		NextSteps:         topCluster.NextSteps,
+		Clusters:          clusters,
 	}
+}
+
+func buildDiagnosisClusters(summaries []WorkerSummaryResponse) []diagnosisCluster {
+	type clusterAccumulator struct {
+		stage      string
+		signature  string
+		subsystem  string
+		workers    []diagnosisWorkerRef
+		profiles   []string
+		datasets   []string
+		loadModes  []string
+		example    WorkerSummaryResponse
+		latestSeen time.Time
+	}
+
+	clustersByKey := make(map[string]*clusterAccumulator)
+	for _, summary := range summaries {
+		if strings.TrimSpace(summary.CurrentFailureSignature) == "" {
+			continue
+		}
+
+		key := diagnosisClusterKey(summary)
+		cluster, ok := clustersByKey[key]
+		if !ok {
+			cluster = &clusterAccumulator{
+				stage:     summary.CurrentFailureStage,
+				signature: summary.CurrentFailureSignature,
+				subsystem: summary.CurrentProbableSubsystem,
+				example:   summary,
+			}
+			clustersByKey[key] = cluster
+		}
+
+		cluster.workers = append(cluster.workers, diagnosisWorkerRef{
+			ID:          summary.Worker.ID,
+			Name:        workerName(&summary.Worker, summary.Worker.ID),
+			ProfileName: summary.Worker.ProfileName,
+		})
+		cluster.profiles = append(cluster.profiles, summary.Worker.ProfileName)
+		cluster.loadModes = append(cluster.loadModes, summary.Workload.MetricLoadMode())
+		if dataset := summary.Workload.MetricReplayDataset(); dataset != "none" {
+			cluster.datasets = append(cluster.datasets, dataset)
+		}
+		if summary.LastVerification != nil && summary.LastVerification.StartedAt.After(cluster.latestSeen) {
+			cluster.latestSeen = summary.LastVerification.StartedAt
+			cluster.example = summary
+		}
+	}
+
+	clusters := make([]diagnosisCluster, 0, len(clustersByKey))
+	for key, cluster := range clustersByKey {
+		profiles := uniqueSortedStrings(cluster.profiles)
+		datasets := uniqueSortedStrings(cluster.datasets)
+		loadModes := uniqueSortedStrings(cluster.loadModes)
+		workerCount := len(cluster.workers)
+		confidence := diagnosisConfidence(workerCount, len(profiles), len(loadModes), len(datasets), cluster.signature)
+
+		why := []string{
+			fmt.Sprintf("%d worker(s) currently share this stage/signature pair.", workerCount),
+			fmt.Sprintf("The cluster is classified as %s.", cluster.subsystem),
+		}
+		if len(profiles) > 0 {
+			why = append(why, fmt.Sprintf("Affected profiles: %s.", strings.Join(profiles, ", ")))
+		}
+		if len(datasets) > 0 {
+			why = append(why, fmt.Sprintf("Replay datasets in this cluster: %s.", strings.Join(datasets, ", ")))
+		}
+		if len(loadModes) > 0 {
+			why = append(why, fmt.Sprintf("Load modes in this cluster: %s.", strings.Join(loadModes, ", ")))
+		}
+
+		clusters = append(clusters, diagnosisCluster{
+			Key:               key,
+			Headline:          fmt.Sprintf("%d workers share %s", workerCount, cluster.signature),
+			Summary:           fmt.Sprintf("This cluster is failing during %s and currently points to %s.", valueOrUnknown(cluster.stage), cluster.subsystem),
+			Stage:             cluster.stage,
+			Signature:         cluster.signature,
+			ProbableSubsystem: cluster.subsystem,
+			Confidence:        confidence,
+			WorkerCount:       workerCount,
+			RepresentativeWorker: diagnosisWorkerRef{
+				ID:          cluster.example.Worker.ID,
+				Name:        workerName(&cluster.example.Worker, cluster.example.Worker.ID),
+				ProfileName: cluster.example.Worker.ProfileName,
+			},
+			Workers:           sortDiagnosisWorkers(cluster.workers),
+			AffectedProfiles:  profiles,
+			AffectedDatasets:  datasets,
+			AffectedLoadModes: loadModes,
+			WhyLikely:         why,
+			NextSteps:         diagnosisNextSteps(cluster.subsystem, cluster.example),
+		})
+	}
+
+	sort.Slice(clusters, func(i, j int) bool {
+		if clusters[i].WorkerCount != clusters[j].WorkerCount {
+			return clusters[i].WorkerCount > clusters[j].WorkerCount
+		}
+		if confidenceRank(clusters[i].Confidence) != confidenceRank(clusters[j].Confidence) {
+			return confidenceRank(clusters[i].Confidence) > confidenceRank(clusters[j].Confidence)
+		}
+		return clusters[i].Headline < clusters[j].Headline
+	})
+
+	return clusters
 }
 
 func buildCoverageSnapshot(summaries []WorkerSummaryResponse) coverageSnapshot {
@@ -476,6 +593,74 @@ func sortedCoverageCounts(values map[string]int) []coverageCount {
 			return items[i].Count > items[j].Count
 		}
 		return items[i].Label < items[j].Label
+	})
+	return items
+}
+
+func diagnosisClusterKey(summary WorkerSummaryResponse) string {
+	return strings.Join([]string{
+		summary.CurrentFailureStage,
+		summary.CurrentFailureSignature,
+		summary.CurrentProbableSubsystem,
+	}, "|")
+}
+
+func diagnosisConfidence(workerCount, profileCount, loadModeCount, datasetCount int, signature string) string {
+	score := 0
+	switch {
+	case workerCount >= 4:
+		score += 4
+	case workerCount == 3:
+		score += 3
+	case workerCount == 2:
+		score += 2
+	case workerCount == 1:
+		score++
+	}
+
+	if profileCount >= 2 {
+		score++
+	}
+	if loadModeCount >= 2 {
+		score++
+	}
+	if datasetCount >= 2 {
+		score++
+	}
+	if strings.TrimSpace(signature) != "" {
+		score++
+	}
+
+	switch {
+	case score >= 5:
+		return "high"
+	case score >= 3:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+func confidenceRank(value string) int {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func sortDiagnosisWorkers(workers []diagnosisWorkerRef) []diagnosisWorkerRef {
+	items := append([]diagnosisWorkerRef(nil), workers...)
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Name != items[j].Name {
+			return items[i].Name < items[j].Name
+		}
+		return items[i].ID < items[j].ID
 	})
 	return items
 }

@@ -53,6 +53,7 @@ type helpPageData struct {
 }
 
 var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
+	"confidenceClass":   confidenceClass,
 	"eventClass":        eventClass,
 	"failureText":       failureText,
 	"formatDuration":    formatDurationMS,
@@ -70,25 +71,42 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"verificationClass": verificationClass,
 	"verificationLabel": verificationLabel,
 	"workerName":        workerName,
-}).Parse(homePageTemplate + workerPageTemplate + helpPageTemplate))
+}).Parse(homePageTemplate + homeBodyTemplate + workerPageTemplate + helpPageTemplate))
 
 func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
-	summaries, err := a.listWorkerSummaries("")
+	data, err := a.buildHomePageData()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	renderHTML(w, "home", data)
+}
+
+func (a *API) handleHomePartial(w http.ResponseWriter, r *http.Request) {
+	data, err := a.buildHomePageData()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	renderHTML(w, "home_body", data)
+}
+
+func (a *API) buildHomePageData() (homePageData, error) {
+	summaries, err := a.listWorkerSummaries("")
+	if err != nil {
+		return homePageData{}, err
 	}
 
 	failures, err := a.db.ListRecentFailedVerifications(8)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return homePageData{}, err
 	}
 
 	events, err := a.db.ListEvents(12)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return homePageData{}, err
 	}
 
 	workerCards := make([]homeWorker, 0, len(summaries))
@@ -149,7 +167,7 @@ func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	renderHTML(w, "home", homePageData{
+	return homePageData{
 		GeneratedAt:  time.Now().UTC(),
 		Summary:      summary,
 		Diagnosis:    buildDiagnosisSnapshot(summaries),
@@ -158,7 +176,7 @@ func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
 		FailureQueue: queue,
 		Workers:      workerCards,
 		Events:       events,
-	})
+	}, nil
 }
 
 func (a *API) handleWorkerPage(w http.ResponseWriter, r *http.Request) {
@@ -259,6 +277,17 @@ func statusClass(value any) string {
 		return "status-warn"
 	case "failed", "stopped":
 		return "status-bad"
+	default:
+		return "status-neutral"
+	}
+}
+
+func confidenceClass(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "high":
+		return "status-good"
+	case "medium":
+		return "status-warn"
 	default:
 		return "status-neutral"
 	}
@@ -432,6 +461,7 @@ const homePageTemplate = `{{define "home"}}
     .topbar-link:hover { color: var(--text); }
     .refresh-indicator { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
     .refresh-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: pulse 2s ease-in-out infinite; }
+    .refresh-dot.busy { background: var(--blue); animation: none; }
     .refresh-dot.paused { background: var(--muted); animation: none; }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
@@ -501,6 +531,14 @@ const homePageTemplate = `{{define "home"}}
     .chip strong { color: var(--blue); }
     .diag-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
     .diag-meta .badge { text-transform: none; letter-spacing: 0; }
+    .cluster-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin: 16px 0; }
+    .cluster-card ul { margin: 10px 0 0 18px; }
+    .cluster-card li + li { margin-top: 6px; }
+    .cluster-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .cluster-title { font-size: 14px; font-weight: 600; }
+    .cluster-summary { margin-top: 4px; color: var(--muted); font-size: 13px; }
+    .cluster-workers { margin-top: 12px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .cluster-workers a { color: var(--blue); }
 
     /* Bottom grid */
     .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
@@ -535,51 +573,88 @@ const homePageTemplate = `{{define "home"}}
     }
   </style>
   <script>
-    let refreshInterval = 30;
+    let refreshInterval = 10;
     let countdown = refreshInterval;
     let paused = false;
+    let refreshing = false;
     let timer;
 
-    function startCountdown() {
+    function updateRefreshIndicator() {
       const el = document.getElementById("refresh-count");
       const dot = document.getElementById("refresh-dot");
-      timer = setInterval(function() {
-        if (paused) return;
-        countdown--;
-        if (el) el.textContent = countdown + "s";
-        if (countdown <= 0) {
-          sessionStorage.setItem("scrollY", window.scrollY);
-          location.reload();
+      if (dot) {
+        dot.classList.toggle("paused", paused);
+        dot.classList.toggle("busy", refreshing);
+      }
+      if (!el) return;
+      if (paused) {
+        el.textContent = "paused";
+        return;
+      }
+      if (refreshing) {
+        el.textContent = "updating";
+        return;
+      }
+      el.textContent = countdown + "s";
+    }
+
+    async function refreshHome() {
+      if (paused || refreshing) return;
+      refreshing = true;
+      updateRefreshIndicator();
+
+      try {
+        const resp = await fetch(window.location.origin + "/ui/partials/home", {
+          credentials: "same-origin",
+          headers: { "X-Requested-With": "fetch" }
+        });
+        if (!resp.ok) return;
+        const root = document.getElementById("home-live-root");
+        if (!root) return;
+        root.innerHTML = await resp.text();
+      } finally {
+        refreshing = false;
+        countdown = refreshInterval;
+        updateRefreshIndicator();
+      }
+    }
+
+    function startCountdown() {
+      updateRefreshIndicator();
+      timer = setInterval(async function() {
+        if (paused || refreshing) return;
+        if (countdown > 0) {
+          countdown--;
+          updateRefreshIndicator();
+          return;
         }
+        await refreshHome();
       }, 1000);
     }
 
     function toggleRefresh() {
       paused = !paused;
-      const el = document.getElementById("refresh-count");
-      const dot = document.getElementById("refresh-dot");
-      if (paused) {
-        if (dot) dot.classList.add("paused");
-        if (el) el.textContent = "paused";
-      } else {
+      if (!paused && countdown <= 0) {
         countdown = refreshInterval;
-        if (dot) dot.classList.remove("paused");
-        if (el) el.textContent = countdown + "s";
       }
+      updateRefreshIndicator();
+    }
+
+    function bindHomeInteractions() {
+      var root = document.getElementById("home-live-root");
+      if (!root) return;
+      root.addEventListener("click", function(e) {
+        if (e.target.closest("a,button,summary,textarea,details")) return;
+        var row = e.target.closest(".clickable-row");
+        if (!row) return;
+        var href = row.dataset.href;
+          if (href) window.location = href;
+      });
     }
 
     document.addEventListener("DOMContentLoaded", function() {
-      var saved = sessionStorage.getItem("scrollY");
-      if (saved) { window.scrollTo(0, parseInt(saved, 10)); sessionStorage.removeItem("scrollY"); }
+      bindHomeInteractions();
       startCountdown();
-
-      document.querySelectorAll(".clickable-row").forEach(function(row) {
-        row.addEventListener("click", function(e) {
-          if (e.target.tagName === "A") return;
-          var href = row.dataset.href;
-          if (href) window.location = href;
-        });
-      });
     });
   </script>
 </head>
@@ -598,7 +673,13 @@ const homePageTemplate = `{{define "home"}}
         <a class="topbar-link" href="/api/events">Events</a>
       </div>
     </div>
+    <div id="home-live-root">{{template "home_body" .}}</div>
+  </div>
+</body>
+</html>
+{{end}}`
 
+const homeBodyTemplate = `{{define "home_body"}}
     <div class="status-strip">
       <span><span class="ss-label">Workers</span> <span class="ss-value">{{.Summary.TotalWorkers}}</span></span>
       <span><span class="ss-label">Healthy</span> <span class="ss-value ss-good">{{.Summary.HealthyWorkers}}</span></span>
@@ -613,6 +694,7 @@ const homePageTemplate = `{{define "home"}}
         <p style="margin-top:8px;">{{.Diagnosis.Summary}}</p>
         {{if .Diagnosis.ProbableSubsystem}}
         <div class="diag-meta">
+          {{if .Diagnosis.Confidence}}<span class="badge badge-{{if eq (confidenceClass .Diagnosis.Confidence) "status-good"}}good{{else if eq (confidenceClass .Diagnosis.Confidence) "status-warn"}}warn{{else}}neutral{{end}}">confidence: {{.Diagnosis.Confidence}}</span>{{end}}
           <span class="badge badge-warn">{{.Diagnosis.ProbableSubsystem}}</span>
           {{if .Diagnosis.DominantStage}}<span class="badge badge-neutral">stage: {{.Diagnosis.DominantStage}}</span>{{end}}
           {{if .Diagnosis.DominantSignature}}<span class="badge badge-bad">{{shorten .Diagnosis.DominantSignature 80}}</span>{{end}}
@@ -661,6 +743,47 @@ const homePageTemplate = `{{define "home"}}
         {{end}}
       </div>
     </div>
+
+    {{if .Diagnosis.Clusters}}
+    <div class="section-head">
+      <span class="section-title">Active Clusters</span>
+    </div>
+    <div class="cluster-grid">
+      {{range .Diagnosis.Clusters}}
+      <div class="panel cluster-card">
+        <div class="cluster-head">
+          <div>
+            <div class="cluster-title">{{.Headline}}</div>
+            <div class="cluster-summary">{{.Summary}}</div>
+          </div>
+          <span class="badge badge-{{if eq (confidenceClass .Confidence) "status-good"}}good{{else if eq (confidenceClass .Confidence) "status-warn"}}warn{{else}}neutral{{end}}">confidence: {{.Confidence}}</span>
+        </div>
+        <div class="diag-meta">
+          <span class="badge badge-neutral">{{.WorkerCount}} workers</span>
+          {{if .ProbableSubsystem}}<span class="badge badge-warn">{{.ProbableSubsystem}}</span>{{end}}
+          {{if .Stage}}<span class="badge badge-neutral">stage: {{.Stage}}</span>{{end}}
+          {{if .Signature}}<span class="badge badge-bad">{{shorten .Signature 80}}</span>{{end}}
+        </div>
+        {{if .WhyLikely}}
+        <ul>
+          {{range .WhyLikely}}
+          <li>{{.}}</li>
+          {{end}}
+        </ul>
+        {{end}}
+        {{if .Workers}}
+        <div class="cluster-workers">
+          {{range $index, $worker := .Workers}}{{if $index}}, {{end}}<a href="/ui/workers/{{pathEscape $worker.ID}}">{{$worker.Name}}</a>{{end}}
+        </div>
+        {{end}}
+        <div class="feed-actions">
+          <a href="/ui/workers/{{pathEscape .RepresentativeWorker.ID}}">Open {{.RepresentativeWorker.Name}}</a>
+          <a href="/api/workers/{{pathEscape .RepresentativeWorker.ID}}/prompt?mode=triage">Prompt</a>
+        </div>
+      </div>
+      {{end}}
+    </div>
+    {{end}}
 
     {{if .Spotlight}}
     <div class="incident-alert">
@@ -782,9 +905,6 @@ const homePageTemplate = `{{define "home"}}
     </div>
 
     <div class="footer">Generated {{formatTime .GeneratedAt}}</div>
-  </div>
-</body>
-</html>
 {{end}}`
 
 const workerPageTemplate = `{{define "worker"}}
@@ -957,7 +1077,7 @@ const workerPageTemplate = `{{define "worker"}}
       var summary = btn.dataset.summary;
       var label = btn.dataset.label;
       var box = document.getElementById("prompt-box");
-      var endpoint = "/api/workers/{{pathEscape .Incident.Worker.ID}}/prompt?mode=" + encodeURIComponent(mode);
+      var endpoint = window.location.origin + "/api/workers/{{pathEscape .Incident.Worker.ID}}/prompt?mode=" + encodeURIComponent(mode);
       var resp = await fetch(endpoint);
       if (!resp.ok) return;
       box.value = await resp.text();
@@ -1250,6 +1370,12 @@ const helpPageTemplate = `{{define "help"}}
     .panel ul, .panel ol { margin: 10px 0 0 18px; color: var(--muted); }
     .panel li + li { margin-top: 6px; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .cluster-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 16px; }
+    .cluster-card ul { margin: 10px 0 0 18px; }
+    .cluster-card li + li { margin-top: 6px; }
+    .cluster-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .cluster-title { font-size: 14px; font-weight: 600; }
+    .cluster-summary { margin-top: 4px; color: var(--muted); font-size: 13px; }
     .badge-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
     .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border-subtle); background: var(--surface-raised); }
     .badge strong { color: var(--blue); }
@@ -1280,6 +1406,7 @@ const helpPageTemplate = `{{define "help"}}
         <p class="callout">{{.Diagnosis.Headline}}</p>
         <p>{{.Diagnosis.Summary}}</p>
         <div class="badge-row">
+          {{if .Diagnosis.Confidence}}<span class="badge">confidence: {{.Diagnosis.Confidence}}</span>{{end}}
           {{if .Diagnosis.ProbableSubsystem}}<span class="badge">{{.Diagnosis.ProbableSubsystem}}</span>{{end}}
           {{if .Diagnosis.DominantStage}}<span class="badge">stage: {{.Diagnosis.DominantStage}}</span>{{end}}
           {{if .Diagnosis.DominantSignature}}<span class="badge">{{shorten .Diagnosis.DominantSignature 96}}</span>{{end}}
@@ -1312,6 +1439,34 @@ const helpPageTemplate = `{{define "help"}}
         {{end}}
       </div>
     </div>
+
+    {{if .Diagnosis.Clusters}}
+    <div class="cluster-grid">
+      {{range .Diagnosis.Clusters}}
+      <div class="panel cluster-card">
+        <div class="cluster-head">
+          <div>
+            <div class="cluster-title">{{.Headline}}</div>
+            <div class="cluster-summary">{{.Summary}}</div>
+          </div>
+          <span class="badge">confidence: {{.Confidence}}</span>
+        </div>
+        <div class="badge-row">
+          <span class="badge"><strong>{{.WorkerCount}}</strong> workers</span>
+          {{if .ProbableSubsystem}}<span class="badge">{{.ProbableSubsystem}}</span>{{end}}
+          {{if .Stage}}<span class="badge">stage: {{.Stage}}</span>{{end}}
+        </div>
+        {{if .WhyLikely}}
+        <ul>
+          {{range .WhyLikely}}
+          <li>{{.}}</li>
+          {{end}}
+        </ul>
+        {{end}}
+      </div>
+      {{end}}
+    </div>
+    {{end}}
 
     <div class="grid">
       <div class="panel">

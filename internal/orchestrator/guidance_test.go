@@ -91,4 +91,62 @@ func TestBuildDiagnosisSnapshotUsesCurrentFailures(t *testing.T) {
 	if diagnosis.DominantSignature != "litestream_sync_socket_refused" {
 		t.Fatalf("dominant signature=%q", diagnosis.DominantSignature)
 	}
+	if diagnosis.Confidence != "high" {
+		t.Fatalf("confidence=%q want %q", diagnosis.Confidence, "high")
+	}
+	if len(diagnosis.Clusters) != 1 {
+		t.Fatalf("clusters=%d want 1", len(diagnosis.Clusters))
+	}
+}
+
+func TestBuildDiagnosisSnapshotClustersMultipleFailureFamilies(t *testing.T) {
+	summaries := []WorkerSummaryResponse{
+		{
+			Worker: model.Worker{ID: "w1", ProfileName: "gharchive-replay", Status: model.WorkerDegraded, Name: "worker-main-gharchive"},
+			Workload: workload.Config{
+				LoadMode:      "replay",
+				ReplayDataset: "gharchive",
+			},
+			LastVerification:         &model.Verification{WorkerID: "w1"},
+			CurrentFailureStage:      "sync",
+			CurrentFailureSignature:  "litestream_sync_socket_refused",
+			CurrentProbableSubsystem: "Litestream sync/control socket",
+		},
+		{
+			Worker: model.Worker{ID: "w2", ProfileName: "high-volume", Status: model.WorkerDegraded, Name: "worker-main-high-vol"},
+			Workload: workload.Config{
+				LoadMode: "synthetic",
+				Pattern:  "wave",
+			},
+			LastVerification:         &model.Verification{WorkerID: "w2"},
+			CurrentFailureStage:      "sync",
+			CurrentFailureSignature:  "litestream_sync_socket_refused",
+			CurrentProbableSubsystem: "Litestream sync/control socket",
+		},
+		{
+			Worker: model.Worker{ID: "w3", ProfileName: "taxi-replay", Status: model.WorkerDegraded, Name: "worker-main-taxi-replay"},
+			Workload: workload.Config{
+				LoadMode:      "replay",
+				ReplayDataset: "taxi",
+			},
+			LastVerification:         &model.Verification{WorkerID: "w3"},
+			CurrentFailureStage:      "restore",
+			CurrentFailureSignature:  "replica_s3_timeout",
+			CurrentProbableSubsystem: "Replication or restore path",
+		},
+	}
+
+	diagnosis := buildDiagnosisSnapshot(summaries)
+	if len(diagnosis.Clusters) != 2 {
+		t.Fatalf("clusters=%d want 2", len(diagnosis.Clusters))
+	}
+	if diagnosis.Headline != "2 active failure clusters across 3 workers" {
+		t.Fatalf("headline=%q", diagnosis.Headline)
+	}
+	if diagnosis.Clusters[0].Signature != "litestream_sync_socket_refused" {
+		t.Fatalf("top cluster signature=%q", diagnosis.Clusters[0].Signature)
+	}
+	if diagnosis.Clusters[0].Confidence != "high" {
+		t.Fatalf("top cluster confidence=%q", diagnosis.Clusters[0].Confidence)
+	}
 }
