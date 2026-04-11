@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -35,6 +37,8 @@ func main() {
 	controlBaseURL := envOrDefault("CONTROL_BASE_URL", "https://litestream-soak-ctl.fly.dev")
 	alertWebhookURL := os.Getenv("SOAK_ALERT_WEBHOOK_URL")
 	alertWebhookToken := os.Getenv("SOAK_ALERT_WEBHOOK_BEARER_TOKEN")
+	basicAuthUsername := os.Getenv("SOAK_BASIC_AUTH_USERNAME")
+	basicAuthPassword := os.Getenv("SOAK_BASIC_AUTH_PASSWORD")
 	fleetEnabled := envOrDefault("SOAK_MAIN_FLEET_ENABLED", "false") == "true"
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	listenAddr := envOrDefault("LISTEN_ADDR", ":8080")
@@ -63,6 +67,11 @@ func main() {
 	mux.Handle("GET /metrics", promhttp.Handler())
 	api.RegisterRoutes(mux)
 
+	handler := http.Handler(mux)
+	if basicAuthUsername != "" && basicAuthPassword != "" {
+		handler = newBasicAuthMiddleware(basicAuthUsername, basicAuthPassword)(handler)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -86,10 +95,11 @@ func main() {
 		"s3_bucket", s3Bucket,
 		"control_base_url", controlBaseURL,
 		"alerts_enabled", alerts.Enabled(),
+		"basic_auth_enabled", basicAuthUsername != "" && basicAuthPassword != "",
 		"fleet_enabled", fleetEnabled,
 	)
 
-	server := &http.Server{Addr: listenAddr, Handler: mux}
+	server := &http.Server{Addr: listenAddr, Handler: handler}
 	go func() {
 		<-ctx.Done()
 		server.Shutdown(context.Background())
@@ -106,4 +116,41 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func newBasicAuthMiddleware(username, password string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if skipBasicAuth(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			providedUser, providedPassword, ok := r.BasicAuth()
+			if ok &&
+				subtle.ConstantTimeCompare([]byte(providedUser), []byte(username)) == 1 &&
+				subtle.ConstantTimeCompare([]byte(providedPassword), []byte(password)) == 1 {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			w.Header().Set("WWW-Authenticate", `Basic realm="litestream-soak-ctl"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		})
+	}
+}
+
+func skipBasicAuth(r *http.Request) bool {
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+		(r.URL.Path == "/healthz" || r.URL.Path == "/metrics") {
+		return true
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/webhooks/github" {
+		return true
+	}
+	if r.Method != http.MethodPost {
+		return false
+	}
+	return strings.HasPrefix(r.URL.Path, "/api/workers/") &&
+		(strings.HasSuffix(r.URL.Path, "/heartbeat") || strings.HasSuffix(r.URL.Path, "/verifications"))
 }

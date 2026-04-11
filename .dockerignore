@@ -1,4 +1,6 @@
+.git
 bin/
+tmp/
 /soakctl
 /soakworker
 *.db
