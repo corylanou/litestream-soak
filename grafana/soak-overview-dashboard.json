@@ -58,7 +58,7 @@
       },
       "id": 1,
       "options": {
-        "content": "### Operator Flow\n- Start here to answer: what is broken, how broad is it, and which worker should I open next.\n- Use the top stats and donut charts for immediate posture.\n- Read **Last Verification Split** first to see whether the fleet is mostly passing or failing.\n- Read **Worker Status Split** and **Runtime Snapshot Health** to separate active incidents from telemetry health.\n- Read **Active Failure Clusters** and **Active Failure x Runtime Counts** to see whether breakage is isolated or shared, and whether it aligns with unhealthy runtime snapshots.\n- Use **Active Failure x Runtime Workers** to choose a worker, then switch to **Drilldown Dashboard** or **Selected Worker**.\n- Use **Fleet Workload Shapes** to confirm whether the issue clusters around a replay dataset or load profile.",
+        "content": "### Operator Flow\n- Start here to answer: what is failing, what is passing, and what worker you should open next.\n- Use the top stats and donut charts for immediate posture.\n- Read **Failing Workers Right Now** first if anything is broken.\n- Read **Passing Workers Right Now** to confirm what is still healthy.\n- Read **Failure Types Right Now** to see whether the fleet is clustered on one failure shape or split across multiple problems.\n- Use **Workload Coverage** to see whether a failure is tied to a specific replay dataset or load mode.\n- Then jump to **Drilldown Dashboard** or **Selected Worker** for the actual investigation.",
         "mode": "markdown"
       },
       "title": "Start Here",
@@ -420,7 +420,7 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
+        "h": 8,
         "w": 12,
         "x": 0,
         "y": 15
@@ -440,12 +440,44 @@
       },
       "targets": [
         {
-          "expr": "count by (failure_stage, failure_signature) (soak_control_worker_failure_info == 1)",
+          "expr": "((soak_control_worker_failure_info == 1) * on(worker_id) group_left(runtime_status) (soak_control_worker_runtime_snapshot_status == 1)) * on(worker_id) group_left(load_mode, replay_dataset, profile) (soak_control_worker_workload_info == 1)",
           "format": "table",
           "instant": true
         }
       ],
-      "title": "Active Failure Cluster Details",
+      "title": "Failing Workers Right Now",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "worker_id": 0,
+              "failure_signature": 1,
+              "failure_stage": 2,
+              "runtime_status": 3,
+              "load_mode": 4,
+              "replay_dataset": 5,
+              "profile": 6
+            },
+            "renameByName": {
+              "worker_id": "Worker",
+              "failure_signature": "Failure",
+              "failure_stage": "Stage",
+              "runtime_status": "Runtime",
+              "load_mode": "Load",
+              "replay_dataset": "Dataset",
+              "profile": "Profile"
+            }
+          }
+        }
+      ],
       "type": "table"
     },
     {
@@ -479,7 +511,32 @@
           "instant": true
         }
       ],
-      "title": "Active Failure x Runtime Counts",
+      "title": "Failure Types Right Now",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "failure_signature": 0,
+              "failure_stage": 1,
+              "runtime_status": 2,
+              "Value": 3
+            },
+            "renameByName": {
+              "failure_signature": "Failure",
+              "failure_stage": "Stage",
+              "runtime_status": "Runtime",
+              "Value": "Workers"
+            }
+          }
+        }
+      ],
       "type": "table"
     },
     {
@@ -488,10 +545,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
+        "h": 8,
         "w": 12,
         "x": 0,
-        "y": 22
+        "y": 23
       },
       "id": 10,
       "options": {
@@ -508,12 +565,40 @@
       },
       "targets": [
         {
-          "expr": "(soak_control_worker_failure_info == 1) * on(worker_id) group_left(runtime_status) (soak_control_worker_runtime_snapshot_status == 1)",
+          "expr": "((soak_control_worker_last_verification_result == 1) * on(worker_id) group_left(runtime_status) (soak_control_worker_runtime_snapshot_status == 1)) * on(worker_id) group_left(load_mode, replay_dataset, profile) (soak_control_worker_workload_info == 1)",
           "format": "table",
           "instant": true
         }
       ],
-      "title": "Active Failure x Runtime Workers",
+      "title": "Passing Workers Right Now",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "worker_id": 0,
+              "runtime_status": 1,
+              "load_mode": 2,
+              "replay_dataset": 3,
+              "profile": 4
+            },
+            "renameByName": {
+              "worker_id": "Worker",
+              "runtime_status": "Runtime",
+              "load_mode": "Load",
+              "replay_dataset": "Dataset",
+              "profile": "Profile"
+            }
+          }
+        }
+      ],
       "type": "table"
     },
     {
@@ -525,7 +610,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 22
+        "y": 23
       },
       "id": 11,
       "options": {
@@ -542,12 +627,37 @@
       },
       "targets": [
         {
-          "expr": "soak_control_worker_workload_info == 1",
+          "expr": "count by (load_mode, replay_dataset, profile) (soak_control_worker_workload_info == 1)",
           "format": "table",
           "instant": true
         }
       ],
-      "title": "Fleet Workload Shapes",
+      "title": "Workload Coverage",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "load_mode": 0,
+              "replay_dataset": 1,
+              "profile": 2,
+              "Value": 3
+            },
+            "renameByName": {
+              "load_mode": "Load",
+              "replay_dataset": "Dataset",
+              "profile": "Profile",
+              "Value": "Workers"
+            }
+          }
+        }
+      ],
       "type": "table"
     },
     {
@@ -556,10 +666,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
+        "h": 6,
         "w": 8,
         "x": 0,
-        "y": 29
+        "y": 31
       },
       "id": 12,
       "options": {
@@ -576,12 +686,34 @@
       },
       "targets": [
         {
-          "expr": "count by (runtime_status) (soak_control_worker_runtime_snapshot_status == 1)",
+          "expr": "soak_control_worker_status{status=\"degraded\"} == 1",
           "format": "table",
           "instant": true
         }
       ],
-      "title": "Runtime Snapshot Count Details",
+      "title": "Workers Needing Attention",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "worker_id": 0,
+              "status": 1
+            },
+            "renameByName": {
+              "worker_id": "Worker",
+              "status": "Status"
+            }
+          }
+        }
+      ],
       "type": "table"
     },
     {
@@ -590,10 +722,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
+        "h": 6,
         "w": 8,
         "x": 8,
-        "y": 29
+        "y": 31
       },
       "id": 13,
       "options": {
@@ -610,12 +742,34 @@
       },
       "targets": [
         {
-          "expr": "soak_control_worker_status == 1",
+          "expr": "soak_control_worker_status{status=\"running\"} == 1",
           "format": "table",
           "instant": true
         }
       ],
-      "title": "Fleet Status Details",
+      "title": "Workers Stable Right Now",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "worker_id": 0,
+              "status": 1
+            },
+            "renameByName": {
+              "worker_id": "Worker",
+              "status": "Status"
+            }
+          }
+        }
+      ],
       "type": "table"
     },
     {
@@ -626,10 +780,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
+        "h": 6,
         "w": 8,
         "x": 16,
-        "y": 29
+        "y": 31
       },
       "id": 14,
       "options": {
@@ -652,6 +806,27 @@
         }
       ],
       "title": "Fleet Last Failure Age",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "worker_id": 0,
+              "Value": 1
+            },
+            "renameByName": {
+              "worker_id": "Worker",
+              "Value": "Age"
+            }
+          }
+        }
+      ],
       "type": "table"
     }
   ],
@@ -692,5 +867,5 @@
   },
   "title": "Litestream Soak Overview",
   "uid": "litestream-soak-overview",
-  "version": 2
+  "version": 3
 }
