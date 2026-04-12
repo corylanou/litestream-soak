@@ -702,7 +702,11 @@
     },
     {
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
         "overrides": []
       },
       "gridPos": {
@@ -713,51 +717,29 @@
       },
       "id": 9,
       "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
+        "displayMode": "basic",
+        "namePlacement": "left",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
           ],
-          "show": false
+          "fields": "",
+          "values": false
         },
-        "showHeader": true
+        "showUnfilled": false,
+        "sizing": "manual",
+        "text": {}
       },
       "targets": [
         {
-          "expr": "count by (failure_stage, failure_signature, runtime_status) ((soak_control_worker_failure_info == 1) * on(worker_id) group_left(runtime_status) (soak_control_worker_runtime_snapshot_status == 1))",
-          "format": "table",
-          "instant": true
+          "expr": "count by (failure_signature) (soak_control_worker_failure_info == 1)",
+          "instant": true,
+          "legendFormat": "{{failure_signature}}"
         }
       ],
-      "title": "Failure Types Right Now",
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "instance": true,
-              "job": true
-            },
-            "indexByName": {
-              "failure_signature": 0,
-              "failure_stage": 1,
-              "runtime_status": 2,
-              "Value": 3
-            },
-            "renameByName": {
-              "failure_signature": "Failure",
-              "failure_stage": "Stage",
-              "runtime_status": "Runtime",
-              "Value": "Workers"
-            }
-          }
-        }
-      ],
-      "type": "table"
+      "title": "Failure Types",
+      "type": "bargauge"
     },
     {
       "fieldConfig": {
@@ -848,7 +830,11 @@
     },
     {
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
         "overrides": []
       },
       "gridPos": {
@@ -859,51 +845,29 @@
       },
       "id": 11,
       "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
+        "displayMode": "basic",
+        "namePlacement": "left",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
           ],
-          "show": false
+          "fields": "",
+          "values": false
         },
-        "showHeader": true
+        "showUnfilled": false,
+        "sizing": "manual",
+        "text": {}
       },
       "targets": [
         {
-          "expr": "count by (load_mode, replay_dataset, profile) (soak_control_worker_workload_info == 1)",
-          "format": "table",
-          "instant": true
+          "expr": "count by (profile) (soak_control_worker_workload_info == 1)",
+          "instant": true,
+          "legendFormat": "{{profile}}"
         }
       ],
-      "title": "Workload Coverage",
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "instance": true,
-              "job": true
-            },
-            "indexByName": {
-              "load_mode": 0,
-              "replay_dataset": 1,
-              "profile": 2,
-              "Value": 3
-            },
-            "renameByName": {
-              "load_mode": "Load",
-              "replay_dataset": "Dataset",
-              "profile": "Profile",
-              "Value": "Workers"
-            }
-          }
-        }
-      ],
-      "type": "table"
+      "title": "Coverage By Profile",
+      "type": "bargauge"
     },
     {
       "fieldConfig": {
@@ -1187,5 +1151,5 @@
   },
   "title": "Litestream Soak Overview",
   "uid": "litestream-soak-overview",
-  "version": 5
+  "version": 6
 }
