@@ -52,7 +52,7 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 24,
+        "w": 16,
         "x": 0,
         "y": 0
       },
@@ -63,6 +63,56 @@
       },
       "title": "Start Here",
       "type": "text"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "id": 20,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "expr": "topk(1, count by (failure_signature) (soak_control_worker_failure_info == 1))",
+          "instant": true,
+          "legendFormat": "{{failure_signature}}"
+        }
+      ],
+      "title": "Dominant Failure Now",
+      "type": "stat"
     },
     {
       "fieldConfig": {
@@ -952,87 +1002,6 @@
     },
     {
       "fieldConfig": {
-        "defaults": {},
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Worker"
-            },
-            "properties": [
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "targetBlank": true,
-                    "title": "Open Worker",
-                    "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__value.raw}"
-                  }
-                ]
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "data-links"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 8,
-        "y": 39
-      },
-      "id": 13,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true
-      },
-      "targets": [
-        {
-          "expr": "soak_control_worker_status{status=\"running\"} == 1",
-          "format": "table",
-          "instant": true
-        }
-      ],
-      "title": "Workers Stable Right Now",
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "Value": true,
-              "__name__": true,
-              "instance": true,
-              "job": true
-            },
-            "indexByName": {
-              "worker_id": 0,
-              "status": 1
-            },
-            "renameByName": {
-              "worker_id": "Worker",
-              "status": "Status"
-            }
-          }
-        }
-      ],
-      "type": "table"
-    },
-    {
-      "fieldConfig": {
         "defaults": {
           "unit": "s"
         },
@@ -1065,8 +1034,8 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 8,
-        "x": 16,
+        "w": 12,
+        "x": 12,
         "y": 39
       },
       "id": 14,
@@ -1151,5 +1120,5 @@
   },
   "title": "Litestream Soak Overview",
   "uid": "litestream-soak-overview",
-  "version": 6
+  "version": 7
 }
