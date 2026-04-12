@@ -257,7 +257,7 @@
           "legendFormat": "clusters"
         }
       ],
-      "title": "Active Failure Clusters",
+      "title": "Failure Clusters",
       "type": "stat"
     },
     {
@@ -306,7 +306,7 @@
           "legendFormat": "unhealthy"
         }
       ],
-      "title": "Unhealthy Runtime Snapshots",
+      "title": "Runtime Unhealthy",
       "type": "stat"
     },
     {
@@ -355,7 +355,7 @@
           "legendFormat": "healthy"
         }
       ],
-      "title": "Healthy Runtime Snapshots",
+      "title": "Runtime Healthy",
       "type": "stat"
     },
     {
@@ -421,10 +421,7 @@
       },
       "id": 16,
       "options": {
-        "displayLabels": [
-          "name",
-          "percent"
-        ],
+        "displayLabels": [],
         "legend": {
           "displayMode": "table",
           "placement": "right",
@@ -450,7 +447,7 @@
           "legendFormat": "{{failure_signature}}"
         }
       ],
-      "title": "Failure Type Split",
+      "title": "Failure Split",
       "type": "piechart"
     },
     {
