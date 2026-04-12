@@ -9,6 +9,12 @@
   "links": [
     {
       "targetBlank": true,
+      "title": "Overview Dashboard",
+      "type": "link",
+      "url": "/d/litestream-soak-overview"
+    },
+    {
+      "targetBlank": true,
       "title": "Control Plane",
       "type": "link",
       "url": "https://litestream-soak-ctl.fly.dev/ui"
@@ -64,7 +70,7 @@
       },
       "id": 1,
       "options": {
-        "content": "### Operator Flow\n- Filter to a worker first.\n- Start with **Last Verification**, **Verification Age**, **Current Sync Age**, **Runtime Snapshot Labels**, and the restart counters.\n- Use **Current Failure Labels** for active breakage and **Fleet Last Failure Classes** for the most recent failure shape, even if the worker recovered.\n- Use **Fleet Workload Shapes** to confirm the exact load mode, replay dataset, write rate, payload size, and concurrency behind the incident.\n- Use **Fleet Runtime Snapshot States** and **Fleet Runtime Snapshot Counts** to separate healthy telemetry from genuinely unhealthy runtime snapshots.\n- Use **Active Failure x Runtime Counts** and **Active Failure x Runtime Workers** to see which active failure signatures also have unhealthy runtime snapshots.\n- If the worker is bad, jump to **Selected Worker**, **Worker Summaries**, **Operator Help**, or **Prompt Bundle** in the dashboard links.",
+        "content": "### Operator Flow\n- Start in **Overview Dashboard** for fleet posture and active failure clusters.\n- Use this board after you know which worker or failure shape you are investigating.\n- Filter to a worker first.\n- Start with **Last Verification**, **Verification Age**, **Current Sync Age**, **Runtime Snapshot Labels**, and the restart counters.\n- Use **Current Failure Labels** for active breakage and **Fleet Last Failure Classes** for the most recent failure shape, even if the worker recovered.\n- Use **Fleet Workload Shapes** to confirm the exact load mode, replay dataset, write rate, payload size, and concurrency behind the incident.\n- Use **Fleet Runtime Snapshot States** and **Fleet Runtime Snapshot Counts** to separate healthy telemetry from genuinely unhealthy runtime snapshots.\n- Use **Active Failure x Runtime Counts** and **Active Failure x Runtime Workers** to see which active failure signatures also have unhealthy runtime snapshots.\n- If the worker is bad, jump to **Selected Worker**, **Worker Summaries**, **Operator Help**, or **Prompt Bundle** in the dashboard links.",
         "mode": "markdown"
       },
       "title": "Runbook",
@@ -1461,7 +1467,7 @@
     "from": "now-24h",
     "to": "now"
   },
-  "title": "Litestream Soak Signal Board",
+  "title": "Litestream Soak Drilldown",
   "uid": "litestream-soak",
   "version": 7
 }

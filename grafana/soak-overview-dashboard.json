@@ -1,0 +1,556 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Fleet-first overview for the Litestream soak project. Start here to see posture, active failure clusters, runtime snapshot health, and affected workers before drilling into a specific worker.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 2,
+  "links": [
+    {
+      "targetBlank": true,
+      "title": "Drilldown Dashboard",
+      "type": "link",
+      "url": "/d/litestream-soak?var-worker=${worker}"
+    },
+    {
+      "targetBlank": true,
+      "title": "Control Plane",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/ui"
+    },
+    {
+      "targetBlank": true,
+      "title": "Selected Worker",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${worker}"
+    },
+    {
+      "targetBlank": true,
+      "title": "Prompt Bundle",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/workers/${worker}/prompt"
+    },
+    {
+      "targetBlank": true,
+      "title": "Worker Summaries",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/worker-summaries"
+    },
+    {
+      "targetBlank": true,
+      "title": "Diagnosis JSON",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/diagnosis"
+    }
+  ],
+  "panels": [
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "content": "### Operator Flow\n- Start here to answer: what is broken, how broad is it, and which worker should I open next.\n- Use the top stats for immediate posture.\n- Read **Active Failure Clusters** and **Active Failure x Runtime Counts** to see whether breakage is isolated or shared, and whether it aligns with unhealthy runtime snapshots.\n- Use **Active Failure x Runtime Workers** to choose a worker, then switch to **Drilldown Dashboard** or **Selected Worker**.\n- Use **Fleet Workload Shapes** to confirm whether the issue clusters around a replay dataset or load profile.",
+        "mode": "markdown"
+      },
+      "title": "Start Here",
+      "type": "text"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 4
+      },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "count(soak_control_worker_status{status=\"degraded\"} == 1)",
+          "legendFormat": "degraded"
+        }
+      ],
+      "title": "Degraded Workers",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 4
+      },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "count(soak_control_worker_status{status=\"running\"} == 1)",
+          "legendFormat": "running"
+        }
+      ],
+      "title": "Running Workers",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 4
+      },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "count(soak_control_worker_failure_info == 1)",
+          "legendFormat": "active failures"
+        }
+      ],
+      "title": "Workers With Active Failures",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 4
+      },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "count(count by (failure_stage, failure_signature) (soak_control_worker_failure_info == 1))",
+          "legendFormat": "clusters"
+        }
+      ],
+      "title": "Active Failure Clusters",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 4
+      },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "count(soak_control_worker_runtime_snapshot_status{runtime_status=\"unhealthy\"} == 1)",
+          "legendFormat": "unhealthy"
+        }
+      ],
+      "title": "Unhealthy Runtime Snapshots",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 4
+      },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "count(soak_control_worker_runtime_snapshot_status{runtime_status=\"healthy\"} == 1)",
+          "legendFormat": "healthy"
+        }
+      ],
+      "title": "Healthy Runtime Snapshots",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 8,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "count by (failure_stage, failure_signature) (soak_control_worker_failure_info == 1)",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Active Failure Clusters",
+      "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 9,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "count by (failure_stage, failure_signature, runtime_status) ((soak_control_worker_failure_info == 1) * on(worker_id) group_left(runtime_status) (soak_control_worker_runtime_snapshot_status == 1))",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Active Failure x Runtime Counts",
+      "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "id": 10,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "(soak_control_worker_failure_info == 1) * on(worker_id) group_left(runtime_status) (soak_control_worker_runtime_snapshot_status == 1)",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Active Failure x Runtime Workers",
+      "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
+      "id": 11,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "soak_control_worker_workload_info == 1",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Fleet Workload Shapes",
+      "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 22
+      },
+      "id": 12,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "count by (runtime_status) (soak_control_worker_runtime_snapshot_status == 1)",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Fleet Runtime Snapshot Counts",
+      "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 22
+      },
+      "id": 13,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "soak_control_worker_status == 1",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Fleet Status",
+      "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 22
+      },
+      "id": 14,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "sort_desc(time() - soak_control_worker_last_failure_unixtime)",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Fleet Last Failure Age",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "litestream",
+    "soak",
+    "fly",
+    "overview"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "worker-main-low-vol",
+          "value": "worker-main-low-vol"
+        },
+        "definition": "label_values(soak_control_worker_info, worker_id)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Worker",
+        "multi": false,
+        "name": "worker",
+        "options": [],
+        "query": "label_values(soak_control_worker_info, worker_id)",
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "title": "Litestream Soak Overview",
+  "uid": "litestream-soak-overview",
+  "version": 1
+}
