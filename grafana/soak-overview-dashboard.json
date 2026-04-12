@@ -58,7 +58,7 @@
       },
       "id": 1,
       "options": {
-        "content": "### Operator Flow\n- Start here to answer: what is failing, what is passing, and what worker you should open next.\n- Use the top stats and donut charts for immediate posture.\n- Read **Failing Workers Right Now** first if anything is broken.\n- Read **Passing Workers Right Now** to confirm what is still healthy.\n- Read **Failure Types Right Now** to see whether the fleet is clustered on one failure shape or split across multiple problems.\n- Use **Workload Coverage** to see whether a failure is tied to a specific replay dataset or load mode.\n- Then jump to **Drilldown Dashboard** or **Selected Worker** for the actual investigation.",
+        "content": "### Operator Flow\n- Start here to answer: what is failing right now, which workers are affected, and whether the breakage is clustered.\n- Read the top cards first.\n- Then read **Verification By Worker** and **Control Status By Worker**. Those two panels should tell you where the problem is without opening a single table.\n- Use the tables below only after you already know what you are looking at.\n- Then jump to **Drilldown Dashboard** or **Selected Worker** for the actual investigation.",
         "mode": "markdown"
       },
       "title": "Start Here",
@@ -84,12 +84,124 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 4,
+        "h": 5,
         "w": 4,
         "x": 0,
         "y": 4
       },
       "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "count(soak_control_worker_last_verification_result == 0)",
+          "legendFormat": "failing"
+        }
+      ],
+      "title": "Failing Workers",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 4
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "count(soak_control_worker_last_verification_result == 1)",
+          "legendFormat": "passing"
+        }
+      ],
+      "title": "Passing Workers",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 4
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
       "targets": [
         {
           "expr": "count(soak_control_worker_status{status=\"degraded\"} == 1)",
@@ -97,76 +209,6 @@
         }
       ],
       "title": "Degraded Workers",
-      "type": "stat"
-    },
-    {
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 4,
-        "y": 4
-      },
-      "id": 3,
-      "targets": [
-        {
-          "expr": "count(soak_control_worker_status{status=\"running\"} == 1)",
-          "legendFormat": "running"
-        }
-      ],
-      "title": "Running Workers",
-      "type": "stat"
-    },
-    {
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 8,
-        "y": 4
-      },
-      "id": 4,
-      "targets": [
-        {
-          "expr": "count(soak_control_worker_failure_info == 1)",
-          "legendFormat": "active failures"
-        }
-      ],
-      "title": "Workers With Active Failures",
       "type": "stat"
     },
     {
@@ -189,12 +231,26 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 4,
+        "h": 5,
         "w": 4,
         "x": 12,
         "y": 4
       },
       "id": 5,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
       "targets": [
         {
           "expr": "count(count by (failure_stage, failure_signature) (soak_control_worker_failure_info == 1))",
@@ -224,12 +280,26 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 4,
+        "h": 5,
         "w": 4,
         "x": 16,
         "y": 4
       },
       "id": 6,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
       "targets": [
         {
           "expr": "count(soak_control_worker_runtime_snapshot_status{runtime_status=\"unhealthy\"} == 1)",
@@ -259,12 +329,26 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 4,
+        "h": 5,
         "w": 4,
         "x": 20,
         "y": 4
       },
       "id": 7,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
       "targets": [
         {
           "expr": "count(soak_control_worker_runtime_snapshot_status{runtime_status=\"healthy\"} == 1)",
@@ -283,7 +367,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 8
+        "y": 9
       },
       "id": 15,
       "options": {
@@ -321,7 +405,7 @@
           "legendFormat": "FAIL"
         }
       ],
-      "title": "Last Verification Split",
+      "title": "Verification Split",
       "type": "piechart"
     },
     {
@@ -333,7 +417,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 8
+        "y": 9
       },
       "id": 16,
       "options": {
@@ -361,12 +445,12 @@
       },
       "targets": [
         {
-          "expr": "count by (status) (soak_control_worker_status == 1)",
+          "expr": "count by (failure_signature) (soak_control_worker_failure_info == 1)",
           "instant": true,
-          "legendFormat": "{{status}}"
+          "legendFormat": "{{failure_signature}}"
         }
       ],
-      "title": "Worker Status Split",
+      "title": "Failure Type Split",
       "type": "piechart"
     },
     {
@@ -378,7 +462,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 8
+        "y": 9
       },
       "id": 17,
       "options": {
@@ -416,6 +500,106 @@
     },
     {
       "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "FAIL"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "PASS"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 18,
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "always",
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "label_replace(soak_control_worker_last_verification_result, \"worker\", \"$1\", \"worker_id\", \"worker-main-(.*)\")",
+          "legendFormat": "{{worker}}"
+        }
+      ],
+      "title": "Verification By Worker",
+      "type": "state-timeline"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "green",
+                  "text": "RUNNING"
+                },
+                "1": {
+                  "color": "red",
+                  "text": "DEGRADED"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 19,
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "always",
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "label_replace(1 - max by (worker_id) (soak_control_worker_status{status=\"running\"}), \"worker\", \"$1\", \"worker_id\", \"worker-main-(.*)\")",
+          "legendFormat": "{{worker}}"
+        }
+      ],
+      "title": "Control Status By Worker",
+      "type": "state-timeline"
+    },
+    {
+      "fieldConfig": {
         "defaults": {},
         "overrides": []
       },
@@ -423,7 +607,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 15
+        "y": 24
       },
       "id": 8,
       "options": {
@@ -489,7 +673,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 15
+        "y": 24
       },
       "id": 9,
       "options": {
@@ -548,7 +732,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 23
+        "y": 32
       },
       "id": 10,
       "options": {
@@ -610,7 +794,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 23
+        "y": 31
       },
       "id": 11,
       "options": {
@@ -669,7 +853,7 @@
         "h": 6,
         "w": 8,
         "x": 0,
-        "y": 31
+        "y": 40
       },
       "id": 12,
       "options": {
@@ -725,7 +909,7 @@
         "h": 6,
         "w": 8,
         "x": 8,
-        "y": 31
+        "y": 40
       },
       "id": 13,
       "options": {
@@ -783,7 +967,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 31
+        "y": 40
       },
       "id": 14,
       "options": {
@@ -867,5 +1051,5 @@
   },
   "title": "Litestream Soak Overview",
   "uid": "litestream-soak-overview",
-  "version": 3
+  "version": 4
 }
