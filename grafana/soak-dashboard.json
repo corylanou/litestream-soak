@@ -64,7 +64,7 @@
       },
       "id": 1,
       "options": {
-        "content": "### Operator Flow\n- Filter to a worker first.\n- Start with **Last Verification**, **Verification Age**, **Current Sync Age**, and the restart counters.\n- Use **Current Failure Labels** for active breakage and **Fleet Last Failure Classes** for the most recent failure shape, even if the worker recovered.\n- Use **Fleet Workload Shapes** to confirm the exact load mode, replay dataset, write rate, payload size, and concurrency behind the incident.\n- If the worker is bad, jump to **Selected Worker**, **Worker Summaries**, **Operator Help**, or **Prompt Bundle** in the dashboard links.",
+        "content": "### Operator Flow\n- Filter to a worker first.\n- Start with **Last Verification**, **Verification Age**, **Current Sync Age**, **Runtime Snapshot Labels**, and the restart counters.\n- Use **Current Failure Labels** for active breakage and **Fleet Last Failure Classes** for the most recent failure shape, even if the worker recovered.\n- Use **Fleet Workload Shapes** to confirm the exact load mode, replay dataset, write rate, payload size, and concurrency behind the incident.\n- Use **Fleet Runtime Snapshot States** and **Fleet Runtime Snapshot Counts** to separate healthy telemetry from genuinely unhealthy runtime snapshots.\n- If the worker is bad, jump to **Selected Worker**, **Worker Summaries**, **Operator Help**, or **Prompt Bundle** in the dashboard links.",
         "mode": "markdown"
       },
       "title": "Runbook",
@@ -1254,6 +1254,109 @@
       ],
       "title": "Fleet Last Failure Age",
       "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 59
+      },
+      "id": 30,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "soak_control_worker_runtime_snapshot_status{worker_id=\"$worker\"} == 1",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{runtime_status}}"
+        }
+      ],
+      "title": "Runtime Snapshot Labels",
+      "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 59
+      },
+      "id": 31,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "soak_control_worker_runtime_snapshot_status == 1",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Fleet Runtime Snapshot States",
+      "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 59
+      },
+      "id": 32,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "count by (runtime_status) (soak_control_worker_runtime_snapshot_status == 1)",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Fleet Runtime Snapshot Counts",
+      "type": "table"
     }
   ],
   "refresh": "30s",
@@ -1292,5 +1395,5 @@
   },
   "title": "Litestream Soak Signal Board",
   "uid": "litestream-soak",
-  "version": 5
+  "version": 6
 }
