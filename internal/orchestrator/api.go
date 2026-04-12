@@ -67,7 +67,10 @@ type IncidentBundle struct {
 	ActiveFailure       bool                 `json:"active_failure"`
 	FailureStage        string               `json:"failure_stage,omitempty"`
 	FailureSignature    string               `json:"failure_signature,omitempty"`
+	ProbableSubsystem   string               `json:"probable_subsystem,omitempty"`
 	Guide               incidentGuide        `json:"guide"`
+	Diagnosis           diagnosisSnapshot    `json:"diagnosis"`
+	RelatedClusters     []diagnosisCluster   `json:"related_clusters,omitempty"`
 	PromptModes         []promptModeInfo     `json:"prompt_modes,omitempty"`
 	RecentVerifications []model.Verification `json:"recent_verifications"`
 	RecentEvents        []model.Event        `json:"recent_events"`
@@ -457,6 +460,14 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 		}
 	}
 
+	summaries, err := a.listWorkerSummaries("")
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+
+	diagnosis := buildDiagnosisSnapshot(summaries)
+	probableSubsystem := inferProbableSubsystem(inferFailureStage(latestFailure), inferFailureSignature(latestFailure))
+
 	bundle := &IncidentBundle{
 		GeneratedAt:         time.Now().UTC(),
 		Worker:              detail.Worker,
@@ -465,6 +476,9 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 		ActiveFailure:       activeFailureDetected,
 		FailureStage:        inferFailureStage(latestFailure),
 		FailureSignature:    inferFailureSignature(latestFailure),
+		ProbableSubsystem:   probableSubsystem,
+		Diagnosis:           diagnosis,
+		RelatedClusters:     relatedDiagnosisClusters(diagnosis, detail.Worker.ID, inferFailureSignature(latestFailure), probableSubsystem),
 		RecentVerifications: detail.RecentVerifications,
 		RecentEvents:        detail.RecentEvents,
 		Machine:             detail.Machine,
@@ -532,7 +546,7 @@ func inferFailureSignature(verification *model.Verification) string {
 }
 
 func buildTriageCommands(worker model.Worker, hasMachine bool) []string {
-	commands := make([]string, 0, 4)
+	commands := make([]string, 0, 5)
 	appName := strings.TrimSpace(worker.AppName)
 	if appName == "" {
 		appName = "litestream-soak"
@@ -545,7 +559,10 @@ func buildTriageCommands(worker model.Worker, hasMachine bool) []string {
 	if hasMachine {
 		commands = append(commands, fmt.Sprintf("fly ssh console -a %s", appName))
 	}
-	commands = append(commands, fmt.Sprintf("curl -sS https://litestream-soak-ctl.fly.dev/api/workers/%s/incident | jq .", worker.ID))
+	commands = append(commands,
+		fmt.Sprintf(`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/workers/%s/incident | jq .`, worker.ID),
+		`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/diagnosis | jq .`,
+	)
 
 	return commands
 }

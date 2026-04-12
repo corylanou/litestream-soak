@@ -229,6 +229,52 @@ func buildDiagnosisSnapshot(summaries []WorkerSummaryResponse) diagnosisSnapshot
 	}
 }
 
+func relatedDiagnosisClusters(diagnosis diagnosisSnapshot, workerID, failureSignature, probableSubsystem string) []diagnosisCluster {
+	clusters := make([]diagnosisCluster, 0, 3)
+	seen := make(map[string]struct{})
+
+	appendCluster := func(cluster diagnosisCluster) {
+		if len(clusters) >= 3 {
+			return
+		}
+		if _, ok := seen[cluster.Key]; ok {
+			return
+		}
+		seen[cluster.Key] = struct{}{}
+		clusters = append(clusters, cluster)
+	}
+
+	for _, cluster := range diagnosis.Clusters {
+		if diagnosisClusterHasWorker(cluster, workerID) {
+			appendCluster(cluster)
+		}
+	}
+	for _, cluster := range diagnosis.Clusters {
+		if failureSignature != "" && cluster.Signature == failureSignature {
+			appendCluster(cluster)
+		}
+	}
+	for _, cluster := range diagnosis.Clusters {
+		if probableSubsystem != "" && cluster.ProbableSubsystem == probableSubsystem {
+			appendCluster(cluster)
+		}
+	}
+	for _, cluster := range diagnosis.Clusters {
+		appendCluster(cluster)
+	}
+
+	return clusters
+}
+
+func diagnosisClusterHasWorker(cluster diagnosisCluster, workerID string) bool {
+	for _, worker := range cluster.Workers {
+		if worker.ID == workerID {
+			return true
+		}
+	}
+	return false
+}
+
 func buildDiagnosisClusters(summaries []WorkerSummaryResponse) []diagnosisCluster {
 	type clusterAccumulator struct {
 		stage      string
@@ -389,6 +435,48 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 		)
 	}
 
+	if len(bundle.TriageCommands) > 0 {
+		sections = append(
+			sections,
+			"",
+			"<control_plane_access>",
+			"The control-plane API uses HTTP basic auth in production.",
+			`Export SOAK_BASIC_AUTH_USERNAME and SOAK_BASIC_AUTH_PASSWORD or source .envrc before running the curl commands below.`,
+			`Use the provided incident and diagnosis curl commands as written so you can compare the worker-specific evidence against the live fleet diagnosis.`,
+			"</control_plane_access>",
+		)
+	}
+
+	if bundle.Diagnosis.Headline != "" {
+		sections = append(
+			sections,
+			"",
+			"<fleet_diagnosis>",
+			fmt.Sprintf("headline: %s", bundle.Diagnosis.Headline),
+			fmt.Sprintf("summary: %s", bundle.Diagnosis.Summary),
+			fmt.Sprintf("probable_subsystem: %s", valueOrUnknown(bundle.Diagnosis.ProbableSubsystem)),
+			fmt.Sprintf("confidence: %s", valueOrUnknown(bundle.Diagnosis.Confidence)),
+			fmt.Sprintf("affected_workers: %d", bundle.Diagnosis.AffectedWorkers),
+			fmt.Sprintf("dominant_stage: %s", valueOrUnknown(bundle.Diagnosis.DominantStage)),
+			fmt.Sprintf("dominant_signature: %s", valueOrUnknown(bundle.Diagnosis.DominantSignature)),
+			"why_likely:",
+			bulletLines(bundle.Diagnosis.WhyLikely),
+			"next_steps:",
+			bulletLines(bundle.Diagnosis.NextSteps),
+			"</fleet_diagnosis>",
+		)
+	}
+
+	if len(bundle.RelatedClusters) > 0 {
+		sections = append(
+			sections,
+			"",
+			"<related_clusters>",
+			mustJSON(bundle.RelatedClusters),
+			"</related_clusters>",
+		)
+	}
+
 	sections = append(
 		sections,
 		"",
@@ -463,11 +551,11 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 func promptTask(mode promptMode) string {
 	switch mode {
 	case promptModeLitestream:
-		return "Assume the most likely issue is in Litestream sync, restore, or replication behavior. Use the incident evidence to explain whether the failure is in the control socket, restore path, replica object fetch path, or restore correctness."
+		return "Assume the most likely issue is in Litestream sync, restore, or replication behavior. Use both the worker incident evidence and the fleet diagnosis to explain whether the failure is in the control socket, restore path, replica object fetch path, or restore correctness."
 	case promptModeHarness:
-		return "Assume Litestream may be innocent. Use the incident evidence to look for worker-harness issues, runtime conditions, bad timeouts, bad config, Fly machine problems, or dataset-specific behavior."
+		return "Assume Litestream may be innocent. Use both the worker incident evidence and the fleet diagnosis to look for worker-harness issues, runtime conditions, bad timeouts, bad config, Fly machine problems, or dataset-specific behavior."
 	default:
-		return "Classify the likely subsystem first, rank the top hypotheses, and recommend the fastest next commands or log locations. Do not jump straight to code changes."
+		return "Classify the likely subsystem first, rank the top hypotheses, and use the fleet diagnosis to decide whether this looks shared across workers or isolated before recommending next commands or log locations. Do not jump straight to code changes."
 	}
 }
 
@@ -478,24 +566,25 @@ func promptReturnFormat(mode promptMode) string {
 			"1. Most likely Litestream subsystem",
 			"2. Evidence for that subsystem",
 			"3. Competing hypotheses",
-			"4. Exact next commands or files to inspect",
-			"5. Whether this looks shared across workers or isolated",
+			"4. Whether this looks shared across the fleet or isolated, using the fleet diagnosis and related clusters",
+			"5. Exact next commands or files to inspect, preferring the auth-safe control-plane and Fly commands already provided",
 		}, "\n")
 	case promptModeHarness:
 		return strings.Join([]string{
 			"1. Most likely non-Litestream cause",
 			"2. Evidence for that cause",
 			"3. What would falsify this hypothesis",
-			"4. Exact next commands or files to inspect",
-			"5. Whether the workload shape itself is a clue",
+			"4. Whether the workload shape or fleet clustering is a clue",
+			"5. Exact next commands or files to inspect, preferring the auth-safe control-plane and Fly commands already provided",
 		}, "\n")
 	default:
 		return strings.Join([]string{
 			"1. Likely subsystem",
 			"2. Top three hypotheses ranked",
 			"3. Evidence for each",
-			"4. Fastest next commands or logs",
-			"5. Whether to investigate Litestream, runtime, S3, or the harness first",
+			"4. Whether this looks shared across the fleet or isolated, with evidence",
+			"5. Fastest next commands or logs, preferring the auth-safe control-plane and Fly commands already provided",
+			"6. Whether to investigate Litestream, runtime, S3, or the harness first",
 		}, "\n")
 	}
 }

@@ -169,10 +169,15 @@ Litestream or runtime issue.
 Every worker summary and incident bundle includes commands like:
 
 ```bash
+export SOAK_BASIC_AUTH_USERNAME=...
+export SOAK_BASIC_AUTH_PASSWORD=...
 fly machine status <machine-id> -a litestream-soak
 fly logs -a litestream-soak -i <machine-id>
 fly ssh console -a litestream-soak
-curl -sS https://litestream-soak-ctl.fly.dev/api/workers/<worker-id>/incident | jq .
+curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  https://litestream-soak-ctl.fly.dev/api/workers/<worker-id>/incident | jq .
+curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  https://litestream-soak-ctl.fly.dev/api/diagnosis | jq .
 ```
 
 Inside the worker machine, these checks are usually the most useful:

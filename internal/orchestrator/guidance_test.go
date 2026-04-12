@@ -1,7 +1,9 @@
 package orchestrator
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/workload"
@@ -149,4 +151,115 @@ func TestBuildDiagnosisSnapshotClustersMultipleFailureFamilies(t *testing.T) {
 	if diagnosis.Clusters[0].Confidence != "high" {
 		t.Fatalf("top cluster confidence=%q", diagnosis.Clusters[0].Confidence)
 	}
+}
+
+func TestRelatedDiagnosisClustersPrefersWorkerCluster(t *testing.T) {
+	diagnosis := diagnosisSnapshot{
+		Clusters: []diagnosisCluster{
+			{
+				Key:               "sync|litestream_sync_socket_refused|Litestream sync/control socket",
+				Signature:         "litestream_sync_socket_refused",
+				ProbableSubsystem: "Litestream sync/control socket",
+				Workers: []diagnosisWorkerRef{
+					{ID: "worker-main-burst-vol", Name: "worker-main-burst-vol"},
+					{ID: "worker-main-high-vol", Name: "worker-main-high-vol"},
+				},
+			},
+			{
+				Key:               "restore|replica_s3_timeout|Replication or restore path",
+				Signature:         "replica_s3_timeout",
+				ProbableSubsystem: "Replication or restore path",
+				Workers: []diagnosisWorkerRef{
+					{ID: "worker-main-taxi-replay", Name: "worker-main-taxi-replay"},
+				},
+			},
+		},
+	}
+
+	clusters := relatedDiagnosisClusters(diagnosis, "worker-main-burst-vol", "litestream_sync_socket_refused", "Litestream sync/control socket")
+	if len(clusters) == 0 {
+		t.Fatal("expected related clusters")
+	}
+	if clusters[0].Signature != "litestream_sync_socket_refused" {
+		t.Fatalf("first related cluster=%q", clusters[0].Signature)
+	}
+}
+
+func TestBuildTriageCommandsUseBasicAuth(t *testing.T) {
+	commands := buildTriageCommands(model.Worker{ID: "worker-main-burst-vol", AppName: "litestream-soak"}, false)
+	text := strings.Join(commands, "\n")
+
+	if !strings.Contains(text, "SOAK_BASIC_AUTH_USERNAME") {
+		t.Fatalf("triage commands missing basic auth vars: %s", text)
+	}
+	if !strings.Contains(text, "/api/diagnosis") {
+		t.Fatalf("triage commands missing diagnosis endpoint: %s", text)
+	}
+}
+
+func TestBuildPromptIncludesFleetDiagnosisAndAuthGuidance(t *testing.T) {
+	bundle := &IncidentBundle{
+		GeneratedAt: timeMustParse("2026-04-11T21:00:00Z"),
+		Worker: model.Worker{
+			ID:     "worker-main-burst-vol",
+			Status: model.WorkerDegraded,
+		},
+		Workload: workload.Config{
+			LoadMode: "synthetic",
+			Pattern:  "burst",
+		},
+		FailureStage:      "sync",
+		FailureSignature:  "litestream_sync_socket_refused",
+		ProbableSubsystem: "Litestream sync/control socket",
+		Guide: incidentGuide{
+			Summary:           "The latest verification is failing during sync.",
+			ProbableSubsystem: "Litestream sync/control socket",
+			WhyLikely:         []string{"The latest verification is still failing."},
+			NextSteps:         []string{"Inspect the worker logs."},
+		},
+		Diagnosis: diagnosisSnapshot{
+			Headline:          "2 active failure clusters across 4 workers",
+			Summary:           "The dominant live cluster is litestream_sync_socket_refused during sync.",
+			ProbableSubsystem: "Litestream sync/control socket",
+			Confidence:        "high",
+			AffectedWorkers:   4,
+			DominantStage:     "sync",
+			DominantSignature: "litestream_sync_socket_refused",
+			WhyLikely:         []string{"3 workers share the dominant signature."},
+			NextSteps:         []string{"Open a representative worker first."},
+		},
+		RelatedClusters: []diagnosisCluster{
+			{
+				Key:               "sync|litestream_sync_socket_refused|Litestream sync/control socket",
+				Signature:         "litestream_sync_socket_refused",
+				ProbableSubsystem: "Litestream sync/control socket",
+			},
+		},
+		TriageCommands: []string{
+			`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/workers/worker-main-burst-vol/incident | jq .`,
+			`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/diagnosis | jq .`,
+		},
+	}
+
+	prompt := buildPrompt(bundle, promptModeLitestream)
+	for _, want := range []string{
+		"<fleet_diagnosis>",
+		"<related_clusters>",
+		"<control_plane_access>",
+		"shared across the fleet or isolated",
+		"SOAK_BASIC_AUTH_USERNAME",
+		"/api/diagnosis",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q", want)
+		}
+	}
+}
+
+func timeMustParse(raw string) time.Time {
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		panic(err)
+	}
+	return t
 }
