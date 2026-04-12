@@ -51,14 +51,14 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 4,
+        "h": 3,
         "w": 24,
         "x": 0,
         "y": 0
       },
       "id": 1,
       "options": {
-        "content": "### Operator Flow\n- Start here to answer: what is failing right now, which workers are affected, and whether the breakage is clustered.\n- Read the top cards first.\n- Then read **Verification By Worker** and **Control Status By Worker**. Those two panels should tell you where the problem is without opening a single table.\n- Use the tables below only after you already know what you are looking at.\n- Then jump to **Drilldown Dashboard** or **Selected Worker** for the actual investigation.",
+        "content": "**Read top cards, then `Verification By Worker` and `Control Status By Worker`. Click a worker row or timeline bar to open that worker in the control plane.**",
         "mode": "markdown"
       },
       "title": "Start Here",
@@ -87,7 +87,7 @@
         "h": 5,
         "w": 4,
         "x": 0,
-        "y": 4
+        "y": 3
       },
       "id": 2,
       "options": {
@@ -136,7 +136,7 @@
         "h": 5,
         "w": 4,
         "x": 4,
-        "y": 4
+        "y": 3
       },
       "id": 3,
       "options": {
@@ -185,7 +185,7 @@
         "h": 5,
         "w": 4,
         "x": 8,
-        "y": 4
+        "y": 3
       },
       "id": 4,
       "options": {
@@ -234,7 +234,7 @@
         "h": 5,
         "w": 4,
         "x": 12,
-        "y": 4
+        "y": 3
       },
       "id": 5,
       "options": {
@@ -283,7 +283,7 @@
         "h": 5,
         "w": 4,
         "x": 16,
-        "y": 4
+        "y": 3
       },
       "id": 6,
       "options": {
@@ -332,7 +332,7 @@
         "h": 5,
         "w": 4,
         "x": 20,
-        "y": 4
+        "y": 3
       },
       "id": 7,
       "options": {
@@ -367,7 +367,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 9
+        "y": 8
       },
       "id": 15,
       "options": {
@@ -417,7 +417,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 9
+        "y": 8
       },
       "id": 16,
       "options": {
@@ -459,7 +459,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 9
+        "y": 8
       },
       "id": 17,
       "options": {
@@ -498,6 +498,13 @@
     {
       "fieldConfig": {
         "defaults": {
+          "links": [
+            {
+              "targetBlank": true,
+              "title": "Open Worker",
+              "url": "https://litestream-soak-ctl.fly.dev/ui/workers/worker-main-${__series.name}"
+            }
+          ],
           "mappings": [
             {
               "options": {
@@ -520,7 +527,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 16
+        "y": 15
       },
       "id": 18,
       "options": {
@@ -548,6 +555,13 @@
     {
       "fieldConfig": {
         "defaults": {
+          "links": [
+            {
+              "targetBlank": true,
+              "title": "Open Worker",
+              "url": "https://litestream-soak-ctl.fly.dev/ui/workers/worker-main-${__series.name}"
+            }
+          ],
           "mappings": [
             {
               "options": {
@@ -570,7 +584,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 16
+        "y": 15
       },
       "id": 19,
       "options": {
@@ -598,13 +612,38 @@
     {
       "fieldConfig": {
         "defaults": {},
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Worker"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": true,
+                    "title": "Open Worker",
+                    "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__value.raw}"
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "data-links"
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 24
+        "y": 23
       },
       "id": 8,
       "options": {
@@ -723,13 +762,38 @@
     {
       "fieldConfig": {
         "defaults": {},
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Worker"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": true,
+                    "title": "Open Worker",
+                    "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__value.raw}"
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "data-links"
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 32
+        "y": 31
       },
       "id": 10,
       "options": {
@@ -844,13 +908,38 @@
     {
       "fieldConfig": {
         "defaults": {},
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Worker"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": true,
+                    "title": "Open Worker",
+                    "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__value.raw}"
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "data-links"
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 6,
         "w": 8,
         "x": 0,
-        "y": 40
+        "y": 39
       },
       "id": 12,
       "options": {
@@ -900,13 +989,38 @@
     {
       "fieldConfig": {
         "defaults": {},
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Worker"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": true,
+                    "title": "Open Worker",
+                    "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__value.raw}"
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "data-links"
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 6,
         "w": 8,
         "x": 8,
-        "y": 40
+        "y": 39
       },
       "id": 13,
       "options": {
@@ -958,13 +1072,38 @@
         "defaults": {
           "unit": "s"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Worker"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": true,
+                    "title": "Open Worker",
+                    "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__value.raw}"
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "data-links"
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 40
+        "y": 39
       },
       "id": 14,
       "options": {
@@ -1048,5 +1187,5 @@
   },
   "title": "Litestream Soak Overview",
   "uid": "litestream-soak-overview",
-  "version": 4
+  "version": 5
 }
