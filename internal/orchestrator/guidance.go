@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -84,6 +85,19 @@ type coverageSnapshot struct {
 	ReplayDatasets []coverageCount `json:"replay_datasets,omitempty"`
 	Profiles       []coverageCount `json:"profiles,omitempty"`
 	RuntimeStates  []coverageCount `json:"runtime_states,omitempty"`
+}
+
+type promptEventSummary struct {
+	CreatedAt             time.Time `json:"created_at"`
+	EventType             string    `json:"event_type"`
+	Message               string    `json:"message"`
+	CheckType             string    `json:"check_type,omitempty"`
+	VerificationStatus    string    `json:"verification_status,omitempty"`
+	Passed                *bool     `json:"passed,omitempty"`
+	FailureStage          string    `json:"failure_stage,omitempty"`
+	FailureSignature      string    `json:"failure_signature,omitempty"`
+	RuntimeSnapshotStatus string    `json:"runtime_snapshot_status,omitempty"`
+	RuntimeSnapshotError  string    `json:"runtime_snapshot_error,omitempty"`
 }
 
 func parsePromptMode(raw string, recommended string) promptMode {
@@ -517,6 +531,7 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 		fmt.Sprintf("replay_dataset: %s", valueOrUnknown(bundle.Workload.MetricReplayDataset())),
 		fmt.Sprintf("failure_stage: %s", valueOrUnknown(bundle.FailureStage)),
 		fmt.Sprintf("failure_signature: %s", valueOrUnknown(bundle.FailureSignature)),
+		fmt.Sprintf("current_runtime_snapshot_status: %s", valueOrUnknown(bundle.RuntimeSnapshotStatus)),
 		"</summary>",
 	)
 
@@ -529,6 +544,16 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 			"</reported_runtime>",
 		)
 	}
+
+	sections = append(
+		sections,
+		"",
+		"<runtime_interpretation>",
+		"The current <reported_runtime> block is the highest-priority runtime evidence for this worker.",
+		"Historical event summaries below are normalized per event timestamp so you can see whether older verification events came from healthy, legacy, or unhealthy runtime snapshots.",
+		"If current_runtime_snapshot_status is unhealthy, treat the current snapshot error as stronger evidence than older successful runtime fields embedded in historical verification payloads.",
+		"</runtime_interpretation>",
+	)
 
 	sections = append(
 		sections,
@@ -559,9 +584,9 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 		mustJSON(bundle.RecentVerifications),
 		"</recent_verifications>",
 		"",
-		"<recent_events>",
-		mustJSON(bundle.RecentEvents),
-		"</recent_events>",
+		"<recent_event_summaries>",
+		mustJSON(buildPromptEventSummaries(bundle.RecentEvents)),
+		"</recent_event_summaries>",
 		"",
 		"<workload>",
 		mustJSON(bundle.Workload),
@@ -588,6 +613,50 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 	}
 
 	return strings.Join(sections, "\n")
+}
+
+func buildPromptEventSummaries(events []model.Event) []promptEventSummary {
+	summaries := make([]promptEventSummary, 0, len(events))
+	for _, event := range events {
+		summary := promptEventSummary{
+			CreatedAt: event.CreatedAt,
+			EventType: event.EventType,
+			Message:   event.Message,
+		}
+
+		if strings.HasPrefix(event.EventType, "verification_") {
+			var payload reporting.VerificationPayload
+			if err := json.Unmarshal([]byte(event.Details), &payload); err == nil {
+				summary.CheckType = payload.CheckType
+				summary.VerificationStatus = payload.Status
+				summary.Passed = boolPtr(payload.Passed)
+
+				runtime := payload.RuntimePayload.Normalize(event.CreatedAt.UTC())
+				summary.RuntimeSnapshotStatus = reporting.SnapshotStatus(&runtime)
+				summary.RuntimeSnapshotError = runtime.LitestreamSnapshotError
+
+				verification := model.Verification{
+					WorkerID:     payload.WorkerID,
+					StartedAt:    payload.StartedAt,
+					Status:       payload.Status,
+					CheckType:    payload.CheckType,
+					Passed:       payload.Passed,
+					DurationMS:   payload.DurationMS,
+					ErrorMessage: payload.ErrorMessage,
+				}
+				summary.FailureStage = inferFailureStage(&verification)
+				summary.FailureSignature = inferFailureSignature(&verification)
+			}
+		}
+
+		summaries = append(summaries, summary)
+	}
+	return summaries
+}
+
+func boolPtr(value bool) *bool {
+	v := value
+	return &v
 }
 
 func promptTask(mode promptMode) string {

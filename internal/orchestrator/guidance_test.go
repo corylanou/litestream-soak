@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -264,6 +265,25 @@ func TestBuildTriageCommandsUseBasicAuth(t *testing.T) {
 }
 
 func TestBuildPromptIncludesFleetDiagnosisAndAuthGuidance(t *testing.T) {
+	legacyEventDetails, err := json.Marshal(reporting.VerificationPayload{
+		WorkerIdentity: reporting.WorkerIdentity{
+			WorkerID: "worker-main-burst-vol",
+		},
+		StartedAt:    timeMustParse("2026-04-11T20:30:00Z"),
+		CompletedAt:  timeMustParse("2026-04-11T20:30:02Z"),
+		CheckType:    "integrity",
+		Status:       "failed",
+		Passed:       false,
+		ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`,
+		RuntimePayload: reporting.RuntimePayload{
+			DBStatus: "replicating",
+			DBTXID:   42,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal event payload: %v", err)
+	}
+
 	bundle := &IncidentBundle{
 		GeneratedAt: timeMustParse("2026-04-11T21:00:00Z"),
 		Worker: model.Worker{
@@ -311,6 +331,14 @@ func TestBuildPromptIncludesFleetDiagnosisAndAuthGuidance(t *testing.T) {
 			`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/workers/worker-main-burst-vol/incident | jq .`,
 			`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/diagnosis | jq .`,
 		},
+		RecentEvents: []model.Event{
+			{
+				EventType: "verification_failed",
+				Message:   `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`,
+				Details:   string(legacyEventDetails),
+				CreatedAt: timeMustParse("2026-04-11T20:30:02Z"),
+			},
+		},
 	}
 
 	prompt := buildPrompt(bundle, promptModeLitestream)
@@ -320,13 +348,20 @@ func TestBuildPromptIncludesFleetDiagnosisAndAuthGuidance(t *testing.T) {
 		"<control_plane_access>",
 		"shared across the fleet or isolated",
 		"<reported_runtime>",
+		"<runtime_interpretation>",
+		"<recent_event_summaries>",
 		"litestream_snapshot_healthy",
+		"current_runtime_snapshot_status: unknown",
+		`"runtime_snapshot_status": "legacy"`,
 		"SOAK_BASIC_AUTH_USERNAME",
 		"/api/diagnosis",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q", want)
 		}
+	}
+	if strings.Contains(prompt, "<recent_events>") {
+		t.Fatalf("prompt should not include raw recent events: %s", prompt)
 	}
 }
 
