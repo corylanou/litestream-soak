@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
 	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
@@ -35,6 +36,7 @@ type homeWorker struct {
 	Worker                   model.Worker
 	LatestVerification       *model.Verification
 	Workload                 workload.Config
+	RuntimeSnapshotStatus    string
 	CurrentFailureStage      string
 	CurrentFailureSignature  string
 	CurrentProbableSubsystem string
@@ -63,6 +65,8 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"json":              mustJSON,
 	"joinList":          strings.Join,
 	"pathEscape":        url.PathEscape,
+	"runtimeClass":      runtimeSnapshotClass,
+	"runtimeLabel":      runtimeSnapshotLabel,
 	"shorten":           shortenText,
 	"statusClass":       statusClass,
 	"timeAgo":           formatTimeAgoPtr,
@@ -120,6 +124,7 @@ func (a *API) buildHomePageData() (homePageData, error) {
 			Worker:                   workerSummary.Worker,
 			LatestVerification:       workerSummary.LastVerification,
 			Workload:                 workerSummary.Workload,
+			RuntimeSnapshotStatus:    workerSummary.RuntimeSnapshotStatus,
 			CurrentFailureStage:      workerSummary.CurrentFailureStage,
 			CurrentFailureSignature:  workerSummary.CurrentFailureSignature,
 			CurrentProbableSubsystem: workerSummary.CurrentProbableSubsystem,
@@ -305,6 +310,32 @@ func heartbeatClass(value *time.Time) string {
 		return "status-warn"
 	default:
 		return "status-bad"
+	}
+}
+
+func runtimeSnapshotClass(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case reporting.RuntimeSnapshotStatusHealthy:
+		return "status-good"
+	case reporting.RuntimeSnapshotStatusLegacy:
+		return "status-warn"
+	case reporting.RuntimeSnapshotStatusUnhealthy:
+		return "status-bad"
+	default:
+		return "status-neutral"
+	}
+}
+
+func runtimeSnapshotLabel(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case reporting.RuntimeSnapshotStatusHealthy:
+		return "snapshot ok"
+	case reporting.RuntimeSnapshotStatusLegacy:
+		return "legacy telemetry"
+	case reporting.RuntimeSnapshotStatusUnhealthy:
+		return "snapshot unhealthy"
+	default:
+		return "snapshot missing"
 	}
 }
 
@@ -741,6 +772,13 @@ const homeBodyTemplate = `{{define "home_body"}}
           {{end}}
         </div>
         {{end}}
+        {{if .Coverage.RuntimeStates}}
+        <div class="chip-row">
+          {{range .Coverage.RuntimeStates}}
+          <span class="chip"><strong>{{.Count}}</strong> {{runtimeLabel .Label}}</span>
+          {{end}}
+        </div>
+        {{end}}
       </div>
     </div>
 
@@ -816,6 +854,7 @@ const homeBodyTemplate = `{{define "home_body"}}
             <th>Last Check</th>
             <th>Profile</th>
             <th>Workload</th>
+            <th>Telemetry</th>
             <th>Signal</th>
             <th style="width:80px;"></th>
           </tr>
@@ -833,6 +872,7 @@ const homeBodyTemplate = `{{define "home_body"}}
             </td>
             <td>{{.Worker.ProfileName}}</td>
             <td>{{.Workload.MetricLoadMode}}{{if ne .Workload.MetricReplayDataset "none"}} · {{.Workload.MetricReplayDataset}}{{end}}</td>
+            <td><span class="badge badge-{{if eq (runtimeClass .RuntimeSnapshotStatus) "status-good"}}good{{else if eq (runtimeClass .RuntimeSnapshotStatus) "status-warn"}}warn{{else if eq (runtimeClass .RuntimeSnapshotStatus) "status-bad"}}bad{{else}}neutral{{end}}">{{runtimeLabel .RuntimeSnapshotStatus}}</span></td>
             <td>
               {{if .CurrentFailureSignature}}
               <span class="badge badge-bad">{{shorten .CurrentFailureSignature 48}}</span>
@@ -1142,6 +1182,7 @@ const workerPageTemplate = `{{define "worker"}}
           {{if .Incident.Guide.ProbableSubsystem}}<span class="badge badge-warn">{{.Incident.Guide.ProbableSubsystem}}</span>{{end}}
           {{if .Incident.FailureStage}}<span class="badge badge-neutral">stage: {{.Incident.FailureStage}}</span>{{end}}
           {{if .Incident.FailureSignature}}<span class="badge badge-bad">{{shorten .Incident.FailureSignature 96}}</span>{{end}}
+          <span class="badge badge-{{if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-good"}}good{{else if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-warn"}}warn{{else if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-bad"}}bad{{else}}neutral{{end}}">{{runtimeLabel .Incident.RuntimeSnapshotStatus}}</span>
         </div>
         {{if .Incident.Guide.WhyLikely}}
         <ul>
@@ -1437,6 +1478,13 @@ const helpPageTemplate = `{{define "help"}}
           {{end}}
         </div>
         {{end}}
+        {{if .Coverage.RuntimeStates}}
+        <div class="badge-row">
+          {{range .Coverage.RuntimeStates}}
+          <span class="badge"><strong>{{.Count}}</strong> {{runtimeLabel .Label}}</span>
+          {{end}}
+        </div>
+        {{end}}
       </div>
     </div>
 
@@ -1474,6 +1522,7 @@ const helpPageTemplate = `{{define "help"}}
         <ol>
           <li>Start on <code>/ui</code> and find workers marked <code>degraded</code>.</li>
           <li>Open the failing worker page and record the failure stage, signature, and workload shape.</li>
+          <li>Check the worker telemetry badge before trusting runtime fields. <code>legacy telemetry</code> means those fields are advisory until the fleet image is refreshed.</li>
           <li>Use Grafana to see whether the failure is isolated or clustered by profile or replay dataset.</li>
           <li>Copy the AI prompt or incident JSON, then run the listed Fly triage commands.</li>
         </ol>

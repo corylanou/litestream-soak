@@ -7,6 +7,13 @@ import (
 
 const LegacyRuntimeTelemetryError = "worker telemetry did not include snapshot health metadata; litestream runtime fields may be stale"
 
+const (
+	RuntimeSnapshotStatusMissing   = "missing"
+	RuntimeSnapshotStatusHealthy   = "healthy"
+	RuntimeSnapshotStatusLegacy    = "legacy"
+	RuntimeSnapshotStatusUnhealthy = "unhealthy"
+)
+
 type WorkerIdentity struct {
 	WorkerID      string `json:"worker_id"`
 	Name          string `json:"name"`
@@ -57,6 +64,21 @@ func (p RuntimePayload) hasLitestreamRuntimeFields() bool {
 	}
 	status := strings.TrimSpace(p.DBStatus)
 	return status != "" && status != "unknown"
+}
+
+func SnapshotStatus(payload *RuntimePayload) string {
+	switch {
+	case payload == nil:
+		return RuntimeSnapshotStatusMissing
+	case payload.LitestreamSnapshotHealthy:
+		return RuntimeSnapshotStatusHealthy
+	case payload.LitestreamSnapshotError == LegacyRuntimeTelemetryError:
+		return RuntimeSnapshotStatusLegacy
+	case payload.hasSnapshotMetadata() || payload.hasLitestreamRuntimeFields():
+		return RuntimeSnapshotStatusUnhealthy
+	default:
+		return RuntimeSnapshotStatusMissing
+	}
 }
 
 type HeartbeatPayload struct {

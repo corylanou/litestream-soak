@@ -150,6 +150,7 @@ func TestBuildDiagnosisSnapshotClustersMultipleFailureFamilies(t *testing.T) {
 				LoadMode:      "replay",
 				ReplayDataset: "gharchive",
 			},
+			RuntimeSnapshotStatus:    reporting.RuntimeSnapshotStatusLegacy,
 			LastVerification:         &model.Verification{WorkerID: "w1"},
 			CurrentFailureStage:      "sync",
 			CurrentFailureSignature:  "litestream_sync_socket_refused",
@@ -161,6 +162,7 @@ func TestBuildDiagnosisSnapshotClustersMultipleFailureFamilies(t *testing.T) {
 				LoadMode: "synthetic",
 				Pattern:  "wave",
 			},
+			RuntimeSnapshotStatus:    reporting.RuntimeSnapshotStatusLegacy,
 			LastVerification:         &model.Verification{WorkerID: "w2"},
 			CurrentFailureStage:      "sync",
 			CurrentFailureSignature:  "litestream_sync_socket_refused",
@@ -172,6 +174,7 @@ func TestBuildDiagnosisSnapshotClustersMultipleFailureFamilies(t *testing.T) {
 				LoadMode:      "replay",
 				ReplayDataset: "taxi",
 			},
+			RuntimeSnapshotStatus:    reporting.RuntimeSnapshotStatusHealthy,
 			LastVerification:         &model.Verification{WorkerID: "w3"},
 			CurrentFailureStage:      "restore",
 			CurrentFailureSignature:  "replica_s3_timeout",
@@ -191,6 +194,28 @@ func TestBuildDiagnosisSnapshotClustersMultipleFailureFamilies(t *testing.T) {
 	}
 	if diagnosis.Clusters[0].Confidence != "high" {
 		t.Fatalf("top cluster confidence=%q", diagnosis.Clusters[0].Confidence)
+	}
+	if !strings.Contains(strings.Join(diagnosis.WhyLikely, "\n"), "legacy runtime telemetry") {
+		t.Fatalf("expected legacy runtime note in diagnosis why_likely, got %v", diagnosis.WhyLikely)
+	}
+	if !strings.Contains(strings.Join(diagnosis.NextSteps, "\n"), "Refresh the worker fleet image") {
+		t.Fatalf("expected fleet refresh note in diagnosis next_steps, got %v", diagnosis.NextSteps)
+	}
+}
+
+func TestBuildCoverageSnapshotIncludesRuntimeStates(t *testing.T) {
+	summaries := []WorkerSummaryResponse{
+		{Worker: model.Worker{ID: "w1", ProfileName: "low-volume"}, Workload: workload.Config{LoadMode: "synthetic"}, RuntimeSnapshotStatus: reporting.RuntimeSnapshotStatusHealthy},
+		{Worker: model.Worker{ID: "w2", ProfileName: "gharchive-replay"}, Workload: workload.Config{LoadMode: "replay", ReplayDataset: "gharchive"}, RuntimeSnapshotStatus: reporting.RuntimeSnapshotStatusLegacy},
+		{Worker: model.Worker{ID: "w3", ProfileName: "high-volume"}, Workload: workload.Config{LoadMode: "synthetic"}, RuntimeSnapshotStatus: reporting.RuntimeSnapshotStatusLegacy},
+	}
+
+	coverage := buildCoverageSnapshot(summaries)
+	if len(coverage.RuntimeStates) != 2 {
+		t.Fatalf("runtime state count=%d want 2", len(coverage.RuntimeStates))
+	}
+	if coverage.RuntimeStates[0].Label != reporting.RuntimeSnapshotStatusLegacy || coverage.RuntimeStates[0].Count != 2 {
+		t.Fatalf("top runtime state=%+v want legacy x2", coverage.RuntimeStates[0])
 	}
 }
 

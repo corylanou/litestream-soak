@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -14,6 +15,7 @@ type controlMetrics struct {
 	mu                  sync.Mutex
 	statusByWorker      map[string]string
 	workloadByWorker    map[string]labelMetricState
+	runtimeByWorker     map[string]labelMetricState
 	failureByWorker     map[string]failureMetricState
 	lastFailureByWorker map[string]failureMetricState
 }
@@ -62,6 +64,11 @@ var (
 		Help: "Unix timestamp when the most recent verification completed.",
 	}, []string{"worker_id", "profile", "source", "app_name", "region"})
 
+	controlWorkerRuntimeSnapshotStatus = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_runtime_snapshot_status",
+		Help: "Current runtime snapshot health classification tracked by the control plane.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region", "runtime_status"})
+
 	controlWorkerFailureInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_control_worker_failure_info",
 		Help: "Current failure classification tracked by the control plane.",
@@ -82,6 +89,7 @@ func NewControlMetrics(db *model.DB) *controlMetrics {
 	m := &controlMetrics{
 		statusByWorker:      make(map[string]string),
 		workloadByWorker:    make(map[string]labelMetricState),
+		runtimeByWorker:     make(map[string]labelMetricState),
 		failureByWorker:     make(map[string]failureMetricState),
 		lastFailureByWorker: make(map[string]failureMetricState),
 	}
@@ -120,6 +128,7 @@ func (m *controlMetrics) syncFromDB(db *model.DB) {
 func (m *controlMetrics) observeWorker(worker model.Worker) {
 	labels := workerMetricLabels(worker)
 	workloadCfg := resolveWorkerWorkload(worker)
+	runtimeStatus := reporting.SnapshotStatus(extractReportedRuntime(worker, nil))
 	workloadLabels := []string{
 		worker.ID,
 		worker.ProfileName,
@@ -136,6 +145,7 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 		metricIntLabel(workloadCfg.MemoryMB),
 		metricIntLabel(workloadCfg.CPUs),
 	}
+	runtimeLabels := append(labels, metricValueOrUnknown(runtimeStatus))
 
 	controlWorkerInfo.WithLabelValues(worker.ID, worker.GitSHA, worker.ProfileName, worker.Source, workerAppName(worker), workerRegion(worker)).Set(1)
 
@@ -144,12 +154,19 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 	m.statusByWorker[worker.ID] = string(worker.Status)
 	previousWorkload := m.workloadByWorker[worker.ID]
 	m.workloadByWorker[worker.ID] = labelMetricState{labels: workloadLabels}
+	previousRuntime := m.runtimeByWorker[worker.ID]
+	m.runtimeByWorker[worker.ID] = labelMetricState{labels: runtimeLabels}
 	m.mu.Unlock()
 
 	if len(previousWorkload.labels) > 0 && !sameMetricLabels(previousWorkload.labels, workloadLabels) {
 		controlWorkerWorkloadInfo.WithLabelValues(previousWorkload.labels...).Set(0)
 	}
 	controlWorkerWorkloadInfo.WithLabelValues(workloadLabels...).Set(1)
+
+	if len(previousRuntime.labels) > 0 && !sameMetricLabels(previousRuntime.labels, runtimeLabels) {
+		controlWorkerRuntimeSnapshotStatus.WithLabelValues(previousRuntime.labels...).Set(0)
+	}
+	controlWorkerRuntimeSnapshotStatus.WithLabelValues(runtimeLabels...).Set(1)
 
 	if previousStatus != "" && previousStatus != string(worker.Status) {
 		controlWorkerStatus.WithLabelValues(append(labels, previousStatus)...).Set(0)

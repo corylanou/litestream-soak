@@ -83,6 +83,7 @@ type coverageSnapshot struct {
 	LoadModes      []coverageCount `json:"load_modes,omitempty"`
 	ReplayDatasets []coverageCount `json:"replay_datasets,omitempty"`
 	Profiles       []coverageCount `json:"profiles,omitempty"`
+	RuntimeStates  []coverageCount `json:"runtime_states,omitempty"`
 }
 
 func parsePromptMode(raw string, recommended string) promptMode {
@@ -195,11 +196,15 @@ func buildDiagnosisSnapshot(summaries []WorkerSummaryResponse) diagnosisSnapshot
 	profiles := make([]string, 0)
 	datasets := make([]string, 0)
 	loadModes := make([]string, 0)
+	runtimeStates := make(map[string]int)
 	for _, cluster := range clusters {
 		totalAffectedWorkers += cluster.WorkerCount
 		profiles = append(profiles, cluster.AffectedProfiles...)
 		datasets = append(datasets, cluster.AffectedDatasets...)
 		loadModes = append(loadModes, cluster.AffectedLoadModes...)
+	}
+	for _, summary := range summaries {
+		runtimeStates[summary.RuntimeSnapshotStatus]++
 	}
 
 	topCluster := clusters[0]
@@ -221,6 +226,16 @@ func buildDiagnosisSnapshot(summaries []WorkerSummaryResponse) diagnosisSnapshot
 	if len(clusters) > 1 {
 		why = append(why, fmt.Sprintf("%d additional cluster(s) are active, so the fleet currently has more than one failure family.", len(clusters)-1))
 	}
+	if legacyCount := runtimeStates[reporting.RuntimeSnapshotStatusLegacy]; legacyCount > 0 {
+		why = append(why, fmt.Sprintf("%d worker(s) are still reporting legacy runtime telemetry, so their runtime fields should be treated as advisory until the fleet is refreshed.", legacyCount))
+	}
+
+	nextSteps := append([]string{}, topCluster.NextSteps...)
+	if legacyCount := runtimeStates[reporting.RuntimeSnapshotStatusLegacy]; legacyCount > 0 {
+		nextSteps = append([]string{
+			"Refresh the worker fleet image before treating runtime fields as ground truth on legacy workers.",
+		}, nextSteps...)
+	}
 
 	return diagnosisSnapshot{
 		Headline:          headline,
@@ -234,7 +249,7 @@ func buildDiagnosisSnapshot(summaries []WorkerSummaryResponse) diagnosisSnapshot
 		AffectedDatasets:  uniqueSortedStrings(datasets),
 		AffectedLoadModes: uniqueSortedStrings(loadModes),
 		WhyLikely:         why,
-		NextSteps:         topCluster.NextSteps,
+		NextSteps:         nextSteps,
 		Clusters:          clusters,
 	}
 }
@@ -394,6 +409,7 @@ func buildCoverageSnapshot(summaries []WorkerSummaryResponse) coverageSnapshot {
 	loadModes := make(map[string]int)
 	datasets := make(map[string]int)
 	profiles := make(map[string]int)
+	runtimeStates := make(map[string]int)
 
 	for _, summary := range summaries {
 		loadModes[summary.Workload.MetricLoadMode()]++
@@ -401,12 +417,14 @@ func buildCoverageSnapshot(summaries []WorkerSummaryResponse) coverageSnapshot {
 		if dataset := summary.Workload.MetricReplayDataset(); dataset != "none" {
 			datasets[dataset]++
 		}
+		runtimeStates[firstNonEmpty(summary.RuntimeSnapshotStatus, reporting.RuntimeSnapshotStatusMissing)]++
 	}
 
 	return coverageSnapshot{
 		LoadModes:      sortedCoverageCounts(loadModes),
 		ReplayDatasets: sortedCoverageCounts(datasets),
 		Profiles:       sortedCoverageCounts(profiles),
+		RuntimeStates:  sortedCoverageCounts(runtimeStates),
 	}
 }
 

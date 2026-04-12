@@ -23,18 +23,19 @@ type API struct {
 }
 
 type WorkerDetailResponse struct {
-	Worker              model.Worker              `json:"worker"`
-	Workload            workload.Config           `json:"workload"`
-	LatestFailure       *model.Verification       `json:"latest_failure,omitempty"`
-	FailureStage        string                    `json:"failure_stage,omitempty"`
-	FailureSignature    string                    `json:"failure_signature,omitempty"`
-	ProbableSubsystem   string                    `json:"probable_subsystem,omitempty"`
-	ReportedRuntime     *reporting.RuntimePayload `json:"reported_runtime,omitempty"`
-	TriageCommands      []string                  `json:"triage_commands,omitempty"`
-	RecentVerifications []model.Verification      `json:"recent_verifications"`
-	RecentEvents        []model.Event             `json:"recent_events"`
-	Machine             *flyapi.Machine           `json:"machine,omitempty"`
-	MachineError        string                    `json:"machine_error,omitempty"`
+	Worker                model.Worker              `json:"worker"`
+	Workload              workload.Config           `json:"workload"`
+	LatestFailure         *model.Verification       `json:"latest_failure,omitempty"`
+	FailureStage          string                    `json:"failure_stage,omitempty"`
+	FailureSignature      string                    `json:"failure_signature,omitempty"`
+	ProbableSubsystem     string                    `json:"probable_subsystem,omitempty"`
+	RuntimeSnapshotStatus string                    `json:"runtime_snapshot_status,omitempty"`
+	ReportedRuntime       *reporting.RuntimePayload `json:"reported_runtime,omitempty"`
+	TriageCommands        []string                  `json:"triage_commands,omitempty"`
+	RecentVerifications   []model.Verification      `json:"recent_verifications"`
+	RecentEvents          []model.Event             `json:"recent_events"`
+	Machine               *flyapi.Machine           `json:"machine,omitempty"`
+	MachineError          string                    `json:"machine_error,omitempty"`
 }
 
 type FailureResponse struct {
@@ -49,6 +50,7 @@ type FailureResponse struct {
 type WorkerSummaryResponse struct {
 	Worker                   model.Worker        `json:"worker"`
 	Workload                 workload.Config     `json:"workload"`
+	RuntimeSnapshotStatus    string              `json:"runtime_snapshot_status,omitempty"`
 	LastVerification         *model.Verification `json:"last_verification,omitempty"`
 	LatestFailure            *model.Verification `json:"latest_failure,omitempty"`
 	CurrentFailureStage      string              `json:"current_failure_stage,omitempty"`
@@ -61,25 +63,26 @@ type WorkerSummaryResponse struct {
 }
 
 type IncidentBundle struct {
-	GeneratedAt         time.Time                 `json:"generated_at"`
-	Worker              model.Worker              `json:"worker"`
-	Workload            workload.Config           `json:"workload"`
-	LatestFailure       *model.Verification       `json:"latest_failure,omitempty"`
-	ActiveFailure       bool                      `json:"active_failure"`
-	FailureStage        string                    `json:"failure_stage,omitempty"`
-	FailureSignature    string                    `json:"failure_signature,omitempty"`
-	ProbableSubsystem   string                    `json:"probable_subsystem,omitempty"`
-	ReportedRuntime     *reporting.RuntimePayload `json:"reported_runtime,omitempty"`
-	Guide               incidentGuide             `json:"guide"`
-	Diagnosis           diagnosisSnapshot         `json:"diagnosis"`
-	RelatedClusters     []diagnosisCluster        `json:"related_clusters,omitempty"`
-	PromptModes         []promptModeInfo          `json:"prompt_modes,omitempty"`
-	RecentVerifications []model.Verification      `json:"recent_verifications"`
-	RecentEvents        []model.Event             `json:"recent_events"`
-	Machine             *flyapi.Machine           `json:"machine,omitempty"`
-	MachineError        string                    `json:"machine_error,omitempty"`
-	TriageCommands      []string                  `json:"triage_commands,omitempty"`
-	Prompt              string                    `json:"prompt"`
+	GeneratedAt           time.Time                 `json:"generated_at"`
+	Worker                model.Worker              `json:"worker"`
+	Workload              workload.Config           `json:"workload"`
+	LatestFailure         *model.Verification       `json:"latest_failure,omitempty"`
+	ActiveFailure         bool                      `json:"active_failure"`
+	FailureStage          string                    `json:"failure_stage,omitempty"`
+	FailureSignature      string                    `json:"failure_signature,omitempty"`
+	ProbableSubsystem     string                    `json:"probable_subsystem,omitempty"`
+	RuntimeSnapshotStatus string                    `json:"runtime_snapshot_status,omitempty"`
+	ReportedRuntime       *reporting.RuntimePayload `json:"reported_runtime,omitempty"`
+	Guide                 incidentGuide             `json:"guide"`
+	Diagnosis             diagnosisSnapshot         `json:"diagnosis"`
+	RelatedClusters       []diagnosisCluster        `json:"related_clusters,omitempty"`
+	PromptModes           []promptModeInfo          `json:"prompt_modes,omitempty"`
+	RecentVerifications   []model.Verification      `json:"recent_verifications"`
+	RecentEvents          []model.Event             `json:"recent_events"`
+	Machine               *flyapi.Machine           `json:"machine,omitempty"`
+	MachineError          string                    `json:"machine_error,omitempty"`
+	TriageCommands        []string                  `json:"triage_commands,omitempty"`
+	Prompt                string                    `json:"prompt"`
 }
 
 func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *AlertDispatcher) *API {
@@ -225,9 +228,10 @@ func (a *API) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, error) {
 	summary := WorkerSummaryResponse{
-		Worker:         worker,
-		Workload:       resolveWorkerWorkload(worker),
-		TriageCommands: buildTriageCommands(worker, worker.FlyMachineID != ""),
+		Worker:                worker,
+		Workload:              resolveWorkerWorkload(worker),
+		RuntimeSnapshotStatus: reporting.SnapshotStatus(extractReportedRuntime(worker, nil)),
+		TriageCommands:        buildTriageCommands(worker, worker.FlyMachineID != ""),
 	}
 
 	verifications, err := a.db.ListVerifications(worker.ID, 1)
@@ -427,6 +431,7 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 		RecentEvents:        events,
 		TriageCommands:      buildTriageCommands(*worker, false),
 	}
+	response.RuntimeSnapshotStatus = reporting.SnapshotStatus(response.ReportedRuntime)
 
 	for _, verification := range verifications {
 		if verification.Passed && verification.Status != "failed" {
@@ -487,22 +492,23 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 	reportedRuntime := extractReportedRuntime(detail.Worker, detail.RecentEvents)
 
 	bundle := &IncidentBundle{
-		GeneratedAt:         time.Now().UTC(),
-		Worker:              detail.Worker,
-		Workload:            detail.Workload,
-		LatestFailure:       latestFailure,
-		ActiveFailure:       activeFailureDetected,
-		FailureStage:        inferFailureStage(latestFailure),
-		FailureSignature:    inferFailureSignature(latestFailure),
-		ProbableSubsystem:   probableSubsystem,
-		ReportedRuntime:     reportedRuntime,
-		Diagnosis:           diagnosis,
-		RelatedClusters:     relatedDiagnosisClusters(diagnosis, detail.Worker.ID, inferFailureSignature(latestFailure), probableSubsystem),
-		RecentVerifications: detail.RecentVerifications,
-		RecentEvents:        detail.RecentEvents,
-		Machine:             detail.Machine,
-		MachineError:        detail.MachineError,
-		TriageCommands:      buildTriageCommands(detail.Worker, detail.Machine != nil),
+		GeneratedAt:           time.Now().UTC(),
+		Worker:                detail.Worker,
+		Workload:              detail.Workload,
+		LatestFailure:         latestFailure,
+		ActiveFailure:         activeFailureDetected,
+		FailureStage:          inferFailureStage(latestFailure),
+		FailureSignature:      inferFailureSignature(latestFailure),
+		ProbableSubsystem:     probableSubsystem,
+		RuntimeSnapshotStatus: reporting.SnapshotStatus(reportedRuntime),
+		ReportedRuntime:       reportedRuntime,
+		Diagnosis:             diagnosis,
+		RelatedClusters:       relatedDiagnosisClusters(diagnosis, detail.Worker.ID, inferFailureSignature(latestFailure), probableSubsystem),
+		RecentVerifications:   detail.RecentVerifications,
+		RecentEvents:          detail.RecentEvents,
+		Machine:               detail.Machine,
+		MachineError:          detail.MachineError,
+		TriageCommands:        buildTriageCommands(detail.Worker, detail.Machine != nil),
 	}
 	bundle.Guide = buildIncidentGuide(bundle)
 	bundle.PromptModes = buildPromptModes(bundle.Guide.RecommendedPromptMode)

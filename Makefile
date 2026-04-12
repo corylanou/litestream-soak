@@ -3,7 +3,7 @@ LITESTREAM_REPO ?= ../../../benbjohnson/litestream
 WORKER_IMAGE ?= registry.fly.io/litestream-soak:worker-$(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 LOCAL_DATA_DIR ?= /tmp/litestream-soak
 
-.PHONY: build build-worker build-deps test vet clean run-local clean-local docker-worker
+.PHONY: build build-worker build-deps test vet clean run-local clean-local docker-worker refresh-worker-fleet
 
 build:
 	go build -o bin/soakworker ./cmd/soakworker
@@ -64,3 +64,6 @@ test-replay: build-worker
 
 docker-worker:
 	docker build -f Dockerfile.worker --build-arg LITESTREAM_SHA=$(LITESTREAM_SHA) -t $(WORKER_IMAGE) .
+
+refresh-worker-fleet:
+	./scripts/refresh-worker-fleet.sh

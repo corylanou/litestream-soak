@@ -48,3 +48,45 @@ func TestRuntimePayloadNormalizeMarksLegacyTelemetry(t *testing.T) {
 		t.Fatalf("snapshot_collected_at=%s want %s", normalized.SnapshotCollectedAt, observedAt)
 	}
 }
+
+func TestSnapshotStatus(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload *RuntimePayload
+		want    string
+	}{
+		{
+			name: "missing",
+			want: RuntimeSnapshotStatusMissing,
+		},
+		{
+			name: "healthy",
+			payload: &RuntimePayload{
+				LitestreamSnapshotHealthy: true,
+			},
+			want: RuntimeSnapshotStatusHealthy,
+		},
+		{
+			name: "legacy",
+			payload: &RuntimePayload{
+				LitestreamSnapshotError: LegacyRuntimeTelemetryError,
+			},
+			want: RuntimeSnapshotStatusLegacy,
+		},
+		{
+			name: "unhealthy",
+			payload: &RuntimePayload{
+				LitestreamSnapshotError: "dial unix /data/litestream.sock: connect: connection refused",
+			},
+			want: RuntimeSnapshotStatusUnhealthy,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SnapshotStatus(tt.payload); got != tt.want {
+				t.Fatalf("SnapshotStatus()=%q want %q", got, tt.want)
+			}
+		})
+	}
+}

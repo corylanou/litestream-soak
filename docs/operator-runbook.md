@@ -37,7 +37,7 @@ The home page is the fastest answer to "is anything wrong right now?" It shows:
 - a live-updating diagnosis summary that refreshes without a full page reload
 - active failure clusters with confidence, affected workload shapes, and a representative worker
 - an incident spotlight for the most urgent recent failure
-- a worker table with status, heartbeat age, last check, and profile
+- a worker table with status, heartbeat age, last check, profile, and telemetry health
 - a failure queue with recent failed verifications
 - an event feed
 
@@ -56,6 +56,7 @@ This page is the incident page. It gives you:
 - recent verification history
 - recent event history
 - Fly machine metadata
+- runtime snapshot status so you know whether DB status and sync-age fields are trustworthy
 - a copyable AI prompt bundle
 
 ### JSON Endpoints
@@ -98,6 +99,8 @@ The control plane helps in four ways:
 4. It preserves recent verification history so you can tell whether the worker
    is stuck, flapping, or recovered.
 5. It gives exact next-step commands for the affected Fly machine.
+6. It tells you whether the worker is on healthy telemetry, legacy telemetry,
+   or an unhealthy runtime snapshot before you trust runtime fields.
 
 The incident prompt is built from the worker, workload, latest failure, recent
 verifications, recent events, machine metadata, and triage commands in
@@ -143,6 +146,46 @@ If four workers with different profiles all start failing on the same `/sync`
 step within minutes, that points away from one bad dataset and toward a shared
 Litestream or runtime issue.
 
+## Telemetry Health And Fleet Drift
+
+The control plane now classifies worker runtime telemetry as:
+
+- `snapshot ok`
+- `legacy telemetry`
+- `snapshot unhealthy`
+- `snapshot missing`
+
+Interpret them this way:
+
+- `snapshot ok`: the worker is reporting the new snapshot-health fields, so DB
+  status, TXID, and sync-age fields are current enough to trust.
+- `legacy telemetry`: the worker is still sending the older payload shape. The
+  runtime fields may be stale and should be treated as advisory.
+- `snapshot unhealthy`: the worker attempted to collect Litestream runtime
+  stats and failed. The snapshot error is real signal.
+- `snapshot missing`: the control plane has not received a usable runtime
+  snapshot yet.
+
+If several workers show `legacy telemetry` while a newer worker shows
+`snapshot ok`, the fleet is likely split across worker images. `fly deploy`
+updates the default `app` machine, but it does not automatically refresh every
+worker machine in this fleet layout.
+
+Use this dry-run command to inspect fleet image drift:
+
+```bash
+make refresh-worker-fleet
+```
+
+To execute the refresh:
+
+```bash
+RUN=1 make refresh-worker-fleet
+```
+
+That command updates non-`app` worker machines to the newest image discovered
+from the app.
+
 ## Standard Triage Flow
 
 1. Open the control plane home page.
@@ -155,12 +198,14 @@ Litestream or runtime issue.
    - replay dataset, if any
    - failure stage
    - failure signature
+   - telemetry status
    - last heartbeat
    - last verification duration
 5. Compare against Grafana:
    - is the failure clustered by profile?
    - is it clustered by replay dataset?
    - are sync age or restart counters also moving?
+   - are the affected workers on `legacy telemetry` or `snapshot ok`?
 6. Copy the prompt bundle or incident JSON.
 7. Run the triage commands from the worker page or API response.
 
@@ -275,6 +320,9 @@ Workers send this to the control plane:
 - the latest Litestream runtime snapshot error when the control socket polls fail
 - verification status, duration, summary, and error text
 
+The control plane also normalizes older worker payloads so legacy telemetry is
+flagged explicitly instead of being silently treated as current.
+
 That reporting contract lives in `internal/reporting/types.go`.
 
 ## Current Operator Mental Model
@@ -309,7 +357,12 @@ Use the incident bundle to answer:
    - restore failures
    - integrity-check failures
    - `/sync` socket or timeout failures
-5. Practice one investigation with:
+5. Learn the telemetry status badges:
+   - `snapshot ok`
+   - `legacy telemetry`
+   - `snapshot unhealthy`
+   - `snapshot missing`
+6. Practice one investigation with:
    - control plane
    - Grafana
    - Fly logs
