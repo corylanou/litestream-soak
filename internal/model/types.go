@@ -32,6 +32,8 @@ type Worker struct {
 	UpdatedAt       time.Time    `json:"updated_at"`
 	LastHeartbeatAt *time.Time   `json:"last_heartbeat_at,omitempty"`
 	ErrorMessage    string       `json:"error_message,omitempty"`
+	LastRuntimeJSON string       `json:"-"`
+	LastRuntimeAt   *time.Time   `json:"-"`
 }
 
 type Verification struct {

@@ -2,6 +2,7 @@ package model
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -28,7 +29,9 @@ CREATE TABLE IF NOT EXISTS workers (
     created_at DATETIME NOT NULL DEFAULT (datetime('now')),
     updated_at DATETIME NOT NULL DEFAULT (datetime('now')),
     last_heartbeat_at DATETIME,
-    error_message TEXT
+    error_message TEXT,
+    last_runtime_json TEXT NOT NULL DEFAULT '',
+    last_runtime_at DATETIME
 );
 
 CREATE TABLE IF NOT EXISTS verifications (
@@ -116,6 +119,8 @@ func ensureWorkerColumns(db *sql.DB) error {
 	statements := []string{
 		`ALTER TABLE workers ADD COLUMN app_name TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE workers ADD COLUMN region TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE workers ADD COLUMN last_runtime_json TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE workers ADD COLUMN last_runtime_at DATETIME`,
 	}
 
 	for _, statement := range statements {
@@ -178,6 +183,25 @@ func (d *DB) UpdateWorkerHeartbeat(id string) error {
 		UPDATE workers SET last_heartbeat_at = datetime('now'), updated_at = datetime('now')
 		WHERE id = ?`,
 		id,
+	)
+	return err
+}
+
+func (d *DB) UpdateWorkerRuntimeSnapshot(id string, payload reporting.RuntimePayload) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal runtime payload: %w", err)
+	}
+
+	reportedAt := payload.SnapshotCollectedAt
+	if reportedAt.IsZero() {
+		reportedAt = time.Now().UTC()
+	}
+
+	_, err = d.db.Exec(`
+		UPDATE workers SET last_runtime_json = ?, last_runtime_at = ?, updated_at = datetime('now')
+		WHERE id = ?`,
+		string(body), reportedAt, id,
 	)
 	return err
 }
@@ -250,7 +274,7 @@ func (d *DB) UpdateWorkerVerificationState(id string, passed bool, summary strin
 func (d *DB) GetWorker(id string) (*Worker, error) {
 	var w Worker
 	err := scanWorker(
-		d.db.QueryRow(`SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message FROM workers WHERE id = ?`, id),
+		d.db.QueryRow(`SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at FROM workers WHERE id = ?`, id),
 		&w,
 	)
 	if err != nil {
@@ -260,7 +284,7 @@ func (d *DB) GetWorker(id string) (*Worker, error) {
 }
 
 func (d *DB) ListWorkers(status string) ([]Worker, error) {
-	query := `SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message FROM workers`
+	query := `SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at FROM workers`
 	var args []any
 	if status != "" {
 		query += " WHERE status = ?"
@@ -287,7 +311,7 @@ func (d *DB) ListWorkers(status string) ([]Worker, error) {
 
 func (d *DB) ListExpiredWorkers() ([]Worker, error) {
 	rows, err := d.db.Query(`
-		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message
+		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at
 		FROM workers
 		WHERE expires_at IS NOT NULL AND expires_at < datetime('now') AND status NOT IN ('stopped', 'failed')
 		ORDER BY expires_at`)
@@ -638,7 +662,7 @@ func (d *DB) ListAlerts(limit int) ([]AlertDelivery, error) {
 
 func (d *DB) listWorkersBySource(source string) ([]Worker, error) {
 	rows, err := d.db.Query(`
-		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message
+		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at
 		FROM workers WHERE source = ? AND status NOT IN ('stopped', 'failed')
 		ORDER BY created_at`, source)
 	if err != nil {
@@ -681,7 +705,7 @@ func (d *DB) DeleteWorker(id string) error {
 func (d *DB) StaleWorkers(timeout time.Duration) ([]Worker, error) {
 	cutoff := time.Now().Add(-timeout)
 	rows, err := d.db.Query(`
-		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message
+		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at
 		FROM workers
 		WHERE status = 'running' AND last_heartbeat_at IS NOT NULL AND last_heartbeat_at < ?`,
 		cutoff)
@@ -706,8 +730,8 @@ type workerScanner interface {
 }
 
 func scanWorker(scanner workerScanner, w *Worker) error {
-	var appName, region, machineID, volumeID, errorMessage sql.NullString
-	var expiresAt, heartbeat sql.NullTime
+	var appName, region, machineID, volumeID, errorMessage, lastRuntimeJSON sql.NullString
+	var expiresAt, heartbeat, lastRuntimeAt sql.NullTime
 	var prNumber sql.NullInt64
 
 	if err := scanner.Scan(
@@ -728,6 +752,8 @@ func scanWorker(scanner workerScanner, w *Worker) error {
 		&w.UpdatedAt,
 		&heartbeat,
 		&errorMessage,
+		&lastRuntimeJSON,
+		&lastRuntimeAt,
 	); err != nil {
 		return err
 	}
@@ -755,6 +781,12 @@ func scanWorker(scanner workerScanner, w *Worker) error {
 	}
 	if errorMessage.Valid {
 		w.ErrorMessage = errorMessage.String
+	}
+	if lastRuntimeJSON.Valid {
+		w.LastRuntimeJSON = lastRuntimeJSON.String
+	}
+	if lastRuntimeAt.Valid {
+		w.LastRuntimeAt = &lastRuntimeAt.Time
 	}
 
 	return nil

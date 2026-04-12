@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -23,13 +24,7 @@ import (
 )
 
 type runtimeSnapshot struct {
-	UptimeSeconds           float64
-	DBSizeBytes             int64
-	WALSizeBytes            int64
-	DBTXID                  uint64
-	DBStatus                string
-	LastSyncAgeSeconds      float64
-	LitestreamUptimeSeconds float64
+	reporting.RuntimePayload
 }
 
 type Runner struct {
@@ -44,7 +39,15 @@ type Runner struct {
 }
 
 func NewRunner(cfg Config) *Runner {
-	return &Runner{cfg: cfg}
+	return &Runner{
+		cfg: cfg,
+		snapshot: runtimeSnapshot{
+			RuntimePayload: reporting.RuntimePayload{
+				DBStatus:                "unknown",
+				LitestreamSnapshotError: "litestream stats not collected yet",
+			},
+		},
+	}
 }
 
 func (r *Runner) Run(ctx context.Context) error {
@@ -399,10 +402,12 @@ func (r *Runner) pollDBStats() {
 	}
 
 	client := r.ipcClient()
-
-	r.pollTXID(client)
-	r.pollInfo(client)
-	r.pollList(client)
+	snapshot, err := r.collectLitestreamRuntime(client, time.Now().UTC())
+	if err != nil {
+		r.setLitestreamSnapshotFailure(time.Now().UTC(), err)
+		return
+	}
+	r.setLitestreamSnapshot(snapshot)
 }
 
 func (r *Runner) ipcClient() *http.Client {
@@ -416,10 +421,34 @@ func (r *Runner) ipcClient() *http.Client {
 	}
 }
 
-func (r *Runner) pollTXID(client *http.Client) {
+func (r *Runner) collectLitestreamRuntime(client *http.Client, collectedAt time.Time) (reporting.RuntimePayload, error) {
+	txid, err := r.pollTXID(client)
+	if err != nil {
+		return reporting.RuntimePayload{}, err
+	}
+	uptimeSeconds, err := r.pollInfo(client)
+	if err != nil {
+		return reporting.RuntimePayload{}, err
+	}
+	dbStatus, lastSyncAgeSeconds, err := r.pollList(client)
+	if err != nil {
+		return reporting.RuntimePayload{}, err
+	}
+
+	return reporting.RuntimePayload{
+		DBTXID:                    txid,
+		DBStatus:                  dbStatus,
+		LastSyncAgeSeconds:        lastSyncAgeSeconds,
+		LitestreamUptimeSeconds:   uptimeSeconds,
+		SnapshotCollectedAt:       collectedAt,
+		LitestreamSnapshotHealthy: true,
+	}, nil
+}
+
+func (r *Runner) pollTXID(client *http.Client) (uint64, error) {
 	resp, err := client.Get("http://localhost/txid?path=" + r.cfg.DBPath)
 	if err != nil {
-		return
+		return 0, fmt.Errorf("read txid: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -427,16 +456,15 @@ func (r *Runner) pollTXID(client *http.Client) {
 		TXID uint64 `json:"txid"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return
+		return 0, fmt.Errorf("decode txid: %w", err)
 	}
-	SetDBTXID(float64(result.TXID))
-	r.setDBTXID(result.TXID)
+	return result.TXID, nil
 }
 
-func (r *Runner) pollInfo(client *http.Client) {
+func (r *Runner) pollInfo(client *http.Client) (float64, error) {
 	resp, err := client.Get("http://localhost/info")
 	if err != nil {
-		return
+		return 0, fmt.Errorf("read info: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -444,16 +472,15 @@ func (r *Runner) pollInfo(client *http.Client) {
 		UptimeSeconds int64 `json:"uptime_seconds"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return
+		return 0, fmt.Errorf("decode info: %w", err)
 	}
-	SetLitestreamUptime(float64(result.UptimeSeconds))
-	r.setLitestreamUptime(float64(result.UptimeSeconds))
+	return float64(result.UptimeSeconds), nil
 }
 
-func (r *Runner) pollList(client *http.Client) {
+func (r *Runner) pollList(client *http.Client) (string, float64, error) {
 	resp, err := client.Get("http://localhost/list")
 	if err != nil {
-		return
+		return "", 0, fmt.Errorf("read database list: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -464,17 +491,18 @@ func (r *Runner) pollList(client *http.Client) {
 		} `json:"databases"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return
+		return "", 0, fmt.Errorf("decode database list: %w", err)
 	}
-	for _, db := range result.Databases {
-		SetDBStatus(db.Status)
-		r.setDBStatus(db.Status)
-		if db.LastSyncAt != nil {
-			age := time.Since(*db.LastSyncAt).Seconds()
-			SetLastSyncAge(age)
-			r.setLastSyncAge(age)
-		}
+	if len(result.Databases) == 0 {
+		return "", 0, errors.New("database list was empty")
 	}
+
+	db := result.Databases[0]
+	age := 0.0
+	if db.LastSyncAt != nil {
+		age = time.Since(*db.LastSyncAt).Seconds()
+	}
+	return db.Status, age, nil
 }
 
 func (r *Runner) runVerifyLoop(ctx context.Context) error {
@@ -511,14 +539,8 @@ func (r *Runner) sendHeartbeat(ctx context.Context) {
 	defer cancel()
 
 	if err := r.reporter.SendHeartbeat(reportCtx, reporting.HeartbeatPayload{
-		SentAt:                  time.Now().UTC(),
-		UptimeSeconds:           snapshot.UptimeSeconds,
-		DBSizeBytes:             snapshot.DBSizeBytes,
-		WALSizeBytes:            snapshot.WALSizeBytes,
-		DBTXID:                  snapshot.DBTXID,
-		DBStatus:                snapshot.DBStatus,
-		LastSyncAgeSeconds:      snapshot.LastSyncAgeSeconds,
-		LitestreamUptimeSeconds: snapshot.LitestreamUptimeSeconds,
+		SentAt:         time.Now().UTC(),
+		RuntimePayload: snapshot.RuntimePayload,
 	}); err != nil {
 		slog.Warn("Failed to send heartbeat", "error", err)
 	}
@@ -534,20 +556,15 @@ func (r *Runner) sendVerification(ctx context.Context, result VerificationResult
 	defer cancel()
 
 	if err := r.reporter.SendVerification(reportCtx, reporting.VerificationPayload{
-		StartedAt:               result.StartedAt,
-		CompletedAt:             result.CompletedAt,
-		CheckType:               result.CheckType,
-		Status:                  result.Status,
-		Passed:                  result.Passed,
-		Summary:                 result.Summary,
-		ErrorMessage:            result.ErrorMessage,
-		DurationMS:              result.DurationMS,
-		DBSizeBytes:             result.DBSizeBytes,
-		WALSizeBytes:            result.WALSizeBytes,
-		DBTXID:                  snapshot.DBTXID,
-		DBStatus:                snapshot.DBStatus,
-		LastSyncAgeSeconds:      snapshot.LastSyncAgeSeconds,
-		LitestreamUptimeSeconds: snapshot.LitestreamUptimeSeconds,
+		StartedAt:      result.StartedAt,
+		CompletedAt:    result.CompletedAt,
+		CheckType:      result.CheckType,
+		Status:         result.Status,
+		Passed:         result.Passed,
+		Summary:        result.Summary,
+		ErrorMessage:   result.ErrorMessage,
+		DurationMS:     result.DurationMS,
+		RuntimePayload: snapshot.RuntimePayload,
 	}); err != nil {
 		slog.Warn("Failed to send verification report", "error", err)
 	}
@@ -562,41 +579,46 @@ func (r *Runner) currentSnapshot() runtimeSnapshot {
 func (r *Runner) setUptime(seconds float64) {
 	r.snapshotMu.Lock()
 	defer r.snapshotMu.Unlock()
-	r.snapshot.UptimeSeconds = seconds
+	r.snapshot.RuntimePayload.UptimeSeconds = seconds
 }
 
 func (r *Runner) setDBSize(bytes int64) {
 	r.snapshotMu.Lock()
 	defer r.snapshotMu.Unlock()
-	r.snapshot.DBSizeBytes = bytes
+	r.snapshot.RuntimePayload.DBSizeBytes = bytes
 }
 
 func (r *Runner) setWALSize(bytes int64) {
 	r.snapshotMu.Lock()
 	defer r.snapshotMu.Unlock()
-	r.snapshot.WALSizeBytes = bytes
+	r.snapshot.RuntimePayload.WALSizeBytes = bytes
 }
 
-func (r *Runner) setDBTXID(txid uint64) {
+func (r *Runner) setLitestreamSnapshot(snapshot reporting.RuntimePayload) {
 	r.snapshotMu.Lock()
 	defer r.snapshotMu.Unlock()
-	r.snapshot.DBTXID = txid
+	r.snapshot.RuntimePayload.DBTXID = snapshot.DBTXID
+	r.snapshot.RuntimePayload.DBStatus = snapshot.DBStatus
+	r.snapshot.RuntimePayload.LastSyncAgeSeconds = snapshot.LastSyncAgeSeconds
+	r.snapshot.RuntimePayload.LitestreamUptimeSeconds = snapshot.LitestreamUptimeSeconds
+	r.snapshot.RuntimePayload.SnapshotCollectedAt = snapshot.SnapshotCollectedAt
+	r.snapshot.RuntimePayload.LitestreamSnapshotHealthy = snapshot.LitestreamSnapshotHealthy
+	r.snapshot.RuntimePayload.LitestreamSnapshotError = snapshot.LitestreamSnapshotError
+	SetDBTXID(float64(snapshot.DBTXID))
+	SetDBStatus(snapshot.DBStatus)
+	SetLastSyncAge(snapshot.LastSyncAgeSeconds)
+	SetLitestreamUptime(snapshot.LitestreamUptimeSeconds)
+	SetLitestreamSnapshotHealthy(snapshot.LitestreamSnapshotHealthy)
 }
 
-func (r *Runner) setDBStatus(status string) {
-	r.snapshotMu.Lock()
-	defer r.snapshotMu.Unlock()
-	r.snapshot.DBStatus = status
-}
-
-func (r *Runner) setLastSyncAge(seconds float64) {
-	r.snapshotMu.Lock()
-	defer r.snapshotMu.Unlock()
-	r.snapshot.LastSyncAgeSeconds = seconds
-}
-
-func (r *Runner) setLitestreamUptime(seconds float64) {
-	r.snapshotMu.Lock()
-	defer r.snapshotMu.Unlock()
-	r.snapshot.LitestreamUptimeSeconds = seconds
+func (r *Runner) setLitestreamSnapshotFailure(collectedAt time.Time, err error) {
+	r.setLitestreamSnapshot(reporting.RuntimePayload{
+		DBTXID:                    0,
+		DBStatus:                  "unknown",
+		LastSyncAgeSeconds:        0,
+		LitestreamUptimeSeconds:   0,
+		SnapshotCollectedAt:       collectedAt,
+		LitestreamSnapshotHealthy: false,
+		LitestreamSnapshotError:   err.Error(),
+	})
 }

@@ -78,6 +78,11 @@ var (
 		Help: "Litestream process uptime.",
 	}, []string{"worker_id", "profile", "source"})
 
+	litestreamSnapshotHealthy = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_snapshot_healthy",
+		Help: "Whether the worker could refresh Litestream runtime stats on the last poll (1=yes, 0=no).",
+	}, []string{"worker_id", "profile", "source"})
+
 	dbStatus = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_db_status",
 		Help: "Database status (1=active, 0=inactive).",
@@ -145,6 +150,14 @@ func SetLastSyncAge(seconds float64) {
 
 func SetLitestreamUptime(seconds float64) {
 	litestreamUptime.WithLabelValues(currentMetricLabels()...).Set(seconds)
+}
+
+func SetLitestreamSnapshotHealthy(healthy bool) {
+	value := 0.0
+	if healthy {
+		value = 1
+	}
+	litestreamSnapshotHealthy.WithLabelValues(currentMetricLabels()...).Set(value)
 }
 
 func SetDBStatus(status string) {

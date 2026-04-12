@@ -271,6 +271,8 @@ Workers send this to the control plane:
 - DB status
 - last sync age
 - Litestream uptime
+- whether the Litestream runtime snapshot is healthy
+- the latest Litestream runtime snapshot error when the control socket polls fail
 - verification status, duration, summary, and error text
 
 That reporting contract lives in `internal/reporting/types.go`.

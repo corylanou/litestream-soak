@@ -13,7 +13,9 @@ CREATE TABLE IF NOT EXISTS workers (
     created_at DATETIME NOT NULL DEFAULT (datetime('now')),
     updated_at DATETIME NOT NULL DEFAULT (datetime('now')),
     last_heartbeat_at DATETIME,
-    error_message TEXT
+    error_message TEXT,
+    last_runtime_json TEXT NOT NULL DEFAULT '',
+    last_runtime_at DATETIME
 );
 
 CREATE TABLE IF NOT EXISTS verifications (

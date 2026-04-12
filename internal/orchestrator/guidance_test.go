@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
 	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
@@ -40,6 +41,11 @@ func TestBuildIncidentGuideSync(t *testing.T) {
 		ActiveFailure:    true,
 		FailureStage:     "sync",
 		FailureSignature: "litestream_sync_socket_refused",
+		ReportedRuntime: &reporting.RuntimePayload{
+			SnapshotCollectedAt:       timeMustParse("2026-04-11T21:05:00Z"),
+			LitestreamSnapshotHealthy: false,
+			LitestreamSnapshotError:   "read txid: dial unix /data/litestream.sock: connect: connection refused",
+		},
 		Workload: workload.Config{
 			LoadMode:      "replay",
 			ReplayDataset: "gharchive",
@@ -56,6 +62,41 @@ func TestBuildIncidentGuideSync(t *testing.T) {
 	}
 	if len(guide.NextSteps) == 0 {
 		t.Fatal("expected next steps")
+	}
+	if !strings.Contains(strings.Join(guide.WhyLikely, "\n"), "runtime snapshot is unhealthy") {
+		t.Fatalf("expected runtime snapshot note in why_likely, got %v", guide.WhyLikely)
+	}
+}
+
+func TestBuildIncidentGuideLegacyRuntimeTelemetry(t *testing.T) {
+	bundle := &IncidentBundle{
+		Worker: model.Worker{
+			ID:     "worker-main-burst-vol",
+			Status: model.WorkerDegraded,
+		},
+		ActiveFailure:    true,
+		FailureStage:     "sync",
+		FailureSignature: "litestream_sync_socket_refused",
+		ReportedRuntime: &reporting.RuntimePayload{
+			SnapshotCollectedAt:       timeMustParse("2026-04-12T01:40:51Z"),
+			DBStatus:                  "replicating",
+			LitestreamSnapshotHealthy: false,
+			LitestreamSnapshotError:   reporting.LegacyRuntimeTelemetryError,
+		},
+		Workload: workload.Config{
+			LoadMode: "synthetic",
+			Pattern:  "burst",
+		},
+	}
+
+	guide := buildIncidentGuide(bundle)
+	why := strings.Join(guide.WhyLikely, "\n")
+	steps := strings.Join(guide.NextSteps, "\n")
+	if !strings.Contains(why, "legacy runtime telemetry") {
+		t.Fatalf("expected legacy runtime note in why_likely, got %v", guide.WhyLikely)
+	}
+	if !strings.Contains(steps, "Treat runtime fields on this page as advisory") {
+		t.Fatalf("expected legacy runtime note in next_steps, got %v", guide.NextSteps)
 	}
 }
 
@@ -235,6 +276,12 @@ func TestBuildPromptIncludesFleetDiagnosisAndAuthGuidance(t *testing.T) {
 				ProbableSubsystem: "Litestream sync/control socket",
 			},
 		},
+		ReportedRuntime: &reporting.RuntimePayload{
+			SnapshotCollectedAt:       timeMustParse("2026-04-11T21:00:10Z"),
+			DBStatus:                  "unknown",
+			LitestreamSnapshotHealthy: false,
+			LitestreamSnapshotError:   "read txid: dial unix /data/litestream.sock: connect: connection refused",
+		},
 		TriageCommands: []string{
 			`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/workers/worker-main-burst-vol/incident | jq .`,
 			`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/diagnosis | jq .`,
@@ -247,6 +294,8 @@ func TestBuildPromptIncludesFleetDiagnosisAndAuthGuidance(t *testing.T) {
 		"<related_clusters>",
 		"<control_plane_access>",
 		"shared across the fleet or isolated",
+		"<reported_runtime>",
+		"litestream_snapshot_healthy",
 		"SOAK_BASIC_AUTH_USERNAME",
 		"/api/diagnosis",
 	} {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 type promptMode string
@@ -152,6 +153,15 @@ func buildIncidentGuide(bundle *IncidentBundle) incidentGuide {
 		why = append(why, fmt.Sprintf("This worker is exercising the %s replay dataset.", dataset))
 	} else {
 		why = append(why, fmt.Sprintf("This worker is running a %s synthetic workload.", bundle.Workload.MetricPattern()))
+	}
+	if bundle.ReportedRuntime != nil {
+		if bundle.ReportedRuntime.LitestreamSnapshotHealthy {
+			why = append(why, fmt.Sprintf("The latest Litestream runtime snapshot refreshed at %s.", bundle.ReportedRuntime.SnapshotCollectedAt.Format(timeFormatRFC3339)))
+		} else if bundle.ReportedRuntime.LitestreamSnapshotError == reporting.LegacyRuntimeTelemetryError {
+			why = append(why, fmt.Sprintf("This worker is still reporting legacy runtime telemetry as of %s, so runtime fields like db_status and last_sync_age_seconds should be treated as advisory.", bundle.ReportedRuntime.SnapshotCollectedAt.Format(timeFormatRFC3339)))
+		} else {
+			why = append(why, fmt.Sprintf("The latest Litestream runtime snapshot is unhealthy: %s.", valueOrUnknown(bundle.ReportedRuntime.LitestreamSnapshotError)))
+		}
 	}
 
 	nextSteps := incidentNextSteps(subsystem, bundle)
@@ -490,6 +500,20 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 		fmt.Sprintf("failure_stage: %s", valueOrUnknown(bundle.FailureStage)),
 		fmt.Sprintf("failure_signature: %s", valueOrUnknown(bundle.FailureSignature)),
 		"</summary>",
+	)
+
+	if bundle.ReportedRuntime != nil {
+		sections = append(
+			sections,
+			"",
+			"<reported_runtime>",
+			mustJSON(bundle.ReportedRuntime),
+			"</reported_runtime>",
+		)
+	}
+
+	sections = append(
+		sections,
 		"",
 		"<triage_commands>",
 		strings.Join(bundle.TriageCommands, "\n"),
@@ -618,6 +642,12 @@ func recommendedPromptModeForSubsystem(subsystem string) promptMode {
 
 func incidentNextSteps(subsystem string, bundle *IncidentBundle) []string {
 	steps := make([]string, 0, 6)
+	if bundle.ReportedRuntime != nil && bundle.ReportedRuntime.LitestreamSnapshotError == reporting.LegacyRuntimeTelemetryError {
+		steps = append(steps,
+			"Treat runtime fields on this page as advisory for this worker because it is still emitting legacy telemetry without snapshot-health metadata.",
+			"Use the verification failure, machine logs, and fleet diagnosis first; refresh the worker before trusting db_status or sync-age fields.",
+		)
+	}
 	switch subsystem {
 	case "Litestream sync/control socket":
 		steps = append(steps,

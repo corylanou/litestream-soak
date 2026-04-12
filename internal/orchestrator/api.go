@@ -23,17 +23,18 @@ type API struct {
 }
 
 type WorkerDetailResponse struct {
-	Worker              model.Worker         `json:"worker"`
-	Workload            workload.Config      `json:"workload"`
-	LatestFailure       *model.Verification  `json:"latest_failure,omitempty"`
-	FailureStage        string               `json:"failure_stage,omitempty"`
-	FailureSignature    string               `json:"failure_signature,omitempty"`
-	ProbableSubsystem   string               `json:"probable_subsystem,omitempty"`
-	TriageCommands      []string             `json:"triage_commands,omitempty"`
-	RecentVerifications []model.Verification `json:"recent_verifications"`
-	RecentEvents        []model.Event        `json:"recent_events"`
-	Machine             *flyapi.Machine      `json:"machine,omitempty"`
-	MachineError        string               `json:"machine_error,omitempty"`
+	Worker              model.Worker              `json:"worker"`
+	Workload            workload.Config           `json:"workload"`
+	LatestFailure       *model.Verification       `json:"latest_failure,omitempty"`
+	FailureStage        string                    `json:"failure_stage,omitempty"`
+	FailureSignature    string                    `json:"failure_signature,omitempty"`
+	ProbableSubsystem   string                    `json:"probable_subsystem,omitempty"`
+	ReportedRuntime     *reporting.RuntimePayload `json:"reported_runtime,omitempty"`
+	TriageCommands      []string                  `json:"triage_commands,omitempty"`
+	RecentVerifications []model.Verification      `json:"recent_verifications"`
+	RecentEvents        []model.Event             `json:"recent_events"`
+	Machine             *flyapi.Machine           `json:"machine,omitempty"`
+	MachineError        string                    `json:"machine_error,omitempty"`
 }
 
 type FailureResponse struct {
@@ -60,24 +61,25 @@ type WorkerSummaryResponse struct {
 }
 
 type IncidentBundle struct {
-	GeneratedAt         time.Time            `json:"generated_at"`
-	Worker              model.Worker         `json:"worker"`
-	Workload            workload.Config      `json:"workload"`
-	LatestFailure       *model.Verification  `json:"latest_failure,omitempty"`
-	ActiveFailure       bool                 `json:"active_failure"`
-	FailureStage        string               `json:"failure_stage,omitempty"`
-	FailureSignature    string               `json:"failure_signature,omitempty"`
-	ProbableSubsystem   string               `json:"probable_subsystem,omitempty"`
-	Guide               incidentGuide        `json:"guide"`
-	Diagnosis           diagnosisSnapshot    `json:"diagnosis"`
-	RelatedClusters     []diagnosisCluster   `json:"related_clusters,omitempty"`
-	PromptModes         []promptModeInfo     `json:"prompt_modes,omitempty"`
-	RecentVerifications []model.Verification `json:"recent_verifications"`
-	RecentEvents        []model.Event        `json:"recent_events"`
-	Machine             *flyapi.Machine      `json:"machine,omitempty"`
-	MachineError        string               `json:"machine_error,omitempty"`
-	TriageCommands      []string             `json:"triage_commands,omitempty"`
-	Prompt              string               `json:"prompt"`
+	GeneratedAt         time.Time                 `json:"generated_at"`
+	Worker              model.Worker              `json:"worker"`
+	Workload            workload.Config           `json:"workload"`
+	LatestFailure       *model.Verification       `json:"latest_failure,omitempty"`
+	ActiveFailure       bool                      `json:"active_failure"`
+	FailureStage        string                    `json:"failure_stage,omitempty"`
+	FailureSignature    string                    `json:"failure_signature,omitempty"`
+	ProbableSubsystem   string                    `json:"probable_subsystem,omitempty"`
+	ReportedRuntime     *reporting.RuntimePayload `json:"reported_runtime,omitempty"`
+	Guide               incidentGuide             `json:"guide"`
+	Diagnosis           diagnosisSnapshot         `json:"diagnosis"`
+	RelatedClusters     []diagnosisCluster        `json:"related_clusters,omitempty"`
+	PromptModes         []promptModeInfo          `json:"prompt_modes,omitempty"`
+	RecentVerifications []model.Verification      `json:"recent_verifications"`
+	RecentEvents        []model.Event             `json:"recent_events"`
+	Machine             *flyapi.Machine           `json:"machine,omitempty"`
+	MachineError        string                    `json:"machine_error,omitempty"`
+	TriageCommands      []string                  `json:"triage_commands,omitempty"`
+	Prompt              string                    `json:"prompt"`
 }
 
 func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *AlertDispatcher) *API {
@@ -302,8 +304,13 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if payload.Name == "" {
 		payload.Name = workerID
 	}
+	payload.RuntimePayload = payload.RuntimePayload.Normalize(payload.SentAt)
 
 	if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.db.UpdateWorkerRuntimeSnapshot(workerID, payload.RuntimePayload); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -325,8 +332,17 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	if payload.Name == "" {
 		payload.Name = workerID
 	}
+	observedAt := payload.CompletedAt
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+	payload.RuntimePayload = payload.RuntimePayload.Normalize(observedAt)
 
 	if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.db.UpdateWorkerRuntimeSnapshot(workerID, payload.RuntimePayload); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -406,6 +422,7 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 	response := &WorkerDetailResponse{
 		Worker:              *worker,
 		Workload:            resolveWorkerWorkload(*worker),
+		ReportedRuntime:     extractReportedRuntime(*worker, events),
 		RecentVerifications: verifications,
 		RecentEvents:        events,
 		TriageCommands:      buildTriageCommands(*worker, false),
@@ -467,6 +484,7 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 
 	diagnosis := buildDiagnosisSnapshot(summaries)
 	probableSubsystem := inferProbableSubsystem(inferFailureStage(latestFailure), inferFailureSignature(latestFailure))
+	reportedRuntime := extractReportedRuntime(detail.Worker, detail.RecentEvents)
 
 	bundle := &IncidentBundle{
 		GeneratedAt:         time.Now().UTC(),
@@ -477,6 +495,7 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 		FailureStage:        inferFailureStage(latestFailure),
 		FailureSignature:    inferFailureSignature(latestFailure),
 		ProbableSubsystem:   probableSubsystem,
+		ReportedRuntime:     reportedRuntime,
 		Diagnosis:           diagnosis,
 		RelatedClusters:     relatedDiagnosisClusters(diagnosis, detail.Worker.ID, inferFailureSignature(latestFailure), probableSubsystem),
 		RecentVerifications: detail.RecentVerifications,
@@ -489,6 +508,45 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 	bundle.PromptModes = buildPromptModes(bundle.Guide.RecommendedPromptMode)
 	bundle.Prompt = buildPrompt(bundle, parsePromptMode("", bundle.Guide.RecommendedPromptMode))
 	return bundle, http.StatusOK, nil
+}
+
+func extractReportedRuntime(worker model.Worker, events []model.Event) *reporting.RuntimePayload {
+	var observedAt time.Time
+	if worker.LastRuntimeAt != nil {
+		observedAt = worker.LastRuntimeAt.UTC()
+	}
+	if runtime := parseRuntimeJSON(worker.LastRuntimeJSON, observedAt); runtime != nil {
+		return runtime
+	}
+
+	for _, event := range events {
+		if !strings.HasPrefix(event.EventType, "verification_") {
+			continue
+		}
+
+		var payload reporting.VerificationPayload
+		if err := json.Unmarshal([]byte(event.Details), &payload); err != nil {
+			continue
+		}
+
+		runtime := payload.RuntimePayload.Normalize(event.CreatedAt.UTC())
+		return &runtime
+	}
+
+	return nil
+}
+
+func parseRuntimeJSON(raw string, observedAt time.Time) *reporting.RuntimePayload {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	var runtime reporting.RuntimePayload
+	if err := json.Unmarshal([]byte(raw), &runtime); err != nil {
+		return nil
+	}
+	normalized := runtime.Normalize(observedAt)
+	return &normalized
 }
 
 func mustJSON(v any) string {
