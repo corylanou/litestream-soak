@@ -42,6 +42,12 @@
       "title": "Diagnosis JSON",
       "type": "link",
       "url": "https://litestream-soak-ctl.fly.dev/api/diagnosis"
+    },
+    {
+      "targetBlank": true,
+      "title": "Latest Rollout",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/deployments/latest"
     }
   ],
   "panels": [
@@ -52,7 +58,7 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 16,
+        "w": 12,
         "x": 0,
         "y": 0
       },
@@ -85,8 +91,8 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 8,
-        "x": 16,
+        "w": 6,
+        "x": 12,
         "y": 0
       },
       "id": 20,
@@ -112,6 +118,91 @@
         }
       ],
       "title": "Dominant Failure Now",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "gray",
+                  "text": "no workers"
+                },
+                "1": {
+                  "color": "orange",
+                  "text": "rolling out"
+                },
+                "2": {
+                  "color": "yellow",
+                  "text": "probing"
+                },
+                "3": {
+                  "color": "red",
+                  "text": "needs attention"
+                },
+                "4": {
+                  "color": "green",
+                  "text": "stable"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "gray",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              },
+              {
+                "color": "green",
+                "value": 4
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 21,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "topk(1, max by (status) (soak_control_latest_deployment_info))",
+          "instant": true,
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "title": "Rollout Status",
       "type": "stat"
     },
     {
@@ -986,7 +1077,7 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 8,
+        "w": 6,
         "x": 0,
         "y": 39
       },
@@ -1034,6 +1125,47 @@
         }
       ],
       "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 39
+      },
+      "id": 22,
+      "options": {
+        "displayMode": "basic",
+        "namePlacement": "left",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": false,
+        "sizing": "manual",
+        "text": {}
+      },
+      "targets": [
+        {
+          "expr": "sum by (worker_state) (soak_control_latest_deployment_workers{worker_state=~\"updated|outdated|probing|dormant|degraded\"})",
+          "instant": true,
+          "legendFormat": "{{worker_state}}"
+        }
+      ],
+      "title": "Latest Rollout Progress",
+      "type": "bargauge"
     },
     {
       "fieldConfig": {
@@ -1155,5 +1287,5 @@
   },
   "title": "Litestream Soak Overview",
   "uid": "litestream-soak-overview",
-  "version": 8
+  "version": 9
 }
