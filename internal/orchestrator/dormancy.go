@@ -284,6 +284,10 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	if err != nil {
 		return err
 	}
+	resumeSHA := strings.TrimSpace(gitSHA)
+	if resumeSHA == "" {
+		resumeSHA = worker.GitSHA
+	}
 
 	workloadCfg := normalizeWorkloadConfig(resolveWorkerWorkload(worker))
 
@@ -294,7 +298,7 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	}
 
 	resumeWorker := worker
-	resumeWorker.GitSHA = gitSHA
+	resumeWorker.GitSHA = resumeSHA
 	machine, err := m.createWorkerMachine(ctx, resumeWorker, imageRef, volumeID, workloadCfg)
 	if err != nil {
 		return fmt.Errorf("create probe machine: %w", err)
@@ -303,7 +307,7 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	if err := m.db.UpdateWorkerMachine(worker.ID, machine.ID, volumeID); err != nil {
 		return fmt.Errorf("update worker machine: %w", err)
 	}
-	if err := m.db.UpdateWorkerMachineGitSHA(worker.ID, machine.ID, gitSHA); err != nil {
+	if err := m.db.UpdateWorkerMachineGitSHA(worker.ID, machine.ID, resumeSHA); err != nil {
 		return fmt.Errorf("update worker machine sha: %w", err)
 	}
 	if err := m.db.MarkWorkerProbing(worker.ID, resumeTrigger); err != nil {
@@ -311,7 +315,7 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	}
 	m.observeWorkerByID(worker.ID)
 
-	message := fmt.Sprintf("Worker resumed for probe on %s (%s)", gitSHA, resumeTrigger)
+	message := fmt.Sprintf("Worker resumed for probe on %s (%s)", resumeSHA, resumeTrigger)
 	if err := m.db.RecordEvent(worker.ID, "worker_probe_started", message, imageRef); err != nil {
 		return fmt.Errorf("record probe event: %w", err)
 	}

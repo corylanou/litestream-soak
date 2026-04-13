@@ -131,6 +131,19 @@ curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
   https://litestream-soak-ctl.fly.dev/api/workers?status=dormant | jq .
 ```
 
+If you want to manually wake dormant workers for a probe without waiting for a
+new deploy:
+
+```bash
+curl -X POST -sS \
+  -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  "https://litestream-soak-ctl.fly.dev/api/admin/resume-dormant?source=main&trigger=manual_resume" | jq .
+```
+
+That resumes dormant workers using the current worker image already running in
+Fly. If you want the probe to carry a specific Git SHA for tracking, add
+`&sha=<git-sha>` to the request.
+
 ## How The Control Plane Helps Debug
 
 The control plane helps in four ways:

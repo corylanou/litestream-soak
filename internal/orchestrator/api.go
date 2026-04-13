@@ -108,6 +108,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/workers", a.handleListWorkers)
 	mux.HandleFunc("GET /api/worker-summaries", a.handleListWorkerSummaries)
 	mux.HandleFunc("GET /api/diagnosis", a.handleGetDiagnosis)
+	mux.HandleFunc("POST /api/admin/resume-dormant", a.handleResumeDormantWorkers)
 	mux.HandleFunc("GET /api/workers/{id}", a.handleGetWorker)
 	mux.HandleFunc("GET /api/workers/{id}/incident", a.handleGetIncident)
 	mux.HandleFunc("GET /api/workers/{id}/prompt", a.handleGetPrompt)
@@ -296,6 +297,58 @@ func (a *API) handleGetDiagnosis(w http.ResponseWriter, r *http.Request) {
 		"generated_at": time.Now().UTC(),
 		"diagnosis":    buildDiagnosisSnapshot(summaries),
 		"coverage":     buildCoverageSnapshot(summaries),
+	})
+}
+
+func (a *API) handleResumeDormantWorkers(w http.ResponseWriter, r *http.Request) {
+	if a.manager == nil {
+		http.Error(w, "resume manager unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	if source == "" {
+		source = "main"
+	}
+	imageRef := strings.TrimSpace(r.URL.Query().Get("image"))
+	if imageRef == "" {
+		var err error
+		imageRef, err = a.manager.currentWorkerImage(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	sha := strings.TrimSpace(r.URL.Query().Get("sha"))
+	trigger := strings.TrimSpace(r.URL.Query().Get("trigger"))
+	if trigger == "" {
+		trigger = "manual_resume"
+	}
+
+	dormantWorkers, err := a.db.ListDormantWorkers(source)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := a.manager.ResumeDormantWorkers(r.Context(), source, imageRef, sha, trigger); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	workerIDs := make([]string, 0, len(dormantWorkers))
+	for _, worker := range dormantWorkers {
+		workerIDs = append(workerIDs, worker.ID)
+	}
+	_ = a.db.RecordEvent("", "manual_resume_requested", fmt.Sprintf("Requested probe resume for %d dormant %s worker(s)", len(dormantWorkers), source), strings.Join(workerIDs, ","))
+
+	writeAPIJSON(w, map[string]any{
+		"resumed_workers": len(dormantWorkers),
+		"worker_ids":      workerIDs,
+		"source":          source,
+		"image_ref":       imageRef,
+		"git_sha":         sha,
+		"trigger":         trigger,
 	})
 }
 
