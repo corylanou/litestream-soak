@@ -195,6 +195,23 @@ SOAK_ADMIN_BEARER_TOKEN=... \
 ./scripts/notify-deployment-ready.sh <git-sha> main manual_test <image-ref>
 ```
 
+To verify that a merge or manual handoff actually propagated through the fleet:
+
+```bash
+curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  https://litestream-soak-ctl.fly.dev/api/deployments/latest | jq .
+```
+
+That rollout view tells you:
+
+- which SHA the control plane thinks is current
+- how many workers are updated to that SHA
+- how many are still probing after wake-up
+- whether any workers fell back to `dormant` or `degraded`
+
+On the home page, the `Latest Rollout` card mirrors the same information for
+faster review after a merge.
+
 ## How The Control Plane Helps Debug
 
 The control plane helps in four ways:

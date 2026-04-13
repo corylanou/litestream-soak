@@ -15,14 +15,15 @@ import (
 )
 
 type homePageData struct {
-	GeneratedAt  time.Time
-	Summary      homeSummary
-	Diagnosis    diagnosisSnapshot
-	Coverage     coverageSnapshot
-	Spotlight    *FailureResponse
-	FailureQueue []FailureResponse
-	Workers      []homeWorker
-	Events       []model.Event
+	GeneratedAt      time.Time
+	Summary          homeSummary
+	Diagnosis        diagnosisSnapshot
+	Coverage         coverageSnapshot
+	LatestDeployment *DeploymentRolloutResponse
+	Spotlight        *FailureResponse
+	FailureQueue     []FailureResponse
+	Workers          []homeWorker
+	Events           []model.Event
 }
 
 type homeSummary struct {
@@ -56,6 +57,7 @@ type helpPageData struct {
 
 var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"confidenceClass":   confidenceClass,
+	"deploymentClass":   deploymentStatusClass,
 	"eventClass":        eventClass,
 	"failureText":       failureText,
 	"formatDuration":    formatDurationMS,
@@ -99,6 +101,11 @@ func (a *API) handleHomePartial(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) buildHomePageData() (homePageData, error) {
 	summaries, err := a.listWorkerSummaries("")
+	if err != nil {
+		return homePageData{}, err
+	}
+
+	latestDeployment, err := a.db.GetLatestDeployment("main")
 	if err != nil {
 		return homePageData{}, err
 	}
@@ -172,15 +179,25 @@ func (a *API) buildHomePageData() (homePageData, error) {
 		}
 	}
 
+	var rollout *DeploymentRolloutResponse
+	if latestDeployment != nil {
+		progress, err := a.buildDeploymentRollout(*latestDeployment)
+		if err != nil {
+			return homePageData{}, err
+		}
+		rollout = &progress
+	}
+
 	return homePageData{
-		GeneratedAt:  time.Now().UTC(),
-		Summary:      summary,
-		Diagnosis:    buildDiagnosisSnapshot(summaries),
-		Coverage:     buildCoverageSnapshot(summaries),
-		Spotlight:    spotlight,
-		FailureQueue: queue,
-		Workers:      workerCards,
-		Events:       events,
+		GeneratedAt:      time.Now().UTC(),
+		Summary:          summary,
+		Diagnosis:        buildDiagnosisSnapshot(summaries),
+		Coverage:         buildCoverageSnapshot(summaries),
+		LatestDeployment: rollout,
+		Spotlight:        spotlight,
+		FailureQueue:     queue,
+		Workers:          workerCards,
+		Events:           events,
 	}, nil
 }
 
@@ -293,6 +310,19 @@ func confidenceClass(value string) string {
 		return "status-good"
 	case "medium":
 		return "status-warn"
+	default:
+		return "status-neutral"
+	}
+}
+
+func deploymentStatusClass(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "stable":
+		return "status-good"
+	case "rolling_out", "probing":
+		return "status-warn"
+	case "needs_attention":
+		return "status-bad"
 	default:
 		return "status-neutral"
 	}
@@ -702,6 +732,7 @@ const homePageTemplate = `{{define "home"}}
         </span>
         <a class="topbar-link" href="/ui/help">Help</a>
         <a class="topbar-link" href="/api/workers">API</a>
+        <a class="topbar-link" href="/api/deployments/latest">Deploy</a>
         <a class="topbar-link" href="/api/failures">Failures</a>
         <a class="topbar-link" href="/api/events">Events</a>
       </div>
@@ -781,6 +812,36 @@ const homeBodyTemplate = `{{define "home_body"}}
           <span class="chip"><strong>{{.Count}}</strong> {{runtimeLabel .Label}}</span>
           {{end}}
         </div>
+        {{end}}
+      </div>
+
+      <div class="guide-card">
+        <h2>Latest Rollout</h2>
+        {{if .LatestDeployment}}
+        <p class="lead">{{.LatestDeployment.Summary}}</p>
+        <div class="diag-meta">
+          <span class="badge badge-{{if eq (deploymentClass .LatestDeployment.Status) "status-good"}}good{{else if eq (deploymentClass .LatestDeployment.Status) "status-warn"}}warn{{else if eq (deploymentClass .LatestDeployment.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.LatestDeployment.Status}}</span>
+          <span class="badge badge-neutral">sha: {{trimSHA .LatestDeployment.Deployment.GitSHA}}</span>
+          <span class="badge badge-neutral">{{.LatestDeployment.UpdatedWorkers}}/{{.LatestDeployment.TotalWorkers}} updated</span>
+          {{if gt .LatestDeployment.ProbingWorkers 0}}<span class="badge badge-warn">{{.LatestDeployment.ProbingWorkers}} probing</span>{{end}}
+          {{if gt .LatestDeployment.DormantWorkers 0}}<span class="badge badge-bad">{{.LatestDeployment.DormantWorkers}} dormant</span>{{end}}
+          {{if gt .LatestDeployment.DegradedWorkers 0}}<span class="badge badge-bad">{{.LatestDeployment.DegradedWorkers}} degraded</span>{{end}}
+        </div>
+        {{if gt .LatestDeployment.OutdatedWorkers 0}}
+        <ul>
+          {{range .LatestDeployment.Workers}}
+            {{if not .Updated}}
+            <li><a href="/ui/workers/{{pathEscape .WorkerID}}">{{.Name}}</a> is still on {{trimSHA .GitSHA}} with status {{.Status}}.</li>
+            {{end}}
+          {{end}}
+        </ul>
+        {{end}}
+        <div class="chip-row">
+          <a class="btn btn-primary" href="/api/deployments/latest">Latest rollout JSON</a>
+          <a class="btn" href="/api/deployments">History</a>
+        </div>
+        {{else}}
+        <p class="empty">No deployments have been recorded yet.</p>
         {{end}}
       </div>
     </div>

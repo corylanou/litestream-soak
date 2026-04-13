@@ -502,6 +502,36 @@ func (d *DB) CreateDeployment(dep *Deployment) (int64, error) {
 	return result.LastInsertId()
 }
 
+func (d *DB) ListDeployments(source string, limit int) ([]Deployment, error) {
+	query := `
+		SELECT id, git_sha, image_ref, source, pr_number, status, started_at, completed_at, error_message
+		FROM deployments`
+	args := make([]any, 0, 2)
+	if source != "" {
+		query += " WHERE source = ?"
+		args = append(args, source)
+	}
+	query += " ORDER BY started_at DESC, id DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	deployments := make([]Deployment, 0)
+	for rows.Next() {
+		var dep Deployment
+		if err := scanDeployment(rows, &dep); err != nil {
+			return nil, err
+		}
+		deployments = append(deployments, dep)
+	}
+
+	return deployments, nil
+}
+
 func (d *DB) UpdateDeployment(id int64, status, imageRef, errMsg string) error {
 	_, err := d.db.Exec(`
 		UPDATE deployments SET status = ?, image_ref = ?, error_message = ?, completed_at = datetime('now')
@@ -530,19 +560,34 @@ func (d *DB) UpsertReadyDeployment(dep *Deployment) error {
 
 func (d *DB) GetDeploymentBySHA(sha string) (*Deployment, error) {
 	var dep Deployment
-	var completedAt sql.NullTime
-	var prNumber sql.NullInt64
-	err := d.db.QueryRow(`SELECT id, git_sha, image_ref, source, pr_number, status, started_at, completed_at, error_message FROM deployments WHERE git_sha = ? ORDER BY started_at DESC LIMIT 1`, sha).Scan(
-		&dep.ID, &dep.GitSHA, &dep.ImageRef, &dep.Source, &prNumber, &dep.Status, &dep.StartedAt, &completedAt, &dep.ErrorMessage,
+	err := scanDeployment(
+		d.db.QueryRow(`SELECT id, git_sha, image_ref, source, pr_number, status, started_at, completed_at, error_message FROM deployments WHERE git_sha = ? ORDER BY started_at DESC LIMIT 1`, sha),
+		&dep,
 	)
 	if err != nil {
 		return nil, err
 	}
-	if prNumber.Valid {
-		dep.PRNumber = int(prNumber.Int64)
+	return &dep, nil
+}
+
+func (d *DB) GetLatestDeployment(source string) (*Deployment, error) {
+	query := `
+		SELECT id, git_sha, image_ref, source, pr_number, status, started_at, completed_at, error_message
+		FROM deployments`
+	args := make([]any, 0, 1)
+	if source != "" {
+		query += " WHERE source = ?"
+		args = append(args, source)
 	}
-	if completedAt.Valid {
-		dep.CompletedAt = &completedAt.Time
+	query += " ORDER BY started_at DESC, id DESC LIMIT 1"
+
+	var dep Deployment
+	err := scanDeployment(d.db.QueryRow(query, args...), &dep)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
 	}
 	return &dep, nil
 }
@@ -580,6 +625,27 @@ func (d *DB) ListEvents(limit int) ([]Event, error) {
 
 func (d *DB) ListMainWorkers() ([]Worker, error) {
 	return d.listWorkersBySource("main")
+}
+
+func (d *DB) ListWorkersForSource(source string) ([]Worker, error) {
+	rows, err := d.db.Query(`
+		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at
+		FROM workers WHERE source = ? AND status NOT IN ('stopped', 'failed')
+		ORDER BY created_at`, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	workers := make([]Worker, 0)
+	for rows.Next() {
+		var w Worker
+		if err := scanWorker(rows, &w); err != nil {
+			return nil, err
+		}
+		workers = append(workers, w)
+	}
+	return workers, nil
 }
 
 func (d *DB) ListDormantWorkers(source string) ([]Worker, error) {
@@ -852,6 +918,36 @@ func (d *DB) StaleWorkers(timeout time.Duration) ([]Worker, error) {
 
 type workerScanner interface {
 	Scan(dest ...any) error
+}
+
+type deploymentScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanDeployment(scanner deploymentScanner, dep *Deployment) error {
+	var completedAt sql.NullTime
+	var prNumber sql.NullInt64
+	if err := scanner.Scan(
+		&dep.ID,
+		&dep.GitSHA,
+		&dep.ImageRef,
+		&dep.Source,
+		&prNumber,
+		&dep.Status,
+		&dep.StartedAt,
+		&completedAt,
+		&dep.ErrorMessage,
+	); err != nil {
+		return err
+	}
+
+	if prNumber.Valid {
+		dep.PRNumber = int(prNumber.Int64)
+	}
+	if completedAt.Valid {
+		dep.CompletedAt = &completedAt.Time
+	}
+	return nil
 }
 
 func scanWorker(scanner workerScanner, w *Worker) error {

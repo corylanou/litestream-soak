@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -64,6 +65,33 @@ type WorkerSummaryResponse struct {
 	TriageCommands           []string            `json:"triage_commands,omitempty"`
 }
 
+type DeploymentWorkerProgress struct {
+	WorkerID                string             `json:"worker_id"`
+	Name                    string             `json:"name"`
+	Status                  model.WorkerStatus `json:"status"`
+	GitSHA                  string             `json:"git_sha"`
+	RuntimeSnapshotStatus   string             `json:"runtime_snapshot_status,omitempty"`
+	Updated                 bool               `json:"updated"`
+	LastHeartbeatAt         *time.Time         `json:"last_heartbeat_at,omitempty"`
+	CurrentFailureStage     string             `json:"current_failure_stage,omitempty"`
+	CurrentFailureSignature string             `json:"current_failure_signature,omitempty"`
+}
+
+type DeploymentRolloutResponse struct {
+	Deployment       model.Deployment           `json:"deployment"`
+	Status           string                     `json:"status"`
+	Summary          string                     `json:"summary"`
+	TotalWorkers     int                        `json:"total_workers"`
+	UpdatedWorkers   int                        `json:"updated_workers"`
+	OutdatedWorkers  int                        `json:"outdated_workers"`
+	RunningWorkers   int                        `json:"running_workers"`
+	DegradedWorkers  int                        `json:"degraded_workers"`
+	DormantWorkers   int                        `json:"dormant_workers"`
+	ProbingWorkers   int                        `json:"probing_workers"`
+	AttentionWorkers int                        `json:"attention_workers"`
+	Workers          []DeploymentWorkerProgress `json:"workers,omitempty"`
+}
+
 type IncidentBundle struct {
 	GeneratedAt           time.Time                 `json:"generated_at"`
 	Worker                model.Worker              `json:"worker"`
@@ -110,6 +138,9 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/workers", a.handleListWorkers)
 	mux.HandleFunc("GET /api/worker-summaries", a.handleListWorkerSummaries)
 	mux.HandleFunc("GET /api/diagnosis", a.handleGetDiagnosis)
+	mux.HandleFunc("GET /api/deployments", a.handleListDeployments)
+	mux.HandleFunc("GET /api/deployments/latest", a.handleGetLatestDeployment)
+	mux.HandleFunc("GET /api/deployments/{sha}", a.handleGetDeployment)
 	mux.HandleFunc("POST /api/admin/deployments/ready", a.handleDeploymentReady)
 	mux.HandleFunc("POST /api/admin/resume-dormant", a.handleResumeDormantWorkers)
 	mux.HandleFunc("GET /api/workers/{id}", a.handleGetWorker)
@@ -141,6 +172,62 @@ func (a *API) handleListWorkerSummaries(w http.ResponseWriter, r *http.Request) 
 	writeAPIJSON(w, summaries)
 }
 
+func (a *API) handleListDeployments(w http.ResponseWriter, r *http.Request) {
+	deployments, err := a.db.ListDeployments(strings.TrimSpace(r.URL.Query().Get("source")), readLimit(r, 10))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	rollouts := make([]DeploymentRolloutResponse, 0, len(deployments))
+	for _, deployment := range deployments {
+		rollout, err := a.buildDeploymentRollout(deployment)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		rollouts = append(rollouts, rollout)
+	}
+
+	writeAPIJSON(w, rollouts)
+}
+
+func (a *API) handleGetLatestDeployment(w http.ResponseWriter, r *http.Request) {
+	deployment, err := a.db.GetLatestDeployment(strings.TrimSpace(r.URL.Query().Get("source")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if deployment == nil {
+		http.Error(w, "deployment not found", http.StatusNotFound)
+		return
+	}
+
+	rollout, err := a.buildDeploymentRollout(*deployment)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeAPIJSON(w, rollout)
+}
+
+func (a *API) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
+	deployment, err := a.db.GetDeploymentBySHA(strings.TrimSpace(r.PathValue("sha")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	rollout, err := a.buildDeploymentRollout(*deployment)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeAPIJSON(w, rollout)
+}
+
 func (a *API) listWorkerSummaries(status string) ([]WorkerSummaryResponse, error) {
 	workers, err := a.db.ListWorkers(status)
 	if err != nil {
@@ -157,6 +244,81 @@ func (a *API) listWorkerSummaries(status string) ([]WorkerSummaryResponse, error
 	}
 
 	return summaries, nil
+}
+
+func (a *API) buildDeploymentRollout(deployment model.Deployment) (DeploymentRolloutResponse, error) {
+	source := strings.TrimSpace(deployment.Source)
+	if source == "" {
+		source = "main"
+	}
+
+	workers, err := a.db.ListWorkersForSource(source)
+	if err != nil {
+		return DeploymentRolloutResponse{}, err
+	}
+
+	response := DeploymentRolloutResponse{
+		Deployment: deployment,
+		Workers:    make([]DeploymentWorkerProgress, 0, len(workers)),
+	}
+
+	for _, worker := range workers {
+		runtimeStatus := reporting.SnapshotStatus(extractReportedRuntime(worker, nil))
+		progress := DeploymentWorkerProgress{
+			WorkerID:              worker.ID,
+			Name:                  worker.Name,
+			Status:                worker.Status,
+			GitSHA:                worker.GitSHA,
+			RuntimeSnapshotStatus: runtimeStatus,
+			Updated:               strings.TrimSpace(worker.GitSHA) == strings.TrimSpace(deployment.GitSHA),
+			LastHeartbeatAt:       worker.LastHeartbeatAt,
+		}
+
+		verifications, err := a.db.ListVerifications(worker.ID, 1)
+		if err == nil && len(verifications) > 0 && activeFailure(&verifications[0]) {
+			progress.CurrentFailureStage = inferFailureStage(&verifications[0])
+			progress.CurrentFailureSignature = inferFailureSignature(&verifications[0])
+		}
+
+		response.TotalWorkers++
+		if progress.Updated {
+			response.UpdatedWorkers++
+		} else {
+			response.OutdatedWorkers++
+		}
+
+		switch worker.Status {
+		case model.WorkerRunning:
+			response.RunningWorkers++
+		case model.WorkerDegraded:
+			response.DegradedWorkers++
+		case model.WorkerDormant:
+			response.DormantWorkers++
+		case model.WorkerProbing:
+			response.ProbingWorkers++
+		}
+		if worker.Status != model.WorkerRunning {
+			response.AttentionWorkers++
+		}
+
+		response.Workers = append(response.Workers, progress)
+	}
+
+	sort.SliceStable(response.Workers, func(i, j int) bool {
+		left := response.Workers[i]
+		right := response.Workers[j]
+		if left.Updated != right.Updated {
+			return !left.Updated
+		}
+		if workerRank(left.Status) != workerRank(right.Status) {
+			return workerRank(left.Status) < workerRank(right.Status)
+		}
+		return left.Name < right.Name
+	})
+
+	response.Status = inferDeploymentRolloutStatus(response)
+	response.Summary = summarizeDeploymentRollout(response)
+	return response, nil
 }
 
 func (a *API) handleListEvents(w http.ResponseWriter, r *http.Request) {
@@ -752,6 +914,37 @@ func inferFailureSignature(verification *model.Verification) string {
 		return "ltx_continuity"
 	default:
 		return firstMeaningfulLine(verification.ErrorMessage)
+	}
+}
+
+func inferDeploymentRolloutStatus(rollout DeploymentRolloutResponse) string {
+	switch {
+	case rollout.TotalWorkers == 0:
+		return "no_workers"
+	case rollout.OutdatedWorkers > 0:
+		return "rolling_out"
+	case rollout.ProbingWorkers > 0:
+		return "probing"
+	case rollout.DormantWorkers > 0 || rollout.DegradedWorkers > 0:
+		return "needs_attention"
+	default:
+		return "stable"
+	}
+}
+
+func summarizeDeploymentRollout(rollout DeploymentRolloutResponse) string {
+	trimmedSHA := trimSHA(rollout.Deployment.GitSHA)
+	switch rollout.Status {
+	case "no_workers":
+		return fmt.Sprintf("Deployment %s is recorded, but no %s workers are registered yet.", trimmedSHA, valueOrUnknown(rollout.Deployment.Source))
+	case "rolling_out":
+		return fmt.Sprintf("%d of %d workers are on %s; %d still need the new release.", rollout.UpdatedWorkers, rollout.TotalWorkers, trimmedSHA, rollout.OutdatedWorkers)
+	case "probing":
+		return fmt.Sprintf("All %d workers are on %s; %d worker(s) are still probing after wake-up.", rollout.TotalWorkers, trimmedSHA, rollout.ProbingWorkers)
+	case "needs_attention":
+		return fmt.Sprintf("All %d workers are on %s; %d still need attention (%d degraded, %d dormant).", rollout.TotalWorkers, trimmedSHA, rollout.AttentionWorkers, rollout.DegradedWorkers, rollout.DormantWorkers)
+	default:
+		return fmt.Sprintf("All %d workers are on %s and the fleet is stable.", rollout.TotalWorkers, trimmedSHA)
 	}
 }
 

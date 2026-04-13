@@ -64,6 +64,43 @@ func TestDetectDormancyCandidateRequiresSameSignature(t *testing.T) {
 	}
 }
 
+func TestInferDeploymentRolloutStatus(t *testing.T) {
+	tests := []struct {
+		name    string
+		rollout DeploymentRolloutResponse
+		want    string
+	}{
+		{name: "no workers", rollout: DeploymentRolloutResponse{}, want: "no_workers"},
+		{name: "outdated workers", rollout: DeploymentRolloutResponse{TotalWorkers: 9, OutdatedWorkers: 2}, want: "rolling_out"},
+		{name: "probing workers", rollout: DeploymentRolloutResponse{TotalWorkers: 9, UpdatedWorkers: 9, ProbingWorkers: 3}, want: "probing"},
+		{name: "attention workers", rollout: DeploymentRolloutResponse{TotalWorkers: 9, UpdatedWorkers: 9, DegradedWorkers: 1}, want: "needs_attention"},
+		{name: "stable fleet", rollout: DeploymentRolloutResponse{TotalWorkers: 9, UpdatedWorkers: 9, RunningWorkers: 9}, want: "stable"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := inferDeploymentRolloutStatus(test.rollout); got != test.want {
+				t.Fatalf("inferDeploymentRolloutStatus()=%q want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSummarizeDeploymentRollout(t *testing.T) {
+	rollout := DeploymentRolloutResponse{
+		Deployment:     model.Deployment{GitSHA: "0123456789abcdef", Source: "main"},
+		Status:         "probing",
+		TotalWorkers:   9,
+		UpdatedWorkers: 9,
+		ProbingWorkers: 3,
+	}
+
+	summary := summarizeDeploymentRollout(rollout)
+	if summary != "All 9 workers are on 0123456789ab; 3 worker(s) are still probing after wake-up." {
+		t.Fatalf("summary=%q", summary)
+	}
+}
+
 func failedVerificationAt(completedAt time.Time, errorMessage string) model.Verification {
 	startedAt := completedAt.Add(-10 * time.Second)
 	return model.Verification{
