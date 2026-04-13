@@ -10,30 +10,37 @@ const (
 	WorkerStarting WorkerStatus = "starting"
 	WorkerRunning  WorkerStatus = "running"
 	WorkerDegraded WorkerStatus = "degraded"
+	WorkerDormant  WorkerStatus = "dormant"
+	WorkerProbing  WorkerStatus = "probing"
 	WorkerStopped  WorkerStatus = "stopped"
 	WorkerFailed   WorkerStatus = "failed"
 )
 
 type Worker struct {
-	ID              string       `json:"id"`
-	AppName         string       `json:"app_name,omitempty"`
-	Region          string       `json:"region,omitempty"`
-	FlyMachineID    string       `json:"fly_machine_id"`
-	FlyVolumeID     string       `json:"fly_volume_id"`
-	Name            string       `json:"name"`
-	Status          WorkerStatus `json:"status"`
-	Source          string       `json:"source"`
-	GitSHA          string       `json:"git_sha"`
-	PRNumber        int          `json:"pr_number,omitempty"`
-	ProfileName     string       `json:"profile_name"`
-	ProfileConfig   string       `json:"profile_config"`
-	ExpiresAt       *time.Time   `json:"expires_at,omitempty"`
-	CreatedAt       time.Time    `json:"created_at"`
-	UpdatedAt       time.Time    `json:"updated_at"`
-	LastHeartbeatAt *time.Time   `json:"last_heartbeat_at,omitempty"`
-	ErrorMessage    string       `json:"error_message,omitempty"`
-	LastRuntimeJSON string       `json:"-"`
-	LastRuntimeAt   *time.Time   `json:"-"`
+	ID               string       `json:"id"`
+	AppName          string       `json:"app_name,omitempty"`
+	Region           string       `json:"region,omitempty"`
+	FlyMachineID     string       `json:"fly_machine_id"`
+	FlyVolumeID      string       `json:"fly_volume_id"`
+	Name             string       `json:"name"`
+	Status           WorkerStatus `json:"status"`
+	Source           string       `json:"source"`
+	GitSHA           string       `json:"git_sha"`
+	PRNumber         int          `json:"pr_number,omitempty"`
+	ProfileName      string       `json:"profile_name"`
+	ProfileConfig    string       `json:"profile_config"`
+	ExpiresAt        *time.Time   `json:"expires_at,omitempty"`
+	CreatedAt        time.Time    `json:"created_at"`
+	UpdatedAt        time.Time    `json:"updated_at"`
+	LastHeartbeatAt  *time.Time   `json:"last_heartbeat_at,omitempty"`
+	ErrorMessage     string       `json:"error_message,omitempty"`
+	LastRuntimeJSON  string       `json:"-"`
+	LastRuntimeAt    *time.Time   `json:"-"`
+	DormantAt        *time.Time   `json:"dormant_at,omitempty"`
+	DormantReason    string       `json:"dormant_reason,omitempty"`
+	DormantSignature string       `json:"dormant_signature,omitempty"`
+	ResumeTrigger    string       `json:"resume_trigger,omitempty"`
+	LastProbeAt      *time.Time   `json:"last_probe_at,omitempty"`
 }
 
 type Verification struct {

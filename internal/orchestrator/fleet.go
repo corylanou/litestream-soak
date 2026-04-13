@@ -273,7 +273,7 @@ func (m *Manager) reconcileFleet(ctx context.Context, spec FleetSpec) {
 		return
 	}
 
-	activeWorkers, err := m.db.ListMainWorkers()
+	activeWorkers, err := m.db.ListWorkers("")
 	if err != nil {
 		slog.Error("Failed to list current main workers", "error", err)
 		return
@@ -281,6 +281,12 @@ func (m *Manager) reconcileFleet(ctx context.Context, spec FleetSpec) {
 
 	byName := make(map[string]model.Worker, len(activeWorkers))
 	for _, worker := range activeWorkers {
+		if worker.Source != "main" {
+			continue
+		}
+		if worker.Status == model.WorkerStopped || worker.Status == model.WorkerFailed {
+			continue
+		}
 		byName[worker.Name] = worker
 	}
 

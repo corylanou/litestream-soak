@@ -278,7 +278,7 @@ func statusClass(value any) string {
 	switch strings.ToLower(fmt.Sprint(value)) {
 	case "running":
 		return "status-good"
-	case "degraded", "starting", "building", "pending":
+	case "degraded", "dormant", "probing", "starting", "building", "pending":
 		return "status-warn"
 	case "failed", "stopped":
 		return "status-bad"
@@ -426,14 +426,16 @@ func workerRank(status model.WorkerStatus) int {
 	switch status {
 	case model.WorkerFailed:
 		return 0
-	case model.WorkerDegraded:
+	case model.WorkerDegraded, model.WorkerProbing:
 		return 1
-	case model.WorkerStarting, model.WorkerBuilding, model.WorkerPending:
+	case model.WorkerDormant:
 		return 2
-	case model.WorkerRunning:
+	case model.WorkerStarting, model.WorkerBuilding, model.WorkerPending:
 		return 3
-	default:
+	case model.WorkerRunning:
 		return 4
+	default:
+		return 5
 	}
 }
 
@@ -744,8 +746,9 @@ const homeBodyTemplate = `{{define "home_body"}}
         <h2>Start Here</h2>
         <p>Use the control plane for incident context and Grafana for cluster shape.</p>
         <ul>
-          <li>Open a worker marked <strong>degraded</strong>.</li>
+          <li>Open a worker marked <strong>degraded</strong>, <strong>dormant</strong>, or <strong>probing</strong>.</li>
           <li>Check failure stage, signature, and probable subsystem.</li>
+          <li>If the worker is <strong>dormant</strong>, the control plane already paused compute after sustained same-signature failures.</li>
           <li>Copy the AI prompt or incident JSON.</li>
           <li>Run the listed Fly triage commands before changing code.</li>
         </ul>
@@ -1520,8 +1523,9 @@ const helpPageTemplate = `{{define "help"}}
       <div class="panel">
         <h2>Operator Workflow</h2>
         <ol>
-          <li>Start on <code>/ui</code> and find workers marked <code>degraded</code>.</li>
+          <li>Start on <code>/ui</code> and find workers marked <code>degraded</code>, <code>dormant</code>, or <code>probing</code>.</li>
           <li>Open the failing worker page and record the failure stage, signature, and workload shape.</li>
+          <li>If the worker is <code>dormant</code>, treat that as a known-bad paused worker, not a recovered one. Dormant means compute was intentionally stopped to avoid paying for repeated failures.</li>
           <li>Check the worker telemetry badge before trusting runtime fields. <code>legacy telemetry</code> means those fields are advisory until the fleet image is refreshed.</li>
           <li>Use Grafana to see whether the failure is isolated or clustered by profile or replay dataset.</li>
           <li>Copy the AI prompt or incident JSON, then run the listed Fly triage commands.</li>

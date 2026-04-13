@@ -29,7 +29,10 @@ func (d *Deployer) DeployNewSHA(sha string) error {
 	existing, err := d.db.GetDeploymentBySHA(sha)
 	if err == nil && existing.Status == "ready" {
 		slog.Info("Deployment already exists for SHA, triggering rolling update", "sha", sha, "image", existing.ImageRef)
-		return d.manager.RollingUpdate(context.Background(), existing.ImageRef, sha)
+		if err := d.manager.RollingUpdate(context.Background(), existing.ImageRef, sha); err != nil {
+			return err
+		}
+		return d.manager.ResumeDormantWorkers(context.Background(), "main", existing.ImageRef, sha, "deploy_ready")
 	}
 
 	slog.Info("Building new image for SHA", "sha", sha)
@@ -58,7 +61,10 @@ func (d *Deployer) DeployNewSHA(sha string) error {
 	d.db.RecordEvent("", "deploy_completed", fmt.Sprintf("Image ready for %s: %s", sha[:12], imageRef), "")
 
 	slog.Info("Image built, starting rolling update", "sha", sha, "image", imageRef)
-	return d.manager.RollingUpdate(context.Background(), imageRef, sha)
+	if err := d.manager.RollingUpdate(context.Background(), imageRef, sha); err != nil {
+		return err
+	}
+	return d.manager.ResumeDormantWorkers(context.Background(), "main", imageRef, sha, "deploy_ready")
 }
 
 func (d *Deployer) buildImage(sha string) (string, error) {

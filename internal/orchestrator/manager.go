@@ -61,27 +61,7 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 		region = "ord"
 	}
 	workloadCfg := req.Workload
-	if workloadCfg.InitialSize == "" {
-		workloadCfg.InitialSize = "5MB"
-	}
-	if workloadCfg.VerifyInterval == "" {
-		workloadCfg.VerifyInterval = "30m"
-	}
-	if workloadCfg.SnapshotInterval == "" {
-		workloadCfg.SnapshotInterval = "10m"
-	}
-	if workloadCfg.SyncInterval == "" {
-		workloadCfg.SyncInterval = "1s"
-	}
-	if workloadCfg.LoadMode == "" {
-		workloadCfg.LoadMode = "synthetic"
-	}
-	if workloadCfg.CPUs == 0 {
-		workloadCfg.CPUs = 1
-	}
-	if workloadCfg.MemoryMB == 0 {
-		workloadCfg.MemoryMB = 1024
-	}
+	workloadCfg = normalizeWorkloadConfig(workloadCfg)
 
 	worker := &model.Worker{
 		ID:            workerID,
@@ -120,78 +100,7 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 		return nil, fmt.Errorf("create volume: %w", err)
 	}
 
-	s3Path := fmt.Sprintf("soak/%s", req.Name)
-	env := map[string]string{
-		"WORKER_ID":         workerID,
-		"WORKER_NAME":       req.Name,
-		"GIT_SHA":           req.GitSHA,
-		"SOURCE":            req.Source,
-		"PROFILE":           req.ProfileName,
-		"INITIAL_SIZE":      workloadCfg.InitialSize,
-		"VERIFY_INTERVAL":   workloadCfg.VerifyInterval,
-		"VERIFY_TYPE":       workloadCfg.VerifyType,
-		"SNAPSHOT_INTERVAL": workloadCfg.SnapshotInterval,
-		"SYNC_INTERVAL":     workloadCfg.SyncInterval,
-		"LOAD_MODE":         workloadCfg.LoadMode,
-		"REPLICA_TYPE":      "s3",
-		"S3_BUCKET":         m.s3Bucket,
-		"S3_PATH":           s3Path,
-		"S3_ENDPOINT":       m.s3Endpoint,
-		"CONTROL_BASE_URL":  m.controlBaseURL,
-	}
-
-	if workloadCfg.WriteRate > 0 {
-		env["WRITE_RATE"] = fmt.Sprintf("%d", workloadCfg.WriteRate)
-	}
-	if workloadCfg.Pattern != "" {
-		env["PATTERN"] = workloadCfg.Pattern
-	}
-	if workloadCfg.PayloadSize > 0 {
-		env["PAYLOAD_SIZE"] = fmt.Sprintf("%d", workloadCfg.PayloadSize)
-	}
-	if workloadCfg.ReadRatio > 0 {
-		env["READ_RATIO"] = fmt.Sprintf("%.2f", workloadCfg.ReadRatio)
-	}
-	if workloadCfg.Workers > 0 {
-		env["LOAD_WORKERS"] = fmt.Sprintf("%d", workloadCfg.Workers)
-	}
-	if workloadCfg.ReplayDataset != "" {
-		env["REPLAY_DATASET"] = workloadCfg.ReplayDataset
-	}
-	if workloadCfg.ReplayDataPath != "" {
-		env["REPLAY_DATA_PATH"] = workloadCfg.ReplayDataPath
-	}
-	if workloadCfg.ReplayDataURL != "" {
-		env["REPLAY_DATA_URL"] = workloadCfg.ReplayDataURL
-	}
-	if workloadCfg.ReplaySpeed > 0 {
-		env["REPLAY_SPEED"] = fmt.Sprintf("%.2f", workloadCfg.ReplaySpeed)
-	}
-	if !workloadCfg.ReplayLoop {
-		env["REPLAY_LOOP"] = "false"
-	}
-
-	machine, err := m.fly.CreateMachine(ctx, flyapi.CreateMachineRequest{
-		Name:   req.Name,
-		Region: region,
-		Config: flyapi.MachineConfig{
-			Image: req.ImageRef,
-			Env:   env,
-			Guest: flyapi.Guest{
-				CPUKind:  "shared",
-				CPUs:     workloadCfg.CPUs,
-				MemoryMB: workloadCfg.MemoryMB,
-			},
-			Mounts: []flyapi.Mount{{
-				Volume: vol.ID,
-				Path:   "/data",
-			}},
-			Metrics: &flyapi.MetricsConfig{
-				Port: 9091,
-				Path: "/metrics",
-			},
-		},
-	})
+	machine, err := m.createWorkerMachine(ctx, *worker, req.ImageRef, vol.ID, workloadCfg)
 	if err != nil {
 		m.fly.DestroyVolume(ctx, vol.ID)
 		m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error())

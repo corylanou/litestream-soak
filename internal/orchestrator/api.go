@@ -20,6 +20,7 @@ type API struct {
 	fly     *flyapi.Client
 	metrics *controlMetrics
 	alerts  *AlertDispatcher
+	manager *Manager
 }
 
 type WorkerDetailResponse struct {
@@ -85,7 +86,7 @@ type IncidentBundle struct {
 	Prompt                string                    `json:"prompt"`
 }
 
-func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *AlertDispatcher) *API {
+func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *AlertDispatcher, manager *Manager) *API {
 	if metrics == nil {
 		metrics = NewControlMetrics(db)
 	}
@@ -94,6 +95,7 @@ func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *A
 		fly:     fly,
 		metrics: metrics,
 		alerts:  alerts,
+		manager: manager,
 	}
 }
 
@@ -351,6 +353,8 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	workerBeforeUpdate, _ := a.db.GetWorker(workerID)
+
 	completedAt := payload.CompletedAt
 	verification := &model.Verification{
 		WorkerID:     workerID,
@@ -396,6 +400,21 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	if workerBeforeUpdate != nil && workerBeforeUpdate.Status == model.WorkerProbing {
+		if payload.Passed {
+			_ = a.db.RecordEvent(workerID, "worker_probe_passed", "Worker probe verification passed", "")
+		} else if a.manager != nil {
+			signature := inferFailureSignature(verification)
+			reason := fmt.Sprintf("worker probe failed with %s; returning to dormant state", signature)
+			if err := a.manager.DormantWorker(r.Context(), workerID, reason, signature, "probe_failed"); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_ = a.db.RecordEvent(workerID, "worker_probe_failed", reason, string(details))
+		}
+	}
+
 	if worker, err := a.db.GetWorker(workerID); err == nil {
 		a.metrics.observeWorker(*worker)
 		a.metrics.observeVerification(*worker, *verification)
@@ -610,7 +629,7 @@ func inferFailureSignature(verification *model.Verification) string {
 }
 
 func buildTriageCommands(worker model.Worker, hasMachine bool) []string {
-	commands := make([]string, 0, 5)
+	commands := make([]string, 0, 6)
 	appName := strings.TrimSpace(worker.AppName)
 	if appName == "" {
 		appName = "litestream-soak"
@@ -618,6 +637,9 @@ func buildTriageCommands(worker model.Worker, hasMachine bool) []string {
 
 	if worker.FlyMachineID != "" {
 		commands = append(commands, fmt.Sprintf("fly machine status %s -a %s", worker.FlyMachineID, appName))
+		if worker.Status == model.WorkerDormant {
+			commands = append(commands, fmt.Sprintf("fly machine start %s -a %s", worker.FlyMachineID, appName))
+		}
 		commands = append(commands, fmt.Sprintf("fly logs -a %s -i %s", appName, worker.FlyMachineID))
 	}
 	if hasMachine {

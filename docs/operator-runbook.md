@@ -42,6 +42,9 @@ The home page is the fastest answer to "is anything wrong right now?" It shows:
 - an event feed
 
 If the home page shows a worker as `degraded`, open that worker first.
+If it shows a worker as `dormant`, the control plane has intentionally paused
+that machine because the worker kept failing with the same signature for long
+enough that continuing to run it was wasting compute.
 
 ### Worker Detail Page
 
@@ -57,6 +60,7 @@ This page is the incident page. It gives you:
 - recent event history
 - Fly machine metadata
 - runtime snapshot status so you know whether DB status and sync-age fields are trustworthy
+- dormancy metadata when the worker has been intentionally paused
 - a copyable AI prompt bundle
 
 ### JSON Endpoints
@@ -85,6 +89,47 @@ immediately.
 
 Use `/ui/help` for the embedded operator guide and `/api/diagnosis` for the
 live machine-readable diagnosis summary that powers the home page.
+
+## Automatic Dormancy
+
+The control plane can now act as a circuit breaker for sustained failures.
+
+When enabled, it watches main-fleet workers and looks for a consecutive run of
+the same active failure signature. If that signature persists long enough, the
+worker is moved to `dormant` and the Fly Machine is stopped.
+
+Interpret the new worker states this way:
+
+- `degraded`: the worker is failing, but still running
+- `dormant`: the worker was intentionally paused after sustained same-signature failures
+- `probing`: the worker was resumed to test whether a new deploy or retry changed the result
+
+Current dormancy behavior:
+
+- compute is stopped, but the Fly volume is kept
+- the control plane records `dormant_at`, `dormant_reason`, `dormant_signature`, and `resume_trigger`
+- a new deploy wakes dormant main workers into `probing`
+- if the probe fails, the worker returns to `dormant`
+- if the probe passes, the worker returns to `running`
+
+This is a cost-control feature, not a deletion policy. Dormant workers still
+consume storage for their attached volumes.
+
+Control it with these env vars on `litestream-soak-ctl`:
+
+```bash
+SOAK_DORMANCY_ENABLED=true
+SOAK_DORMANCY_THRESHOLD=24h
+SOAK_DORMANCY_CHECK_INTERVAL=10m
+SOAK_DORMANCY_MIN_FAILURES=3
+```
+
+If you want to inspect dormant workers quickly:
+
+```bash
+curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  https://litestream-soak-ctl.fly.dev/api/workers?status=dormant | jq .
+```
 
 ## How The Control Plane Helps Debug
 

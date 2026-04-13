@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -40,6 +41,10 @@ func main() {
 	basicAuthUsername := os.Getenv("SOAK_BASIC_AUTH_USERNAME")
 	basicAuthPassword := os.Getenv("SOAK_BASIC_AUTH_PASSWORD")
 	fleetEnabled := envOrDefault("SOAK_MAIN_FLEET_ENABLED", "false") == "true"
+	dormancyEnabled := envOrDefault("SOAK_DORMANCY_ENABLED", "false") == "true"
+	dormancyThreshold := durationEnvOrDefault("SOAK_DORMANCY_THRESHOLD", 24*time.Hour)
+	dormancyInterval := durationEnvOrDefault("SOAK_DORMANCY_CHECK_INTERVAL", 10*time.Minute)
+	dormancyMinFailures := intEnvOrDefault("SOAK_DORMANCY_MIN_FAILURES", 3)
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	listenAddr := envOrDefault("LISTEN_ADDR", ":8080")
 
@@ -56,7 +61,7 @@ func main() {
 	mgr := orchestrator.NewManager(fly, db, metrics, alerts, workerAppName, s3Bucket, s3Endpoint, controlBaseURL)
 	deployer := orchestrator.NewDeployer(mgr, db, workerAppName)
 	webhookHandler := orchestrator.NewWebhookHandler(webhookSecret, mgr, deployer)
-	api := orchestrator.NewAPI(db, fly, metrics, alerts)
+	api := orchestrator.NewAPI(db, fly, metrics, alerts, mgr)
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /webhooks/github", webhookHandler)
@@ -88,6 +93,13 @@ func main() {
 	if fleetEnabled {
 		go mgr.RunFleetReconciler(ctx, orchestrator.DefaultMainFleet(), 10*time.Minute)
 	}
+	if dormancyEnabled {
+		go mgr.RunDormancyLoop(ctx, orchestrator.DormancyPolicy{
+			Threshold:     dormancyThreshold,
+			CheckInterval: dormancyInterval,
+			MinFailures:   dormancyMinFailures,
+		})
+	}
 
 	slog.Info("soakctl starting",
 		"listen", listenAddr,
@@ -97,6 +109,10 @@ func main() {
 		"alerts_enabled", alerts.Enabled(),
 		"basic_auth_enabled", basicAuthUsername != "" && basicAuthPassword != "",
 		"fleet_enabled", fleetEnabled,
+		"dormancy_enabled", dormancyEnabled,
+		"dormancy_threshold", dormancyThreshold,
+		"dormancy_check_interval", dormancyInterval,
+		"dormancy_min_failures", dormancyMinFailures,
 	)
 
 	server := &http.Server{Addr: listenAddr, Handler: handler}
@@ -116,6 +132,30 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func durationEnvOrDefault(key string, def time.Duration) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		return def
+	}
+	return value
+}
+
+func intEnvOrDefault(key string, def int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return def
+	}
+	return value
 }
 
 func newBasicAuthMiddleware(username, password string) func(http.Handler) http.Handler {

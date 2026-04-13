@@ -10,6 +10,10 @@ primary_region = "ord"
   LISTEN_ADDR = ":8080"
   CONTROL_BASE_URL = "https://litestream-soak-ctl.fly.dev"
   SOAK_MAIN_FLEET_ENABLED = "true"
+  SOAK_DORMANCY_ENABLED = "true"
+  SOAK_DORMANCY_THRESHOLD = "24h"
+  SOAK_DORMANCY_CHECK_INTERVAL = "10m"
+  SOAK_DORMANCY_MIN_FAILURES = "3"
 
 [http_service]
   internal_port = 8080

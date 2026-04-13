@@ -31,7 +31,12 @@ CREATE TABLE IF NOT EXISTS workers (
     last_heartbeat_at DATETIME,
     error_message TEXT,
     last_runtime_json TEXT NOT NULL DEFAULT '',
-    last_runtime_at DATETIME
+    last_runtime_at DATETIME,
+    dormant_at DATETIME,
+    dormant_reason TEXT NOT NULL DEFAULT '',
+    dormant_signature TEXT NOT NULL DEFAULT '',
+    resume_trigger TEXT NOT NULL DEFAULT '',
+    last_probe_at DATETIME
 );
 
 CREATE TABLE IF NOT EXISTS verifications (
@@ -121,6 +126,11 @@ func ensureWorkerColumns(db *sql.DB) error {
 		`ALTER TABLE workers ADD COLUMN region TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE workers ADD COLUMN last_runtime_json TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE workers ADD COLUMN last_runtime_at DATETIME`,
+		`ALTER TABLE workers ADD COLUMN dormant_at DATETIME`,
+		`ALTER TABLE workers ADD COLUMN dormant_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE workers ADD COLUMN dormant_signature TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE workers ADD COLUMN resume_trigger TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE workers ADD COLUMN last_probe_at DATETIME`,
 	}
 
 	for _, statement := range statements {
@@ -138,8 +148,8 @@ func (d *DB) Close() error {
 
 func (d *DB) CreateWorker(w *Worker) error {
 	_, err := d.db.Exec(`
-		INSERT INTO workers (id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO workers (id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '', NULL)
 		ON CONFLICT(id) DO UPDATE SET
 			app_name = excluded.app_name,
 			region = excluded.region,
@@ -154,6 +164,11 @@ func (d *DB) CreateWorker(w *Worker) error {
 			profile_config = excluded.profile_config,
 			expires_at = excluded.expires_at,
 			error_message = '',
+			dormant_at = NULL,
+			dormant_reason = '',
+			dormant_signature = '',
+			resume_trigger = '',
+			last_probe_at = NULL,
 			updated_at = datetime('now')`,
 		w.ID, w.AppName, w.Region, nullIntString(w.FlyMachineID), nullIntString(w.FlyVolumeID), w.Name, w.Status, w.Source, w.GitSHA, w.PRNumber, w.ProfileName, w.ProfileConfig, w.ExpiresAt,
 	)
@@ -262,6 +277,16 @@ func (d *DB) UpdateWorkerVerificationState(id string, passed bool, summary strin
 		errMsg = summary
 	}
 
+	if passed {
+		_, err := d.db.Exec(`
+			UPDATE workers
+			SET status = ?, error_message = ?, dormant_at = NULL, dormant_reason = '', dormant_signature = '', resume_trigger = '', last_probe_at = NULL, updated_at = datetime('now')
+			WHERE id = ?`,
+			status, errMsg, id,
+		)
+		return err
+	}
+
 	_, err := d.db.Exec(`
 		UPDATE workers
 		SET status = ?, error_message = ?, updated_at = datetime('now')
@@ -271,10 +296,59 @@ func (d *DB) UpdateWorkerVerificationState(id string, passed bool, summary strin
 	return err
 }
 
+func (d *DB) MarkWorkerDormant(id, reason, signature, resumeTrigger string) error {
+	_, err := d.db.Exec(`
+		UPDATE workers
+		SET status = ?, error_message = ?, dormant_at = datetime('now'), dormant_reason = ?, dormant_signature = ?, resume_trigger = ?, updated_at = datetime('now')
+		WHERE id = ?`,
+		WorkerDormant,
+		reason,
+		reason,
+		signature,
+		resumeTrigger,
+		id,
+	)
+	return err
+}
+
+func (d *DB) MarkWorkerProbing(id, resumeTrigger string) error {
+	_, err := d.db.Exec(`
+		UPDATE workers
+		SET status = ?, error_message = '', dormant_at = NULL, dormant_reason = '', dormant_signature = '', resume_trigger = ?, last_probe_at = datetime('now'), updated_at = datetime('now')
+		WHERE id = ?`,
+		WorkerProbing,
+		resumeTrigger,
+		id,
+	)
+	return err
+}
+
+func (d *DB) ClearWorkerDormancy(id string) error {
+	_, err := d.db.Exec(`
+		UPDATE workers
+		SET dormant_at = NULL, dormant_reason = '', dormant_signature = '', resume_trigger = '', last_probe_at = NULL, updated_at = datetime('now')
+		WHERE id = ?`,
+		id,
+	)
+	return err
+}
+
+func (d *DB) UpdateWorkerMachineGitSHA(id, machineID, gitSHA string) error {
+	_, err := d.db.Exec(`
+		UPDATE workers
+		SET fly_machine_id = ?, git_sha = ?, updated_at = datetime('now')
+		WHERE id = ?`,
+		nullIntString(machineID),
+		gitSHA,
+		id,
+	)
+	return err
+}
+
 func (d *DB) GetWorker(id string) (*Worker, error) {
 	var w Worker
 	err := scanWorker(
-		d.db.QueryRow(`SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at FROM workers WHERE id = ?`, id),
+		d.db.QueryRow(`SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at FROM workers WHERE id = ?`, id),
 		&w,
 	)
 	if err != nil {
@@ -284,7 +358,7 @@ func (d *DB) GetWorker(id string) (*Worker, error) {
 }
 
 func (d *DB) ListWorkers(status string) ([]Worker, error) {
-	query := `SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at FROM workers`
+	query := `SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at FROM workers`
 	var args []any
 	if status != "" {
 		query += " WHERE status = ?"
@@ -311,7 +385,7 @@ func (d *DB) ListWorkers(status string) ([]Worker, error) {
 
 func (d *DB) ListExpiredWorkers() ([]Worker, error) {
 	rows, err := d.db.Query(`
-		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at
+		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at
 		FROM workers
 		WHERE expires_at IS NOT NULL AND expires_at < datetime('now') AND status NOT IN ('stopped', 'failed')
 		ORDER BY expires_at`)
@@ -484,6 +558,35 @@ func (d *DB) ListEvents(limit int) ([]Event, error) {
 
 func (d *DB) ListMainWorkers() ([]Worker, error) {
 	return d.listWorkersBySource("main")
+}
+
+func (d *DB) ListDormantWorkers(source string) ([]Worker, error) {
+	query := `
+		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at
+		FROM workers
+		WHERE status = 'dormant'`
+	args := make([]any, 0, 1)
+	if source != "" {
+		query += " AND source = ?"
+		args = append(args, source)
+	}
+	query += " ORDER BY updated_at DESC"
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	workers := make([]Worker, 0)
+	for rows.Next() {
+		var w Worker
+		if err := scanWorker(rows, &w); err != nil {
+			return nil, err
+		}
+		workers = append(workers, w)
+	}
+	return workers, nil
 }
 
 func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
@@ -662,8 +765,8 @@ func (d *DB) ListAlerts(limit int) ([]AlertDelivery, error) {
 
 func (d *DB) listWorkersBySource(source string) ([]Worker, error) {
 	rows, err := d.db.Query(`
-		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at
-		FROM workers WHERE source = ? AND status NOT IN ('stopped', 'failed')
+		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at
+		FROM workers WHERE source = ? AND status NOT IN ('stopped', 'failed', 'dormant')
 		ORDER BY created_at`, source)
 	if err != nil {
 		return nil, err
@@ -705,9 +808,9 @@ func (d *DB) DeleteWorker(id string) error {
 func (d *DB) StaleWorkers(timeout time.Duration) ([]Worker, error) {
 	cutoff := time.Now().Add(-timeout)
 	rows, err := d.db.Query(`
-		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at
+		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at
 		FROM workers
-		WHERE status = 'running' AND last_heartbeat_at IS NOT NULL AND last_heartbeat_at < ?`,
+		WHERE status IN ('running', 'probing') AND last_heartbeat_at IS NOT NULL AND last_heartbeat_at < ?`,
 		cutoff)
 	if err != nil {
 		return nil, err
@@ -730,8 +833,8 @@ type workerScanner interface {
 }
 
 func scanWorker(scanner workerScanner, w *Worker) error {
-	var appName, region, machineID, volumeID, errorMessage, lastRuntimeJSON sql.NullString
-	var expiresAt, heartbeat, lastRuntimeAt sql.NullTime
+	var appName, region, machineID, volumeID, errorMessage, lastRuntimeJSON, dormantReason, dormantSignature, resumeTrigger sql.NullString
+	var expiresAt, heartbeat, lastRuntimeAt, dormantAt, lastProbeAt sql.NullTime
 	var prNumber sql.NullInt64
 
 	if err := scanner.Scan(
@@ -754,6 +857,11 @@ func scanWorker(scanner workerScanner, w *Worker) error {
 		&errorMessage,
 		&lastRuntimeJSON,
 		&lastRuntimeAt,
+		&dormantAt,
+		&dormantReason,
+		&dormantSignature,
+		&resumeTrigger,
+		&lastProbeAt,
 	); err != nil {
 		return err
 	}
@@ -787,6 +895,21 @@ func scanWorker(scanner workerScanner, w *Worker) error {
 	}
 	if lastRuntimeAt.Valid {
 		w.LastRuntimeAt = &lastRuntimeAt.Time
+	}
+	if dormantAt.Valid {
+		w.DormantAt = &dormantAt.Time
+	}
+	if dormantReason.Valid {
+		w.DormantReason = dormantReason.String
+	}
+	if dormantSignature.Valid {
+		w.DormantSignature = dormantSignature.String
+	}
+	if resumeTrigger.Valid {
+		w.ResumeTrigger = resumeTrigger.String
+	}
+	if lastProbeAt.Valid {
+		w.LastProbeAt = &lastProbeAt.Time
 	}
 
 	return nil
