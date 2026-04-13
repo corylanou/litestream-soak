@@ -58,7 +58,7 @@
       },
       "id": 1,
       "options": {
-        "content": "**Read top cards, then `Verification By Worker` and `Control Status By Worker`. Click a worker row or timeline bar to open that worker in the control plane.**",
+        "content": "**Read top cards, then `Verification By Worker` and `Compute State By Worker`. `Paused Compute` means dormant workers whose Fly Machines were intentionally stopped to avoid wasting money. Click a worker row or timeline bar to open that worker in the control plane.**",
         "mode": "markdown"
       },
       "title": "Start Here",
@@ -254,11 +254,11 @@
       },
       "targets": [
         {
-          "expr": "count(soak_control_worker_status{status=\"degraded\"} == 1)",
-          "legendFormat": "degraded"
+          "expr": "count(soak_control_worker_status{status=\"dormant\"} == 1)",
+          "legendFormat": "paused"
         }
       ],
-      "title": "Degraded Workers",
+      "title": "Paused Compute",
       "type": "stat"
     },
     {
@@ -401,11 +401,11 @@
       },
       "targets": [
         {
-          "expr": "count(soak_control_worker_runtime_snapshot_status{runtime_status=\"healthy\"} == 1)",
-          "legendFormat": "healthy"
+          "expr": "count(soak_control_worker_status{status=~\"running|degraded|probing|starting|building|pending\"} == 1)",
+          "legendFormat": "active"
         }
       ],
-      "title": "Runtime Healthy",
+      "title": "Active Compute",
       "type": "stat"
     },
     {
@@ -537,12 +537,17 @@
       },
       "targets": [
         {
-          "expr": "count by (runtime_status) (soak_control_worker_runtime_snapshot_status == 1)",
+          "expr": "count(soak_control_worker_status{status=~\"running|degraded|probing|starting|building|pending\"} == 1)",
           "instant": true,
-          "legendFormat": "{{runtime_status}}"
+          "legendFormat": "ACTIVE"
+        },
+        {
+          "expr": "count(soak_control_worker_status{status=\"dormant\"} == 1)",
+          "instant": true,
+          "legendFormat": "PAUSED"
         }
       ],
-      "title": "Runtime Snapshot Health",
+      "title": "Compute Spend State",
       "type": "piechart"
     },
     {
@@ -615,13 +620,41 @@
           "mappings": [
             {
               "options": {
-                "0": {
+                "1": {
                   "color": "green",
                   "text": "RUNNING"
                 },
-                "1": {
+                "2": {
                   "color": "red",
                   "text": "DEGRADED"
+                },
+                "3": {
+                  "color": "blue",
+                  "text": "DORMANT"
+                },
+                "4": {
+                  "color": "orange",
+                  "text": "PROBING"
+                },
+                "5": {
+                  "color": "yellow",
+                  "text": "PENDING"
+                },
+                "6": {
+                  "color": "yellow",
+                  "text": "BUILDING"
+                },
+                "7": {
+                  "color": "yellow",
+                  "text": "STARTING"
+                },
+                "8": {
+                  "color": "gray",
+                  "text": "STOPPED"
+                },
+                "9": {
+                  "color": "red",
+                  "text": "FAILED"
                 }
               },
               "type": "value"
@@ -652,11 +685,11 @@
       },
       "targets": [
         {
-          "expr": "label_replace(1 - max by (worker_id) (soak_control_worker_status{status=\"running\"}), \"worker\", \"$1\", \"worker_id\", \"worker-main-(.*)\")",
+          "expr": "label_replace(sum by (worker_id) ((((soak_control_worker_status{status=\"running\"} == 1) * 1) or ((soak_control_worker_status{status=\"degraded\"} == 1) * 2) or ((soak_control_worker_status{status=\"dormant\"} == 1) * 3) or ((soak_control_worker_status{status=\"probing\"} == 1) * 4) or ((soak_control_worker_status{status=\"pending\"} == 1) * 5) or ((soak_control_worker_status{status=\"building\"} == 1) * 6) or ((soak_control_worker_status{status=\"starting\"} == 1) * 7) or ((soak_control_worker_status{status=\"stopped\"} == 1) * 8) or ((soak_control_worker_status{status=\"failed\"} == 1) * 9))), \"worker\", \"$1\", \"worker_id\", \"worker-main-(.*)\")",
           "legendFormat": "{{worker}}"
         }
       ],
-      "title": "Control Status By Worker",
+      "title": "Compute State By Worker",
       "type": "state-timeline"
     },
     {
@@ -842,12 +875,12 @@
       },
       "targets": [
         {
-          "expr": "((soak_control_worker_last_verification_result == 1) * on(worker_id) group_left(runtime_status) (soak_control_worker_runtime_snapshot_status == 1)) * on(worker_id) group_left(load_mode, replay_dataset, profile) (soak_control_worker_workload_info == 1)",
+          "expr": "(((soak_control_worker_status{status=\"dormant\"} == 1) * on(worker_id) group_left(failure_signature, failure_stage) (soak_control_worker_last_failure_info == 1)) * on(worker_id) group_left(load_mode, replay_dataset, profile) (soak_control_worker_workload_info == 1))",
           "format": "table",
           "instant": true
         }
       ],
-      "title": "Passing Workers Right Now",
+      "title": "Paused Compute Right Now",
       "transformations": [
         {
           "id": "organize",
@@ -861,14 +894,16 @@
             },
             "indexByName": {
               "worker_id": 0,
-              "runtime_status": 1,
-              "load_mode": 2,
-              "replay_dataset": 3,
-              "profile": 4
+              "failure_signature": 1,
+              "failure_stage": 2,
+              "load_mode": 3,
+              "replay_dataset": 4,
+              "profile": 5
             },
             "renameByName": {
               "worker_id": "Worker",
-              "runtime_status": "Runtime",
+              "failure_signature": "Failure",
+              "failure_stage": "Stage",
               "load_mode": "Load",
               "replay_dataset": "Dataset",
               "profile": "Profile"
@@ -970,12 +1005,12 @@
       },
       "targets": [
         {
-          "expr": "soak_control_worker_status{status=\"degraded\"} == 1",
+          "expr": "soak_control_worker_status{status=~\"degraded|probing\"} == 1",
           "format": "table",
           "instant": true
         }
       ],
-      "title": "Workers Needing Attention",
+      "title": "Workers Still Burning Compute",
       "transformations": [
         {
           "id": "organize",
@@ -1120,5 +1155,5 @@
   },
   "title": "Litestream Soak Overview",
   "uid": "litestream-soak-overview",
-  "version": 7
+  "version": 8
 }
