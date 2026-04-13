@@ -3,6 +3,7 @@ package model
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -235,20 +236,24 @@ func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
 	_, err := d.db.Exec(`
 		INSERT INTO workers (id, app_name, region, fly_machine_id, name, status, source, git_sha, profile_name, profile_config, last_heartbeat_at)
 		VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, datetime('now'))
-		ON CONFLICT(id) DO UPDATE SET
-			app_name = CASE
-				WHEN excluded.app_name <> '' THEN excluded.app_name
-				ELSE workers.app_name
-			END,
+			ON CONFLICT(id) DO UPDATE SET
+				app_name = CASE
+					WHEN excluded.app_name <> '' THEN excluded.app_name
+					ELSE workers.app_name
+				END,
 			region = CASE
 				WHEN excluded.region <> '' THEN excluded.region
 				ELSE workers.region
 			END,
 			fly_machine_id = COALESCE(excluded.fly_machine_id, workers.fly_machine_id),
-			name = excluded.name,
-			source = excluded.source,
-			git_sha = excluded.git_sha,
-			profile_name = excluded.profile_name,
+				name = excluded.name,
+				status = CASE
+					WHEN workers.status IN ('pending', 'building', 'starting', 'stopped', 'failed') THEN 'running'
+					ELSE workers.status
+				END,
+				source = excluded.source,
+				git_sha = excluded.git_sha,
+				profile_name = excluded.profile_name,
 			profile_config = CASE
 				WHEN workers.profile_config <> '{}' THEN workers.profile_config
 				WHEN excluded.profile_config <> '{}' THEN excluded.profile_config
@@ -504,6 +509,23 @@ func (d *DB) UpdateDeployment(id int64, status, imageRef, errMsg string) error {
 		status, imageRef, errMsg, id,
 	)
 	return err
+}
+
+func (d *DB) UpsertReadyDeployment(dep *Deployment) error {
+	existing, err := d.GetDeploymentBySHA(dep.GitSHA)
+	switch {
+	case err == nil:
+		return d.UpdateDeployment(int64(existing.ID), "ready", dep.ImageRef, "")
+	case errors.Is(err, sql.ErrNoRows):
+		_, err := d.db.Exec(`
+			INSERT INTO deployments (git_sha, image_ref, source, pr_number, status, started_at, completed_at, error_message)
+			VALUES (?, ?, ?, ?, 'ready', datetime('now'), datetime('now'), '')`,
+			dep.GitSHA, dep.ImageRef, dep.Source, dep.PRNumber,
+		)
+		return err
+	default:
+		return err
+	}
 }
 
 func (d *DB) GetDeploymentBySHA(sha string) (*Deployment, error) {

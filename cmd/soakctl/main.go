@@ -38,6 +38,7 @@ func main() {
 	controlBaseURL := envOrDefault("CONTROL_BASE_URL", "https://litestream-soak-ctl.fly.dev")
 	alertWebhookURL := os.Getenv("SOAK_ALERT_WEBHOOK_URL")
 	alertWebhookToken := os.Getenv("SOAK_ALERT_WEBHOOK_BEARER_TOKEN")
+	adminBearerToken := os.Getenv("SOAK_ADMIN_BEARER_TOKEN")
 	basicAuthUsername := os.Getenv("SOAK_BASIC_AUTH_USERNAME")
 	basicAuthPassword := os.Getenv("SOAK_BASIC_AUTH_PASSWORD")
 	fleetEnabled := envOrDefault("SOAK_MAIN_FLEET_ENABLED", "false") == "true"
@@ -46,6 +47,7 @@ func main() {
 	dormancyInterval := durationEnvOrDefault("SOAK_DORMANCY_CHECK_INTERVAL", 10*time.Minute)
 	dormancyMinFailures := intEnvOrDefault("SOAK_DORMANCY_MIN_FAILURES", 3)
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
+	webhookDeployEnabled := envOrDefault("GITHUB_WEBHOOK_DEPLOY_ENABLED", "false") == "true"
 	listenAddr := envOrDefault("LISTEN_ADDR", ":8080")
 
 	db, err := model.Open(dbPath)
@@ -59,9 +61,9 @@ func main() {
 	alerts := orchestrator.NewAlertDispatcher(db, controlBaseURL, alertWebhookURL, alertWebhookToken)
 	fly := flyapi.NewClient(workerAppName, flyToken)
 	mgr := orchestrator.NewManager(fly, db, metrics, alerts, workerAppName, s3Bucket, s3Endpoint, controlBaseURL)
-	deployer := orchestrator.NewDeployer(mgr, db, workerAppName)
-	webhookHandler := orchestrator.NewWebhookHandler(webhookSecret, mgr, deployer)
-	api := orchestrator.NewAPI(db, fly, metrics, alerts, mgr)
+	deployer := orchestrator.NewDeployer(mgr, db, workerAppName, webhookDeployEnabled)
+	webhookHandler := orchestrator.NewWebhookHandler(webhookSecret, deployer, webhookDeployEnabled)
+	api := orchestrator.NewAPI(db, fly, metrics, alerts, mgr, deployer)
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /webhooks/github", webhookHandler)
@@ -73,8 +75,8 @@ func main() {
 	api.RegisterRoutes(mux)
 
 	handler := http.Handler(mux)
-	if basicAuthUsername != "" && basicAuthPassword != "" {
-		handler = newBasicAuthMiddleware(basicAuthUsername, basicAuthPassword)(handler)
+	if (basicAuthUsername != "" && basicAuthPassword != "") || adminBearerToken != "" {
+		handler = newAuthMiddleware(basicAuthUsername, basicAuthPassword, adminBearerToken)(handler)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -108,11 +110,13 @@ func main() {
 		"control_base_url", controlBaseURL,
 		"alerts_enabled", alerts.Enabled(),
 		"basic_auth_enabled", basicAuthUsername != "" && basicAuthPassword != "",
+		"admin_bearer_enabled", adminBearerToken != "",
 		"fleet_enabled", fleetEnabled,
 		"dormancy_enabled", dormancyEnabled,
 		"dormancy_threshold", dormancyThreshold,
 		"dormancy_check_interval", dormancyInterval,
 		"dormancy_min_failures", dormancyMinFailures,
+		"webhook_deploy_enabled", webhookDeployEnabled,
 	)
 
 	server := &http.Server{Addr: listenAddr, Handler: handler}
@@ -158,10 +162,24 @@ func intEnvOrDefault(key string, def int) int {
 	return value
 }
 
-func newBasicAuthMiddleware(username, password string) func(http.Handler) http.Handler {
+func newAuthMiddleware(username, password, adminBearerToken string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if skipBasicAuth(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			if isAdminBearerAuthorized(r, adminBearerToken) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			if username == "" || password == "" {
+				if strings.HasPrefix(r.URL.Path, "/api/admin/") {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -178,6 +196,18 @@ func newBasicAuthMiddleware(username, password string) func(http.Handler) http.H
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 		})
 	}
+}
+
+func isAdminBearerAuthorized(r *http.Request, adminBearerToken string) bool {
+	if adminBearerToken == "" || !strings.HasPrefix(r.URL.Path, "/api/admin/") {
+		return false
+	}
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return false
+	}
+	providedToken := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	return subtle.ConstantTimeCompare([]byte(providedToken), []byte(adminBearerToken)) == 1
 }
 
 func skipBasicAuth(r *http.Request) bool {

@@ -236,9 +236,6 @@ func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA string)
 			slog.Error("Failed to create updated worker", "name", w.Name, "error", err)
 			continue
 		}
-
-		m.db.UpdateWorkerStatus(w.ID, model.WorkerStopped, "replaced by rolling update")
-		m.observeWorkerByID(w.ID)
 		slog.Info("Worker updated", "name", w.Name, "new_id", newWorker.ID)
 	}
 

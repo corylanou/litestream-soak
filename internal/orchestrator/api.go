@@ -16,11 +16,12 @@ import (
 )
 
 type API struct {
-	db      *model.DB
-	fly     *flyapi.Client
-	metrics *controlMetrics
-	alerts  *AlertDispatcher
-	manager *Manager
+	db       *model.DB
+	fly      *flyapi.Client
+	metrics  *controlMetrics
+	alerts   *AlertDispatcher
+	manager  *Manager
+	deployer *Deployer
 }
 
 type WorkerDetailResponse struct {
@@ -86,16 +87,17 @@ type IncidentBundle struct {
 	Prompt                string                    `json:"prompt"`
 }
 
-func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *AlertDispatcher, manager *Manager) *API {
+func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *AlertDispatcher, manager *Manager, deployer *Deployer) *API {
 	if metrics == nil {
 		metrics = NewControlMetrics(db)
 	}
 	return &API{
-		db:      db,
-		fly:     fly,
-		metrics: metrics,
-		alerts:  alerts,
-		manager: manager,
+		db:       db,
+		fly:      fly,
+		metrics:  metrics,
+		alerts:   alerts,
+		manager:  manager,
+		deployer: deployer,
 	}
 }
 
@@ -108,6 +110,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/workers", a.handleListWorkers)
 	mux.HandleFunc("GET /api/worker-summaries", a.handleListWorkerSummaries)
 	mux.HandleFunc("GET /api/diagnosis", a.handleGetDiagnosis)
+	mux.HandleFunc("POST /api/admin/deployments/ready", a.handleDeploymentReady)
 	mux.HandleFunc("POST /api/admin/resume-dormant", a.handleResumeDormantWorkers)
 	mux.HandleFunc("GET /api/workers/{id}", a.handleGetWorker)
 	mux.HandleFunc("GET /api/workers/{id}/incident", a.handleGetIncident)
@@ -300,6 +303,52 @@ func (a *API) handleGetDiagnosis(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type deploymentReadyRequest struct {
+	SHA      string `json:"sha"`
+	Source   string `json:"source"`
+	ImageRef string `json:"image_ref"`
+	Trigger  string `json:"trigger"`
+}
+
+func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
+	if a.deployer == nil {
+		http.Error(w, "deployer unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	request, err := readDeploymentReadyRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(request.SHA) == "" {
+		http.Error(w, "sha is required", http.StatusBadRequest)
+		return
+	}
+
+	source := strings.TrimSpace(request.Source)
+	if source == "" {
+		source = "main"
+	}
+	trigger := strings.TrimSpace(request.Trigger)
+	if trigger == "" {
+		trigger = "deploy_ready"
+	}
+
+	imageRef, err := a.deployer.NotifyDeploymentReady(r.Context(), source, request.SHA, request.ImageRef, trigger)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeAPIJSON(w, map[string]any{
+		"sha":       request.SHA,
+		"source":    source,
+		"image_ref": imageRef,
+		"trigger":   trigger,
+	})
+}
+
 func (a *API) handleResumeDormantWorkers(w http.ResponseWriter, r *http.Request) {
 	if a.manager == nil {
 		http.Error(w, "resume manager unavailable", http.StatusInternalServerError)
@@ -350,6 +399,31 @@ func (a *API) handleResumeDormantWorkers(w http.ResponseWriter, r *http.Request)
 		"git_sha":         sha,
 		"trigger":         trigger,
 	})
+}
+
+func readDeploymentReadyRequest(r *http.Request) (deploymentReadyRequest, error) {
+	var request deploymentReadyRequest
+	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			return deploymentReadyRequest{}, fmt.Errorf("decode request: %w", err)
+		}
+	}
+
+	if strings.TrimSpace(request.SHA) == "" {
+		request.SHA = strings.TrimSpace(r.URL.Query().Get("sha"))
+	}
+	if strings.TrimSpace(request.Source) == "" {
+		request.Source = strings.TrimSpace(r.URL.Query().Get("source"))
+	}
+	if strings.TrimSpace(request.ImageRef) == "" {
+		request.ImageRef = strings.TrimSpace(r.URL.Query().Get("image"))
+	}
+	if strings.TrimSpace(request.Trigger) == "" {
+		request.Trigger = strings.TrimSpace(r.URL.Query().Get("trigger"))
+	}
+
+	return request, nil
 }
 
 func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {

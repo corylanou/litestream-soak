@@ -21,6 +21,10 @@ Control plane:
 The control plane is protected with HTTP basic auth. Keep the username and
 password in your local `.envrc`.
 
+Deployment automation uses a separate bearer token for admin endpoints. Keep
+that in GitHub Actions secrets as `SOAK_ADMIN_BEARER_TOKEN` instead of reusing
+the UI basic-auth credentials.
+
 Grafana:
 
 - import `grafana/soak-dashboard.json`
@@ -143,6 +147,48 @@ curl -X POST -sS \
 That resumes dormant workers using the current worker image already running in
 Fly. If you want the probe to carry a specific Git SHA for tracking, add
 `&sha=<git-sha>` to the request.
+
+## Trusted Main Deployment Path
+
+The trusted deploy path for `main` is now:
+
+1. GitHub Actions builds the worker image with `flyctl deploy --build-only --push`.
+2. GitHub Actions deploys the control plane when control-plane code changed.
+3. GitHub Actions calls `POST /api/admin/deployments/ready`.
+4. The control plane records the ready deployment, performs the rolling update,
+   and resumes dormant workers into `probing`.
+
+This matters because the worker fleet is a set of custom Fly Machines with
+per-worker env and volume bindings. A plain `fly deploy` on the app is not the
+same thing as a fleet-wide rolling update.
+
+The control plane no longer assumes it should build worker images from inside
+the running `soakctl` machine. Keep `GITHUB_WEBHOOK_DEPLOY_ENABLED=false` in
+production unless you intentionally want the old in-process build path.
+
+GitHub Actions needs these secrets and variables:
+
+```bash
+FLY_API_TOKEN=<fly token with deploy access>
+SOAK_ADMIN_BEARER_TOKEN=<admin api token for soakctl>
+SOAK_CONTROL_BASE_URL=https://litestream-soak-ctl.fly.dev
+```
+
+The post-build handoff command is:
+
+```bash
+CONTROL_BASE_URL=https://litestream-soak-ctl.fly.dev \
+SOAK_ADMIN_BEARER_TOKEN=... \
+./scripts/notify-deployment-ready.sh <git-sha> main github_actions_main <image-ref>
+```
+
+If you need to test the same path manually without merging anything:
+
+```bash
+CONTROL_BASE_URL=https://litestream-soak-ctl.fly.dev \
+SOAK_ADMIN_BEARER_TOKEN=... \
+./scripts/notify-deployment-ready.sh <git-sha> main manual_test <image-ref>
+```
 
 ## How The Control Plane Helps Debug
 

@@ -1,0 +1,151 @@
+name: deploy-main
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "docs/**"
+      - "grafana/**"
+      - "tmp/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      control_changed: ${{ steps.detect.outputs.control_changed }}
+      worker_changed: ${{ steps.detect.outputs.worker_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          control_changed=false
+          worker_changed=false
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            control_changed=true
+            worker_changed=true
+          else
+            while IFS= read -r file; do
+              case "$file" in
+                cmd/soakctl/*|internal/orchestrator/*|internal/model/*|internal/flyapi/*|fly.control.toml|Dockerfile.control|go.mod|go.sum)
+                  control_changed=true
+                  ;;
+              esac
+
+              case "$file" in
+                cmd/soakworker/*|internal/worker/*|internal/replay/*|internal/workload/*|internal/reporting/*|internal/model/*|internal/flyapi/*|fly.toml|fly.worker.toml|Dockerfile.worker|datasets/*|go.mod|go.sum)
+                  worker_changed=true
+                  ;;
+              esac
+            done < <(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}")
+          fi
+
+          echo "control_changed=${control_changed}" >> "${GITHUB_OUTPUT}"
+          echo "worker_changed=${worker_changed}" >> "${GITHUB_OUTPUT}"
+
+  verify:
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - run: go test ./...
+      - run: go build ./cmd/soakctl ./cmd/soakworker
+
+  deploy-control-plane:
+    needs:
+      - changes
+      - verify
+    if: needs.changes.outputs.control_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only --config fly.control.toml --app litestream-soak-ctl
+
+  build-worker-image:
+    needs:
+      - changes
+      - verify
+    if: needs.changes.outputs.worker_changed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      image_ref: ${{ steps.build.outputs.image_ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - id: build
+        shell: bash
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA::12}"
+          log_file="$(mktemp)"
+
+          flyctl deploy \
+            --remote-only \
+            --app litestream-soak \
+            --config fly.toml \
+            --build-arg "LITESTREAM_SHA=${GITHUB_SHA}" \
+            --image-label "sha-${short_sha}" \
+            --build-only \
+            --push 2>&1 | tee "${log_file}"
+
+          image_ref="$(awk '/^image:/{print $2}' "${log_file}" | tail -n 1)"
+          if [ -z "${image_ref}" ]; then
+            echo "failed to parse image ref from flyctl output" >&2
+            exit 1
+          fi
+
+          echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
+
+  notify-worker-fleet:
+    needs:
+      - changes
+      - build-worker-image
+      - deploy-control-plane
+    if: needs.changes.outputs.worker_changed == 'true' && needs.build-worker-image.result == 'success' && (needs.deploy-control-plane.result == 'success' || needs.deploy-control-plane.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - shell: bash
+        env:
+          CONTROL_BASE_URL: ${{ vars.SOAK_CONTROL_BASE_URL }}
+          SOAK_ADMIN_BEARER_TOKEN: ${{ secrets.SOAK_ADMIN_BEARER_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CONTROL_BASE_URL}" ]; then
+            export CONTROL_BASE_URL="https://litestream-soak-ctl.fly.dev"
+          fi
+
+          chmod +x scripts/notify-deployment-ready.sh
+          ./scripts/notify-deployment-ready.sh "${GITHUB_SHA}" main github_actions_main "${{ needs.build-worker-image.outputs.image_ref }}"

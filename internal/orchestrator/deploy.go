@@ -12,27 +12,31 @@ import (
 )
 
 type Deployer struct {
-	manager *Manager
-	db      *model.DB
-	appName string
+	manager           *Manager
+	db                *model.DB
+	appName           string
+	allowRuntimeBuild bool
 }
 
-func NewDeployer(manager *Manager, db *model.DB, appName string) *Deployer {
+func NewDeployer(manager *Manager, db *model.DB, appName string, allowRuntimeBuild bool) *Deployer {
 	return &Deployer{
-		manager: manager,
-		db:      db,
-		appName: appName,
+		manager:           manager,
+		db:                db,
+		appName:           appName,
+		allowRuntimeBuild: allowRuntimeBuild,
 	}
 }
 
 func (d *Deployer) DeployNewSHA(sha string) error {
+	if !d.allowRuntimeBuild {
+		return fmt.Errorf("runtime builds are disabled; build in CI and notify /api/admin/deployments/ready")
+	}
+
 	existing, err := d.db.GetDeploymentBySHA(sha)
 	if err == nil && existing.Status == "ready" {
 		slog.Info("Deployment already exists for SHA, triggering rolling update", "sha", sha, "image", existing.ImageRef)
-		if err := d.manager.RollingUpdate(context.Background(), existing.ImageRef, sha); err != nil {
-			return err
-		}
-		return d.manager.ResumeDormantWorkers(context.Background(), "main", existing.ImageRef, sha, "deploy_ready")
+		_, err := d.NotifyDeploymentReady(context.Background(), "main", sha, existing.ImageRef, "github_webhook_ready")
+		return err
 	}
 
 	slog.Info("Building new image for SHA", "sha", sha)
@@ -58,13 +62,59 @@ func (d *Deployer) DeployNewSHA(sha string) error {
 	}
 
 	d.db.UpdateDeployment(depID, "ready", imageRef, "")
-	d.db.RecordEvent("", "deploy_completed", fmt.Sprintf("Image ready for %s: %s", sha[:12], imageRef), "")
+	_, err = d.NotifyDeploymentReady(context.Background(), "main", sha, imageRef, "github_webhook_build")
+	return err
+}
 
-	slog.Info("Image built, starting rolling update", "sha", sha, "image", imageRef)
-	if err := d.manager.RollingUpdate(context.Background(), imageRef, sha); err != nil {
-		return err
+func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, imageRef, trigger string) (string, error) {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = "main"
 	}
-	return d.manager.ResumeDormantWorkers(context.Background(), "main", imageRef, sha, "deploy_ready")
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		return "", fmt.Errorf("deployment sha is required")
+	}
+	trigger = strings.TrimSpace(trigger)
+	if trigger == "" {
+		trigger = "deploy_ready"
+	}
+	imageRef = strings.TrimSpace(imageRef)
+	if imageRef == "" {
+		var err error
+		imageRef, err = d.manager.currentWorkerImage(ctx)
+		if err != nil {
+			return "", fmt.Errorf("resolve worker image: %w", err)
+		}
+	}
+
+	if err := d.db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:   sha,
+		ImageRef: imageRef,
+		Source:   source,
+		Status:   "ready",
+	}); err != nil {
+		return "", fmt.Errorf("record ready deployment: %w", err)
+	}
+
+	shortSHA := sha
+	if len(shortSHA) > 12 {
+		shortSHA = shortSHA[:12]
+	}
+	message := fmt.Sprintf("Image ready for %s via %s", shortSHA, trigger)
+	if err := d.db.RecordEvent("", "deploy_ready_received", message, imageRef); err != nil {
+		return "", fmt.Errorf("record deploy event: %w", err)
+	}
+
+	slog.Info("Deployment ready, starting rolling update", "sha", sha, "image", imageRef, "trigger", trigger)
+	if err := d.manager.RollingUpdate(ctx, imageRef, sha); err != nil {
+		return "", err
+	}
+	if err := d.manager.ResumeDormantWorkers(ctx, source, imageRef, sha, trigger); err != nil {
+		return "", err
+	}
+
+	return imageRef, nil
 }
 
 func (d *Deployer) buildImage(sha string) (string, error) {

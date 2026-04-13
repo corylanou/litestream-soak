@@ -14,6 +14,7 @@ primary_region = "ord"
   SOAK_DORMANCY_THRESHOLD = "24h"
   SOAK_DORMANCY_CHECK_INTERVAL = "10m"
   SOAK_DORMANCY_MIN_FAILURES = "3"
+  GITHUB_WEBHOOK_DEPLOY_ENABLED = "false"
 
 [http_service]
   internal_port = 8080

@@ -13,16 +13,16 @@ import (
 )
 
 type WebhookHandler struct {
-	secret  string
-	manager *Manager
-	deployer *Deployer
+	secret        string
+	deployer      *Deployer
+	deployEnabled bool
 }
 
-func NewWebhookHandler(secret string, manager *Manager, deployer *Deployer) *WebhookHandler {
+func NewWebhookHandler(secret string, deployer *Deployer, deployEnabled bool) *WebhookHandler {
 	return &WebhookHandler{
-		secret:   secret,
-		manager:  manager,
-		deployer: deployer,
+		secret:        secret,
+		deployer:      deployer,
+		deployEnabled: deployEnabled,
 	}
 }
 
@@ -92,6 +92,23 @@ func (h *WebhookHandler) handlePush(w http.ResponseWriter, body []byte) {
 		"sha", sha,
 		"message", payload.HeadCommit.Message,
 	)
+	if h.deployer != nil {
+		shortSHA := sha
+		if len(shortSHA) > 12 {
+			shortSHA = shortSHA[:12]
+		}
+		_ = h.deployer.db.RecordEvent("", "github_push_received", fmt.Sprintf("Push received for %s on main", shortSHA), payload.HeadCommit.Message)
+	}
+
+	if !h.deployEnabled {
+		slog.Info("Webhook deploy disabled; awaiting external CI", "sha", sha)
+		if h.deployer != nil {
+			_ = h.deployer.db.RecordEvent("", "github_push_awaiting_ci", "Push acknowledged; awaiting external deploy automation", sha)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprintln(w, "acknowledged: awaiting external deploy automation")
+		return
+	}
 
 	go func() {
 		if err := h.deployer.DeployNewSHA(sha); err != nil {
