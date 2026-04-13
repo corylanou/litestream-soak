@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -123,13 +124,18 @@ func (d *Deployer) buildImage(sha string) (string, error) {
 
 	imageTag := fmt.Sprintf("registry.fly.io/%s:sha-%s", d.appName, sha[:12])
 
-	cmd := exec.CommandContext(ctx, "fly", "deploy",
+	args := []string{
+		"deploy",
 		"--app", d.appName,
-		"--build-arg", fmt.Sprintf("LITESTREAM_SHA=%s", sha),
 		"--image-label", fmt.Sprintf("sha-%s", sha[:12]),
 		"--build-only",
 		"--push",
-	)
+	}
+	if litestreamSHA := strings.TrimSpace(os.Getenv("LITESTREAM_SHA")); litestreamSHA != "" {
+		args = append(args, "--build-arg", fmt.Sprintf("LITESTREAM_SHA=%s", litestreamSHA))
+	}
+
+	cmd := exec.CommandContext(ctx, "fly", args...)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {

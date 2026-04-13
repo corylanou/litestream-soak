@@ -172,7 +172,12 @@ GitHub Actions needs these secrets and variables:
 FLY_API_TOKEN=<fly token with deploy access>
 SOAK_ADMIN_BEARER_TOKEN=<admin api token for soakctl>
 SOAK_CONTROL_BASE_URL=https://litestream-soak-ctl.fly.dev
+SOAK_LITESTREAM_SHA=<optional upstream litestream commit or tag>
 ```
+
+Do not set `SOAK_LITESTREAM_SHA` to the soak repo commit. That value is only
+for the upstream `benbjohnson/litestream` checkout performed inside
+`Dockerfile.worker`.
 
 The post-build handoff command is:
 

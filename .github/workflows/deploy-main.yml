@@ -103,18 +103,24 @@ jobs:
         shell: bash
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          SOAK_LITESTREAM_SHA: ${{ vars.SOAK_LITESTREAM_SHA }}
         run: |
           set -euo pipefail
 
           short_sha="${GITHUB_SHA::12}"
           log_file="$(mktemp)"
+          build_args=()
+
+          if [ -n "${SOAK_LITESTREAM_SHA}" ]; then
+            build_args+=(--build-arg "LITESTREAM_SHA=${SOAK_LITESTREAM_SHA}")
+          fi
 
           flyctl deploy \
             --remote-only \
             --app litestream-soak \
             --config fly.toml \
-            --build-arg "LITESTREAM_SHA=${GITHUB_SHA}" \
             --image-label "sha-${short_sha}" \
+            "${build_args[@]}" \
             --build-only \
             --push 2>&1 | tee "${log_file}"
 

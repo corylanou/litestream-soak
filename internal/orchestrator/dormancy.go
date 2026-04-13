@@ -114,7 +114,7 @@ func (m *Manager) flyClientForWorker(worker model.Worker) *flyapi.Client {
 
 func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, imageRef string, volumeID string, workloadCfg workload.Config) (*flyapi.Machine, error) {
 	workloadCfg = normalizeWorkloadConfig(workloadCfg)
-	return m.flyClientForWorker(worker).CreateMachine(ctx, flyapi.CreateMachineRequest{
+	request := flyapi.CreateMachineRequest{
 		Name:   worker.Name,
 		Region: worker.Region,
 		Config: flyapi.MachineConfig{
@@ -134,7 +134,36 @@ func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, 
 				Path: "/metrics",
 			},
 		},
-	})
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= 5; attempt++ {
+		machine, err := m.flyClientForWorker(worker).CreateMachine(ctx, request)
+		if err == nil {
+			return machine, nil
+		}
+		if !retriableMachineCreateError(err) || attempt == 5 {
+			return nil, err
+		}
+
+		lastErr = err
+		delay := time.Duration(attempt*2) * time.Second
+		slog.Warn("Retrying worker machine creation", "worker_id", worker.ID, "attempt", attempt, "delay", delay, "error", err)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+
+	return nil, lastErr
+}
+
+func retriableMachineCreateError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "failed to get manifest") ||
+		strings.Contains(message, "manifest unknown") ||
+		strings.Contains(message, "http 404")
 }
 
 func (m *Manager) RunDormancyLoop(ctx context.Context, policy DormancyPolicy) {
