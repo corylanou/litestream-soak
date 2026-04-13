@@ -255,7 +255,9 @@ func (m *Manager) observeWorkerByID(workerID string) {
 
 	verifications, err := m.db.ListVerifications(workerID, 1)
 	if err != nil || len(verifications) == 0 {
+		m.metrics.observeLatestDeployment(m.db)
 		return
 	}
 	m.metrics.observeVerification(*worker, verifications[0])
+	m.metrics.observeLatestDeployment(m.db)
 }

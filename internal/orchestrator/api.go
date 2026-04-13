@@ -502,6 +502,9 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if a.metrics != nil {
+		a.metrics.observeLatestDeployment(a.db)
+	}
 
 	writeAPIJSON(w, map[string]any{
 		"sha":       request.SHA,
@@ -552,6 +555,9 @@ func (a *API) handleResumeDormantWorkers(w http.ResponseWriter, r *http.Request)
 		workerIDs = append(workerIDs, worker.ID)
 	}
 	_ = a.db.RecordEvent("", "manual_resume_requested", fmt.Sprintf("Requested probe resume for %d dormant %s worker(s)", len(dormantWorkers), source), strings.Join(workerIDs, ","))
+	if a.metrics != nil {
+		a.metrics.observeLatestDeployment(a.db)
+	}
 
 	writeAPIJSON(w, map[string]any{
 		"resumed_workers": len(dormantWorkers),
@@ -611,6 +617,7 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	if worker, err := a.db.GetWorker(workerID); err == nil {
 		a.metrics.observeWorker(*worker)
+		a.metrics.observeLatestDeployment(a.db)
 	}
 
 	w.WriteHeader(http.StatusAccepted)
@@ -707,6 +714,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	if worker, err := a.db.GetWorker(workerID); err == nil {
 		a.metrics.observeWorker(*worker)
 		a.metrics.observeVerification(*worker, *verification)
+		a.metrics.observeLatestDeployment(a.db)
 		if a.alerts != nil {
 			a.alerts.NotifyVerificationFailure(*worker, *verification)
 		}

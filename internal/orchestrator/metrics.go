@@ -18,6 +18,8 @@ type controlMetrics struct {
 	runtimeByWorker     map[string]labelMetricState
 	failureByWorker     map[string]failureMetricState
 	lastFailureByWorker map[string]failureMetricState
+	latestDeployment    labelMetricState
+	rolloutByState      map[string]labelMetricState
 }
 
 type labelMetricState struct {
@@ -83,6 +85,16 @@ var (
 		Name: "soak_control_worker_last_failure_unixtime",
 		Help: "Unix timestamp of the most recent failed verification seen for a worker.",
 	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlLatestDeploymentInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_latest_deployment_info",
+		Help: "Latest deployment tracked by the control plane.",
+	}, []string{"source", "git_sha", "status"})
+
+	controlLatestDeploymentWorkers = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_latest_deployment_workers",
+		Help: "Worker counts for the latest deployment tracked by the control plane.",
+	}, []string{"source", "git_sha", "status", "worker_state"})
 )
 
 func NewControlMetrics(db *model.DB) *controlMetrics {
@@ -92,6 +104,7 @@ func NewControlMetrics(db *model.DB) *controlMetrics {
 		runtimeByWorker:     make(map[string]labelMetricState),
 		failureByWorker:     make(map[string]failureMetricState),
 		lastFailureByWorker: make(map[string]failureMetricState),
+		rolloutByState:      make(map[string]labelMetricState),
 	}
 	m.syncFromDB(db)
 	return m
@@ -123,6 +136,8 @@ func (m *controlMetrics) syncFromDB(db *model.DB) {
 			}
 		}
 	}
+
+	m.observeLatestDeployment(db)
 }
 
 func (m *controlMetrics) observeWorker(worker model.Worker) {
@@ -247,6 +262,104 @@ func (m *controlMetrics) observeLastFailure(worker model.Worker, verification mo
 	}
 	if !verification.StartedAt.IsZero() {
 		controlWorkerLastFailure.WithLabelValues(labels...).Set(float64(verification.StartedAt.Unix()))
+	}
+}
+
+func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
+	deployment, err := db.GetLatestDeployment("main")
+	if err != nil || deployment == nil {
+		return
+	}
+
+	workers, err := db.ListWorkersForSource(valueOrUnknown(deployment.Source))
+	if err != nil {
+		return
+	}
+
+	rollout := DeploymentRolloutResponse{
+		Deployment: *deployment,
+	}
+	for _, worker := range workers {
+		rollout.TotalWorkers++
+		if strings.TrimSpace(worker.GitSHA) == strings.TrimSpace(deployment.GitSHA) {
+			rollout.UpdatedWorkers++
+		} else {
+			rollout.OutdatedWorkers++
+		}
+
+		switch worker.Status {
+		case model.WorkerRunning:
+			rollout.RunningWorkers++
+		case model.WorkerDegraded:
+			rollout.DegradedWorkers++
+		case model.WorkerDormant:
+			rollout.DormantWorkers++
+		case model.WorkerProbing:
+			rollout.ProbingWorkers++
+		}
+		if worker.Status != model.WorkerRunning {
+			rollout.AttentionWorkers++
+		}
+	}
+	rollout.Status = inferDeploymentRolloutStatus(rollout)
+
+	deploymentLabels := []string{
+		valueOrUnknown(deployment.Source),
+		valueOrUnknown(deployment.GitSHA),
+		valueOrUnknown(rollout.Status),
+	}
+	rolloutStates := map[string]float64{
+		"total":     float64(rollout.TotalWorkers),
+		"updated":   float64(rollout.UpdatedWorkers),
+		"outdated":  float64(rollout.OutdatedWorkers),
+		"running":   float64(rollout.RunningWorkers),
+		"degraded":  float64(rollout.DegradedWorkers),
+		"dormant":   float64(rollout.DormantWorkers),
+		"probing":   float64(rollout.ProbingWorkers),
+		"attention": float64(rollout.AttentionWorkers),
+	}
+
+	m.mu.Lock()
+	previousDeployment := m.latestDeployment
+	m.latestDeployment = labelMetricState{labels: deploymentLabels}
+	previousRolloutStates := make(map[string]labelMetricState, len(m.rolloutByState))
+	for key, state := range m.rolloutByState {
+		previousRolloutStates[key] = state
+	}
+	m.rolloutByState = make(map[string]labelMetricState, len(rolloutStates))
+	for state := range rolloutStates {
+		m.rolloutByState[state] = labelMetricState{labels: append(append([]string{}, deploymentLabels...), state)}
+	}
+	m.mu.Unlock()
+
+	if len(previousDeployment.labels) > 0 && !sameMetricLabels(previousDeployment.labels, deploymentLabels) {
+		controlLatestDeploymentInfo.WithLabelValues(previousDeployment.labels...).Set(0)
+	}
+	controlLatestDeploymentInfo.WithLabelValues(deploymentLabels...).Set(deploymentMetricValue(rollout.Status))
+
+	for state, previous := range previousRolloutStates {
+		currentLabels := append(append([]string{}, deploymentLabels...), state)
+		if len(previous.labels) > 0 && !sameMetricLabels(previous.labels, currentLabels) {
+			controlLatestDeploymentWorkers.WithLabelValues(previous.labels...).Set(0)
+		}
+	}
+	for state, value := range rolloutStates {
+		controlLatestDeploymentWorkers.WithLabelValues(append(append([]string{}, deploymentLabels...), state)...).Set(value)
+	}
+}
+
+func deploymentMetricValue(status string) float64 {
+	switch status {
+	case "stable":
+		return 4
+	case "needs_attention":
+		return 3
+	case "probing":
+		return 2
+	case "rolling_out":
+		return 1
+	default:
+		return 0
 	}
 }
 
