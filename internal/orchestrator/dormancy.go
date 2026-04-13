@@ -280,8 +280,9 @@ func (m *Manager) ResumeDormantWorkers(ctx context.Context, source, imageRef, gi
 }
 
 func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, imageRef, gitSHA, resumeTrigger string) error {
-	if worker.FlyVolumeID == "" {
-		return fmt.Errorf("worker %s has no volume to resume", worker.ID)
+	volumeID, err := m.resolveWorkerVolumeID(ctx, worker)
+	if err != nil {
+		return err
 	}
 
 	workloadCfg := normalizeWorkloadConfig(resolveWorkerWorkload(worker))
@@ -294,11 +295,14 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 
 	resumeWorker := worker
 	resumeWorker.GitSHA = gitSHA
-	machine, err := m.createWorkerMachine(ctx, resumeWorker, imageRef, worker.FlyVolumeID, workloadCfg)
+	machine, err := m.createWorkerMachine(ctx, resumeWorker, imageRef, volumeID, workloadCfg)
 	if err != nil {
 		return fmt.Errorf("create probe machine: %w", err)
 	}
 
+	if err := m.db.UpdateWorkerMachine(worker.ID, machine.ID, volumeID); err != nil {
+		return fmt.Errorf("update worker machine: %w", err)
+	}
 	if err := m.db.UpdateWorkerMachineGitSHA(worker.ID, machine.ID, gitSHA); err != nil {
 		return fmt.Errorf("update worker machine sha: %w", err)
 	}
@@ -312,4 +316,29 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 		return fmt.Errorf("record probe event: %w", err)
 	}
 	return nil
+}
+
+func (m *Manager) resolveWorkerVolumeID(ctx context.Context, worker model.Worker) (string, error) {
+	if worker.FlyVolumeID != "" {
+		return worker.FlyVolumeID, nil
+	}
+	if worker.FlyMachineID == "" {
+		return "", fmt.Errorf("worker %s has no machine or volume to resume", worker.ID)
+	}
+
+	machine, err := m.flyClientForWorker(worker).GetMachine(ctx, worker.FlyMachineID)
+	if err != nil {
+		return "", fmt.Errorf("worker %s has no volume to resume: %w", worker.ID, err)
+	}
+	for _, mount := range machine.Config.Mounts {
+		if mount.Volume == "" {
+			continue
+		}
+		if err := m.db.UpdateWorkerMachine(worker.ID, worker.FlyMachineID, mount.Volume); err != nil {
+			return "", fmt.Errorf("backfill worker volume: %w", err)
+		}
+		return mount.Volume, nil
+	}
+
+	return "", fmt.Errorf("worker %s has no mounted volume in machine config", worker.ID)
 }
