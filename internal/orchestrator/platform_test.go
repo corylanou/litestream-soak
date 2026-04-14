@@ -42,6 +42,17 @@ func TestClassifyPlatformLog(t *testing.T) {
 			wantOK:    true,
 		},
 		{
+			name: "database or disk full",
+			entry: flyapi.AppLogEntry{
+				Attributes: flyapi.AppLogAttributes{
+					Message: "time=2026-04-14T17:46:09.148Z level=ERROR msg=\"Write failed\" error=\"database or disk is full\"",
+				},
+			},
+			wantType:  "platform_disk_full",
+			wantMatch: "disk pressure",
+			wantOK:    true,
+		},
+		{
 			name: "platform restart",
 			entry: flyapi.AppLogEntry{
 				Attributes: flyapi.AppLogAttributes{

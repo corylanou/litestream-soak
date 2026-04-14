@@ -156,7 +156,10 @@ func classifyPlatformLog(entry flyapi.AppLogEntry) (string, string, bool) {
 	switch {
 	case strings.Contains(lower, "oom:") || strings.Contains(lower, "out of memory"):
 		return "platform_oom", fmt.Sprintf("Fly log reported OOM: %s", firstMeaningfulLine(message)), true
-	case strings.Contains(lower, "no space left on device"):
+	case strings.Contains(lower, "no space left on device"),
+		strings.Contains(lower, "disk is full"),
+		strings.Contains(lower, "database is full"),
+		strings.Contains(lower, "database or disk is full"):
 		return "platform_disk_full", fmt.Sprintf("Fly log reported disk pressure: %s", firstMeaningfulLine(message)), true
 	case strings.Contains(lower, "signal: killed"):
 		return "platform_killed", fmt.Sprintf("Fly log reported process kill: %s", firstMeaningfulLine(message)), true
