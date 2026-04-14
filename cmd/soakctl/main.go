@@ -46,6 +46,8 @@ func main() {
 	dormancyThreshold := durationEnvOrDefault("SOAK_DORMANCY_THRESHOLD", 24*time.Hour)
 	dormancyInterval := durationEnvOrDefault("SOAK_DORMANCY_CHECK_INTERVAL", 10*time.Minute)
 	dormancyMinFailures := intEnvOrDefault("SOAK_DORMANCY_MIN_FAILURES", 3)
+	platformLogMonitorEnabled := envOrDefault("SOAK_PLATFORM_LOG_MONITOR_ENABLED", "true") == "true"
+	platformLogPollInterval := durationEnvOrDefault("SOAK_PLATFORM_LOG_POLL_INTERVAL", time.Minute)
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	webhookDeployEnabled := envOrDefault("GITHUB_WEBHOOK_DEPLOY_ENABLED", "false") == "true"
 	listenAddr := envOrDefault("LISTEN_ADDR", ":8080")
@@ -102,6 +104,9 @@ func main() {
 			MinFailures:   dormancyMinFailures,
 		})
 	}
+	if platformLogMonitorEnabled {
+		go mgr.RunPlatformLogMonitor(ctx, platformLogPollInterval)
+	}
 
 	slog.Info("soakctl starting",
 		"listen", listenAddr,
@@ -116,6 +121,8 @@ func main() {
 		"dormancy_threshold", dormancyThreshold,
 		"dormancy_check_interval", dormancyInterval,
 		"dormancy_min_failures", dormancyMinFailures,
+		"platform_log_monitor_enabled", platformLogMonitorEnabled,
+		"platform_log_poll_interval", platformLogPollInterval,
 		"webhook_deploy_enabled", webhookDeployEnabled,
 	)
 

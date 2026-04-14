@@ -60,6 +60,7 @@ This page is the incident page. It gives you:
 - last heartbeat and current status
 - last verification result
 - latest failure plus classified failure stage and signature
+- latest Fly platform signal when one was detected from logs, such as `platform_oom`, `platform_disk_full`, `platform_restart`, or `platform_killed`
 - recent verification history
 - recent event history
 - Fly machine metadata
@@ -90,6 +91,11 @@ hand to an LLM.
 
 Use `/api/workers/{id}/prompt` when you want a copy-paste triage prompt
 immediately.
+
+When a recent Fly platform signal exists, `/api/workers/{id}`,
+`/api/workers/{id}/incident`, and `/api/workers/{id}/prompt` all include it.
+Treat that as first-class evidence before assuming the verification failure
+alone explains what happened.
 
 Use `/ui/help` for the embedded operator guide and `/api/diagnosis` for the
 live machine-readable diagnosis summary that powers the home page.
@@ -267,10 +273,29 @@ The control plane helps in four ways:
 5. It gives exact next-step commands for the affected Fly machine.
 6. It tells you whether the worker is on healthy telemetry, legacy telemetry,
    or an unhealthy runtime snapshot before you trust runtime fields.
+7. It records recent Fly platform signals so OOMs, disk pressure, and restart
+   behavior can be investigated inside the same incident flow.
 
 The incident prompt is built from the worker, workload, latest failure, recent
 verifications, recent events, machine metadata, and triage commands in
 `internal/orchestrator/api.go`.
+
+## Platform Signals
+
+The control plane now polls Fly app logs for each active worker and records
+platform-level signals into the normal event stream. These appear on worker
+detail pages, in incident bundles, and in AI prompt output.
+
+Current platform event types:
+
+- `platform_oom`: Fly reported an out-of-memory kill
+- `platform_disk_full`: Fly or the process reported `no space left on device`
+- `platform_restart`: Fly emitted a non-app restart or start event
+- `platform_killed`: Fly logs reported a process kill
+
+When one of these exists near a verification failure, debug the platform event
+first. A `sync` failure caused by a missing Litestream socket after an OOM is
+not the same class of problem as a clean restore or integrity failure.
 
 Each worker page now exposes three AI prompt modes:
 

@@ -601,6 +601,37 @@ func (d *DB) RecordEvent(workerID, eventType, message, details string) error {
 	return err
 }
 
+func (d *DB) RecordEventAt(workerID, eventType, message, details string, createdAt time.Time) error {
+	_, err := d.db.Exec(`
+		INSERT INTO events (worker_id, event_type, message, details, created_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		workerID, eventType, message, details, createdAt,
+	)
+	return err
+}
+
+func (d *DB) RecordUniqueEventAt(workerID, eventType, message, details string, createdAt time.Time) (bool, error) {
+	var id int
+	err := d.db.QueryRow(`
+		SELECT 1
+		FROM events
+		WHERE worker_id = ? AND event_type = ? AND message = ? AND details = ? AND created_at = ?
+		LIMIT 1`,
+		workerID, eventType, message, details, createdAt,
+	).Scan(&id)
+	switch {
+	case err == nil:
+		return false, nil
+	case err != sql.ErrNoRows:
+		return false, err
+	}
+
+	if err := d.RecordEventAt(workerID, eventType, message, details, createdAt); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (d *DB) ListEvents(limit int) ([]Event, error) {
 	rows, err := d.db.Query(`SELECT id, worker_id, event_type, message, details, created_at FROM events ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {

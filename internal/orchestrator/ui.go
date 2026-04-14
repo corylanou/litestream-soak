@@ -371,6 +371,10 @@ func runtimeSnapshotLabel(value string) string {
 
 func eventClass(value string) string {
 	switch {
+	case strings.HasPrefix(strings.TrimSpace(value), "platform_oom"), strings.HasPrefix(strings.TrimSpace(value), "platform_disk_full"), strings.HasPrefix(strings.TrimSpace(value), "platform_killed"):
+		return "status-bad"
+	case strings.HasPrefix(strings.TrimSpace(value), "platform_restart"):
+		return "status-warn"
 	case strings.Contains(value, "failed"):
 		return "status-bad"
 	case strings.Contains(value, "passed"):
@@ -1246,6 +1250,16 @@ const workerPageTemplate = `{{define "worker"}}
     </div>
     {{end}}
 
+    {{if .Incident.LatestPlatformEvent}}
+    <div class="incident-alert">
+      <div class="incident-alert-body">
+        <div class="incident-alert-title">{{.Incident.LatestPlatformEvent.EventType}}</div>
+        <div class="incident-alert-meta">{{formatTime .Incident.LatestPlatformEvent.CreatedAt}} · {{.Incident.LatestPlatformEvent.Message}}</div>
+      </div>
+      <span class="badge badge-{{if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-good"}}good{{else if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-warn"}}warn{{else if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-bad"}}bad{{else}}neutral{{end}}">platform</span>
+    </div>
+    {{end}}
+
     <div class="guide-banner">
       <div class="panel guide-copy">
         <div class="panel-head">
@@ -1257,6 +1271,7 @@ const workerPageTemplate = `{{define "worker"}}
           {{if .Incident.Guide.ProbableSubsystem}}<span class="badge badge-warn">{{.Incident.Guide.ProbableSubsystem}}</span>{{end}}
           {{if .Incident.FailureStage}}<span class="badge badge-neutral">stage: {{.Incident.FailureStage}}</span>{{end}}
           {{if .Incident.FailureSignature}}<span class="badge badge-bad">{{shorten .Incident.FailureSignature 96}}</span>{{end}}
+          {{if .Incident.LatestPlatformEvent}}<span class="badge badge-{{if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-good"}}good{{else if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-warn"}}warn{{else if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-bad"}}bad{{else}}neutral{{end}}">{{.Incident.LatestPlatformEvent.EventType}}</span>{{end}}
           <span class="badge badge-{{if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-good"}}good{{else if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-warn"}}warn{{else if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-bad"}}bad{{else}}neutral{{end}}">{{runtimeLabel .Incident.RuntimeSnapshotStatus}}</span>
         </div>
         {{if .Incident.Guide.WhyLikely}}

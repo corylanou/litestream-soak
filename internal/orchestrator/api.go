@@ -29,6 +29,7 @@ type WorkerDetailResponse struct {
 	Worker                model.Worker              `json:"worker"`
 	Workload              workload.Config           `json:"workload"`
 	LatestFailure         *model.Verification       `json:"latest_failure,omitempty"`
+	LatestPlatformEvent   *model.Event              `json:"latest_platform_event,omitempty"`
 	FailureStage          string                    `json:"failure_stage,omitempty"`
 	FailureSignature      string                    `json:"failure_signature,omitempty"`
 	ProbableSubsystem     string                    `json:"probable_subsystem,omitempty"`
@@ -56,6 +57,7 @@ type WorkerSummaryResponse struct {
 	RuntimeSnapshotStatus    string              `json:"runtime_snapshot_status,omitempty"`
 	LastVerification         *model.Verification `json:"last_verification,omitempty"`
 	LatestFailure            *model.Verification `json:"latest_failure,omitempty"`
+	LatestPlatformEvent      *model.Event        `json:"latest_platform_event,omitempty"`
 	CurrentFailureStage      string              `json:"current_failure_stage,omitempty"`
 	CurrentFailureSignature  string              `json:"current_failure_signature,omitempty"`
 	CurrentProbableSubsystem string              `json:"current_probable_subsystem,omitempty"`
@@ -102,6 +104,7 @@ type IncidentBundle struct {
 	Worker                model.Worker              `json:"worker"`
 	Workload              workload.Config           `json:"workload"`
 	LatestFailure         *model.Verification       `json:"latest_failure,omitempty"`
+	LatestPlatformEvent   *model.Event              `json:"latest_platform_event,omitempty"`
 	ActiveFailure         bool                      `json:"active_failure"`
 	FailureStage          string                    `json:"failure_stage,omitempty"`
 	FailureSignature      string                    `json:"failure_signature,omitempty"`
@@ -470,6 +473,11 @@ func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, er
 		summary.LatestProbableSubsystem = inferProbableSubsystem(summary.LatestFailureStage, summary.LatestFailureSignature)
 	}
 
+	events, err := a.db.ListWorkerEvents(worker.ID, 10)
+	if err == nil {
+		summary.LatestPlatformEvent = latestPlatformEvent(events)
+	}
+
 	return summary, nil
 }
 
@@ -782,6 +790,7 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 		Worker:              *worker,
 		Workload:            resolveWorkerWorkload(*worker),
 		ReportedRuntime:     extractReportedRuntime(*worker, events),
+		LatestPlatformEvent: latestPlatformEvent(events),
 		RecentVerifications: verifications,
 		RecentEvents:        events,
 		TriageCommands:      buildTriageCommands(*worker, false),
@@ -851,6 +860,7 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 		Worker:                detail.Worker,
 		Workload:              detail.Workload,
 		LatestFailure:         latestFailure,
+		LatestPlatformEvent:   detail.LatestPlatformEvent,
 		ActiveFailure:         activeFailureDetected,
 		FailureStage:          inferFailureStage(latestFailure),
 		FailureSignature:      inferFailureSignature(latestFailure),

@@ -178,6 +178,9 @@ func buildIncidentGuide(bundle *IncidentBundle) incidentGuide {
 			why = append(why, fmt.Sprintf("The latest Litestream runtime snapshot is unhealthy: %s.", valueOrUnknown(bundle.ReportedRuntime.LitestreamSnapshotError)))
 		}
 	}
+	if bundle.LatestPlatformEvent != nil {
+		why = append(why, fmt.Sprintf("The latest platform signal is %s at %s: %s.", bundle.LatestPlatformEvent.EventType, bundle.LatestPlatformEvent.CreatedAt.Format(timeFormatRFC3339), bundle.LatestPlatformEvent.Message))
+	}
 
 	nextSteps := incidentNextSteps(subsystem, bundle)
 
@@ -545,6 +548,16 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 		)
 	}
 
+	if bundle.LatestPlatformEvent != nil {
+		sections = append(
+			sections,
+			"",
+			"<latest_platform_event>",
+			mustJSON(bundle.LatestPlatformEvent),
+			"</latest_platform_event>",
+		)
+	}
+
 	sections = append(
 		sections,
 		"",
@@ -729,6 +742,25 @@ func recommendedPromptModeForSubsystem(subsystem string) promptMode {
 
 func incidentNextSteps(subsystem string, bundle *IncidentBundle) []string {
 	steps := make([]string, 0, 6)
+	if bundle.LatestPlatformEvent != nil {
+		switch bundle.LatestPlatformEvent.EventType {
+		case "platform_oom":
+			steps = append(steps,
+				"Treat the recent OOM as first-class evidence. Check memory pressure and process survival before assuming a logic bug.",
+				"Inspect the worker page event timeline and Fly logs around the OOM timestamp before retrying the workload.",
+			)
+		case "platform_disk_full":
+			steps = append(steps,
+				"Treat disk pressure as the current blocker. Check volume usage and Litestream temp/LTX growth before changing application logic.",
+				"Compare this worker against other profiles to see whether the failure is tied to dataset or write rate.",
+			)
+		case "platform_restart", "platform_killed":
+			steps = append(steps,
+				"Treat the recent platform restart or kill as first-class evidence before investigating higher-level verification failures.",
+				"Inspect the worker event timeline and Fly logs around the restart timestamp to see what died first.",
+			)
+		}
+	}
 	if bundle.ReportedRuntime != nil && bundle.ReportedRuntime.LitestreamSnapshotError == reporting.LegacyRuntimeTelemetryError {
 		steps = append(steps,
 			"Treat runtime fields on this page as advisory for this worker because it is still emitting legacy telemetry without snapshot-health metadata.",
