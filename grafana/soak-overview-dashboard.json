@@ -932,6 +932,71 @@
         {
           "fieldConfig": {
             "defaults": {
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "green",
+                      "text": "within grace"
+                    },
+                    "1": {
+                      "color": "red",
+                      "text": "overdue"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 4,
+            "x": 0,
+            "y": 40
+          },
+          "id": 120,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "value"
+          },
+          "targets": [
+            {
+              "expr": "topk(1, max by (status) (soak_control_latest_deployment_grace_exceeded))",
+              "instant": true,
+              "legendFormat": "{{status}}"
+            }
+          ],
+          "title": "Rollout Grace",
+          "type": "stat"
+        },
+        {
+          "fieldConfig": {
+            "defaults": {
               "color": {
                 "mode": "palette-classic"
               }
@@ -940,8 +1005,8 @@
           },
           "gridPos": {
             "h": 7,
-            "w": 8,
-            "x": 0,
+            "w": 4,
+            "x": 4,
             "y": 40
           },
           "id": 22,

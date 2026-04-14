@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/reporting"
@@ -95,6 +96,16 @@ var (
 		Name: "soak_control_latest_deployment_workers",
 		Help: "Worker counts for the latest deployment tracked by the control plane.",
 	}, []string{"source", "git_sha", "status", "worker_state"})
+
+	controlLatestDeploymentAge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_latest_deployment_age_seconds",
+		Help: "Age of the latest deployment tracked by the control plane.",
+	}, []string{"source", "git_sha", "status"})
+
+	controlLatestDeploymentGraceExceeded = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_latest_deployment_grace_exceeded",
+		Help: "Whether the latest deployment has exceeded the rollout grace window (1=yes, 0=no).",
+	}, []string{"source", "git_sha", "status"})
 )
 
 func NewControlMetrics(db *model.DB) *controlMetrics {
@@ -302,6 +313,7 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 		}
 	}
 	rollout.Status = inferDeploymentRolloutStatus(rollout)
+	applyDeploymentRolloutGuidance(&rollout, time.Now().UTC())
 
 	deploymentLabels := []string{
 		valueOrUnknown(deployment.Source),
@@ -334,8 +346,18 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 
 	if len(previousDeployment.labels) > 0 && !sameMetricLabels(previousDeployment.labels, deploymentLabels) {
 		controlLatestDeploymentInfo.WithLabelValues(previousDeployment.labels...).Set(0)
+		controlLatestDeploymentAge.WithLabelValues(previousDeployment.labels...).Set(0)
+		controlLatestDeploymentGraceExceeded.WithLabelValues(previousDeployment.labels...).Set(0)
 	}
 	controlLatestDeploymentInfo.WithLabelValues(deploymentLabels...).Set(deploymentMetricValue(rollout.Status))
+	if !deployment.StartedAt.IsZero() {
+		controlLatestDeploymentAge.WithLabelValues(deploymentLabels...).Set(time.Since(deployment.StartedAt).Seconds())
+	}
+	if rollout.GraceWindowExceeded {
+		controlLatestDeploymentGraceExceeded.WithLabelValues(deploymentLabels...).Set(1)
+	} else {
+		controlLatestDeploymentGraceExceeded.WithLabelValues(deploymentLabels...).Set(0)
+	}
 
 	for state, previous := range previousRolloutStates {
 		currentLabels := append(append([]string{}, deploymentLabels...), state)
