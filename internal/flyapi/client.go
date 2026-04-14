@@ -7,13 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
 
 const defaultBaseURL = "https://api.machines.dev/v1"
-const defaultLogsBaseURL = "https://api.fly.io/api/v1"
 
 type Client struct {
 	baseURL    string
@@ -138,24 +136,6 @@ func (c *Client) DestroyVolume(ctx context.Context, id string) error {
 		return fmt.Errorf("destroy volume %s: %w", id, err)
 	}
 	return nil
-}
-
-func (c *Client) ListAppLogs(ctx context.Context, instanceID, nextToken string) (*AppLogsResponse, error) {
-	values := url.Values{}
-	if instanceID != "" {
-		values.Set("instance", instanceID)
-	}
-	if nextToken != "" {
-		values.Set("next_token", nextToken)
-	}
-
-	endpoint := fmt.Sprintf("%s/apps/%s/logs?%s", defaultLogsBaseURL, url.PathEscape(c.appName), values.Encode())
-
-	var result AppLogsResponse
-	if err := c.doAbsolute(ctx, "GET", endpoint, nil, &result); err != nil {
-		return nil, fmt.Errorf("list app logs: %w", err)
-	}
-	return &result, nil
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body interface{}, result interface{}) error {

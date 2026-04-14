@@ -63,11 +63,7 @@ func main() {
 	metrics := orchestrator.NewControlMetrics(db)
 	alerts := orchestrator.NewAlertDispatcher(db, controlBaseURL, alertWebhookURL, alertWebhookToken)
 	fly := flyapi.NewClient(workerAppName, flyToken)
-	logFly := fly
-	if platformLogToken != flyToken {
-		logFly = flyapi.NewClient(workerAppName, platformLogToken)
-	}
-	mgr := orchestrator.NewManager(fly, logFly, db, metrics, alerts, workerAppName, s3Bucket, s3Endpoint, controlBaseURL)
+	mgr := orchestrator.NewManager(fly, db, metrics, alerts, workerAppName, s3Bucket, s3Endpoint, controlBaseURL, platformLogToken)
 	deployer := orchestrator.NewDeployer(mgr, db, workerAppName, webhookDeployEnabled)
 	webhookHandler := orchestrator.NewWebhookHandler(webhookSecret, deployer, webhookDeployEnabled)
 	api := orchestrator.NewAPI(db, fly, metrics, alerts, mgr, deployer)

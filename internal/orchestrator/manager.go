@@ -28,31 +28,28 @@ type WorkerRequest struct {
 }
 
 type Manager struct {
-	fly            *flyapi.Client
-	logFly         *flyapi.Client
-	db             *model.DB
-	metrics        *controlMetrics
-	alerts         *AlertDispatcher
-	appName        string
-	s3Bucket       string
-	s3Endpoint     string
-	controlBaseURL string
+	fly              *flyapi.Client
+	db               *model.DB
+	metrics          *controlMetrics
+	alerts           *AlertDispatcher
+	appName          string
+	s3Bucket         string
+	s3Endpoint       string
+	controlBaseURL   string
+	platformLogToken string
 }
 
-func NewManager(fly, logFly *flyapi.Client, db *model.DB, metrics *controlMetrics, alerts *AlertDispatcher, appName, s3Bucket, s3Endpoint, controlBaseURL string) *Manager {
-	if logFly == nil {
-		logFly = fly
-	}
+func NewManager(fly *flyapi.Client, db *model.DB, metrics *controlMetrics, alerts *AlertDispatcher, appName, s3Bucket, s3Endpoint, controlBaseURL, platformLogToken string) *Manager {
 	return &Manager{
-		fly:            fly,
-		logFly:         logFly,
-		db:             db,
-		metrics:        metrics,
-		alerts:         alerts,
-		appName:        appName,
-		s3Bucket:       s3Bucket,
-		s3Endpoint:     s3Endpoint,
-		controlBaseURL: controlBaseURL,
+		fly:              fly,
+		db:               db,
+		metrics:          metrics,
+		alerts:           alerts,
+		appName:          appName,
+		s3Bucket:         s3Bucket,
+		s3Endpoint:       s3Endpoint,
+		controlBaseURL:   controlBaseURL,
+		platformLogToken: platformLogToken,
 	}
 }
 

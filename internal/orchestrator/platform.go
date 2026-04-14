@@ -1,10 +1,14 @@
 package orchestrator
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -40,6 +44,7 @@ func (m *Manager) syncPlatformLogs(ctx context.Context) {
 		return
 	}
 
+	workersByApp := make(map[string]map[string]model.Worker)
 	for _, worker := range workers {
 		if worker.FlyMachineID == "" {
 			continue
@@ -47,44 +52,104 @@ func (m *Manager) syncPlatformLogs(ctx context.Context) {
 		if worker.Status == model.WorkerDormant || worker.Status == model.WorkerStopped || worker.Status == model.WorkerFailed {
 			continue
 		}
-		if err := m.syncWorkerPlatformLogs(ctx, worker); err != nil {
-			slog.Warn("Failed to sync platform logs", "worker_id", worker.ID, "machine_id", worker.FlyMachineID, "error", err)
+		appName := strings.TrimSpace(worker.AppName)
+		if appName == "" {
+			appName = m.appName
+		}
+		if workersByApp[appName] == nil {
+			workersByApp[appName] = make(map[string]model.Worker)
+		}
+		workersByApp[appName][worker.FlyMachineID] = worker
+	}
+
+	for appName, workersByMachine := range workersByApp {
+		if err := m.syncAppPlatformLogs(ctx, appName, workersByMachine); err != nil {
+			slog.Warn("Failed to sync platform logs", "app", appName, "error", err)
 		}
 	}
 }
 
-func (m *Manager) syncWorkerPlatformLogs(ctx context.Context, worker model.Worker) error {
-	logs, err := m.platformLogClientForWorker(worker).ListAppLogs(ctx, worker.FlyMachineID, "")
+func (m *Manager) syncAppPlatformLogs(ctx context.Context, appName string, workersByMachine map[string]model.Worker) error {
+	logs, err := m.fetchAppPlatformLogs(ctx, appName)
 	if err != nil {
-		return fmt.Errorf("list app logs: %w", err)
+		return fmt.Errorf("fetch app logs: %w", err)
 	}
 
-	if logs == nil {
+	if len(logs) == 0 {
 		return nil
 	}
 
-	entries := append([]flyapi.AppLogEntry(nil), logs.Data...)
-	sort.SliceStable(entries, func(i, j int) bool {
-		return entries[i].Attributes.Timestamp.Before(entries[j].Attributes.Timestamp)
+	sort.SliceStable(logs, func(i, j int) bool {
+		return logs[i].Timestamp.Before(logs[j].Timestamp)
 	})
 
-	for _, entry := range entries {
+	for _, logLine := range logs {
+		worker, ok := workersByMachine[logLine.Instance]
+		if !ok {
+			continue
+		}
+
+		entry := logLine.entry()
 		eventType, message, ok := classifyPlatformLog(entry)
 		if !ok {
 			continue
 		}
 
-		details, err := json.Marshal(entry)
+		details, err := json.Marshal(logLine)
 		if err != nil {
 			return fmt.Errorf("marshal platform log entry: %w", err)
 		}
 
-		_, err = m.db.RecordUniqueEventAt(worker.ID, eventType, message, string(details), entry.Attributes.Timestamp.UTC())
+		_, err = m.db.RecordUniqueEventAt(worker.ID, eventType, message, string(details), logLine.Timestamp.UTC())
 		if err != nil {
 			return fmt.Errorf("record platform event: %w", err)
 		}
 	}
 	return nil
+}
+
+func (m *Manager) fetchAppPlatformLogs(ctx context.Context, appName string) ([]platformLogLine, error) {
+	if strings.TrimSpace(m.platformLogToken) == "" {
+		return nil, fmt.Errorf("platform log token is not configured")
+	}
+
+	cmd := exec.CommandContext(ctx, "fly", "logs", "-a", appName, "--json", "--no-tail")
+	cmd.Env = append(os.Environ(), "FLY_API_TOKEN="+m.platformLogToken)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = err.Error()
+		}
+		return nil, fmt.Errorf("run fly logs: %s", message)
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(stdout.Bytes()))
+	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+
+	logs := make([]platformLogLine, 0)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		var entry platformLogLine
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			return nil, fmt.Errorf("decode fly log line: %w", err)
+		}
+		logs = append(logs, entry)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan fly logs: %w", err)
+	}
+
+	return logs, nil
 }
 
 func classifyPlatformLog(entry flyapi.AppLogEntry) (string, string, bool) {
@@ -125,4 +190,26 @@ func latestPlatformEvent(events []model.Event) *model.Event {
 
 func isPlatformEventType(eventType string) bool {
 	return strings.HasPrefix(strings.TrimSpace(eventType), "platform_")
+}
+
+type platformLogLine struct {
+	Level     string            `json:"level"`
+	Instance  string            `json:"instance"`
+	Message   string            `json:"message"`
+	Region    string            `json:"region"`
+	Timestamp time.Time         `json:"timestamp"`
+	Meta      flyapi.AppLogMeta `json:"meta"`
+}
+
+func (l platformLogLine) entry() flyapi.AppLogEntry {
+	return flyapi.AppLogEntry{
+		Attributes: flyapi.AppLogAttributes{
+			Timestamp: l.Timestamp,
+			Message:   l.Message,
+			Level:     l.Level,
+			Instance:  l.Instance,
+			Region:    l.Region,
+			Meta:      l.Meta,
+		},
+	}
 }
