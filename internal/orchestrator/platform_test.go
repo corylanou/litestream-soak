@@ -49,7 +49,7 @@ func TestClassifyPlatformLog(t *testing.T) {
 				},
 			},
 			wantType:  "platform_disk_full",
-			wantMatch: "disk pressure",
+			wantMatch: "database or disk is full",
 			wantOK:    true,
 		},
 		{
@@ -100,6 +100,44 @@ func TestClassifyPlatformLog(t *testing.T) {
 			}
 			if tt.wantMatch != "" && !containsFold(gotMessage, tt.wantMatch) {
 				t.Fatalf("message = %q, want match %q", gotMessage, tt.wantMatch)
+			}
+		})
+	}
+}
+
+func TestNormalizePlatformMessage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "disk pressure strips timestamp noise",
+			raw:  "time=2026-04-14T18:00:30.117Z level=ERROR msg=\"Write failed\" error=\"database or disk is full\"",
+			want: "database or disk is full",
+		},
+		{
+			name: "oom collapses to stable summary",
+			raw:  "OOM: litestream killed in litestream-soak",
+			want: "oom",
+		},
+		{
+			name: "restart keeps readable suffix",
+			raw:  "time=2026-04-14T18:00:30.117Z level=INFO msg=\"machine restarted by platform\"",
+			want: "msg=\"machine restarted by platform\"",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := normalizePlatformMessage(strings.ToLower(tt.raw), tt.raw)
+			if got != tt.want {
+				t.Fatalf("normalizePlatformMessage() = %q, want %q", got, tt.want)
 			}
 		})
 	}

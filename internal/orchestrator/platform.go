@@ -18,6 +18,8 @@ import (
 	"github.com/corylanou/litestream-soak/internal/model"
 )
 
+const platformEventCoalesceWindow = 10 * time.Minute
+
 func (m *Manager) RunPlatformLogMonitor(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = time.Minute
@@ -101,7 +103,7 @@ func (m *Manager) syncAppPlatformLogs(ctx context.Context, appName string, worke
 			return fmt.Errorf("marshal platform log entry: %w", err)
 		}
 
-		_, err = m.db.RecordUniqueEventAt(worker.ID, eventType, message, string(details), logLine.Timestamp.UTC())
+		_, err = m.db.RecordWindowedEventAt(worker.ID, eventType, message, string(details), logLine.Timestamp.UTC(), platformEventCoalesceWindow)
 		if err != nil {
 			return fmt.Errorf("record platform event: %w", err)
 		}
@@ -155,20 +157,49 @@ func classifyPlatformLog(entry flyapi.AppLogEntry) (string, string, bool) {
 	lower := strings.ToLower(message)
 	switch {
 	case strings.Contains(lower, "oom:") || strings.Contains(lower, "out of memory"):
-		return "platform_oom", fmt.Sprintf("Fly log reported OOM: %s", firstMeaningfulLine(message)), true
+		return "platform_oom", fmt.Sprintf("Fly log reported OOM: %s", normalizePlatformMessage(lower, message)), true
 	case strings.Contains(lower, "no space left on device"),
 		strings.Contains(lower, "disk is full"),
 		strings.Contains(lower, "database is full"),
 		strings.Contains(lower, "database or disk is full"):
-		return "platform_disk_full", fmt.Sprintf("Fly log reported disk pressure: %s", firstMeaningfulLine(message)), true
+		return "platform_disk_full", fmt.Sprintf("Fly log reported disk pressure: %s", normalizePlatformMessage(lower, message)), true
 	case strings.Contains(lower, "signal: killed"):
-		return "platform_killed", fmt.Sprintf("Fly log reported process kill: %s", firstMeaningfulLine(message)), true
+		return "platform_killed", fmt.Sprintf("Fly log reported process kill: %s", normalizePlatformMessage(lower, message)), true
 	case entry.Attributes.Meta.Event.Provider != "" && entry.Attributes.Meta.Event.Provider != "app" &&
 		(strings.Contains(lower, "restart") || strings.Contains(lower, "restarted") || strings.Contains(lower, "starting") || strings.Contains(lower, "started")):
-		return "platform_restart", fmt.Sprintf("Fly platform event: %s", firstMeaningfulLine(message)), true
+		return "platform_restart", fmt.Sprintf("Fly platform event: %s", normalizePlatformMessage(lower, message)), true
 	default:
 		return "", "", false
 	}
+}
+
+func normalizePlatformMessage(lower, raw string) string {
+	switch {
+	case strings.Contains(lower, "database or disk is full"):
+		return "database or disk is full"
+	case strings.Contains(lower, "no space left on device"):
+		return "no space left on device"
+	case strings.Contains(lower, "database is full"):
+		return "database is full"
+	case strings.Contains(lower, "disk is full"):
+		return "disk is full"
+	case strings.Contains(lower, "out of memory"):
+		return "out of memory"
+	case strings.Contains(lower, "oom:"):
+		return "oom"
+	case strings.Contains(lower, "signal: killed"):
+		return "signal: killed"
+	}
+
+	line := firstMeaningfulLine(raw)
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "unknown"
+	}
+	if idx := strings.Index(line, " msg="); idx > 0 {
+		line = strings.TrimSpace(line[idx+1:])
+	}
+	return line
 }
 
 func latestPlatformEvent(events []model.Event) *model.Event {
