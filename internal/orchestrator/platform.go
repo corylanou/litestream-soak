@@ -135,7 +135,7 @@ func (m *Manager) fetchAppPlatformLogs(ctx context.Context, appName string) ([]p
 	for {
 		var entry platformLogLine
 		if err := decoder.Decode(&entry); err != nil {
-			if errors.Is(err, io.EOF) {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(err.Error(), "unexpected end of JSON input") {
 				break
 			}
 			return nil, fmt.Errorf("decode fly log line: %w", err)
