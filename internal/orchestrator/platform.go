@@ -113,7 +113,7 @@ func (m *Manager) fetchAppPlatformLogs(ctx context.Context, appName string) ([]p
 		return nil, fmt.Errorf("platform log token is not configured")
 	}
 
-	cmd := exec.CommandContext(ctx, "fly", "logs", "-a", appName, "--json", "--no-tail")
+	cmd := exec.CommandContext(ctx, "flyctl", "logs", "-a", appName, "--json", "--no-tail")
 	cmd.Env = append(os.Environ(), "FLY_API_TOKEN="+m.platformLogToken)
 
 	var stdout bytes.Buffer
