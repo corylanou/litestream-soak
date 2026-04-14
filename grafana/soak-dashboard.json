@@ -54,6 +54,12 @@
       "title": "Diagnosis JSON",
       "type": "link",
       "url": "https://litestream-soak-ctl.fly.dev/api/diagnosis"
+    },
+    {
+      "targetBlank": true,
+      "title": "Events JSON",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/events"
     }
   ],
   "panels": [
@@ -1430,6 +1436,69 @@
         }
       ],
       "title": "Active Failure x Runtime Workers",
+      "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 72
+      },
+      "id": 35,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "soak_control_worker_latest_platform_event_window_count{worker_id=\"$worker\"} > 0",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Latest Platform Signal",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "app_name": true,
+              "instance": true,
+              "job": true,
+              "region": true,
+              "source": true,
+              "worker_id": true
+            },
+            "indexByName": {
+              "event_type": 0,
+              "event_summary": 1,
+              "Value": 2,
+              "profile": 3
+            },
+            "renameByName": {
+              "event_type": "Event",
+              "event_summary": "Summary",
+              "Value": "Window Count",
+              "profile": "Profile"
+            }
+          }
+        }
+      ],
       "type": "table"
     }
   ],

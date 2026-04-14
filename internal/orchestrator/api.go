@@ -678,6 +678,9 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	if worker, err := a.db.GetWorker(workerID); err == nil {
 		a.metrics.observeWorker(*worker)
+		if events, err := a.db.ListWorkerEvents(workerID, 20); err == nil {
+			a.metrics.observePlatformEvent(*worker, latestPlatformEvent(coalesceEventFeed(events)))
+		}
 		a.observeLatestDeploymentState(worker.Source)
 	}
 
@@ -775,6 +778,9 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	if worker, err := a.db.GetWorker(workerID); err == nil {
 		a.metrics.observeWorker(*worker)
 		a.metrics.observeVerification(*worker, *verification)
+		if events, err := a.db.ListWorkerEvents(workerID, 20); err == nil {
+			a.metrics.observePlatformEvent(*worker, latestPlatformEvent(coalesceEventFeed(events)))
+		}
 		a.observeLatestDeploymentState(worker.Source)
 		if a.alerts != nil {
 			a.alerts.NotifyVerificationFailure(*worker, *verification)

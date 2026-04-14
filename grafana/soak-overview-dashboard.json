@@ -48,6 +48,12 @@
       "title": "Latest Rollout",
       "type": "link",
       "url": "https://litestream-soak-ctl.fly.dev/api/deployments/latest"
+    },
+    {
+      "targetBlank": true,
+      "title": "Events JSON",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/events"
     }
   ],
   "panels": [
@@ -1365,6 +1371,152 @@
         }
       ],
       "title": "Fleet Composition",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 41
+      },
+      "id": 102,
+      "panels": [
+        {
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Worker"
+                },
+                "properties": [
+                  {
+                    "id": "links",
+                    "value": [
+                      {
+                        "targetBlank": true,
+                        "title": "Open Worker",
+                        "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__value.raw}"
+                      }
+                    ]
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "data-links"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 16,
+            "x": 0,
+            "y": 42
+          },
+          "id": 130,
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "countRows": false,
+              "fields": "",
+              "reducer": [
+                "sum"
+              ],
+              "show": false
+            },
+            "showHeader": true
+          },
+          "targets": [
+            {
+              "expr": "((soak_control_worker_latest_platform_event_window_count > 0) * on(worker_id) group_left(status) (soak_control_worker_status == 1))",
+              "format": "table",
+              "instant": true
+            }
+          ],
+          "title": "Platform Signals Right Now",
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "__name__": true,
+                  "app_name": true,
+                  "instance": true,
+                  "job": true,
+                  "region": true,
+                  "source": true
+                },
+                "indexByName": {
+                  "worker_id": 0,
+                  "status": 1,
+                  "event_type": 2,
+                  "event_summary": 3,
+                  "Value": 4,
+                  "profile": 5
+                },
+                "renameByName": {
+                  "worker_id": "Worker",
+                  "status": "Status",
+                  "event_type": "Event",
+                  "event_summary": "Summary",
+                  "Value": "Window Count",
+                  "profile": "Profile"
+                }
+              }
+            }
+          ],
+          "type": "table"
+        },
+        {
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 16,
+            "y": 42
+          },
+          "id": 131,
+          "options": {
+            "displayMode": "basic",
+            "namePlacement": "left",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": false,
+            "sizing": "manual",
+            "text": {}
+          },
+          "targets": [
+            {
+              "expr": "count by (event_type) (soak_control_worker_latest_platform_event_info == 1)",
+              "instant": true,
+              "legendFormat": "{{event_type}}"
+            }
+          ],
+          "title": "Platform Signal Types",
+          "type": "bargauge"
+        }
+      ],
+      "title": "Platform Signals",
       "type": "row"
     }
   ],

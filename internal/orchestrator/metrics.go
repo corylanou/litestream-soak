@@ -17,6 +17,7 @@ type controlMetrics struct {
 	statusByWorker      map[string]string
 	workloadByWorker    map[string]labelMetricState
 	runtimeByWorker     map[string]labelMetricState
+	platformByWorker    map[string]labelMetricState
 	failureByWorker     map[string]failureMetricState
 	lastFailureByWorker map[string]failureMetricState
 	latestDeployment    labelMetricState
@@ -72,6 +73,21 @@ var (
 		Help: "Current runtime snapshot health classification tracked by the control plane.",
 	}, []string{"worker_id", "profile", "source", "app_name", "region", "runtime_status"})
 
+	controlWorkerLatestPlatformEventInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_latest_platform_event_info",
+		Help: "Latest normalized platform signal tracked by the control plane.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region", "event_type", "event_summary"})
+
+	controlWorkerLatestPlatformEventUnixTime = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_latest_platform_event_unixtime",
+		Help: "Unix timestamp of the latest normalized platform signal tracked by the control plane.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region", "event_type", "event_summary"})
+
+	controlWorkerLatestPlatformEventWindowCount = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_latest_platform_event_window_count",
+		Help: "Number of similar platform log lines represented by the latest displayed platform incident row.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region", "event_type", "event_summary"})
+
 	controlWorkerFailureInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_control_worker_failure_info",
 		Help: "Current failure classification tracked by the control plane.",
@@ -113,6 +129,7 @@ func NewControlMetrics(db *model.DB) *controlMetrics {
 		statusByWorker:      make(map[string]string),
 		workloadByWorker:    make(map[string]labelMetricState),
 		runtimeByWorker:     make(map[string]labelMetricState),
+		platformByWorker:    make(map[string]labelMetricState),
 		failureByWorker:     make(map[string]failureMetricState),
 		lastFailureByWorker: make(map[string]failureMetricState),
 		rolloutByState:      make(map[string]labelMetricState),
@@ -129,6 +146,10 @@ func (m *controlMetrics) syncFromDB(db *model.DB) {
 
 	for _, worker := range workers {
 		m.observeWorker(worker)
+		events, err := db.ListWorkerEvents(worker.ID, 20)
+		if err == nil {
+			m.observePlatformEvent(worker, latestPlatformEvent(coalesceEventFeed(events)))
+		}
 
 		verifications, err := db.ListVerifications(worker.ID, 1)
 		if err != nil || len(verifications) == 0 {
@@ -202,6 +223,39 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 	if worker.LastHeartbeatAt != nil && !worker.LastHeartbeatAt.IsZero() {
 		controlWorkerLastHeartbeat.WithLabelValues(labels...).Set(float64(worker.LastHeartbeatAt.Unix()))
 	}
+}
+
+func (m *controlMetrics) observePlatformEvent(worker model.Worker, event *model.Event) {
+	baseLabels := workerMetricLabels(worker)
+
+	m.mu.Lock()
+	previous := m.platformByWorker[worker.ID]
+	if event == nil {
+		delete(m.platformByWorker, worker.ID)
+	} else {
+		m.platformByWorker[worker.ID] = labelMetricState{labels: append(baseLabels, metricValueOrUnknown(strings.TrimSpace(event.EventType)), metricValueOrUnknown(strings.TrimSpace(event.Message)))}
+	}
+	m.mu.Unlock()
+
+	if len(previous.labels) > 0 {
+		controlWorkerLatestPlatformEventInfo.WithLabelValues(previous.labels...).Set(0)
+		controlWorkerLatestPlatformEventUnixTime.WithLabelValues(previous.labels...).Set(0)
+		controlWorkerLatestPlatformEventWindowCount.WithLabelValues(previous.labels...).Set(0)
+	}
+	if event == nil {
+		return
+	}
+
+	labels := append(baseLabels, metricValueOrUnknown(strings.TrimSpace(event.EventType)), metricValueOrUnknown(strings.TrimSpace(event.Message)))
+	controlWorkerLatestPlatformEventInfo.WithLabelValues(labels...).Set(1)
+	if !event.CreatedAt.IsZero() {
+		controlWorkerLatestPlatformEventUnixTime.WithLabelValues(labels...).Set(float64(event.CreatedAt.Unix()))
+	}
+	windowCount := 1
+	if event.CollapsedCount > 1 {
+		windowCount = event.CollapsedCount
+	}
+	controlWorkerLatestPlatformEventWindowCount.WithLabelValues(labels...).Set(float64(windowCount))
 }
 
 func (m *controlMetrics) observeVerification(worker model.Worker, verification model.Verification) {

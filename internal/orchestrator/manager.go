@@ -253,6 +253,11 @@ func (m *Manager) observeWorkerByID(workerID string) {
 	if m.metrics != nil {
 		m.metrics.observeWorker(*worker)
 	}
+	if m.metrics != nil {
+		if events, err := m.db.ListWorkerEvents(workerID, 20); err == nil {
+			m.metrics.observePlatformEvent(*worker, latestPlatformEvent(coalesceEventFeed(events)))
+		}
+	}
 
 	verifications, err := m.db.ListVerifications(workerID, 1)
 	if err != nil || len(verifications) == 0 {

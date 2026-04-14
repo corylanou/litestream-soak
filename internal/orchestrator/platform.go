@@ -86,6 +86,7 @@ func (m *Manager) syncAppPlatformLogs(ctx context.Context, appName string, worke
 		return logs[i].Timestamp.Before(logs[j].Timestamp)
 	})
 
+	touchedWorkers := make(map[string]struct{})
 	for _, logLine := range logs {
 		worker, ok := workersByMachine[logLine.Instance]
 		if !ok {
@@ -107,6 +108,11 @@ func (m *Manager) syncAppPlatformLogs(ctx context.Context, appName string, worke
 		if err != nil {
 			return fmt.Errorf("record platform event: %w", err)
 		}
+		touchedWorkers[worker.ID] = struct{}{}
+	}
+
+	for workerID := range touchedWorkers {
+		m.observeWorkerByID(workerID)
 	}
 	return nil
 }
