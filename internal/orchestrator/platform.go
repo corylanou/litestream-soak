@@ -54,7 +54,7 @@ func (m *Manager) syncPlatformLogs(ctx context.Context) {
 }
 
 func (m *Manager) syncWorkerPlatformLogs(ctx context.Context, worker model.Worker) error {
-	logs, err := m.flyClientForWorker(worker).ListAppLogs(ctx, worker.FlyMachineID, "")
+	logs, err := m.platformLogClientForWorker(worker).ListAppLogs(ctx, worker.FlyMachineID, "")
 	if err != nil {
 		return fmt.Errorf("list app logs: %w", err)
 	}

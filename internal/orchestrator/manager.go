@@ -29,6 +29,7 @@ type WorkerRequest struct {
 
 type Manager struct {
 	fly            *flyapi.Client
+	logFly         *flyapi.Client
 	db             *model.DB
 	metrics        *controlMetrics
 	alerts         *AlertDispatcher
@@ -38,9 +39,13 @@ type Manager struct {
 	controlBaseURL string
 }
 
-func NewManager(fly *flyapi.Client, db *model.DB, metrics *controlMetrics, alerts *AlertDispatcher, appName, s3Bucket, s3Endpoint, controlBaseURL string) *Manager {
+func NewManager(fly, logFly *flyapi.Client, db *model.DB, metrics *controlMetrics, alerts *AlertDispatcher, appName, s3Bucket, s3Endpoint, controlBaseURL string) *Manager {
+	if logFly == nil {
+		logFly = fly
+	}
 	return &Manager{
 		fly:            fly,
+		logFly:         logFly,
 		db:             db,
 		metrics:        metrics,
 		alerts:         alerts,

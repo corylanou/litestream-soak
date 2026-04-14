@@ -112,6 +112,14 @@ func (m *Manager) flyClientForWorker(worker model.Worker) *flyapi.Client {
 	return m.fly.ForApp(appName)
 }
 
+func (m *Manager) platformLogClientForWorker(worker model.Worker) *flyapi.Client {
+	appName := strings.TrimSpace(worker.AppName)
+	if appName == "" {
+		appName = m.appName
+	}
+	return m.logFly.ForApp(appName)
+}
+
 func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, imageRef string, volumeID string, workloadCfg workload.Config) (*flyapi.Machine, error) {
 	workloadCfg = normalizeWorkloadConfig(workloadCfg)
 	request := flyapi.CreateMachineRequest{

@@ -31,6 +31,7 @@ func main() {
 		slog.Error("FLY_API_TOKEN is required")
 		os.Exit(1)
 	}
+	platformLogToken := envOrDefault("SOAK_PLATFORM_LOG_TOKEN", flyToken)
 
 	dbPath := envOrDefault("DB_PATH", "/data/soakctl.db")
 	s3Bucket := envOrDefault("S3_BUCKET", os.Getenv("BUCKET_NAME"))
@@ -62,7 +63,11 @@ func main() {
 	metrics := orchestrator.NewControlMetrics(db)
 	alerts := orchestrator.NewAlertDispatcher(db, controlBaseURL, alertWebhookURL, alertWebhookToken)
 	fly := flyapi.NewClient(workerAppName, flyToken)
-	mgr := orchestrator.NewManager(fly, db, metrics, alerts, workerAppName, s3Bucket, s3Endpoint, controlBaseURL)
+	logFly := fly
+	if platformLogToken != flyToken {
+		logFly = flyapi.NewClient(workerAppName, platformLogToken)
+	}
+	mgr := orchestrator.NewManager(fly, logFly, db, metrics, alerts, workerAppName, s3Bucket, s3Endpoint, controlBaseURL)
 	deployer := orchestrator.NewDeployer(mgr, db, workerAppName, webhookDeployEnabled)
 	webhookHandler := orchestrator.NewWebhookHandler(webhookSecret, deployer, webhookDeployEnabled)
 	api := orchestrator.NewAPI(db, fly, metrics, alerts, mgr, deployer)
@@ -123,6 +128,7 @@ func main() {
 		"dormancy_min_failures", dormancyMinFailures,
 		"platform_log_monitor_enabled", platformLogMonitorEnabled,
 		"platform_log_poll_interval", platformLogPollInterval,
+		"platform_log_token_overridden", platformLogToken != flyToken,
 		"webhook_deploy_enabled", webhookDeployEnabled,
 	)
 

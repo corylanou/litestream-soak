@@ -286,6 +286,10 @@ The control plane now polls Fly app logs for each active worker and records
 platform-level signals into the normal event stream. These appear on worker
 detail pages, in incident bundles, and in AI prompt output.
 
+If the control plane is using a deploy-scoped `FLY_API_TOKEN`, configure
+`SOAK_PLATFORM_LOG_TOKEN` with a read-only org token so the Fly logs API can
+be queried successfully.
+
 Current platform event types:
 
 - `platform_oom`: Fly reported an out-of-memory kill
