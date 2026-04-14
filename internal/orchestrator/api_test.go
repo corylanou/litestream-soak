@@ -102,6 +102,15 @@ func TestBuildDeploymentRollout(t *testing.T) {
 	if rollout.Status != "rolling_out" {
 		t.Fatalf("Status = %q, want rolling_out", rollout.Status)
 	}
+	if rollout.NextAction == "" {
+		t.Fatalf("NextAction should not be empty")
+	}
+	if len(rollout.NextChecks) == 0 {
+		t.Fatalf("NextChecks should not be empty")
+	}
+	if rollout.GraceWindowExceeded {
+		t.Fatalf("GraceWindowExceeded = true, want false for fresh rollout")
+	}
 	if rollout.Workers[0].WorkerID != "worker-main-dormant" {
 		t.Fatalf("first worker = %q, want outdated worker first", rollout.Workers[0].WorkerID)
 	}
@@ -156,6 +165,38 @@ func TestHandleGetLatestDeployment(t *testing.T) {
 	}
 	if rollout.UpdatedWorkers != 1 || rollout.TotalWorkers != 1 {
 		t.Fatalf("updated/total = %d/%d, want 1/1", rollout.UpdatedWorkers, rollout.TotalWorkers)
+	}
+	if rollout.NextAction == "" {
+		t.Fatalf("NextAction should not be empty")
+	}
+}
+
+func TestApplyDeploymentRolloutGuidanceGraceWindow(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	rollout := DeploymentRolloutResponse{
+		Deployment: model.Deployment{
+			GitSHA:    "sha-old",
+			StartedAt: now.Add(-1 * time.Hour),
+		},
+		Status:          "needs_attention",
+		TotalWorkers:    9,
+		UpdatedWorkers:  9,
+		DegradedWorkers: 2,
+		DormantWorkers:  1,
+	}
+
+	applyDeploymentRolloutGuidance(&rollout, now)
+
+	if !rollout.GraceWindowExceeded {
+		t.Fatalf("GraceWindowExceeded = false, want true")
+	}
+	if rollout.NextAction == "" {
+		t.Fatalf("NextAction should not be empty")
+	}
+	if len(rollout.NextChecks) == 0 {
+		t.Fatalf("NextChecks should not be empty")
 	}
 }
 

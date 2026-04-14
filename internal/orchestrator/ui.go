@@ -826,7 +826,11 @@ const homeBodyTemplate = `{{define "home_body"}}
           {{if gt .LatestDeployment.ProbingWorkers 0}}<span class="badge badge-warn">{{.LatestDeployment.ProbingWorkers}} probing</span>{{end}}
           {{if gt .LatestDeployment.DormantWorkers 0}}<span class="badge badge-bad">{{.LatestDeployment.DormantWorkers}} dormant</span>{{end}}
           {{if gt .LatestDeployment.DegradedWorkers 0}}<span class="badge badge-bad">{{.LatestDeployment.DegradedWorkers}} degraded</span>{{end}}
+          {{if .LatestDeployment.GraceWindowExceeded}}<span class="badge badge-bad">beyond 45m grace</span>{{end}}
         </div>
+        {{if .LatestDeployment.NextAction}}
+        <p style="margin-top:10px;"><strong>Next action:</strong> {{.LatestDeployment.NextAction}}</p>
+        {{end}}
         {{if gt .LatestDeployment.OutdatedWorkers 0}}
         <ul>
           {{range .LatestDeployment.Workers}}
@@ -836,11 +840,13 @@ const homeBodyTemplate = `{{define "home_body"}}
           {{end}}
         </ul>
         {{end}}
+        {{if .LatestDeployment.NextChecks}}
         <ul>
-          <li>Verify <strong>updated</strong> reaches the full fleet size after a merge or manual deploy handoff.</li>
-          <li>If workers are <strong>probing</strong>, wait for the next verification cycle before deciding whether the release helped.</li>
-          <li>If workers return to <strong>dormant</strong> or stay <strong>degraded</strong>, open those workers before assuming the rollout succeeded.</li>
+          {{range .LatestDeployment.NextChecks}}
+          <li>{{.}}</li>
+          {{end}}
         </ul>
+        {{end}}
         <div class="chip-row">
           <a class="btn btn-primary" href="/api/deployments/latest">Latest rollout JSON</a>
           <a class="btn" href="/api/deployments">History</a>

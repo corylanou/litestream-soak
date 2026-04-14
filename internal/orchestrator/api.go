@@ -78,19 +78,24 @@ type DeploymentWorkerProgress struct {
 }
 
 type DeploymentRolloutResponse struct {
-	Deployment       model.Deployment           `json:"deployment"`
-	Status           string                     `json:"status"`
-	Summary          string                     `json:"summary"`
-	TotalWorkers     int                        `json:"total_workers"`
-	UpdatedWorkers   int                        `json:"updated_workers"`
-	OutdatedWorkers  int                        `json:"outdated_workers"`
-	RunningWorkers   int                        `json:"running_workers"`
-	DegradedWorkers  int                        `json:"degraded_workers"`
-	DormantWorkers   int                        `json:"dormant_workers"`
-	ProbingWorkers   int                        `json:"probing_workers"`
-	AttentionWorkers int                        `json:"attention_workers"`
-	Workers          []DeploymentWorkerProgress `json:"workers,omitempty"`
+	Deployment          model.Deployment           `json:"deployment"`
+	Status              string                     `json:"status"`
+	Summary             string                     `json:"summary"`
+	NextAction          string                     `json:"next_action,omitempty"`
+	NextChecks          []string                   `json:"next_checks,omitempty"`
+	GraceWindowExceeded bool                       `json:"grace_window_exceeded,omitempty"`
+	TotalWorkers        int                        `json:"total_workers"`
+	UpdatedWorkers      int                        `json:"updated_workers"`
+	OutdatedWorkers     int                        `json:"outdated_workers"`
+	RunningWorkers      int                        `json:"running_workers"`
+	DegradedWorkers     int                        `json:"degraded_workers"`
+	DormantWorkers      int                        `json:"dormant_workers"`
+	ProbingWorkers      int                        `json:"probing_workers"`
+	AttentionWorkers    int                        `json:"attention_workers"`
+	Workers             []DeploymentWorkerProgress `json:"workers,omitempty"`
 }
+
+const rolloutAttentionGraceWindow = 45 * time.Minute
 
 type IncidentBundle struct {
 	GeneratedAt           time.Time                 `json:"generated_at"`
@@ -318,6 +323,7 @@ func (a *API) buildDeploymentRollout(deployment model.Deployment) (DeploymentRol
 
 	response.Status = inferDeploymentRolloutStatus(response)
 	response.Summary = summarizeDeploymentRollout(response)
+	applyDeploymentRolloutGuidance(&response, time.Now().UTC())
 	return response, nil
 }
 
@@ -954,6 +960,92 @@ func summarizeDeploymentRollout(rollout DeploymentRolloutResponse) string {
 	default:
 		return fmt.Sprintf("All %d workers are on %s and the fleet is stable.", rollout.TotalWorkers, trimmedSHA)
 	}
+}
+
+func applyDeploymentRolloutGuidance(rollout *DeploymentRolloutResponse, now time.Time) {
+	if rollout == nil {
+		return
+	}
+
+	rollout.GraceWindowExceeded = deploymentGraceWindowExceeded(*rollout, now)
+	rollout.NextAction = inferDeploymentNextAction(*rollout)
+	rollout.NextChecks = inferDeploymentNextChecks(*rollout)
+}
+
+func deploymentGraceWindowExceeded(rollout DeploymentRolloutResponse, now time.Time) bool {
+	if rollout.Deployment.StartedAt.IsZero() {
+		return false
+	}
+
+	switch rollout.Status {
+	case "rolling_out", "probing", "needs_attention":
+	default:
+		return false
+	}
+
+	return now.Sub(rollout.Deployment.StartedAt) >= rolloutAttentionGraceWindow
+}
+
+func inferDeploymentNextAction(rollout DeploymentRolloutResponse) string {
+	switch rollout.Status {
+	case "no_workers":
+		return "Create or reconcile the main fleet before trusting this release."
+	case "rolling_out":
+		if rollout.GraceWindowExceeded {
+			return "Open outdated workers now. The rollout is still incomplete beyond the normal probe window."
+		}
+		return "Wait for the remaining workers to move to the new SHA, then confirm the full fleet is updated."
+	case "probing":
+		if rollout.GraceWindowExceeded {
+			return "Open probing workers now. The rollout has not settled after a full verification cycle."
+		}
+		return "Wait for the next verification cycle to finish before deciding whether the release helped."
+	case "needs_attention":
+		if rollout.GraceWindowExceeded {
+			return "Treat this as a failed rollout until the degraded or dormant workers are explained."
+		}
+		return "Watch the affected workers through one full verification cycle, then open any that stay degraded or dormant."
+	default:
+		return "No immediate action. Spot-check one worker, then keep watching diagnosis for regressions."
+	}
+}
+
+func inferDeploymentNextChecks(rollout DeploymentRolloutResponse) []string {
+	checks := make([]string, 0, 3)
+	switch rollout.Status {
+	case "no_workers":
+		return []string{
+			"Confirm the main fleet reconciler is enabled.",
+			"Create or re-register the expected main workers.",
+			"Check /api/workers to verify the control plane can see the fleet.",
+		}
+	case "rolling_out":
+		checks = append(checks,
+			"Check that updated_workers reaches total_workers.",
+			"Open any worker still on the previous SHA.",
+		)
+	case "probing":
+		checks = append(checks,
+			"Wait for the next verification cycle to finish.",
+			"Open workers still marked probing after that cycle.",
+		)
+	case "needs_attention":
+		checks = append(checks,
+			"Open degraded and dormant workers first.",
+			"Check failure stage, signature, and probable subsystem on those workers.",
+		)
+	default:
+		checks = append(checks,
+			"Spot-check one worker incident bundle after the rollout.",
+			"Keep diagnosis open for at least one more verification cycle.",
+		)
+	}
+
+	if rollout.GraceWindowExceeded {
+		checks = append(checks, fmt.Sprintf("The rollout has exceeded the %s grace window; escalate if it does not recover.", rolloutAttentionGraceWindow))
+	}
+
+	return checks
 }
 
 func buildTriageCommands(worker model.Worker, hasMachine bool) []string {
