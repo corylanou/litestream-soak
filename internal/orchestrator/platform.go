@@ -1,11 +1,12 @@
 package orchestrator
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -129,24 +130,17 @@ func (m *Manager) fetchAppPlatformLogs(ctx context.Context, appName string) ([]p
 		return nil, fmt.Errorf("run fly logs: %s", message)
 	}
 
-	scanner := bufio.NewScanner(bytes.NewReader(stdout.Bytes()))
-	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
-
+	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
 	logs := make([]platformLogLine, 0)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
+	for {
 		var entry platformLogLine
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		if err := decoder.Decode(&entry); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
 			return nil, fmt.Errorf("decode fly log line: %w", err)
 		}
 		logs = append(logs, entry)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan fly logs: %w", err)
 	}
 
 	return logs, nil
