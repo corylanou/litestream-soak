@@ -195,6 +195,41 @@ SOAK_ADMIN_BEARER_TOKEN=... \
 ./scripts/notify-deployment-ready.sh <git-sha> main manual_test <image-ref>
 ```
 
+If GitHub Actions cannot deploy because the repo does not have
+`FLY_API_TOKEN`, use this manual fallback after merging to `main`:
+
+```bash
+git checkout main
+git pull
+
+SHA=$(git rev-parse HEAD)
+SHORT_SHA=$(git rev-parse --short=12 HEAD)
+
+fly deploy \
+  --config fly.toml \
+  --app litestream-soak \
+  --build-only \
+  --push \
+  --image-label "sha-${SHORT_SHA}"
+
+CONTROL_BASE_URL=https://litestream-soak-ctl.fly.dev \
+SOAK_ADMIN_BEARER_TOKEN=... \
+./scripts/notify-deployment-ready.sh \
+  "$SHA" \
+  main \
+  manual_main \
+  "registry.fly.io/litestream-soak:sha-${SHORT_SHA}"
+```
+
+If you only need to wake dormant workers with the current image already running
+in Fly:
+
+```bash
+curl -X POST -sS \
+  -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  "https://litestream-soak-ctl.fly.dev/api/admin/resume-dormant?source=main&trigger=manual_resume" | jq .
+```
+
 To verify that a merge or manual handoff actually propagated through the fleet:
 
 ```bash
