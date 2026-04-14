@@ -29,17 +29,19 @@ type alertWebhookPayload struct {
 }
 
 type alertWebhookDetail struct {
-	AlertID          int64               `json:"alert_id"`
-	AlertType        string              `json:"alert_type"`
-	Severity         string              `json:"severity"`
-	GeneratedAt      time.Time           `json:"generated_at"`
-	FailureStage     string              `json:"failure_stage,omitempty"`
-	FailureSignature string              `json:"failure_signature,omitempty"`
-	Message          string              `json:"message"`
-	Worker           model.Worker        `json:"worker"`
-	Verification     *model.Verification `json:"verification,omitempty"`
-	TriageCommands   []string            `json:"triage_commands,omitempty"`
-	URLs             map[string]string   `json:"urls"`
+	AlertID          int64                      `json:"alert_id"`
+	AlertType        string                     `json:"alert_type"`
+	Severity         string                     `json:"severity"`
+	GeneratedAt      time.Time                  `json:"generated_at"`
+	FailureStage     string                     `json:"failure_stage,omitempty"`
+	FailureSignature string                     `json:"failure_signature,omitempty"`
+	Message          string                     `json:"message"`
+	Worker           *model.Worker              `json:"worker,omitempty"`
+	Deployment       *model.Deployment          `json:"deployment,omitempty"`
+	Rollout          *DeploymentRolloutResponse `json:"rollout,omitempty"`
+	Verification     *model.Verification        `json:"verification,omitempty"`
+	TriageCommands   []string                   `json:"triage_commands,omitempty"`
+	URLs             map[string]string          `json:"urls"`
 }
 
 var (
@@ -88,6 +90,14 @@ func (d *AlertDispatcher) NotifyWorkerStale(worker model.Worker) {
 	}
 
 	go d.notifyWorkerStale(worker)
+}
+
+func (d *AlertDispatcher) NotifyDeploymentAttention(rollout DeploymentRolloutResponse) {
+	if !d.Enabled() || !rolloutAttentionAlertable(rollout) {
+		return
+	}
+
+	go d.notifyDeploymentAttention(rollout)
 }
 
 func (d *AlertDispatcher) notifyVerificationFailure(worker model.Worker, verification model.Verification) {
@@ -148,6 +158,31 @@ func (d *AlertDispatcher) notifyWorkerStale(worker model.Worker) {
 	d.sendAlert(id, worker.ID, delivery.AlertType, payload)
 }
 
+func (d *AlertDispatcher) notifyDeploymentAttention(rollout DeploymentRolloutResponse) {
+	fingerprint := fmt.Sprintf("deployment_attention:%s:%s:%s", rollout.Deployment.Source, rollout.Deployment.GitSHA, rollout.Status)
+	delivery := &model.AlertDelivery{
+		AlertType:        "deployment_attention",
+		Fingerprint:      fingerprint,
+		Status:           "pending",
+		FailureStage:     "deployment",
+		FailureSignature: rollout.Status,
+		Message:          rollout.NextAction,
+	}
+
+	id, created, err := d.db.CreateAlert(delivery)
+	if err != nil {
+		slog.Error("Failed to create deployment alert record", "sha", rollout.Deployment.GitSHA, "status", rollout.Status, "error", err)
+		return
+	}
+	if !created {
+		controlAlertTotal.WithLabelValues("", delivery.AlertType, "duplicate").Inc()
+		return
+	}
+
+	payload := d.buildDeploymentPayload(id, rollout)
+	d.sendAlert(id, "", delivery.AlertType, payload)
+}
+
 func (d *AlertDispatcher) shouldAlertVerificationFailure(workerID string, current model.Verification) bool {
 	verifications, err := d.db.ListVerifications(workerID, 2)
 	if err != nil || len(verifications) < 2 {
@@ -183,7 +218,7 @@ func (d *AlertDispatcher) buildVerificationPayload(id int64, worker model.Worker
 			FailureStage:     stage,
 			FailureSignature: signature,
 			Message:          firstMeaningfulLine(verification.ErrorMessage),
-			Worker:           worker,
+			Worker:           &worker,
 			Verification:     &verification,
 			TriageCommands:   buildTriageCommands(worker, worker.FlyMachineID != ""),
 			URLs:             d.alertURLs(worker.ID),
@@ -204,9 +239,35 @@ func (d *AlertDispatcher) buildStalePayload(id int64, worker model.Worker) alert
 			FailureStage:     "heartbeat",
 			FailureSignature: "worker_stale",
 			Message:          "worker missed heartbeat deadline",
-			Worker:           worker,
+			Worker:           &worker,
 			TriageCommands:   buildTriageCommands(worker, worker.FlyMachineID != ""),
 			URLs:             d.alertURLs(worker.ID),
+		},
+	}
+}
+
+func (d *AlertDispatcher) buildDeploymentPayload(id int64, rollout DeploymentRolloutResponse) alertWebhookPayload {
+	text := fmt.Sprintf(
+		"Litestream soak rollout alert: %s is %s after %s",
+		trimSHA(rollout.Deployment.GitSHA),
+		rollout.Status,
+		rolloutAttentionGraceWindow,
+	)
+
+	return alertWebhookPayload{
+		Text: text,
+		Alert: alertWebhookDetail{
+			AlertID:          id,
+			AlertType:        "deployment_attention",
+			Severity:         "warning",
+			GeneratedAt:      time.Now().UTC(),
+			FailureStage:     "deployment",
+			FailureSignature: rollout.Status,
+			Message:          rollout.NextAction,
+			Deployment:       &rollout.Deployment,
+			Rollout:          &rollout,
+			TriageCommands:   buildDeploymentTriageCommands(),
+			URLs:             d.deploymentAlertURLs(),
 		},
 	}
 }
@@ -222,6 +283,42 @@ func (d *AlertDispatcher) alertURLs(workerID string) map[string]string {
 	urls["prompt_api"] = d.baseURL + "/api/workers/" + workerID + "/prompt"
 	urls["alerts_api"] = d.baseURL + "/api/alerts"
 	return urls
+}
+
+func (d *AlertDispatcher) deploymentAlertURLs() map[string]string {
+	urls := map[string]string{}
+	if d.baseURL == "" {
+		return urls
+	}
+
+	urls["control_ui"] = d.baseURL + "/ui"
+	urls["deployment_api"] = d.baseURL + "/api/deployments/latest"
+	urls["diagnosis_api"] = d.baseURL + "/api/diagnosis"
+	urls["events_api"] = d.baseURL + "/api/events"
+	urls["alerts_api"] = d.baseURL + "/api/alerts"
+	return urls
+}
+
+func rolloutAttentionAlertable(rollout DeploymentRolloutResponse) bool {
+	if !rollout.GraceWindowExceeded {
+		return false
+	}
+
+	switch rollout.Status {
+	case "rolling_out", "probing", "needs_attention":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildDeploymentTriageCommands() []string {
+	return []string{
+		`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/deployments/latest | jq .`,
+		`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/diagnosis | jq .`,
+		`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/events?limit=20 | jq .`,
+		"fly machines list -a litestream-soak",
+	}
 }
 
 func (d *AlertDispatcher) sendAlert(id int64, workerID, alertType string, payload alertWebhookPayload) {

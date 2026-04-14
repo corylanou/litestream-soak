@@ -171,6 +171,49 @@ func TestHandleGetLatestDeployment(t *testing.T) {
 	}
 }
 
+func TestHandleListAlertsIncludesDeploymentTriage(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	if _, created, err := db.CreateAlert(&model.AlertDelivery{
+		AlertType:        "deployment_attention",
+		Fingerprint:      "deployment_attention:main:sha-latest:needs_attention",
+		Status:           "sent",
+		FailureStage:     "deployment",
+		FailureSignature: "needs_attention",
+		Message:          "Treat this as a failed rollout until the degraded or dormant workers are explained.",
+	}); err != nil {
+		t.Fatalf("CreateAlert() error = %v", err)
+	} else if !created {
+		t.Fatalf("CreateAlert() created = false, want true")
+	}
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/alerts", nil)
+	recorder := httptest.NewRecorder()
+
+	api.handleListAlerts(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	var alerts []struct {
+		Alert          model.AlertDelivery `json:"alert"`
+		TriageCommands []string            `json:"triage_commands"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&alerts); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if len(alerts) != 1 {
+		t.Fatalf("len(alerts) = %d, want 1", len(alerts))
+	}
+	if len(alerts[0].TriageCommands) == 0 {
+		t.Fatalf("TriageCommands should not be empty")
+	}
+}
+
 func TestApplyDeploymentRolloutGuidanceGraceWindow(t *testing.T) {
 	t.Parallel()
 

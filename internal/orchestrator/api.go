@@ -252,12 +252,32 @@ func (a *API) listWorkerSummaries(status string) ([]WorkerSummaryResponse, error
 }
 
 func (a *API) buildDeploymentRollout(deployment model.Deployment) (DeploymentRolloutResponse, error) {
+	return buildDeploymentRollout(a.db, deployment)
+}
+
+func buildLatestDeploymentRollout(db *model.DB, source string) (*DeploymentRolloutResponse, error) {
+	deployment, err := db.GetLatestDeployment(strings.TrimSpace(source))
+	if err != nil {
+		return nil, err
+	}
+	if deployment == nil {
+		return nil, nil
+	}
+
+	rollout, err := buildDeploymentRollout(db, *deployment)
+	if err != nil {
+		return nil, err
+	}
+	return &rollout, nil
+}
+
+func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (DeploymentRolloutResponse, error) {
 	source := strings.TrimSpace(deployment.Source)
 	if source == "" {
 		source = "main"
 	}
 
-	workers, err := a.db.ListWorkersForSource(source)
+	workers, err := db.ListWorkersForSource(source)
 	if err != nil {
 		return DeploymentRolloutResponse{}, err
 	}
@@ -279,7 +299,7 @@ func (a *API) buildDeploymentRollout(deployment model.Deployment) (DeploymentRol
 			LastHeartbeatAt:       worker.LastHeartbeatAt,
 		}
 
-		verifications, err := a.db.ListVerifications(worker.ID, 1)
+		verifications, err := db.ListVerifications(worker.ID, 1)
 		if err == nil && len(verifications) > 0 && activeFailure(&verifications[0]) {
 			progress.CurrentFailureStage = inferFailureStage(&verifications[0])
 			progress.CurrentFailureSignature = inferFailureSignature(&verifications[0])
@@ -325,6 +345,21 @@ func (a *API) buildDeploymentRollout(deployment model.Deployment) (DeploymentRol
 	response.Summary = summarizeDeploymentRollout(response)
 	applyDeploymentRolloutGuidance(&response, time.Now().UTC())
 	return response, nil
+}
+
+func (a *API) observeLatestDeploymentState(source string) {
+	if a.metrics != nil {
+		a.metrics.observeLatestDeployment(a.db)
+	}
+	if a.alerts == nil {
+		return
+	}
+
+	rollout, err := buildLatestDeploymentRollout(a.db, source)
+	if err != nil || rollout == nil {
+		return
+	}
+	a.alerts.NotifyDeploymentAttention(*rollout)
 }
 
 func (a *API) handleListEvents(w http.ResponseWriter, r *http.Request) {
@@ -384,6 +419,8 @@ func (a *API) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 				item.Worker = worker
 				item.TriageCommands = buildTriageCommands(*worker, worker.FlyMachineID != "")
 			}
+		} else if alert.AlertType == "deployment_attention" {
+			item.TriageCommands = buildDeploymentTriageCommands()
 		}
 		response = append(response, item)
 	}
@@ -508,9 +545,7 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if a.metrics != nil {
-		a.metrics.observeLatestDeployment(a.db)
-	}
+	a.observeLatestDeploymentState(source)
 
 	writeAPIJSON(w, map[string]any{
 		"sha":       request.SHA,
@@ -561,9 +596,7 @@ func (a *API) handleResumeDormantWorkers(w http.ResponseWriter, r *http.Request)
 		workerIDs = append(workerIDs, worker.ID)
 	}
 	_ = a.db.RecordEvent("", "manual_resume_requested", fmt.Sprintf("Requested probe resume for %d dormant %s worker(s)", len(dormantWorkers), source), strings.Join(workerIDs, ","))
-	if a.metrics != nil {
-		a.metrics.observeLatestDeployment(a.db)
-	}
+	a.observeLatestDeploymentState(source)
 
 	writeAPIJSON(w, map[string]any{
 		"resumed_workers": len(dormantWorkers),
@@ -623,7 +656,7 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	if worker, err := a.db.GetWorker(workerID); err == nil {
 		a.metrics.observeWorker(*worker)
-		a.metrics.observeLatestDeployment(a.db)
+		a.observeLatestDeploymentState(worker.Source)
 	}
 
 	w.WriteHeader(http.StatusAccepted)
@@ -720,7 +753,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	if worker, err := a.db.GetWorker(workerID); err == nil {
 		a.metrics.observeWorker(*worker)
 		a.metrics.observeVerification(*worker, *verification)
-		a.metrics.observeLatestDeployment(a.db)
+		a.observeLatestDeploymentState(worker.Source)
 		if a.alerts != nil {
 			a.alerts.NotifyVerificationFailure(*worker, *verification)
 		}

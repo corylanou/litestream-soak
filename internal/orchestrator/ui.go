@@ -1619,6 +1619,7 @@ const helpPageTemplate = `{{define "help"}}
           <li>Open <code>/api/deployments/latest</code> or the <strong>Latest Rollout</strong> card on <code>/ui</code>.</li>
           <li>Confirm the new SHA is recorded and <code>updated_workers</code> reaches the fleet size.</li>
           <li>If any workers are <code>probing</code>, wait for the next verification cycle and check whether they return to <code>running</code>.</li>
+          <li>If the rollout shows <code>beyond 45m grace</code>, treat it as a stuck rollout and open the affected workers before merging more changes.</li>
           <li>If workers remain <code>degraded</code> or go back to <code>dormant</code>, open those worker pages and inspect the latest failure before retrying.</li>
         </ol>
       </div>

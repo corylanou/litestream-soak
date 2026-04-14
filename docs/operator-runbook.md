@@ -243,9 +243,14 @@ That rollout view tells you:
 - how many workers are updated to that SHA
 - how many are still probing after wake-up
 - whether any workers fell back to `dormant` or `degraded`
+- whether the rollout has moved beyond the 45-minute grace window
 
 On the home page, the `Latest Rollout` card mirrors the same information for
 faster review after a merge.
+
+If the rollout is still `rolling_out`, `probing`, or `needs_attention` after
+the 45-minute grace window, treat it as a stuck rollout until the affected
+workers are explained.
 
 ## How The Control Plane Helps Debug
 

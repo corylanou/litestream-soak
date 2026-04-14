@@ -243,21 +243,37 @@ func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA string)
 }
 
 func (m *Manager) observeWorkerByID(workerID string) {
-	if m.metrics == nil {
-		return
-	}
-
 	worker, err := m.db.GetWorker(workerID)
 	if err != nil {
 		return
 	}
-	m.metrics.observeWorker(*worker)
+
+	if m.metrics != nil {
+		m.metrics.observeWorker(*worker)
+	}
 
 	verifications, err := m.db.ListVerifications(workerID, 1)
 	if err != nil || len(verifications) == 0 {
-		m.metrics.observeLatestDeployment(m.db)
+		m.observeLatestDeploymentState(worker.Source)
 		return
 	}
-	m.metrics.observeVerification(*worker, verifications[0])
-	m.metrics.observeLatestDeployment(m.db)
+	if m.metrics != nil {
+		m.metrics.observeVerification(*worker, verifications[0])
+	}
+	m.observeLatestDeploymentState(worker.Source)
+}
+
+func (m *Manager) observeLatestDeploymentState(source string) {
+	if m.metrics != nil {
+		m.metrics.observeLatestDeployment(m.db)
+	}
+	if m.alerts == nil {
+		return
+	}
+
+	rollout, err := buildLatestDeploymentRollout(m.db, source)
+	if err != nil || rollout == nil {
+		return
+	}
+	m.alerts.NotifyDeploymentAttention(*rollout)
 }
