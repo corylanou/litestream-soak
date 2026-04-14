@@ -119,6 +119,7 @@ func (a *API) buildHomePageData() (homePageData, error) {
 	if err != nil {
 		return homePageData{}, err
 	}
+	events = coalesceEventFeed(events)
 
 	workerCards := make([]homeWorker, 0, len(summaries))
 	summary := homeSummary{
@@ -1350,6 +1351,9 @@ const workerPageTemplate = `{{define "worker"}}
               <span class="tl-time">{{timeAgoValue .CreatedAt}}</span>
             </div>
             <div style="font-size:13px; color:var(--muted); margin-top:2px;">{{.Message}}</div>
+            {{if gt .CollapsedCount 1}}
+            <div style="font-size:12px; color:var(--faint); margin-top:6px;">Collapsed {{.CollapsedCount}} similar platform events from {{formatTimePtr .CollapsedWindowStart}} to {{formatTimePtr .CollapsedWindowEnd}}</div>
+            {{end}}
             {{if .Details}}
             <details>
               <summary>Event details</summary>

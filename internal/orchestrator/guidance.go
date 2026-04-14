@@ -88,16 +88,19 @@ type coverageSnapshot struct {
 }
 
 type promptEventSummary struct {
-	CreatedAt             time.Time `json:"created_at"`
-	EventType             string    `json:"event_type"`
-	Message               string    `json:"message"`
-	CheckType             string    `json:"check_type,omitempty"`
-	VerificationStatus    string    `json:"verification_status,omitempty"`
-	Passed                *bool     `json:"passed,omitempty"`
-	FailureStage          string    `json:"failure_stage,omitempty"`
-	FailureSignature      string    `json:"failure_signature,omitempty"`
-	RuntimeSnapshotStatus string    `json:"runtime_snapshot_status,omitempty"`
-	RuntimeSnapshotError  string    `json:"runtime_snapshot_error,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	EventType             string     `json:"event_type"`
+	Message               string     `json:"message"`
+	CollapsedCount        int        `json:"collapsed_count,omitempty"`
+	CollapsedWindowStart  *time.Time `json:"collapsed_window_start,omitempty"`
+	CollapsedWindowEnd    *time.Time `json:"collapsed_window_end,omitempty"`
+	CheckType             string     `json:"check_type,omitempty"`
+	VerificationStatus    string     `json:"verification_status,omitempty"`
+	Passed                *bool      `json:"passed,omitempty"`
+	FailureStage          string     `json:"failure_stage,omitempty"`
+	FailureSignature      string     `json:"failure_signature,omitempty"`
+	RuntimeSnapshotStatus string     `json:"runtime_snapshot_status,omitempty"`
+	RuntimeSnapshotError  string     `json:"runtime_snapshot_error,omitempty"`
 }
 
 func parsePromptMode(raw string, recommended string) promptMode {
@@ -632,9 +635,12 @@ func buildPromptEventSummaries(events []model.Event) []promptEventSummary {
 	summaries := make([]promptEventSummary, 0, len(events))
 	for _, event := range events {
 		summary := promptEventSummary{
-			CreatedAt: event.CreatedAt,
-			EventType: event.EventType,
-			Message:   event.Message,
+			CreatedAt:            event.CreatedAt,
+			EventType:            event.EventType,
+			Message:              event.Message,
+			CollapsedCount:       event.CollapsedCount,
+			CollapsedWindowStart: event.CollapsedWindowStart,
+			CollapsedWindowEnd:   event.CollapsedWindowEnd,
 		}
 
 		if strings.HasPrefix(event.EventType, "verification_") {

@@ -366,10 +366,24 @@ func (a *API) observeLatestDeploymentState(source string) {
 }
 
 func (a *API) handleListEvents(w http.ResponseWriter, r *http.Request) {
-	events, err := a.db.ListEvents(readLimit(r, 50))
+	limit := readLimit(r, 50)
+	workerID := strings.TrimSpace(r.URL.Query().Get("worker_id"))
+
+	var (
+		events []model.Event
+		err    error
+	)
+	if workerID != "" {
+		events, err = a.db.ListWorkerEvents(workerID, limit)
+	} else {
+		events, err = a.db.ListEvents(limit)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if !readBoolQuery(r, "raw") {
+		events = coalesceEventFeed(events)
 	}
 	writeAPIJSON(w, events)
 }
@@ -475,7 +489,7 @@ func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, er
 
 	events, err := a.db.ListWorkerEvents(worker.ID, 10)
 	if err == nil {
-		summary.LatestPlatformEvent = latestPlatformEvent(events)
+		summary.LatestPlatformEvent = latestPlatformEvent(coalesceEventFeed(events))
 	}
 
 	return summary, nil
@@ -785,6 +799,7 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
+	events = coalesceEventFeed(events)
 
 	response := &WorkerDetailResponse{
 		Worker:              *worker,
@@ -1150,6 +1165,15 @@ func readLimit(r *http.Request, fallback int) int {
 		return fallback
 	}
 	return limit
+}
+
+func readBoolQuery(r *http.Request, key string) bool {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func writeAPIJSON(w http.ResponseWriter, v any) {

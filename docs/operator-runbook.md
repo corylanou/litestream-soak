@@ -92,6 +92,11 @@ hand to an LLM.
 Use `/api/workers/{id}/prompt` when you want a copy-paste triage prompt
 immediately.
 
+Use `/api/events` for the default operator event feed. It now collapses repeated
+platform signals into rolling incident rows so the feed stays readable. Use
+`/api/events?raw=1` to inspect the uncollapsed event stream, or
+`/api/events?worker_id={id}&raw=1` for a worker-specific raw view.
+
 When a recent Fly platform signal exists, `/api/workers/{id}`,
 `/api/workers/{id}/incident`, and `/api/workers/{id}/prompt` all include it.
 Treat that as first-class evidence before assuming the verification failure
@@ -285,6 +290,10 @@ verifications, recent events, machine metadata, and triage commands in
 The control plane now polls Fly app logs for each active worker and records
 platform-level signals into the normal event stream. These appear on worker
 detail pages, in incident bundles, and in AI prompt output.
+
+Repeated platform log lines are collapsed in the default event feed and worker
+incident views, but the latest raw log sample is preserved in event details and
+the raw stream remains available through `/api/events?raw=1`.
 
 If the control plane is using a deploy-scoped `FLY_API_TOKEN`, configure
 `SOAK_PLATFORM_LOG_TOKEN` with a read-only org token so the Fly logs API can
