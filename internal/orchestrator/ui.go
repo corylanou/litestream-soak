@@ -836,6 +836,11 @@ const homeBodyTemplate = `{{define "home_body"}}
           {{end}}
         </ul>
         {{end}}
+        <ul>
+          <li>Verify <strong>updated</strong> reaches the full fleet size after a merge or manual deploy handoff.</li>
+          <li>If workers are <strong>probing</strong>, wait for the next verification cycle before deciding whether the release helped.</li>
+          <li>If workers return to <strong>dormant</strong> or stay <strong>degraded</strong>, open those workers before assuming the rollout succeeded.</li>
+        </ul>
         <div class="chip-row">
           <a class="btn btn-primary" href="/api/deployments/latest">Latest rollout JSON</a>
           <a class="btn" href="/api/deployments">History</a>
@@ -1600,6 +1605,16 @@ const helpPageTemplate = `{{define "help"}}
           <li>Use Grafana for fleet posture, workload shape comparison, sync age drift, restart counters, and failure clustering.</li>
           <li>If the same signature appears across multiple profiles at once, suspect a shared subsystem first.</li>
         </ul>
+      </div>
+
+      <div class="panel">
+        <h2>Post-Merge Verification</h2>
+        <ol>
+          <li>Open <code>/api/deployments/latest</code> or the <strong>Latest Rollout</strong> card on <code>/ui</code>.</li>
+          <li>Confirm the new SHA is recorded and <code>updated_workers</code> reaches the fleet size.</li>
+          <li>If any workers are <code>probing</code>, wait for the next verification cycle and check whether they return to <code>running</code>.</li>
+          <li>If workers remain <code>degraded</code> or go back to <code>dormant</code>, open those worker pages and inspect the latest failure before retrying.</li>
+        </ol>
       </div>
 
       <div class="panel">
