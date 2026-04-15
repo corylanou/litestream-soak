@@ -96,10 +96,6 @@
                 "value": null
               },
               {
-                "color": "orange",
-                "value": 0
-              },
-              {
                 "color": "green",
                 "value": 1
               }
@@ -131,12 +127,12 @@
       },
       "targets": [
         {
-          "expr": "max(soak_control_latest_deployment_comparison_delta{delta_type=\"pass_delta\"})",
+          "expr": "max(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"verified\"})",
           "instant": true,
-          "legendFormat": "pass_delta"
+          "legendFormat": "previous verified"
         }
       ],
-      "title": "Pass Delta",
+      "title": "Previous Verified",
       "type": "stat"
     },
     {
@@ -146,15 +142,11 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "red",
                 "value": null
               },
               {
-                "color": "orange",
-                "value": 0
-              },
-              {
-                "color": "red",
+                "color": "green",
                 "value": 1
               }
             ]
@@ -185,12 +177,12 @@
       },
       "targets": [
         {
-          "expr": "max(soak_control_latest_deployment_comparison_delta{delta_type=\"fail_delta\"})",
+          "expr": "max(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"verified\"})",
           "instant": true,
-          "legendFormat": "fail_delta"
+          "legendFormat": "current verified"
         }
       ],
-      "title": "Fail Delta",
+      "title": "Current Verified",
       "type": "stat"
     },
     {
@@ -202,10 +194,6 @@
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "orange",
-                "value": 0
               },
               {
                 "color": "red",
@@ -239,12 +227,12 @@
       },
       "targets": [
         {
-          "expr": "max(soak_control_latest_deployment_comparison_delta{delta_type=\"improved_workers\"})",
+          "expr": "max(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"awaiting\"})",
           "instant": true,
-          "legendFormat": "improved"
+          "legendFormat": "previous awaiting"
         }
       ],
-      "title": "Improved Workers",
+      "title": "Previous Awaiting",
       "type": "stat"
     },
     {
@@ -289,12 +277,12 @@
       },
       "targets": [
         {
-          "expr": "max(soak_control_latest_deployment_comparison_delta{delta_type=\"regressed_workers\"})",
+          "expr": "max(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"awaiting\"})",
           "instant": true,
-          "legendFormat": "regressed"
+          "legendFormat": "current awaiting"
         }
       ],
-      "title": "Regressed Workers",
+      "title": "Current Awaiting",
       "type": "stat"
     },
     {
@@ -444,12 +432,17 @@
       },
       "targets": [
         {
-          "expr": "sum by (comparison_role) (soak_control_latest_deployment_comparison_workers{worker_state=\"passed\"}) / clamp_min(sum by (comparison_role) (soak_control_latest_deployment_comparison_workers{worker_state=\"total\"}), 1)",
+          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"passed\"}) / clamp_min(sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"total\"}), 1)",
           "instant": true,
-          "legendFormat": "{{comparison_role}}"
+          "legendFormat": "previous"
+        },
+        {
+          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"passed\"}) / clamp_min(sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"total\"}), 1)",
+          "instant": true,
+          "legendFormat": "current"
         }
       ],
-      "title": "Pass Rate By Deployment",
+      "title": "Pass Rate",
       "type": "bargauge"
     },
     {
@@ -489,12 +482,37 @@
       },
       "targets": [
         {
-          "expr": "sum by (comparison_role, worker_state) (soak_control_latest_deployment_comparison_workers{worker_state=~\"passed|failed|awaiting\"})",
+          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"passed\"})",
           "instant": true,
-          "legendFormat": "{{comparison_role}} {{worker_state}}"
+          "legendFormat": "previous passed"
+        },
+        {
+          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"failed\"})",
+          "instant": true,
+          "legendFormat": "previous failed"
+        },
+        {
+          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"awaiting\"})",
+          "instant": true,
+          "legendFormat": "previous awaiting"
+        },
+        {
+          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"passed\"})",
+          "instant": true,
+          "legendFormat": "current passed"
+        },
+        {
+          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"failed\"})",
+          "instant": true,
+          "legendFormat": "current failed"
+        },
+        {
+          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"awaiting\"})",
+          "instant": true,
+          "legendFormat": "current awaiting"
         }
       ],
-      "title": "Worker Outcome Counts",
+      "title": "Outcome Counts",
       "type": "bargauge"
     },
     {
@@ -534,12 +552,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (comparison_role, failure_signature) (soak_control_latest_deployment_comparison_failure{comparison_role=~\"head|base\"})",
+          "expr": "sum by (failure_signature) (soak_control_latest_deployment_comparison_failure{comparison_role=\"head\"})",
           "instant": true,
-          "legendFormat": "{{comparison_role}} {{failure_signature}}"
+          "legendFormat": "{{failure_signature}}"
         }
       ],
-      "title": "Failure Signatures By Deployment",
+      "title": "Current Failure Signatures",
       "type": "bargauge"
     },
     {
@@ -579,9 +597,14 @@
       },
       "targets": [
         {
-          "expr": "sum by (comparison_role, failure_signature) (soak_control_latest_deployment_comparison_failure{comparison_role=~\"new|resolved\"})",
+          "expr": "sum by (failure_signature) (soak_control_latest_deployment_comparison_failure{comparison_role=\"new\"})",
           "instant": true,
-          "legendFormat": "{{comparison_role}} {{failure_signature}}"
+          "legendFormat": "new {{failure_signature}}"
+        },
+        {
+          "expr": "sum by (failure_signature) (soak_control_latest_deployment_comparison_failure{comparison_role=\"resolved\"})",
+          "instant": true,
+          "legendFormat": "resolved {{failure_signature}}"
         }
       ],
       "title": "New Vs Resolved Failure Types",
@@ -624,9 +647,34 @@
       },
       "targets": [
         {
-          "expr": "sum by (comparison_role, worker_state) (soak_control_latest_deployment_comparison_workers{worker_state=~\"verified|awaiting|total\"})",
+          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"verified\"})",
           "instant": true,
-          "legendFormat": "{{comparison_role}} {{worker_state}}"
+          "legendFormat": "previous verified"
+        },
+        {
+          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"awaiting\"})",
+          "instant": true,
+          "legendFormat": "previous awaiting"
+        },
+        {
+          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"total\"})",
+          "instant": true,
+          "legendFormat": "previous total"
+        },
+        {
+          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"verified\"})",
+          "instant": true,
+          "legendFormat": "current verified"
+        },
+        {
+          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"awaiting\"})",
+          "instant": true,
+          "legendFormat": "current awaiting"
+        },
+        {
+          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"total\"})",
+          "instant": true,
+          "legendFormat": "current total"
         }
       ],
       "title": "Verification Coverage",
