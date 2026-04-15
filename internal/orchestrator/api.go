@@ -102,6 +102,51 @@ type DeploymentRolloutResponse struct {
 	Workers              []DeploymentWorkerProgress `json:"workers,omitempty"`
 }
 
+type DeploymentFailureCount struct {
+	Signature string `json:"signature"`
+	Stage     string `json:"stage,omitempty"`
+	Count     int    `json:"count"`
+}
+
+type DeploymentWorkerOutcome struct {
+	WorkerID          string     `json:"worker_id"`
+	Name              string     `json:"name"`
+	Profile           string     `json:"profile"`
+	Passed            bool       `json:"passed"`
+	VerifiedAt        *time.Time `json:"verified_at,omitempty"`
+	FailureStage      string     `json:"failure_stage,omitempty"`
+	FailureSignature  string     `json:"failure_signature,omitempty"`
+	ProbableSubsystem string     `json:"probable_subsystem,omitempty"`
+}
+
+type DeploymentScorecard struct {
+	Deployment      model.Deployment          `json:"deployment"`
+	WindowStart     time.Time                 `json:"window_start"`
+	WindowEnd       *time.Time                `json:"window_end,omitempty"`
+	TotalWorkers    int                       `json:"total_workers"`
+	VerifiedWorkers int                       `json:"verified_workers"`
+	PassedWorkers   int                       `json:"passed_workers"`
+	FailedWorkers   int                       `json:"failed_workers"`
+	AwaitingWorkers int                       `json:"awaiting_workers"`
+	PassRate        float64                   `json:"pass_rate"`
+	Failures        []DeploymentFailureCount  `json:"failures,omitempty"`
+	Outcomes        []DeploymentWorkerOutcome `json:"outcomes,omitempty"`
+}
+
+type DeploymentComparisonResponse struct {
+	Base             *DeploymentScorecard      `json:"base,omitempty"`
+	Head             DeploymentScorecard       `json:"head"`
+	Verdict          string                    `json:"verdict"`
+	Summary          string                    `json:"summary"`
+	PassDelta        int                       `json:"pass_delta"`
+	FailDelta        int                       `json:"fail_delta"`
+	AwaitingDelta    int                       `json:"awaiting_delta"`
+	ImprovedWorkers  []DeploymentWorkerOutcome `json:"improved_workers,omitempty"`
+	RegressedWorkers []DeploymentWorkerOutcome `json:"regressed_workers,omitempty"`
+	NewFailures      []DeploymentFailureCount  `json:"new_failures,omitempty"`
+	ResolvedFailures []DeploymentFailureCount  `json:"resolved_failures,omitempty"`
+}
+
 const rolloutAttentionGraceWindow = 45 * time.Minute
 
 type IncidentBundle struct {
@@ -153,6 +198,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/diagnosis", a.handleGetDiagnosis)
 	mux.HandleFunc("GET /api/deployments", a.handleListDeployments)
 	mux.HandleFunc("GET /api/deployments/latest", a.handleGetLatestDeployment)
+	mux.HandleFunc("GET /api/deployments/compare/latest", a.handleGetLatestDeploymentComparison)
 	mux.HandleFunc("GET /api/deployments/{sha}", a.handleGetDeployment)
 	mux.HandleFunc("POST /api/admin/deployments/ready", a.handleDeploymentReady)
 	mux.HandleFunc("POST /api/admin/resume-dormant", a.handleResumeDormantWorkers)
@@ -225,6 +271,20 @@ func (a *API) handleGetLatestDeployment(w http.ResponseWriter, r *http.Request) 
 	writeAPIJSON(w, rollout)
 }
 
+func (a *API) handleGetLatestDeploymentComparison(w http.ResponseWriter, r *http.Request) {
+	comparison, err := a.buildLatestDeploymentComparison(strings.TrimSpace(r.URL.Query().Get("source")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if comparison == nil {
+		http.Error(w, "deployment not found", http.StatusNotFound)
+		return
+	}
+
+	writeAPIJSON(w, comparison)
+}
+
 func (a *API) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
 	deployment, err := a.db.GetDeploymentBySHA(strings.TrimSpace(r.PathValue("sha")))
 	if err != nil {
@@ -263,6 +323,10 @@ func (a *API) buildDeploymentRollout(deployment model.Deployment) (DeploymentRol
 	return buildDeploymentRollout(a.db, deployment)
 }
 
+func (a *API) buildLatestDeploymentComparison(source string) (*DeploymentComparisonResponse, error) {
+	return buildLatestDeploymentComparison(a.db, source)
+}
+
 func buildLatestDeploymentRollout(db *model.DB, source string) (*DeploymentRolloutResponse, error) {
 	deployment, err := db.GetLatestDeployment(strings.TrimSpace(source))
 	if err != nil {
@@ -277,6 +341,175 @@ func buildLatestDeploymentRollout(db *model.DB, source string) (*DeploymentRollo
 		return nil, err
 	}
 	return &rollout, nil
+}
+
+func buildLatestDeploymentComparison(db *model.DB, source string) (*DeploymentComparisonResponse, error) {
+	deployments, err := db.ListDeployments(strings.TrimSpace(source), 2)
+	if err != nil {
+		return nil, err
+	}
+	if len(deployments) == 0 {
+		return nil, nil
+	}
+
+	head := deployments[0]
+	headScorecard, err := buildDeploymentScorecard(db, head, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	comparison := &DeploymentComparisonResponse{
+		Head:    headScorecard,
+		Verdict: "no_baseline",
+		Summary: fmt.Sprintf("Latest rollout %s has no previous deployment to compare against yet.", deploymentVersionSummary(head)),
+	}
+	if len(deployments) < 2 {
+		return comparison, nil
+	}
+
+	base := deployments[1]
+	baseWindowEnd := head.StartedAt
+	baseScorecard, err := buildDeploymentScorecard(db, base, &baseWindowEnd)
+	if err != nil {
+		return nil, err
+	}
+	comparison.Base = &baseScorecard
+
+	baseByWorker := make(map[string]DeploymentWorkerOutcome, len(baseScorecard.Outcomes))
+	for _, outcome := range baseScorecard.Outcomes {
+		baseByWorker[outcome.WorkerID] = outcome
+	}
+	headByWorker := make(map[string]DeploymentWorkerOutcome, len(headScorecard.Outcomes))
+	for _, outcome := range headScorecard.Outcomes {
+		headByWorker[outcome.WorkerID] = outcome
+	}
+
+	for workerID, headOutcome := range headByWorker {
+		baseOutcome, ok := baseByWorker[workerID]
+		if !ok {
+			continue
+		}
+		switch {
+		case !baseOutcome.Passed && headOutcome.Passed:
+			comparison.ImprovedWorkers = append(comparison.ImprovedWorkers, headOutcome)
+		case baseOutcome.Passed && !headOutcome.Passed:
+			comparison.RegressedWorkers = append(comparison.RegressedWorkers, headOutcome)
+		}
+	}
+	sort.SliceStable(comparison.ImprovedWorkers, func(i, j int) bool { return comparison.ImprovedWorkers[i].Name < comparison.ImprovedWorkers[j].Name })
+	sort.SliceStable(comparison.RegressedWorkers, func(i, j int) bool { return comparison.RegressedWorkers[i].Name < comparison.RegressedWorkers[j].Name })
+
+	headFailures := make(map[string]DeploymentFailureCount, len(headScorecard.Failures))
+	for _, failure := range headScorecard.Failures {
+		headFailures[failure.Signature] = failure
+	}
+	baseFailures := make(map[string]DeploymentFailureCount, len(baseScorecard.Failures))
+	for _, failure := range baseScorecard.Failures {
+		baseFailures[failure.Signature] = failure
+	}
+	for signature, failure := range headFailures {
+		if _, ok := baseFailures[signature]; !ok {
+			comparison.NewFailures = append(comparison.NewFailures, failure)
+		}
+	}
+	for signature, failure := range baseFailures {
+		if _, ok := headFailures[signature]; !ok {
+			comparison.ResolvedFailures = append(comparison.ResolvedFailures, failure)
+		}
+	}
+	sort.SliceStable(comparison.NewFailures, func(i, j int) bool {
+		if comparison.NewFailures[i].Count != comparison.NewFailures[j].Count {
+			return comparison.NewFailures[i].Count > comparison.NewFailures[j].Count
+		}
+		return comparison.NewFailures[i].Signature < comparison.NewFailures[j].Signature
+	})
+	sort.SliceStable(comparison.ResolvedFailures, func(i, j int) bool {
+		if comparison.ResolvedFailures[i].Count != comparison.ResolvedFailures[j].Count {
+			return comparison.ResolvedFailures[i].Count > comparison.ResolvedFailures[j].Count
+		}
+		return comparison.ResolvedFailures[i].Signature < comparison.ResolvedFailures[j].Signature
+	})
+
+	comparison.PassDelta = headScorecard.PassedWorkers - baseScorecard.PassedWorkers
+	comparison.FailDelta = headScorecard.FailedWorkers - baseScorecard.FailedWorkers
+	comparison.AwaitingDelta = headScorecard.AwaitingWorkers - baseScorecard.AwaitingWorkers
+	comparison.Verdict = inferDeploymentComparisonVerdict(*comparison)
+	comparison.Summary = summarizeDeploymentComparison(*comparison)
+	return comparison, nil
+}
+
+func buildDeploymentScorecard(db *model.DB, deployment model.Deployment, windowEnd *time.Time) (DeploymentScorecard, error) {
+	source := strings.TrimSpace(deployment.Source)
+	if source == "" {
+		source = "main"
+	}
+
+	workers, err := db.ListWorkersForSource(source)
+	if err != nil {
+		return DeploymentScorecard{}, err
+	}
+
+	scorecard := DeploymentScorecard{
+		Deployment:   deployment,
+		WindowStart:  deployment.StartedAt,
+		WindowEnd:    windowEnd,
+		TotalWorkers: len(workers),
+		Outcomes:     make([]DeploymentWorkerOutcome, 0, len(workers)),
+	}
+
+	failureCounts := make(map[string]DeploymentFailureCount)
+	for _, worker := range workers {
+		verifications, err := db.ListVerifications(worker.ID, 256)
+		if err != nil {
+			return DeploymentScorecard{}, err
+		}
+		verification := latestVerificationInWindow(verifications, deployment.StartedAt, windowEnd)
+		if verification == nil {
+			scorecard.AwaitingWorkers++
+			continue
+		}
+
+		outcome := DeploymentWorkerOutcome{
+			WorkerID: worker.ID,
+			Name:     worker.Name,
+			Profile:  worker.ProfileName,
+			Passed:   verification.Passed,
+		}
+		if observedAt, ok := verificationObservedAt(*verification); ok {
+			outcome.VerifiedAt = &observedAt
+		}
+		scorecard.VerifiedWorkers++
+		if verification.Passed {
+			scorecard.PassedWorkers++
+		} else {
+			scorecard.FailedWorkers++
+			outcome.FailureStage = inferFailureStage(verification)
+			outcome.FailureSignature = inferFailureSignature(verification)
+			outcome.ProbableSubsystem = inferProbableSubsystem(outcome.FailureStage, outcome.FailureSignature)
+			failure := failureCounts[outcome.FailureSignature]
+			failure.Signature = outcome.FailureSignature
+			failure.Stage = outcome.FailureStage
+			failure.Count++
+			failureCounts[outcome.FailureSignature] = failure
+		}
+		scorecard.Outcomes = append(scorecard.Outcomes, outcome)
+	}
+
+	if scorecard.TotalWorkers > 0 {
+		scorecard.PassRate = float64(scorecard.PassedWorkers) / float64(scorecard.TotalWorkers)
+	}
+	for _, failure := range failureCounts {
+		scorecard.Failures = append(scorecard.Failures, failure)
+	}
+	sort.SliceStable(scorecard.Failures, func(i, j int) bool {
+		if scorecard.Failures[i].Count != scorecard.Failures[j].Count {
+			return scorecard.Failures[i].Count > scorecard.Failures[j].Count
+		}
+		return scorecard.Failures[i].Signature < scorecard.Failures[j].Signature
+	})
+	sort.SliceStable(scorecard.Outcomes, func(i, j int) bool { return scorecard.Outcomes[i].Name < scorecard.Outcomes[j].Name })
+
+	return scorecard, nil
 }
 
 func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (DeploymentRolloutResponse, error) {
@@ -1069,6 +1302,48 @@ func summarizeDeploymentRollout(rollout DeploymentRolloutResponse) string {
 	}
 }
 
+func inferDeploymentComparisonVerdict(comparison DeploymentComparisonResponse) string {
+	switch {
+	case comparison.Base == nil:
+		return "no_baseline"
+	case comparison.Base.VerifiedWorkers == 0 || comparison.Head.VerifiedWorkers == 0:
+		return "insufficient_data"
+	case len(comparison.RegressedWorkers) > 0 && len(comparison.ImprovedWorkers) == 0:
+		return "worse"
+	case len(comparison.ImprovedWorkers) > 0 && len(comparison.RegressedWorkers) == 0 && comparison.FailDelta <= 0:
+		return "better"
+	case comparison.PassDelta > 0 && comparison.FailDelta < 0:
+		return "better"
+	case comparison.PassDelta < 0 || comparison.FailDelta > 0:
+		return "worse"
+	case len(comparison.ImprovedWorkers) > 0 || len(comparison.RegressedWorkers) > 0 || len(comparison.NewFailures) > 0 || len(comparison.ResolvedFailures) > 0:
+		return "mixed"
+	default:
+		return "unchanged"
+	}
+}
+
+func summarizeDeploymentComparison(comparison DeploymentComparisonResponse) string {
+	headVersion := deploymentVersionSummary(comparison.Head.Deployment)
+	if comparison.Base == nil {
+		return fmt.Sprintf("Latest rollout %s has no previous deployment to compare against yet.", headVersion)
+	}
+
+	baseVersion := deploymentVersionSummary(comparison.Base.Deployment)
+	switch comparison.Verdict {
+	case "insufficient_data":
+		return fmt.Sprintf("%s cannot be scored against %s yet because one of the deployment windows does not have enough post-rollout verification data.", headVersion, baseVersion)
+	case "better":
+		return fmt.Sprintf("%s looks better than %s so far: %d passed vs %d, %d failed vs %d.", headVersion, baseVersion, comparison.Head.PassedWorkers, comparison.Base.PassedWorkers, comparison.Head.FailedWorkers, comparison.Base.FailedWorkers)
+	case "worse":
+		return fmt.Sprintf("%s looks worse than %s so far: %d passed vs %d, %d failed vs %d.", headVersion, baseVersion, comparison.Head.PassedWorkers, comparison.Base.PassedWorkers, comparison.Head.FailedWorkers, comparison.Base.FailedWorkers)
+	case "mixed":
+		return fmt.Sprintf("%s is mixed versus %s: %d workers improved, %d regressed, and %d still await verification.", headVersion, baseVersion, len(comparison.ImprovedWorkers), len(comparison.RegressedWorkers), comparison.Head.AwaitingWorkers)
+	default:
+		return fmt.Sprintf("%s is unchanged versus %s so far: %d passed, %d failed, and %d still await verification.", headVersion, baseVersion, comparison.Head.PassedWorkers, comparison.Head.FailedWorkers, comparison.Head.AwaitingWorkers)
+	}
+}
+
 func deploymentVersionSummary(deployment model.Deployment) string {
 	soakSHA := shortVersionValue(deployment.GitSHA)
 	litestreamSHA := shortVersionValue(deployment.LitestreamSHA)
@@ -1191,6 +1466,24 @@ func workerNeedsPostDeployVerification(status model.WorkerStatus) bool {
 	default:
 		return false
 	}
+}
+
+func latestVerificationInWindow(verifications []model.Verification, since time.Time, until *time.Time) *model.Verification {
+	for i := range verifications {
+		observedAt, ok := verificationObservedAt(verifications[i])
+		if !ok {
+			continue
+		}
+		if observedAt.Before(since) {
+			continue
+		}
+		if until != nil && !until.IsZero() && !observedAt.Before(*until) {
+			continue
+		}
+		verification := verifications[i]
+		return &verification
+	}
+	return nil
 }
 
 func buildTriageCommands(worker model.Worker, hasMachine bool) []string {

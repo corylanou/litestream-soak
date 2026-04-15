@@ -205,6 +205,161 @@ func TestHandleGetLatestDeployment(t *testing.T) {
 	}
 }
 
+func TestBuildLatestDeploymentComparison(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-base",
+		LitestreamSHA: "litestream-base",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-base",
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment(base) error = %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-head",
+		LitestreamSHA: "litestream-head",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-head",
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment(head) error = %v", err)
+	}
+
+	deployments, err := db.ListDeployments("main", 2)
+	if err != nil {
+		t.Fatalf("ListDeployments() error = %v", err)
+	}
+	head := deployments[0]
+	base := deployments[1]
+
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-one",
+		Name:          "worker-main-one",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        head.GitSHA,
+		LitestreamSHA: head.LitestreamSHA,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-two",
+		Name:          "worker-main-two",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        head.GitSHA,
+		LitestreamSHA: head.LitestreamSHA,
+		ProfileName:   "high-volume",
+		ProfileConfig: "{}",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-three",
+		Name:          "worker-main-three",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        head.GitSHA,
+		LitestreamSHA: head.LitestreamSHA,
+		ProfileName:   "burst-volume",
+		ProfileConfig: "{}",
+	})
+
+	basePassAt := base.StartedAt.Add(200 * time.Millisecond).UTC()
+	baseFailAt := base.StartedAt.Add(400 * time.Millisecond).UTC()
+	headPassAt := head.StartedAt.Add(200 * time.Millisecond).UTC()
+	headFailAt := head.StartedAt.Add(400 * time.Millisecond).UTC()
+
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-main-one",
+		StartedAt:   basePassAt.Add(-15 * time.Second),
+		CompletedAt: &basePassAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  15000,
+	})
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:     "worker-main-two",
+		StartedAt:    baseFailAt.Add(-15 * time.Second),
+		CompletedAt:  &baseFailAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		Passed:       false,
+		DurationMS:   15000,
+		ErrorMessage: `wrong # of entries in index idx_load_test_timestamp`,
+	})
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-main-three",
+		StartedAt:   basePassAt.Add(-30 * time.Second),
+		CompletedAt: &basePassAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  15000,
+	})
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-main-one",
+		StartedAt:   headPassAt.Add(-15 * time.Second),
+		CompletedAt: &headPassAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  15000,
+	})
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-main-two",
+		StartedAt:   headPassAt.Add(-30 * time.Second),
+		CompletedAt: &headPassAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  15000,
+	})
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:     "worker-main-three",
+		StartedAt:    headFailAt.Add(-15 * time.Second),
+		CompletedAt:  &headFailAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		Passed:       false,
+		DurationMS:   15000,
+		ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": context deadline exceeded`,
+	})
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	comparison, err := api.buildLatestDeploymentComparison("main")
+	if err != nil {
+		t.Fatalf("buildLatestDeploymentComparison() error = %v", err)
+	}
+	if comparison == nil {
+		t.Fatal("comparison = nil, want non-nil")
+	}
+	if comparison.Verdict != "mixed" {
+		t.Fatalf("Verdict = %q, want mixed", comparison.Verdict)
+	}
+	if comparison.PassDelta != 0 {
+		t.Fatalf("PassDelta = %d, want 0", comparison.PassDelta)
+	}
+	if comparison.FailDelta != 0 {
+		t.Fatalf("FailDelta = %d, want 0", comparison.FailDelta)
+	}
+	if len(comparison.ImprovedWorkers) != 1 || comparison.ImprovedWorkers[0].WorkerID != "worker-main-two" {
+		t.Fatalf("ImprovedWorkers = %+v, want worker-main-two", comparison.ImprovedWorkers)
+	}
+	if len(comparison.RegressedWorkers) != 1 || comparison.RegressedWorkers[0].WorkerID != "worker-main-three" {
+		t.Fatalf("RegressedWorkers = %+v, want worker-main-three", comparison.RegressedWorkers)
+	}
+	if len(comparison.NewFailures) != 1 || comparison.NewFailures[0].Signature != "litestream_sync_timeout" {
+		t.Fatalf("NewFailures = %+v, want litestream_sync_timeout", comparison.NewFailures)
+	}
+	if len(comparison.ResolvedFailures) != 1 || comparison.ResolvedFailures[0].Signature != "sqlite_index_mismatch" {
+		t.Fatalf("ResolvedFailures = %+v, want sqlite_index_mismatch", comparison.ResolvedFailures)
+	}
+}
+
 func TestHandleListAlertsIncludesDeploymentTriage(t *testing.T) {
 	t.Parallel()
 
@@ -295,5 +450,13 @@ func createTestWorker(t *testing.T, db *model.DB, worker model.Worker) {
 
 	if err := db.CreateWorker(&worker); err != nil {
 		t.Fatalf("CreateWorker(%s) error = %v", worker.ID, err)
+	}
+}
+
+func mustRecordVerification(t *testing.T, db *model.DB, verification *model.Verification) {
+	t.Helper()
+
+	if err := db.RecordVerification(verification); err != nil {
+		t.Fatalf("RecordVerification(%s) error = %v", verification.WorkerID, err)
 	}
 }

@@ -15,15 +15,16 @@ import (
 )
 
 type homePageData struct {
-	GeneratedAt      time.Time
-	Summary          homeSummary
-	Diagnosis        diagnosisSnapshot
-	Coverage         coverageSnapshot
-	LatestDeployment *DeploymentRolloutResponse
-	Spotlight        *FailureResponse
-	FailureQueue     []FailureResponse
-	Workers          []homeWorker
-	Events           []model.Event
+	GeneratedAt       time.Time
+	Summary           homeSummary
+	Diagnosis         diagnosisSnapshot
+	Coverage          coverageSnapshot
+	LatestDeployment  *DeploymentRolloutResponse
+	ReleaseComparison *DeploymentComparisonResponse
+	Spotlight         *FailureResponse
+	FailureQueue      []FailureResponse
+	Workers           []homeWorker
+	Events            []model.Event
 }
 
 type homeSummary struct {
@@ -189,16 +190,22 @@ func (a *API) buildHomePageData() (homePageData, error) {
 		rollout = &progress
 	}
 
+	releaseComparison, err := a.buildLatestDeploymentComparison("main")
+	if err != nil {
+		return homePageData{}, err
+	}
+
 	return homePageData{
-		GeneratedAt:      time.Now().UTC(),
-		Summary:          summary,
-		Diagnosis:        buildDiagnosisSnapshot(summaries),
-		Coverage:         buildCoverageSnapshot(summaries),
-		LatestDeployment: rollout,
-		Spotlight:        spotlight,
-		FailureQueue:     queue,
-		Workers:          workerCards,
-		Events:           events,
+		GeneratedAt:       time.Now().UTC(),
+		Summary:           summary,
+		Diagnosis:         buildDiagnosisSnapshot(summaries),
+		Coverage:          buildCoverageSnapshot(summaries),
+		LatestDeployment:  rollout,
+		ReleaseComparison: releaseComparison,
+		Spotlight:         spotlight,
+		FailureQueue:      queue,
+		Workers:           workerCards,
+		Events:            events,
 	}, nil
 }
 
@@ -859,6 +866,37 @@ const homeBodyTemplate = `{{define "home_body"}}
         </div>
         {{else}}
         <p class="empty">No deployments have been recorded yet.</p>
+        {{end}}
+      </div>
+
+      <div class="guide-card">
+        <h2>Release Comparison</h2>
+        {{if .ReleaseComparison}}
+        <p class="lead">{{.ReleaseComparison.Summary}}</p>
+        <div class="diag-meta">
+          <span class="badge badge-{{if eq .ReleaseComparison.Verdict "better"}}good{{else if eq .ReleaseComparison.Verdict "worse"}}bad{{else if or (eq .ReleaseComparison.Verdict "mixed") (eq .ReleaseComparison.Verdict "insufficient_data")}}warn{{else}}neutral{{end}}">{{.ReleaseComparison.Verdict}}</span>
+          <span class="badge badge-neutral">pass delta: {{.ReleaseComparison.PassDelta}}</span>
+          <span class="badge badge-neutral">fail delta: {{.ReleaseComparison.FailDelta}}</span>
+          <span class="badge badge-neutral">awaiting: {{.ReleaseComparison.Head.AwaitingWorkers}}</span>
+          {{if .ReleaseComparison.Base}}<span class="badge badge-neutral">base: {{trimSHA .ReleaseComparison.Base.Deployment.LitestreamSHA}}</span>{{end}}
+          <span class="badge badge-neutral">head: {{trimSHA .ReleaseComparison.Head.Deployment.LitestreamSHA}}</span>
+        </div>
+        {{if .ReleaseComparison.RegressedWorkers}}
+        <p style="margin-top:10px;"><strong>Regressed:</strong>
+          {{range $index, $worker := .ReleaseComparison.RegressedWorkers}}{{if $index}}, {{end}}<a href="/ui/workers/{{pathEscape $worker.WorkerID}}">{{$worker.Name}}</a>{{end}}
+        </p>
+        {{end}}
+        {{if .ReleaseComparison.ImprovedWorkers}}
+        <p style="margin-top:10px;"><strong>Improved:</strong>
+          {{range $index, $worker := .ReleaseComparison.ImprovedWorkers}}{{if $index}}, {{end}}<a href="/ui/workers/{{pathEscape $worker.WorkerID}}">{{$worker.Name}}</a>{{end}}
+        </p>
+        {{end}}
+        <div class="chip-row">
+          <a class="btn btn-primary" href="/api/deployments/compare/latest">Comparison JSON</a>
+          <a class="btn" href="/api/deployments/latest">Latest rollout JSON</a>
+        </div>
+        {{else}}
+        <p class="empty">No release comparison is available yet.</p>
         {{end}}
       </div>
     </div>
