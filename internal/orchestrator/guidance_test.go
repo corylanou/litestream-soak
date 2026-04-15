@@ -33,6 +33,28 @@ func TestInferFailureSignatureSyncSocketRefused(t *testing.T) {
 	}
 }
 
+func TestInferFailureSignatureSyncFDExhausted(t *testing.T) {
+	verification := &model.Verification{
+		CheckType:    "integrity",
+		ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: socket: too many open files`,
+	}
+
+	if got := inferFailureSignature(verification); got != "litestream_sync_fd_exhausted" {
+		t.Fatalf("inferFailureSignature()=%q want %q", got, "litestream_sync_fd_exhausted")
+	}
+}
+
+func TestInferFailureSignatureValidationFailed(t *testing.T) {
+	verification := &model.Verification{
+		CheckType:    "restore",
+		ErrorMessage: `validation failed (exit 1): time=2026-04-15T20:29:24.359Z level=INFO msg="Starting validation" source_db=/data/test.db replica_url="" check_type=restore`,
+	}
+
+	if got := inferFailureSignature(verification); got != "validation_failed" {
+		t.Fatalf("inferFailureSignature()=%q want %q", got, "validation_failed")
+	}
+}
+
 func TestBuildIncidentGuideSync(t *testing.T) {
 	bundle := &IncidentBundle{
 		Worker: model.Worker{

@@ -26,6 +26,11 @@ func TestBuildDeploymentRollout(t *testing.T) {
 		t.Fatalf("UpsertReadyDeployment() error = %v", err)
 	}
 
+	deployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment() error = %v", err)
+	}
+
 	createTestWorker(t, db, model.Worker{
 		ID:            "worker-main-running",
 		Name:          "worker-main-running",
@@ -57,7 +62,20 @@ func TestBuildDeploymentRollout(t *testing.T) {
 		ProfileConfig: "{}",
 	})
 
-	failedAt := time.Now().UTC().Add(-2 * time.Minute)
+	passedAt := deployment.StartedAt.Add(1 * time.Minute).UTC()
+	if err := db.RecordVerification(&model.Verification{
+		WorkerID:    "worker-main-running",
+		StartedAt:   passedAt.Add(-15 * time.Second),
+		CompletedAt: &passedAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  15000,
+	}); err != nil {
+		t.Fatalf("RecordVerification() error = %v", err)
+	}
+
+	failedAt := deployment.StartedAt.Add(-2 * time.Minute).UTC()
 	if err := db.RecordVerification(&model.Verification{
 		WorkerID:     "worker-main-probing",
 		StartedAt:    failedAt.Add(-15 * time.Second),
@@ -72,11 +90,6 @@ func TestBuildDeploymentRollout(t *testing.T) {
 	}
 
 	api := NewAPI(db, nil, nil, nil, nil, nil)
-	deployment, err := db.GetLatestDeployment("main")
-	if err != nil {
-		t.Fatalf("GetLatestDeployment() error = %v", err)
-	}
-
 	rollout, err := api.buildDeploymentRollout(*deployment)
 	if err != nil {
 		t.Fatalf("buildDeploymentRollout() error = %v", err)
@@ -103,6 +116,12 @@ func TestBuildDeploymentRollout(t *testing.T) {
 	if rollout.AttentionWorkers != 2 {
 		t.Fatalf("AttentionWorkers = %d, want 2", rollout.AttentionWorkers)
 	}
+	if rollout.VerifiedSinceDeploy != 1 {
+		t.Fatalf("VerifiedSinceDeploy = %d, want 1", rollout.VerifiedSinceDeploy)
+	}
+	if rollout.AwaitingVerification != 1 {
+		t.Fatalf("AwaitingVerification = %d, want 1", rollout.AwaitingVerification)
+	}
 	if rollout.Status != "rolling_out" {
 		t.Fatalf("Status = %q, want rolling_out", rollout.Status)
 	}
@@ -123,6 +142,9 @@ func TestBuildDeploymentRollout(t *testing.T) {
 	}
 	if rollout.Workers[1].CurrentFailureSignature != "litestream_sync_socket_refused" {
 		t.Fatalf("CurrentFailureSignature = %q, want litestream_sync_socket_refused", rollout.Workers[1].CurrentFailureSignature)
+	}
+	if !rollout.Workers[2].VerifiedSinceDeploy {
+		t.Fatalf("VerifiedSinceDeploy = false, want true for worker-main-running")
 	}
 }
 

@@ -104,7 +104,7 @@
       },
       "targets": [
         {
-          "expr": "count(soak_control_worker_last_verification_result == 1) / count(soak_control_worker_last_verification_result)",
+          "expr": "(sum(soak_control_worker_last_verification_result) or on() vector(0)) / clamp_min((count(soak_control_worker_last_verification_result) or on() vector(0)), 1)",
           "instant": true,
           "legendFormat": "healthy"
         }
@@ -154,7 +154,7 @@
       },
       "targets": [
         {
-          "expr": "count(soak_control_worker_last_verification_result == 0)",
+          "expr": "(count(soak_control_worker_last_verification_result) - sum(soak_control_worker_last_verification_result)) or on() vector(0)",
           "legendFormat": "failing"
         }
       ],
@@ -302,7 +302,7 @@
       },
       "targets": [
         {
-          "expr": "count(soak_control_worker_last_verification_result == 1)",
+          "expr": "sum(soak_control_worker_last_verification_result) or on() vector(0)",
           "legendFormat": "passing"
         }
       ],
@@ -445,6 +445,216 @@
     },
     {
       "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 120
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 0,
+        "y": 6
+      },
+      "id": 103,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "time() - max(soak_control_worker_last_heartbeat_unixtime and on(worker_id) (soak_control_worker_status{status=~\"running|probing|degraded\"} == 1))",
+          "instant": true,
+          "legendFormat": "latest heartbeat"
+        }
+      ],
+      "title": "Latest Heartbeat",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 180
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 6,
+        "y": 6
+      },
+      "id": 104,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "time() - min(soak_control_worker_last_heartbeat_unixtime and on(worker_id) (soak_control_worker_status{status=~\"running|probing|degraded\"} == 1))",
+          "instant": true,
+          "legendFormat": "stalest heartbeat"
+        }
+      ],
+      "title": "Stalest Active Heartbeat",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 12,
+        "y": 6
+      },
+      "id": 105,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "max(soak_control_latest_deployment_workers{worker_state=\"verified_since_deploy\"})",
+          "instant": true,
+          "legendFormat": "verified"
+        }
+      ],
+      "title": "Verified This Rollout",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 18,
+        "y": 6
+      },
+      "id": 106,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "max(soak_control_latest_deployment_workers{worker_state=\"awaiting_verification\"})",
+          "instant": true,
+          "legendFormat": "awaiting"
+        }
+      ],
+      "title": "Awaiting Verify",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
         "defaults": {},
         "overrides": [
           {
@@ -483,7 +693,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 6
+        "y": 9
       },
       "id": 15,
       "options": {
@@ -511,12 +721,12 @@
       },
       "targets": [
         {
-          "expr": "count(soak_control_worker_last_verification_result == 1)",
+          "expr": "sum(soak_control_worker_last_verification_result) or on() vector(0)",
           "instant": true,
           "legendFormat": "PASS"
         },
         {
-          "expr": "count(soak_control_worker_last_verification_result == 0)",
+          "expr": "(count(soak_control_worker_last_verification_result) - sum(soak_control_worker_last_verification_result)) or on() vector(0)",
           "instant": true,
           "legendFormat": "FAIL"
         }
@@ -533,7 +743,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 6
+        "y": 9
       },
       "id": 16,
       "options": {
@@ -608,7 +818,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 6
+        "y": 9
       },
       "id": 17,
       "options": {
@@ -681,7 +891,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 16
       },
       "id": 18,
       "options": {
@@ -766,7 +976,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 22
+        "y": 25
       },
       "id": 19,
       "options": {
@@ -825,7 +1035,7 @@
         "h": 8,
         "w": 15,
         "x": 0,
-        "y": 31
+        "y": 34
       },
       "id": 8,
       "options": {
@@ -897,7 +1107,7 @@
         "h": 8,
         "w": 9,
         "x": 15,
-        "y": 31
+        "y": 34
       },
       "id": 9,
       "options": {
@@ -931,7 +1141,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 39
+        "y": 42
       },
       "id": 100,
       "panels": [
@@ -1222,7 +1432,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 40
+        "y": 43
       },
       "id": 101,
       "panels": [
@@ -1379,7 +1589,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 41
+        "y": 44
       },
       "id": 102,
       "panels": [

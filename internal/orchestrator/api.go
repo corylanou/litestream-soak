@@ -75,27 +75,31 @@ type DeploymentWorkerProgress struct {
 	LitestreamSHA           string             `json:"litestream_sha,omitempty"`
 	RuntimeSnapshotStatus   string             `json:"runtime_snapshot_status,omitempty"`
 	Updated                 bool               `json:"updated"`
+	VerifiedSinceDeploy     bool               `json:"verified_since_deploy"`
 	LastHeartbeatAt         *time.Time         `json:"last_heartbeat_at,omitempty"`
+	LastVerificationAt      *time.Time         `json:"last_verification_at,omitempty"`
 	CurrentFailureStage     string             `json:"current_failure_stage,omitempty"`
 	CurrentFailureSignature string             `json:"current_failure_signature,omitempty"`
 }
 
 type DeploymentRolloutResponse struct {
-	Deployment          model.Deployment           `json:"deployment"`
-	Status              string                     `json:"status"`
-	Summary             string                     `json:"summary"`
-	NextAction          string                     `json:"next_action,omitempty"`
-	NextChecks          []string                   `json:"next_checks,omitempty"`
-	GraceWindowExceeded bool                       `json:"grace_window_exceeded,omitempty"`
-	TotalWorkers        int                        `json:"total_workers"`
-	UpdatedWorkers      int                        `json:"updated_workers"`
-	OutdatedWorkers     int                        `json:"outdated_workers"`
-	RunningWorkers      int                        `json:"running_workers"`
-	DegradedWorkers     int                        `json:"degraded_workers"`
-	DormantWorkers      int                        `json:"dormant_workers"`
-	ProbingWorkers      int                        `json:"probing_workers"`
-	AttentionWorkers    int                        `json:"attention_workers"`
-	Workers             []DeploymentWorkerProgress `json:"workers,omitempty"`
+	Deployment           model.Deployment           `json:"deployment"`
+	Status               string                     `json:"status"`
+	Summary              string                     `json:"summary"`
+	NextAction           string                     `json:"next_action,omitempty"`
+	NextChecks           []string                   `json:"next_checks,omitempty"`
+	GraceWindowExceeded  bool                       `json:"grace_window_exceeded,omitempty"`
+	TotalWorkers         int                        `json:"total_workers"`
+	UpdatedWorkers       int                        `json:"updated_workers"`
+	OutdatedWorkers      int                        `json:"outdated_workers"`
+	RunningWorkers       int                        `json:"running_workers"`
+	DegradedWorkers      int                        `json:"degraded_workers"`
+	DormantWorkers       int                        `json:"dormant_workers"`
+	ProbingWorkers       int                        `json:"probing_workers"`
+	AttentionWorkers     int                        `json:"attention_workers"`
+	VerifiedSinceDeploy  int                        `json:"verified_since_deploy_workers"`
+	AwaitingVerification int                        `json:"awaiting_verification_workers"`
+	Workers              []DeploymentWorkerProgress `json:"workers,omitempty"`
 }
 
 const rolloutAttentionGraceWindow = 45 * time.Minute
@@ -305,9 +309,15 @@ func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (Deployme
 		}
 
 		verifications, err := db.ListVerifications(worker.ID, 1)
-		if err == nil && len(verifications) > 0 && activeFailure(&verifications[0]) {
-			progress.CurrentFailureStage = inferFailureStage(&verifications[0])
-			progress.CurrentFailureSignature = inferFailureSignature(&verifications[0])
+		if err == nil && len(verifications) > 0 {
+			if observedAt, ok := verificationObservedAt(verifications[0]); ok {
+				progress.LastVerificationAt = &observedAt
+				progress.VerifiedSinceDeploy = progress.Updated && workerNeedsPostDeployVerification(worker.Status) && !deployment.StartedAt.IsZero() && !observedAt.Before(deployment.StartedAt)
+			}
+			if activeFailure(&verifications[0]) {
+				progress.CurrentFailureStage = inferFailureStage(&verifications[0])
+				progress.CurrentFailureSignature = inferFailureSignature(&verifications[0])
+			}
 		}
 
 		response.TotalWorkers++
@@ -329,6 +339,13 @@ func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (Deployme
 		}
 		if worker.Status != model.WorkerRunning {
 			response.AttentionWorkers++
+		}
+		if progress.Updated && workerNeedsPostDeployVerification(worker.Status) {
+			if progress.VerifiedSinceDeploy {
+				response.VerifiedSinceDeploy++
+			} else {
+				response.AwaitingVerification++
+			}
 		}
 
 		response.Workers = append(response.Workers, progress)
@@ -1000,12 +1017,16 @@ func inferFailureSignature(verification *model.Verification) string {
 
 	text := strings.ToLower(verification.ErrorMessage)
 	switch {
+	case strings.Contains(text, "litestream.sock") && strings.Contains(text, "too many open files"):
+		return "litestream_sync_fd_exhausted"
 	case strings.Contains(text, "litestream.sock") && strings.Contains(text, "connect: connection refused"):
 		return "litestream_sync_socket_refused"
 	case strings.Contains(text, "wait for sync") && (strings.Contains(text, "context deadline exceeded") || strings.Contains(text, "client.timeout exceeded")):
 		return "litestream_sync_timeout"
 	case strings.Contains(text, "wrong # of entries in index"):
 		return "sqlite_index_mismatch"
+	case strings.Contains(text, "validation failed"):
+		return "validation_failed"
 	case strings.Contains(text, "open ltx file: file does not exist"):
 		return "replica_ltx_missing"
 	case strings.Contains(text, "listobjectsv2") || strings.Contains(text, "requestcanceled"):
@@ -1038,13 +1059,13 @@ func summarizeDeploymentRollout(rollout DeploymentRolloutResponse) string {
 	case "no_workers":
 		return fmt.Sprintf("Deployment %s is recorded, but no %s workers are registered yet.", version, valueOrUnknown(rollout.Deployment.Source))
 	case "rolling_out":
-		return fmt.Sprintf("%d of %d workers are on %s; %d still need the new release.", rollout.UpdatedWorkers, rollout.TotalWorkers, version, rollout.OutdatedWorkers)
+		return fmt.Sprintf("%d of %d workers are on %s; %d still need the new release, and %d updated worker(s) still await a post-rollout verification.", rollout.UpdatedWorkers, rollout.TotalWorkers, version, rollout.OutdatedWorkers, rollout.AwaitingVerification)
 	case "probing":
-		return fmt.Sprintf("All %d workers are on %s; %d worker(s) are still probing after wake-up.", rollout.TotalWorkers, version, rollout.ProbingWorkers)
+		return fmt.Sprintf("All %d workers are on %s; %d updated worker(s) have verified since rollout and %d still await a post-rollout verification.", rollout.TotalWorkers, version, rollout.VerifiedSinceDeploy, rollout.AwaitingVerification)
 	case "needs_attention":
-		return fmt.Sprintf("All %d workers are on %s; %d still need attention (%d degraded, %d dormant).", rollout.TotalWorkers, version, rollout.AttentionWorkers, rollout.DegradedWorkers, rollout.DormantWorkers)
+		return fmt.Sprintf("All %d workers are on %s; %d still need attention (%d degraded, %d dormant) and %d updated worker(s) still await a post-rollout verification.", rollout.TotalWorkers, version, rollout.AttentionWorkers, rollout.DegradedWorkers, rollout.DormantWorkers, rollout.AwaitingVerification)
 	default:
-		return fmt.Sprintf("All %d workers are on %s and the fleet is stable.", rollout.TotalWorkers, version)
+		return fmt.Sprintf("All %d workers are on %s; %d updated worker(s) have verified since rollout and the fleet is stable.", rollout.TotalWorkers, version, rollout.VerifiedSinceDeploy)
 	}
 }
 
@@ -1130,11 +1151,13 @@ func inferDeploymentNextChecks(rollout DeploymentRolloutResponse) []string {
 	case "probing":
 		checks = append(checks,
 			"Wait for the next verification cycle to finish.",
+			"Check that awaiting_verification_workers falls as updated workers report fresh results.",
 			"Open workers still marked probing after that cycle.",
 		)
 	case "needs_attention":
 		checks = append(checks,
 			"Open degraded and dormant workers first.",
+			"Check that awaiting_verification_workers is not masking workers that simply have not rerun yet.",
 			"Check failure stage, signature, and probable subsystem on those workers.",
 		)
 	default:
@@ -1149,6 +1172,25 @@ func inferDeploymentNextChecks(rollout DeploymentRolloutResponse) []string {
 	}
 
 	return checks
+}
+
+func verificationObservedAt(verification model.Verification) (time.Time, bool) {
+	if verification.CompletedAt != nil && !verification.CompletedAt.IsZero() {
+		return verification.CompletedAt.UTC(), true
+	}
+	if !verification.StartedAt.IsZero() {
+		return verification.StartedAt.UTC(), true
+	}
+	return time.Time{}, false
+}
+
+func workerNeedsPostDeployVerification(status model.WorkerStatus) bool {
+	switch status {
+	case model.WorkerRunning, model.WorkerProbing, model.WorkerDegraded:
+		return true
+	default:
+		return false
+	}
 }
 
 func buildTriageCommands(worker model.Worker, hasMachine bool) []string {

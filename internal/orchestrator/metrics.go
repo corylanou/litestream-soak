@@ -378,59 +378,33 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 		return
 	}
 
-	workers, err := db.ListWorkersForSource(valueOrUnknown(deployment.Source))
+	rollout, err := buildDeploymentRollout(db, *deployment)
 	if err != nil {
 		return
 	}
 
-	rollout := DeploymentRolloutResponse{
-		Deployment: *deployment,
-	}
-	for _, worker := range workers {
-		rollout.TotalWorkers++
-		if workerMatchesDeployment(worker, *deployment) {
-			rollout.UpdatedWorkers++
-		} else {
-			rollout.OutdatedWorkers++
-		}
-
-		switch worker.Status {
-		case model.WorkerRunning:
-			rollout.RunningWorkers++
-		case model.WorkerDegraded:
-			rollout.DegradedWorkers++
-		case model.WorkerDormant:
-			rollout.DormantWorkers++
-		case model.WorkerProbing:
-			rollout.ProbingWorkers++
-		}
-		if worker.Status != model.WorkerRunning {
-			rollout.AttentionWorkers++
-		}
-	}
-	rollout.Status = inferDeploymentRolloutStatus(rollout)
-	applyDeploymentRolloutGuidance(&rollout, time.Now().UTC())
-
 	deploymentLabels := []string{
-		valueOrUnknown(deployment.Source),
-		valueOrUnknown(deployment.GitSHA),
+		valueOrUnknown(rollout.Deployment.Source),
+		valueOrUnknown(rollout.Deployment.GitSHA),
 		valueOrUnknown(rollout.Status),
 	}
 	deploymentVersionLabels := []string{
-		valueOrUnknown(deployment.Source),
-		valueOrUnknown(deployment.GitSHA),
-		valueOrUnknown(deployment.LitestreamSHA),
+		valueOrUnknown(rollout.Deployment.Source),
+		valueOrUnknown(rollout.Deployment.GitSHA),
+		valueOrUnknown(rollout.Deployment.LitestreamSHA),
 		valueOrUnknown(rollout.Status),
 	}
 	rolloutStates := map[string]float64{
-		"total":     float64(rollout.TotalWorkers),
-		"updated":   float64(rollout.UpdatedWorkers),
-		"outdated":  float64(rollout.OutdatedWorkers),
-		"running":   float64(rollout.RunningWorkers),
-		"degraded":  float64(rollout.DegradedWorkers),
-		"dormant":   float64(rollout.DormantWorkers),
-		"probing":   float64(rollout.ProbingWorkers),
-		"attention": float64(rollout.AttentionWorkers),
+		"total":                 float64(rollout.TotalWorkers),
+		"updated":               float64(rollout.UpdatedWorkers),
+		"outdated":              float64(rollout.OutdatedWorkers),
+		"running":               float64(rollout.RunningWorkers),
+		"degraded":              float64(rollout.DegradedWorkers),
+		"dormant":               float64(rollout.DormantWorkers),
+		"probing":               float64(rollout.ProbingWorkers),
+		"attention":             float64(rollout.AttentionWorkers),
+		"verified_since_deploy": float64(rollout.VerifiedSinceDeploy),
+		"awaiting_verification": float64(rollout.AwaitingVerification),
 	}
 
 	m.mu.Lock()
@@ -458,8 +432,8 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 	}
 	controlLatestDeploymentInfo.WithLabelValues(deploymentLabels...).Set(deploymentMetricValue(rollout.Status))
 	controlLatestDeploymentVersionInfo.WithLabelValues(deploymentVersionLabels...).Set(deploymentMetricValue(rollout.Status))
-	if !deployment.StartedAt.IsZero() {
-		controlLatestDeploymentAge.WithLabelValues(deploymentLabels...).Set(time.Since(deployment.StartedAt).Seconds())
+	if !rollout.Deployment.StartedAt.IsZero() {
+		controlLatestDeploymentAge.WithLabelValues(deploymentLabels...).Set(time.Since(rollout.Deployment.StartedAt).Seconds())
 	}
 	if rollout.GraceWindowExceeded {
 		controlLatestDeploymentGraceExceeded.WithLabelValues(deploymentLabels...).Set(1)
