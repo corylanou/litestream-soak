@@ -15,6 +15,12 @@
     },
     {
       "targetBlank": true,
+      "title": "Release Quality",
+      "type": "link",
+      "url": "/d/litestream-release-quality"
+    },
+    {
+      "targetBlank": true,
       "title": "Control Plane",
       "type": "link",
       "url": "https://litestream-soak-ctl.fly.dev/ui"
