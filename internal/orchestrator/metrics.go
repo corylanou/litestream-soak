@@ -24,6 +24,10 @@ type controlMetrics struct {
 	latestDeployment        labelMetricState
 	latestDeploymentVersion labelMetricState
 	rolloutByState          map[string]labelMetricState
+	comparisonInfo          labelMetricState
+	comparisonWorkers       map[string]labelMetricState
+	comparisonDeltas        map[string]labelMetricState
+	comparisonFailures      map[string]labelMetricState
 }
 
 type labelMetricState struct {
@@ -134,6 +138,26 @@ var (
 		Name: "soak_control_latest_deployment_grace_exceeded",
 		Help: "Whether the latest deployment has exceeded the rollout grace window (1=yes, 0=no).",
 	}, []string{"source", "git_sha", "status"})
+
+	controlLatestDeploymentComparisonInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_latest_deployment_comparison_info",
+		Help: "Latest release-over-release comparison tracked by the control plane.",
+	}, []string{"source", "head_git_sha", "head_litestream_sha", "base_git_sha", "base_litestream_sha", "verdict"})
+
+	controlLatestDeploymentComparisonWorkers = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_latest_deployment_comparison_workers",
+		Help: "Worker counts for the latest release comparison, split by head/base deployment.",
+	}, []string{"source", "comparison_role", "git_sha", "litestream_sha", "worker_state"})
+
+	controlLatestDeploymentComparisonDelta = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_latest_deployment_comparison_delta",
+		Help: "Derived release-over-release deltas for the latest deployment comparison.",
+	}, []string{"source", "head_git_sha", "head_litestream_sha", "base_git_sha", "base_litestream_sha", "delta_type", "verdict"})
+
+	controlLatestDeploymentComparisonFailure = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_latest_deployment_comparison_failure",
+		Help: "Failure signature counts for the latest release comparison.",
+	}, []string{"source", "comparison_role", "git_sha", "litestream_sha", "failure_stage", "failure_signature"})
 )
 
 func NewControlMetrics(db *model.DB) *controlMetrics {
@@ -146,6 +170,9 @@ func NewControlMetrics(db *model.DB) *controlMetrics {
 		failureByWorker:     make(map[string]failureMetricState),
 		lastFailureByWorker: make(map[string]failureMetricState),
 		rolloutByState:      make(map[string]labelMetricState),
+		comparisonWorkers:   make(map[string]labelMetricState),
+		comparisonDeltas:    make(map[string]labelMetricState),
+		comparisonFailures:  make(map[string]labelMetricState),
 	}
 	m.syncFromDB(db)
 	return m
@@ -183,6 +210,7 @@ func (m *controlMetrics) syncFromDB(db *model.DB) {
 	}
 
 	m.observeLatestDeployment(db)
+	m.observeLatestDeploymentComparison(db)
 }
 
 func (m *controlMetrics) observeWorker(worker model.Worker) {
@@ -450,6 +478,229 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 	for state, value := range rolloutStates {
 		controlLatestDeploymentWorkers.WithLabelValues(append(append([]string{}, deploymentLabels...), state)...).Set(value)
 	}
+}
+
+func (m *controlMetrics) observeLatestDeploymentComparison(db *model.DB) {
+	comparison, err := buildLatestDeploymentComparison(db, "main")
+	if err != nil || comparison == nil {
+		return
+	}
+
+	headDeployment := comparison.Head.Deployment
+	baseDeployment := model.Deployment{}
+	if comparison.Base != nil {
+		baseDeployment = comparison.Base.Deployment
+	}
+
+	infoLabels := []string{
+		valueOrUnknown(headDeployment.Source),
+		valueOrUnknown(headDeployment.GitSHA),
+		valueOrUnknown(headDeployment.LitestreamSHA),
+		valueOrUnknown(baseDeployment.GitSHA),
+		valueOrUnknown(baseDeployment.LitestreamSHA),
+		valueOrUnknown(comparison.Verdict),
+	}
+
+	workerStates := make(map[string]comparisonMetricValue)
+	for state, value := range deploymentScorecardWorkerStates(comparison.Head) {
+		workerStates["head:"+state] = comparisonMetricValue{
+			labels: []string{
+				valueOrUnknown(headDeployment.Source),
+				"head",
+				valueOrUnknown(headDeployment.GitSHA),
+				valueOrUnknown(headDeployment.LitestreamSHA),
+				state,
+			},
+			value: value,
+		}
+	}
+	if comparison.Base != nil {
+		for state, value := range deploymentScorecardWorkerStates(*comparison.Base) {
+			workerStates["base:"+state] = comparisonMetricValue{
+				labels: []string{
+					valueOrUnknown(baseDeployment.Source),
+					"base",
+					valueOrUnknown(baseDeployment.GitSHA),
+					valueOrUnknown(baseDeployment.LitestreamSHA),
+					state,
+				},
+				value: value,
+			}
+		}
+	}
+
+	deltaLabels := []string{
+		valueOrUnknown(headDeployment.Source),
+		valueOrUnknown(headDeployment.GitSHA),
+		valueOrUnknown(headDeployment.LitestreamSHA),
+		valueOrUnknown(baseDeployment.GitSHA),
+		valueOrUnknown(baseDeployment.LitestreamSHA),
+	}
+	deltaStates := map[string]comparisonMetricValue{
+		"pass_delta": {
+			labels: append(append([]string{}, deltaLabels...), "pass_delta", valueOrUnknown(comparison.Verdict)),
+			value:  float64(comparison.PassDelta),
+		},
+		"fail_delta": {
+			labels: append(append([]string{}, deltaLabels...), "fail_delta", valueOrUnknown(comparison.Verdict)),
+			value:  float64(comparison.FailDelta),
+		},
+		"awaiting_delta": {
+			labels: append(append([]string{}, deltaLabels...), "awaiting_delta", valueOrUnknown(comparison.Verdict)),
+			value:  float64(comparison.AwaitingDelta),
+		},
+		"improved_workers": {
+			labels: append(append([]string{}, deltaLabels...), "improved_workers", valueOrUnknown(comparison.Verdict)),
+			value:  float64(len(comparison.ImprovedWorkers)),
+		},
+		"regressed_workers": {
+			labels: append(append([]string{}, deltaLabels...), "regressed_workers", valueOrUnknown(comparison.Verdict)),
+			value:  float64(len(comparison.RegressedWorkers)),
+		},
+		"new_failures": {
+			labels: append(append([]string{}, deltaLabels...), "new_failures", valueOrUnknown(comparison.Verdict)),
+			value:  float64(len(comparison.NewFailures)),
+		},
+		"resolved_failures": {
+			labels: append(append([]string{}, deltaLabels...), "resolved_failures", valueOrUnknown(comparison.Verdict)),
+			value:  float64(len(comparison.ResolvedFailures)),
+		},
+	}
+
+	failureStates := make(map[string]comparisonMetricValue)
+	for _, failure := range comparison.Head.Failures {
+		key := strings.Join([]string{"head", failure.Stage, failure.Signature}, ":")
+		failureStates[key] = comparisonMetricValue{
+			labels: []string{
+				valueOrUnknown(headDeployment.Source),
+				"head",
+				valueOrUnknown(headDeployment.GitSHA),
+				valueOrUnknown(headDeployment.LitestreamSHA),
+				metricValueOrUnknown(failure.Stage),
+				metricValueOrUnknown(failure.Signature),
+			},
+			value: float64(failure.Count),
+		}
+	}
+	if comparison.Base != nil {
+		for _, failure := range comparison.Base.Failures {
+			key := strings.Join([]string{"base", failure.Stage, failure.Signature}, ":")
+			failureStates[key] = comparisonMetricValue{
+				labels: []string{
+					valueOrUnknown(baseDeployment.Source),
+					"base",
+					valueOrUnknown(baseDeployment.GitSHA),
+					valueOrUnknown(baseDeployment.LitestreamSHA),
+					metricValueOrUnknown(failure.Stage),
+					metricValueOrUnknown(failure.Signature),
+				},
+				value: float64(failure.Count),
+			}
+		}
+	}
+	for _, failure := range comparison.NewFailures {
+		key := strings.Join([]string{"new", failure.Stage, failure.Signature}, ":")
+		failureStates[key] = comparisonMetricValue{
+			labels: []string{
+				valueOrUnknown(headDeployment.Source),
+				"new",
+				valueOrUnknown(headDeployment.GitSHA),
+				valueOrUnknown(headDeployment.LitestreamSHA),
+				metricValueOrUnknown(failure.Stage),
+				metricValueOrUnknown(failure.Signature),
+			},
+			value: float64(failure.Count),
+		}
+	}
+	for _, failure := range comparison.ResolvedFailures {
+		key := strings.Join([]string{"resolved", failure.Stage, failure.Signature}, ":")
+		failureStates[key] = comparisonMetricValue{
+			labels: []string{
+				valueOrUnknown(baseDeployment.Source),
+				"resolved",
+				valueOrUnknown(baseDeployment.GitSHA),
+				valueOrUnknown(baseDeployment.LitestreamSHA),
+				metricValueOrUnknown(failure.Stage),
+				metricValueOrUnknown(failure.Signature),
+			},
+			value: float64(failure.Count),
+		}
+	}
+
+	m.mu.Lock()
+	previousInfo := m.comparisonInfo
+	previousWorkers := cloneLabelMetricStates(m.comparisonWorkers)
+	previousDeltas := cloneLabelMetricStates(m.comparisonDeltas)
+	previousFailures := cloneLabelMetricStates(m.comparisonFailures)
+	m.comparisonInfo = labelMetricState{labels: infoLabels}
+	m.comparisonWorkers = make(map[string]labelMetricState, len(workerStates))
+	for key, metric := range workerStates {
+		m.comparisonWorkers[key] = labelMetricState{labels: metric.labels}
+	}
+	m.comparisonDeltas = make(map[string]labelMetricState, len(deltaStates))
+	for key, metric := range deltaStates {
+		m.comparisonDeltas[key] = labelMetricState{labels: metric.labels}
+	}
+	m.comparisonFailures = make(map[string]labelMetricState, len(failureStates))
+	for key, metric := range failureStates {
+		m.comparisonFailures[key] = labelMetricState{labels: metric.labels}
+	}
+	m.mu.Unlock()
+
+	if len(previousInfo.labels) > 0 && !sameMetricLabels(previousInfo.labels, infoLabels) {
+		controlLatestDeploymentComparisonInfo.WithLabelValues(previousInfo.labels...).Set(0)
+	}
+	controlLatestDeploymentComparisonInfo.WithLabelValues(infoLabels...).Set(1)
+
+	for _, previous := range previousWorkers {
+		if len(previous.labels) > 0 {
+			controlLatestDeploymentComparisonWorkers.WithLabelValues(previous.labels...).Set(0)
+		}
+	}
+	for _, metric := range workerStates {
+		controlLatestDeploymentComparisonWorkers.WithLabelValues(metric.labels...).Set(metric.value)
+	}
+
+	for _, previous := range previousDeltas {
+		if len(previous.labels) > 0 {
+			controlLatestDeploymentComparisonDelta.WithLabelValues(previous.labels...).Set(0)
+		}
+	}
+	for _, metric := range deltaStates {
+		controlLatestDeploymentComparisonDelta.WithLabelValues(metric.labels...).Set(metric.value)
+	}
+
+	for _, previous := range previousFailures {
+		if len(previous.labels) > 0 {
+			controlLatestDeploymentComparisonFailure.WithLabelValues(previous.labels...).Set(0)
+		}
+	}
+	for _, metric := range failureStates {
+		controlLatestDeploymentComparisonFailure.WithLabelValues(metric.labels...).Set(metric.value)
+	}
+}
+
+type comparisonMetricValue struct {
+	labels []string
+	value  float64
+}
+
+func deploymentScorecardWorkerStates(scorecard DeploymentScorecard) map[string]float64 {
+	return map[string]float64{
+		"total":    float64(scorecard.TotalWorkers),
+		"verified": float64(scorecard.VerifiedWorkers),
+		"passed":   float64(scorecard.PassedWorkers),
+		"failed":   float64(scorecard.FailedWorkers),
+		"awaiting": float64(scorecard.AwaitingWorkers),
+	}
+}
+
+func cloneLabelMetricStates(source map[string]labelMetricState) map[string]labelMetricState {
+	cloned := make(map[string]labelMetricState, len(source))
+	for key, state := range source {
+		cloned[key] = state
+	}
+	return cloned
 }
 
 func deploymentMetricValue(status string) float64 {
