@@ -13,15 +13,17 @@ import (
 )
 
 type controlMetrics struct {
-	mu                  sync.Mutex
-	statusByWorker      map[string]string
-	workloadByWorker    map[string]labelMetricState
-	runtimeByWorker     map[string]labelMetricState
-	platformByWorker    map[string]labelMetricState
-	failureByWorker     map[string]failureMetricState
-	lastFailureByWorker map[string]failureMetricState
-	latestDeployment    labelMetricState
-	rolloutByState      map[string]labelMetricState
+	mu                      sync.Mutex
+	statusByWorker          map[string]string
+	infoByWorker            map[string]labelMetricState
+	workloadByWorker        map[string]labelMetricState
+	runtimeByWorker         map[string]labelMetricState
+	platformByWorker        map[string]labelMetricState
+	failureByWorker         map[string]failureMetricState
+	lastFailureByWorker     map[string]failureMetricState
+	latestDeployment        labelMetricState
+	latestDeploymentVersion labelMetricState
+	rolloutByState          map[string]labelMetricState
 }
 
 type labelMetricState struct {
@@ -37,6 +39,11 @@ var (
 		Name: "soak_control_worker_info",
 		Help: "Static control-plane info about a soak worker.",
 	}, []string{"worker_id", "git_sha", "profile", "source", "app_name", "region"})
+
+	controlWorkerVersionInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_version_info",
+		Help: "Static version info about a soak worker and the Litestream commit under test.",
+	}, []string{"worker_id", "git_sha", "litestream_sha", "profile", "source", "app_name", "region"})
 
 	controlWorkerStatus = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_control_worker_status",
@@ -108,6 +115,11 @@ var (
 		Help: "Latest deployment tracked by the control plane.",
 	}, []string{"source", "git_sha", "status"})
 
+	controlLatestDeploymentVersionInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_latest_deployment_version_info",
+		Help: "Latest deployment tracked by the control plane, including the Litestream commit under test.",
+	}, []string{"source", "git_sha", "litestream_sha", "status"})
+
 	controlLatestDeploymentWorkers = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_control_latest_deployment_workers",
 		Help: "Worker counts for the latest deployment tracked by the control plane.",
@@ -127,6 +139,7 @@ var (
 func NewControlMetrics(db *model.DB) *controlMetrics {
 	m := &controlMetrics{
 		statusByWorker:      make(map[string]string),
+		infoByWorker:        make(map[string]labelMetricState),
 		workloadByWorker:    make(map[string]labelMetricState),
 		runtimeByWorker:     make(map[string]labelMetricState),
 		platformByWorker:    make(map[string]labelMetricState),
@@ -174,6 +187,23 @@ func (m *controlMetrics) syncFromDB(db *model.DB) {
 
 func (m *controlMetrics) observeWorker(worker model.Worker) {
 	labels := workerMetricLabels(worker)
+	infoLabels := []string{
+		worker.ID,
+		worker.GitSHA,
+		worker.ProfileName,
+		worker.Source,
+		workerAppName(worker),
+		workerRegion(worker),
+	}
+	versionLabels := []string{
+		worker.ID,
+		worker.GitSHA,
+		worker.LitestreamSHA,
+		worker.ProfileName,
+		worker.Source,
+		workerAppName(worker),
+		workerRegion(worker),
+	}
 	workloadCfg := resolveWorkerWorkload(worker)
 	runtimeStatus := reporting.SnapshotStatus(extractReportedRuntime(worker, nil))
 	workloadLabels := []string{
@@ -194,16 +224,28 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 	}
 	runtimeLabels := append(labels, metricValueOrUnknown(runtimeStatus))
 
-	controlWorkerInfo.WithLabelValues(worker.ID, worker.GitSHA, worker.ProfileName, worker.Source, workerAppName(worker), workerRegion(worker)).Set(1)
-
 	m.mu.Lock()
 	previousStatus := m.statusByWorker[worker.ID]
 	m.statusByWorker[worker.ID] = string(worker.Status)
+	previousInfo := m.infoByWorker[worker.ID]
+	m.infoByWorker[worker.ID] = labelMetricState{labels: versionLabels}
 	previousWorkload := m.workloadByWorker[worker.ID]
 	m.workloadByWorker[worker.ID] = labelMetricState{labels: workloadLabels}
 	previousRuntime := m.runtimeByWorker[worker.ID]
 	m.runtimeByWorker[worker.ID] = labelMetricState{labels: runtimeLabels}
 	m.mu.Unlock()
+
+	if len(previousInfo.labels) > 0 {
+		previousInfoLabels := []string{previousInfo.labels[0], previousInfo.labels[1], previousInfo.labels[3], previousInfo.labels[4], previousInfo.labels[5], previousInfo.labels[6]}
+		if !sameMetricLabels(previousInfoLabels, infoLabels) {
+			controlWorkerInfo.WithLabelValues(previousInfoLabels...).Set(0)
+		}
+		if !sameMetricLabels(previousInfo.labels, versionLabels) {
+			controlWorkerVersionInfo.WithLabelValues(previousInfo.labels...).Set(0)
+		}
+	}
+	controlWorkerInfo.WithLabelValues(infoLabels...).Set(1)
+	controlWorkerVersionInfo.WithLabelValues(versionLabels...).Set(1)
 
 	if len(previousWorkload.labels) > 0 && !sameMetricLabels(previousWorkload.labels, workloadLabels) {
 		controlWorkerWorkloadInfo.WithLabelValues(previousWorkload.labels...).Set(0)
@@ -346,7 +388,7 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 	}
 	for _, worker := range workers {
 		rollout.TotalWorkers++
-		if strings.TrimSpace(worker.GitSHA) == strings.TrimSpace(deployment.GitSHA) {
+		if workerMatchesDeployment(worker, *deployment) {
 			rollout.UpdatedWorkers++
 		} else {
 			rollout.OutdatedWorkers++
@@ -374,6 +416,12 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 		valueOrUnknown(deployment.GitSHA),
 		valueOrUnknown(rollout.Status),
 	}
+	deploymentVersionLabels := []string{
+		valueOrUnknown(deployment.Source),
+		valueOrUnknown(deployment.GitSHA),
+		valueOrUnknown(deployment.LitestreamSHA),
+		valueOrUnknown(rollout.Status),
+	}
 	rolloutStates := map[string]float64{
 		"total":     float64(rollout.TotalWorkers),
 		"updated":   float64(rollout.UpdatedWorkers),
@@ -387,7 +435,9 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 
 	m.mu.Lock()
 	previousDeployment := m.latestDeployment
+	previousDeploymentVersion := m.latestDeploymentVersion
 	m.latestDeployment = labelMetricState{labels: deploymentLabels}
+	m.latestDeploymentVersion = labelMetricState{labels: deploymentVersionLabels}
 	previousRolloutStates := make(map[string]labelMetricState, len(m.rolloutByState))
 	for key, state := range m.rolloutByState {
 		previousRolloutStates[key] = state
@@ -403,7 +453,11 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 		controlLatestDeploymentAge.WithLabelValues(previousDeployment.labels...).Set(0)
 		controlLatestDeploymentGraceExceeded.WithLabelValues(previousDeployment.labels...).Set(0)
 	}
+	if len(previousDeploymentVersion.labels) > 0 && !sameMetricLabels(previousDeploymentVersion.labels, deploymentVersionLabels) {
+		controlLatestDeploymentVersionInfo.WithLabelValues(previousDeploymentVersion.labels...).Set(0)
+	}
 	controlLatestDeploymentInfo.WithLabelValues(deploymentLabels...).Set(deploymentMetricValue(rollout.Status))
+	controlLatestDeploymentVersionInfo.WithLabelValues(deploymentVersionLabels...).Set(deploymentMetricValue(rollout.Status))
 	if !deployment.StartedAt.IsZero() {
 		controlLatestDeploymentAge.WithLabelValues(deploymentLabels...).Set(time.Since(deployment.StartedAt).Seconds())
 	}

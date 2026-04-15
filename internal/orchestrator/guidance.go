@@ -532,6 +532,8 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 		fmt.Sprintf("generated_at: %s", bundle.GeneratedAt.Format(timeFormatRFC3339)),
 		fmt.Sprintf("worker_id: %s", bundle.Worker.ID),
 		fmt.Sprintf("status: %s", bundle.Worker.Status),
+		fmt.Sprintf("soak_git_sha: %s", valueOrUnknown(bundle.Worker.GitSHA)),
+		fmt.Sprintf("litestream_sha_under_test: %s", valueOrUnknown(bundle.Worker.LitestreamSHA)),
 		fmt.Sprintf("last_heartbeat_at: %s", formatTime(bundle.Worker.LastHeartbeatAt)),
 		fmt.Sprintf("load_mode: %s", valueOrUnknown(bundle.Workload.MetricLoadMode())),
 		fmt.Sprintf("replay_dataset: %s", valueOrUnknown(bundle.Workload.MetricReplayDataset())),

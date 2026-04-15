@@ -5,10 +5,11 @@ sha="${1:-}"
 source_name="${2:-main}"
 trigger="${3:-deploy_ready}"
 image_ref="${4:-}"
+litestream_sha="${5:-}"
 base_url="${CONTROL_BASE_URL:-https://litestream-soak-ctl.fly.dev}"
 
 if [ -z "$sha" ]; then
-  echo "usage: $0 <sha> [source] [trigger] [image-ref]" >&2
+  echo "usage: $0 <sha> [source] [trigger] [image-ref] [litestream-sha]" >&2
   exit 1
 fi
 
@@ -26,11 +27,14 @@ payload="$(jq -n \
   --arg source "$source_name" \
   --arg trigger "$trigger" \
   --arg image_ref "$image_ref" \
+  --arg litestream_sha "$litestream_sha" \
   '{
     sha: $sha,
     source: $source,
     trigger: $trigger
-  } + (if $image_ref == "" then {} else {image_ref: $image_ref} end)')"
+  }
+  + (if $image_ref == "" then {} else {image_ref: $image_ref} end)
+  + (if $litestream_sha == "" then {} else {litestream_sha: $litestream_sha} end)')"
 
 curl -sS -X POST \
   "${auth_args[@]}" \

@@ -3,19 +3,21 @@ package worker
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
 type Config struct {
-	WorkerID   string
-	WorkerName string
-	GitSHA     string
-	Source     string // "main" or "pr"
-	AppName    string
-	MachineID  string
-	Region     string
+	WorkerID      string
+	WorkerName    string
+	GitSHA        string
+	LitestreamSHA string
+	Source        string // "main" or "pr"
+	AppName       string
+	MachineID     string
+	Region        string
 
 	// Paths
 	DataDir    string
@@ -122,6 +124,7 @@ func ConfigFromEnv() (Config, error) {
 	if v := os.Getenv("GIT_SHA"); v != "" {
 		c.GitSHA = v
 	}
+	c.LitestreamSHA = resolveLitestreamSHA()
 	if v := os.Getenv("SOURCE"); v != "" {
 		c.Source = v
 	}
@@ -284,6 +287,24 @@ func ConfigFromEnv() (Config, error) {
 	}
 
 	return c, nil
+}
+
+func resolveLitestreamSHA() string {
+	if v := strings.TrimSpace(os.Getenv("LITESTREAM_SHA")); v != "" {
+		return v
+	}
+
+	shaFile := strings.TrimSpace(os.Getenv("LITESTREAM_SHA_FILE"))
+	if shaFile == "" {
+		shaFile = "/opt/soak/litestream.sha"
+	}
+
+	body, err := os.ReadFile(shaFile)
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(string(body))
 }
 
 func (c Config) ReplicaURL() string {

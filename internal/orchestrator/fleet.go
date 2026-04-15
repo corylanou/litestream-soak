@@ -13,14 +13,15 @@ import (
 )
 
 type DesiredWorker struct {
-	WorkerID     string
-	Name         string
-	Source       string
-	GitSHA       string
-	ProfileName  string
-	Region       string
-	VolumeSizeGB int
-	Workload     workload.Config
+	WorkerID      string
+	Name          string
+	Source        string
+	GitSHA        string
+	LitestreamSHA string
+	ProfileName   string
+	Region        string
+	VolumeSizeGB  int
+	Workload      workload.Config
 }
 
 type FleetSpec struct {
@@ -296,15 +297,16 @@ func (m *Manager) reconcileFleet(ctx context.Context, spec FleetSpec) {
 		}
 
 		request := WorkerRequest{
-			WorkerID:     firstNonEmpty(desired.WorkerID, desired.Name),
-			Name:         desired.Name,
-			Source:       firstNonEmpty(desired.Source, "main"),
-			GitSHA:       firstNonEmpty(desired.GitSHA, "main"),
-			ProfileName:  desired.ProfileName,
-			ImageRef:     imageRef,
-			Region:       desired.Region,
-			VolumeSizeGB: desired.VolumeSizeGB,
-			Workload:     desired.Workload,
+			WorkerID:      firstNonEmpty(desired.WorkerID, desired.Name),
+			Name:          desired.Name,
+			Source:        firstNonEmpty(desired.Source, "main"),
+			GitSHA:        firstNonEmpty(desired.GitSHA, "main"),
+			LitestreamSHA: strings.TrimSpace(desired.LitestreamSHA),
+			ProfileName:   desired.ProfileName,
+			ImageRef:      imageRef,
+			Region:        desired.Region,
+			VolumeSizeGB:  desired.VolumeSizeGB,
+			Workload:      desired.Workload,
 		}
 
 		if _, err := m.CreateWorker(ctx, request); err != nil {

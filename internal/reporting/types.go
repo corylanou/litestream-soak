@@ -19,6 +19,7 @@ type WorkerIdentity struct {
 	Name          string `json:"name"`
 	Source        string `json:"source"`
 	GitSHA        string `json:"git_sha"`
+	LitestreamSHA string `json:"litestream_sha,omitempty"`
 	ProfileName   string `json:"profile_name"`
 	ProfileConfig string `json:"profile_config,omitempty"`
 	AppName       string `json:"app_name,omitempty"`

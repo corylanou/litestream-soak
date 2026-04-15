@@ -69,6 +69,9 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 		"S3_ENDPOINT":       m.s3Endpoint,
 		"CONTROL_BASE_URL":  m.controlBaseURL,
 	}
+	if strings.TrimSpace(worker.LitestreamSHA) != "" {
+		env["LITESTREAM_SHA"] = worker.LitestreamSHA
+	}
 
 	if workloadCfg.WriteRate > 0 {
 		env["WRITE_RATE"] = fmt.Sprintf("%d", workloadCfg.WriteRate)
@@ -293,14 +296,14 @@ func (m *Manager) DormantWorker(ctx context.Context, workerID, reason, signature
 	return nil
 }
 
-func (m *Manager) ResumeDormantWorkers(ctx context.Context, source, imageRef, gitSHA, resumeTrigger string) error {
+func (m *Manager) ResumeDormantWorkers(ctx context.Context, source, imageRef, gitSHA, litestreamSHA, resumeTrigger string) error {
 	workers, err := m.db.ListDormantWorkers(source)
 	if err != nil {
 		return fmt.Errorf("list dormant workers: %w", err)
 	}
 
 	for _, worker := range workers {
-		if err := m.resumeDormantWorker(ctx, worker, imageRef, gitSHA, resumeTrigger); err != nil {
+		if err := m.resumeDormantWorker(ctx, worker, imageRef, gitSHA, litestreamSHA, resumeTrigger); err != nil {
 			slog.Error("Failed to resume dormant worker", "worker_id", worker.ID, "error", err)
 			_ = m.db.RecordEvent(worker.ID, "worker_probe_start_failed", err.Error(), imageRef)
 		}
@@ -308,7 +311,7 @@ func (m *Manager) ResumeDormantWorkers(ctx context.Context, source, imageRef, gi
 	return nil
 }
 
-func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, imageRef, gitSHA, resumeTrigger string) error {
+func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, imageRef, gitSHA, litestreamSHA, resumeTrigger string) error {
 	volumeID, err := m.resolveWorkerVolumeID(ctx, worker)
 	if err != nil {
 		return err
@@ -316,6 +319,10 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	resumeSHA := strings.TrimSpace(gitSHA)
 	if resumeSHA == "" {
 		resumeSHA = worker.GitSHA
+	}
+	resumeLitestreamSHA := strings.TrimSpace(litestreamSHA)
+	if resumeLitestreamSHA == "" {
+		resumeLitestreamSHA = worker.LitestreamSHA
 	}
 
 	workloadCfg := normalizeWorkloadConfig(resolveWorkerWorkload(worker))
@@ -328,6 +335,7 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 
 	resumeWorker := worker
 	resumeWorker.GitSHA = resumeSHA
+	resumeWorker.LitestreamSHA = resumeLitestreamSHA
 	machine, err := m.createWorkerMachine(ctx, resumeWorker, imageRef, volumeID, workloadCfg)
 	if err != nil {
 		return fmt.Errorf("create probe machine: %w", err)
@@ -336,15 +344,15 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	if err := m.db.UpdateWorkerMachine(worker.ID, machine.ID, volumeID); err != nil {
 		return fmt.Errorf("update worker machine: %w", err)
 	}
-	if err := m.db.UpdateWorkerMachineGitSHA(worker.ID, machine.ID, resumeSHA); err != nil {
-		return fmt.Errorf("update worker machine sha: %w", err)
+	if err := m.db.UpdateWorkerMachineVersion(worker.ID, machine.ID, resumeSHA, resumeLitestreamSHA); err != nil {
+		return fmt.Errorf("update worker machine version: %w", err)
 	}
 	if err := m.db.MarkWorkerProbing(worker.ID, resumeTrigger); err != nil {
 		return fmt.Errorf("mark worker probing: %w", err)
 	}
 	m.observeWorkerByID(worker.ID)
 
-	message := fmt.Sprintf("Worker resumed for probe on %s (%s)", resumeSHA, resumeTrigger)
+	message := fmt.Sprintf("Worker resumed for probe on soak %s / litestream %s (%s)", shortVersionValue(resumeSHA), shortVersionValue(resumeLitestreamSHA), resumeTrigger)
 	if err := m.db.RecordEvent(worker.ID, "worker_probe_started", message, imageRef); err != nil {
 		return fmt.Errorf("record probe event: %w", err)
 	}

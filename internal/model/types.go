@@ -26,6 +26,7 @@ type Worker struct {
 	Status           WorkerStatus `json:"status"`
 	Source           string       `json:"source"`
 	GitSHA           string       `json:"git_sha"`
+	LitestreamSHA    string       `json:"litestream_sha,omitempty"`
 	PRNumber         int          `json:"pr_number,omitempty"`
 	ProfileName      string       `json:"profile_name"`
 	ProfileConfig    string       `json:"profile_config"`
@@ -58,15 +59,16 @@ type Verification struct {
 }
 
 type Deployment struct {
-	ID           int        `json:"id"`
-	GitSHA       string     `json:"git_sha"`
-	ImageRef     string     `json:"image_ref"`
-	Source       string     `json:"source"`
-	PRNumber     int        `json:"pr_number,omitempty"`
-	Status       string     `json:"status"`
-	StartedAt    time.Time  `json:"started_at"`
-	CompletedAt  *time.Time `json:"completed_at,omitempty"`
-	ErrorMessage string     `json:"error_message,omitempty"`
+	ID            int        `json:"id"`
+	GitSHA        string     `json:"git_sha"`
+	LitestreamSHA string     `json:"litestream_sha,omitempty"`
+	ImageRef      string     `json:"image_ref"`
+	Source        string     `json:"source"`
+	PRNumber      int        `json:"pr_number,omitempty"`
+	Status        string     `json:"status"`
+	StartedAt     time.Time  `json:"started_at"`
+	CompletedAt   *time.Time `json:"completed_at,omitempty"`
+	ErrorMessage  string     `json:"error_message,omitempty"`
 }
 
 type Event struct {

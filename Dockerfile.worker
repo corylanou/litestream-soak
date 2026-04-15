@@ -5,7 +5,8 @@ FROM golang:1.25 AS litestream-builder
 ARG LITESTREAM_SHA
 WORKDIR /src/litestream
 RUN git clone https://github.com/benbjohnson/litestream.git . && \
-    git checkout ${LITESTREAM_SHA}
+    git checkout ${LITESTREAM_SHA} && \
+    git rev-parse HEAD >/tmp/litestream.sha
 RUN go build \
     -ldflags "-s -w -X 'main.Version=${LITESTREAM_SHA}'" \
     -tags osusergo,netgo,sqlite_omit_load_extension \
@@ -29,8 +30,10 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=litestream-builder /usr/local/bin/litestream /usr/local/bin/litestream
 COPY --from=litestream-builder /usr/local/bin/litestream-test /usr/local/bin/litestream-test
+COPY --from=litestream-builder /tmp/litestream.sha /opt/soak/litestream.sha
 COPY --from=soakworker-builder /usr/local/bin/soakworker /usr/local/bin/soakworker
 COPY --from=soakworker-builder /src/soak/datasets /opt/soak/datasets
+ENV LITESTREAM_SHA_FILE=/opt/soak/litestream.sha
 VOLUME /data
 EXPOSE 9090 9091
 ENTRYPOINT ["/usr/local/bin/soakworker"]

@@ -826,7 +826,8 @@ const homeBodyTemplate = `{{define "home_body"}}
         <p class="lead">{{.LatestDeployment.Summary}}</p>
         <div class="diag-meta">
           <span class="badge badge-{{if eq (deploymentClass .LatestDeployment.Status) "status-good"}}good{{else if eq (deploymentClass .LatestDeployment.Status) "status-warn"}}warn{{else if eq (deploymentClass .LatestDeployment.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.LatestDeployment.Status}}</span>
-          <span class="badge badge-neutral">sha: {{trimSHA .LatestDeployment.Deployment.GitSHA}}</span>
+          <span class="badge badge-neutral">soak: {{trimSHA .LatestDeployment.Deployment.GitSHA}}</span>
+          <span class="badge badge-neutral">litestream: {{trimSHA .LatestDeployment.Deployment.LitestreamSHA}}</span>
           <span class="badge badge-neutral">{{.LatestDeployment.UpdatedWorkers}}/{{.LatestDeployment.TotalWorkers}} updated</span>
           {{if gt .LatestDeployment.ProbingWorkers 0}}<span class="badge badge-warn">{{.LatestDeployment.ProbingWorkers}} probing</span>{{end}}
           {{if gt .LatestDeployment.DormantWorkers 0}}<span class="badge badge-bad">{{.LatestDeployment.DormantWorkers}} dormant</span>{{end}}
@@ -840,7 +841,7 @@ const homeBodyTemplate = `{{define "home_body"}}
         <ul>
           {{range .LatestDeployment.Workers}}
             {{if not .Updated}}
-            <li><a href="/ui/workers/{{pathEscape .WorkerID}}">{{.Name}}</a> is still on {{trimSHA .GitSHA}} with status {{.Status}}.</li>
+            <li><a href="/ui/workers/{{pathEscape .WorkerID}}">{{.Name}}</a> is still on soak {{trimSHA .GitSHA}} / litestream {{trimSHA .LitestreamSHA}} with status {{.Status}}.</li>
             {{end}}
           {{end}}
         </ul>
@@ -1234,7 +1235,8 @@ const workerPageTemplate = `{{define "worker"}}
         <div class="worker-meta-strip">
           <span><span class="meta-label">Profile</span> {{.Incident.Worker.ProfileName}}</span>
           <span><span class="meta-label">Source</span> {{.Incident.Worker.Source}}</span>
-          <span><span class="meta-label">SHA</span> <code class="mono">{{trimSHA .Incident.Worker.GitSHA}}</code></span>
+          <span><span class="meta-label">Soak SHA</span> <code class="mono">{{trimSHA .Incident.Worker.GitSHA}}</code></span>
+          <span><span class="meta-label">Litestream SHA</span> <code class="mono">{{trimSHA .Incident.Worker.LitestreamSHA}}</code></span>
           {{if .Incident.Worker.FlyMachineID}}<span><span class="meta-label">Machine</span> <code class="mono">{{.Incident.Worker.FlyMachineID}}</code></span>{{end}}
         </div>
       </div>
@@ -1412,7 +1414,8 @@ const workerPageTemplate = `{{define "worker"}}
             <div class="kv-row"><span class="kv-label">Worker ID</span><span class="kv-value"><code class="mono">{{.Incident.Worker.ID}}</code></span></div>
             <div class="kv-row"><span class="kv-label">Profile</span><span class="kv-value">{{.Incident.Worker.ProfileName}}</span></div>
             <div class="kv-row"><span class="kv-label">Source</span><span class="kv-value">{{.Incident.Worker.Source}}</span></div>
-            <div class="kv-row"><span class="kv-label">Git SHA</span><span class="kv-value"><code class="mono">{{.Incident.Worker.GitSHA}}</code></span></div>
+            <div class="kv-row"><span class="kv-label">Soak SHA</span><span class="kv-value"><code class="mono">{{.Incident.Worker.GitSHA}}</code></span></div>
+            <div class="kv-row"><span class="kv-label">Litestream SHA</span><span class="kv-value"><code class="mono">{{if .Incident.Worker.LitestreamSHA}}{{.Incident.Worker.LitestreamSHA}}{{else}}--{{end}}</code></span></div>
             <div class="kv-row"><span class="kv-label">Machine</span><span class="kv-value"><code class="mono">{{if .Incident.Worker.FlyMachineID}}{{.Incident.Worker.FlyMachineID}}{{else}}--{{end}}</code></span></div>
             <div class="kv-row"><span class="kv-label">Volume</span><span class="kv-value"><code class="mono">{{if .Incident.Worker.FlyVolumeID}}{{.Incident.Worker.FlyVolumeID}}{{else}}--{{end}}</code></span></div>
             <div class="kv-row"><span class="kv-label">Created</span><span class="kv-value">{{formatTime .Incident.Worker.CreatedAt}}</span></div>

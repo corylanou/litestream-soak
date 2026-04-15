@@ -159,7 +159,7 @@ func (d *AlertDispatcher) notifyWorkerStale(worker model.Worker) {
 }
 
 func (d *AlertDispatcher) notifyDeploymentAttention(rollout DeploymentRolloutResponse) {
-	fingerprint := fmt.Sprintf("deployment_attention:%s:%s:%s", rollout.Deployment.Source, rollout.Deployment.GitSHA, rollout.Status)
+	fingerprint := fmt.Sprintf("deployment_attention:%s:%s:%s:%s", rollout.Deployment.Source, rollout.Deployment.GitSHA, valueOrUnknown(rollout.Deployment.LitestreamSHA), rollout.Status)
 	delivery := &model.AlertDelivery{
 		AlertType:        "deployment_attention",
 		Fingerprint:      fingerprint,

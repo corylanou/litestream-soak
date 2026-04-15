@@ -156,8 +156,8 @@ curl -X POST -sS \
 ```
 
 That resumes dormant workers using the current worker image already running in
-Fly. If you want the probe to carry a specific Git SHA for tracking, add
-`&sha=<git-sha>` to the request.
+Fly. If you want the probe to carry explicit version tracking, add
+`&sha=<soak-git-sha>&litestream_sha=<upstream-litestream-sha>` to the request.
 
 ## Trusted Main Deployment Path
 
@@ -195,7 +195,12 @@ The post-build handoff command is:
 ```bash
 CONTROL_BASE_URL=https://litestream-soak-ctl.fly.dev \
 SOAK_ADMIN_BEARER_TOKEN=... \
-./scripts/notify-deployment-ready.sh <git-sha> main github_actions_main <image-ref>
+./scripts/notify-deployment-ready.sh \
+  <soak-git-sha> \
+  main \
+  github_actions_main \
+  <image-ref> \
+  <upstream-litestream-sha>
 ```
 
 If you need to test the same path manually without merging anything:
@@ -203,8 +208,17 @@ If you need to test the same path manually without merging anything:
 ```bash
 CONTROL_BASE_URL=https://litestream-soak-ctl.fly.dev \
 SOAK_ADMIN_BEARER_TOKEN=... \
-./scripts/notify-deployment-ready.sh <git-sha> main manual_test <image-ref>
+./scripts/notify-deployment-ready.sh \
+  <soak-git-sha> \
+  main \
+  manual_test \
+  <image-ref> \
+  <upstream-litestream-sha>
 ```
+
+Use the soak repo SHA for `<soak-git-sha>` and the actual commit being tested
+from `github.com/benbjohnson/litestream` for `<upstream-litestream-sha>`. Those
+are intentionally different fields in the control plane.
 
 If GitHub Actions cannot deploy because the repo does not have
 `FLY_API_TOKEN`, use this manual fallback after merging to `main`:
@@ -215,12 +229,14 @@ git pull
 
 SHA=$(git rev-parse HEAD)
 SHORT_SHA=$(git rev-parse --short=12 HEAD)
+LITESTREAM_SHA="$(git ls-remote https://github.com/benbjohnson/litestream.git refs/heads/main | awk 'NR==1{print $1}')"
 
 fly deploy \
   --config fly.toml \
   --app litestream-soak \
   --build-only \
   --push \
+  --build-arg "LITESTREAM_SHA=${LITESTREAM_SHA}" \
   --image-label "sha-${SHORT_SHA}"
 
 CONTROL_BASE_URL=https://litestream-soak-ctl.fly.dev \
@@ -229,7 +245,8 @@ SOAK_ADMIN_BEARER_TOKEN=... \
   "$SHA" \
   main \
   manual_main \
-  "registry.fly.io/litestream-soak:sha-${SHORT_SHA}"
+  "registry.fly.io/litestream-soak:sha-${SHORT_SHA}" \
+  "$LITESTREAM_SHA"
 ```
 
 If you only need to wake dormant workers with the current image already running

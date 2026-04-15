@@ -72,6 +72,7 @@ type DeploymentWorkerProgress struct {
 	Name                    string             `json:"name"`
 	Status                  model.WorkerStatus `json:"status"`
 	GitSHA                  string             `json:"git_sha"`
+	LitestreamSHA           string             `json:"litestream_sha,omitempty"`
 	RuntimeSnapshotStatus   string             `json:"runtime_snapshot_status,omitempty"`
 	Updated                 bool               `json:"updated"`
 	LastHeartbeatAt         *time.Time         `json:"last_heartbeat_at,omitempty"`
@@ -297,8 +298,9 @@ func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (Deployme
 			Name:                  worker.Name,
 			Status:                worker.Status,
 			GitSHA:                worker.GitSHA,
+			LitestreamSHA:         worker.LitestreamSHA,
 			RuntimeSnapshotStatus: runtimeStatus,
-			Updated:               strings.TrimSpace(worker.GitSHA) == strings.TrimSpace(deployment.GitSHA),
+			Updated:               workerMatchesDeployment(worker, deployment),
 			LastHeartbeatAt:       worker.LastHeartbeatAt,
 		}
 
@@ -531,10 +533,11 @@ func (a *API) handleGetDiagnosis(w http.ResponseWriter, r *http.Request) {
 }
 
 type deploymentReadyRequest struct {
-	SHA      string `json:"sha"`
-	Source   string `json:"source"`
-	ImageRef string `json:"image_ref"`
-	Trigger  string `json:"trigger"`
+	SHA           string `json:"sha"`
+	LitestreamSHA string `json:"litestream_sha"`
+	Source        string `json:"source"`
+	ImageRef      string `json:"image_ref"`
+	Trigger       string `json:"trigger"`
 }
 
 func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
@@ -562,7 +565,7 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 		trigger = "deploy_ready"
 	}
 
-	imageRef, err := a.deployer.NotifyDeploymentReady(r.Context(), source, request.SHA, request.ImageRef, trigger)
+	imageRef, err := a.deployer.NotifyDeploymentReady(r.Context(), source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -570,10 +573,11 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 	a.observeLatestDeploymentState(source)
 
 	writeAPIJSON(w, map[string]any{
-		"sha":       request.SHA,
-		"source":    source,
-		"image_ref": imageRef,
-		"trigger":   trigger,
+		"sha":            request.SHA,
+		"litestream_sha": request.LitestreamSHA,
+		"source":         source,
+		"image_ref":      imageRef,
+		"trigger":        trigger,
 	})
 }
 
@@ -597,6 +601,7 @@ func (a *API) handleResumeDormantWorkers(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	sha := strings.TrimSpace(r.URL.Query().Get("sha"))
+	litestreamSHA := strings.TrimSpace(r.URL.Query().Get("litestream_sha"))
 	trigger := strings.TrimSpace(r.URL.Query().Get("trigger"))
 	if trigger == "" {
 		trigger = "manual_resume"
@@ -608,7 +613,7 @@ func (a *API) handleResumeDormantWorkers(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := a.manager.ResumeDormantWorkers(r.Context(), source, imageRef, sha, trigger); err != nil {
+	if err := a.manager.ResumeDormantWorkers(r.Context(), source, imageRef, sha, litestreamSHA, trigger); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -626,6 +631,7 @@ func (a *API) handleResumeDormantWorkers(w http.ResponseWriter, r *http.Request)
 		"source":          source,
 		"image_ref":       imageRef,
 		"git_sha":         sha,
+		"litestream_sha":  litestreamSHA,
 		"trigger":         trigger,
 	})
 }
@@ -645,6 +651,9 @@ func readDeploymentReadyRequest(r *http.Request) (deploymentReadyRequest, error)
 	if strings.TrimSpace(request.Source) == "" {
 		request.Source = strings.TrimSpace(r.URL.Query().Get("source"))
 	}
+	if strings.TrimSpace(request.LitestreamSHA) == "" {
+		request.LitestreamSHA = strings.TrimSpace(r.URL.Query().Get("litestream_sha"))
+	}
 	if strings.TrimSpace(request.ImageRef) == "" {
 		request.ImageRef = strings.TrimSpace(r.URL.Query().Get("image"))
 	}
@@ -653,6 +662,19 @@ func readDeploymentReadyRequest(r *http.Request) (deploymentReadyRequest, error)
 	}
 
 	return request, nil
+}
+
+func workerMatchesDeployment(worker model.Worker, deployment model.Deployment) bool {
+	if strings.TrimSpace(worker.GitSHA) != strings.TrimSpace(deployment.GitSHA) {
+		return false
+	}
+
+	deploymentLitestreamSHA := strings.TrimSpace(deployment.LitestreamSHA)
+	if deploymentLitestreamSHA == "" {
+		return true
+	}
+
+	return strings.TrimSpace(worker.LitestreamSHA) == deploymentLitestreamSHA
 }
 
 func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -1011,19 +1033,36 @@ func inferDeploymentRolloutStatus(rollout DeploymentRolloutResponse) string {
 }
 
 func summarizeDeploymentRollout(rollout DeploymentRolloutResponse) string {
-	trimmedSHA := trimSHA(rollout.Deployment.GitSHA)
+	version := deploymentVersionSummary(rollout.Deployment)
 	switch rollout.Status {
 	case "no_workers":
-		return fmt.Sprintf("Deployment %s is recorded, but no %s workers are registered yet.", trimmedSHA, valueOrUnknown(rollout.Deployment.Source))
+		return fmt.Sprintf("Deployment %s is recorded, but no %s workers are registered yet.", version, valueOrUnknown(rollout.Deployment.Source))
 	case "rolling_out":
-		return fmt.Sprintf("%d of %d workers are on %s; %d still need the new release.", rollout.UpdatedWorkers, rollout.TotalWorkers, trimmedSHA, rollout.OutdatedWorkers)
+		return fmt.Sprintf("%d of %d workers are on %s; %d still need the new release.", rollout.UpdatedWorkers, rollout.TotalWorkers, version, rollout.OutdatedWorkers)
 	case "probing":
-		return fmt.Sprintf("All %d workers are on %s; %d worker(s) are still probing after wake-up.", rollout.TotalWorkers, trimmedSHA, rollout.ProbingWorkers)
+		return fmt.Sprintf("All %d workers are on %s; %d worker(s) are still probing after wake-up.", rollout.TotalWorkers, version, rollout.ProbingWorkers)
 	case "needs_attention":
-		return fmt.Sprintf("All %d workers are on %s; %d still need attention (%d degraded, %d dormant).", rollout.TotalWorkers, trimmedSHA, rollout.AttentionWorkers, rollout.DegradedWorkers, rollout.DormantWorkers)
+		return fmt.Sprintf("All %d workers are on %s; %d still need attention (%d degraded, %d dormant).", rollout.TotalWorkers, version, rollout.AttentionWorkers, rollout.DegradedWorkers, rollout.DormantWorkers)
 	default:
-		return fmt.Sprintf("All %d workers are on %s and the fleet is stable.", rollout.TotalWorkers, trimmedSHA)
+		return fmt.Sprintf("All %d workers are on %s and the fleet is stable.", rollout.TotalWorkers, version)
 	}
+}
+
+func deploymentVersionSummary(deployment model.Deployment) string {
+	soakSHA := shortVersionValue(deployment.GitSHA)
+	litestreamSHA := shortVersionValue(deployment.LitestreamSHA)
+	if litestreamSHA == "unknown" {
+		return fmt.Sprintf("soak %s", soakSHA)
+	}
+	return fmt.Sprintf("soak %s / litestream %s", soakSHA, litestreamSHA)
+}
+
+func shortVersionValue(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "unknown"
+	}
+	return trimSHA(trimmed)
 }
 
 func applyDeploymentRolloutGuidance(rollout *DeploymentRolloutResponse, now time.Time) {

@@ -35,6 +35,7 @@ func NewReporter(cfg Config) *Reporter {
 			Name:          cfg.WorkerName,
 			Source:        cfg.Source,
 			GitSHA:        cfg.GitSHA,
+			LitestreamSHA: cfg.LitestreamSHA,
 			ProfileName:   cfg.ProfileName,
 			ProfileConfig: cfg.WorkloadConfig().JSON(),
 			AppName:       cfg.AppName,

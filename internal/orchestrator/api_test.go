@@ -17,10 +17,11 @@ func TestBuildDeploymentRollout(t *testing.T) {
 	db := openTestDB(t)
 
 	if err := db.UpsertReadyDeployment(&model.Deployment{
-		GitSHA:   "sha-new",
-		ImageRef: "registry.fly.io/litestream-soak:sha-new",
-		Source:   "main",
-		Status:   "ready",
+		GitSHA:        "sha-new",
+		LitestreamSHA: "litestream-new",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-new",
+		Source:        "main",
+		Status:        "ready",
 	}); err != nil {
 		t.Fatalf("UpsertReadyDeployment() error = %v", err)
 	}
@@ -31,6 +32,7 @@ func TestBuildDeploymentRollout(t *testing.T) {
 		Status:        model.WorkerRunning,
 		Source:        "main",
 		GitSHA:        "sha-new",
+		LitestreamSHA: "litestream-new",
 		ProfileName:   "low-volume",
 		ProfileConfig: "{}",
 	})
@@ -40,6 +42,7 @@ func TestBuildDeploymentRollout(t *testing.T) {
 		Status:        model.WorkerProbing,
 		Source:        "main",
 		GitSHA:        "sha-new",
+		LitestreamSHA: "litestream-new",
 		ProfileName:   "high-volume",
 		ProfileConfig: "{}",
 	})
@@ -48,7 +51,8 @@ func TestBuildDeploymentRollout(t *testing.T) {
 		Name:          "worker-main-dormant",
 		Status:        model.WorkerDormant,
 		Source:        "main",
-		GitSHA:        "sha-old",
+		GitSHA:        "sha-new",
+		LitestreamSHA: "litestream-old",
 		ProfileName:   "burst-volume",
 		ProfileConfig: "{}",
 	})
@@ -114,6 +118,9 @@ func TestBuildDeploymentRollout(t *testing.T) {
 	if rollout.Workers[0].WorkerID != "worker-main-dormant" {
 		t.Fatalf("first worker = %q, want outdated worker first", rollout.Workers[0].WorkerID)
 	}
+	if rollout.Workers[0].LitestreamSHA != "litestream-old" {
+		t.Fatalf("first worker LitestreamSHA = %q, want litestream-old", rollout.Workers[0].LitestreamSHA)
+	}
 	if rollout.Workers[1].CurrentFailureSignature != "litestream_sync_socket_refused" {
 		t.Fatalf("CurrentFailureSignature = %q, want litestream_sync_socket_refused", rollout.Workers[1].CurrentFailureSignature)
 	}
@@ -124,10 +131,11 @@ func TestHandleGetLatestDeployment(t *testing.T) {
 
 	db := openTestDB(t)
 	if err := db.UpsertReadyDeployment(&model.Deployment{
-		GitSHA:   "sha-latest",
-		ImageRef: "registry.fly.io/litestream-soak:sha-latest",
-		Source:   "main",
-		Status:   "ready",
+		GitSHA:        "sha-latest",
+		LitestreamSHA: "litestream-latest",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-latest",
+		Source:        "main",
+		Status:        "ready",
 	}); err != nil {
 		t.Fatalf("UpsertReadyDeployment() error = %v", err)
 	}
@@ -138,6 +146,7 @@ func TestHandleGetLatestDeployment(t *testing.T) {
 		Status:        model.WorkerRunning,
 		Source:        "main",
 		GitSHA:        "sha-latest",
+		LitestreamSHA: "litestream-latest",
 		ProfileName:   "low-volume",
 		ProfileConfig: "{}",
 	})
@@ -159,6 +168,9 @@ func TestHandleGetLatestDeployment(t *testing.T) {
 
 	if rollout.Deployment.GitSHA != "sha-latest" {
 		t.Fatalf("Deployment.GitSHA = %q, want sha-latest", rollout.Deployment.GitSHA)
+	}
+	if rollout.Deployment.LitestreamSHA != "litestream-latest" {
+		t.Fatalf("Deployment.LitestreamSHA = %q, want litestream-latest", rollout.Deployment.LitestreamSHA)
 	}
 	if rollout.Status != "stable" {
 		t.Fatalf("Status = %q, want stable", rollout.Status)

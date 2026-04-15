@@ -33,20 +33,26 @@ func (d *Deployer) DeployNewSHA(sha string) error {
 		return fmt.Errorf("runtime builds are disabled; build in CI and notify /api/admin/deployments/ready")
 	}
 
-	existing, err := d.db.GetDeploymentBySHA(sha)
+	litestreamSHA, err := resolveLitestreamBuildSHA(context.Background(), strings.TrimSpace(os.Getenv("LITESTREAM_SHA")))
+	if err != nil {
+		return fmt.Errorf("resolve litestream sha: %w", err)
+	}
+
+	existing, err := d.db.GetDeploymentByVersion("main", sha, litestreamSHA)
 	if err == nil && existing.Status == "ready" {
 		slog.Info("Deployment already exists for SHA, triggering rolling update", "sha", sha, "image", existing.ImageRef)
-		_, err := d.NotifyDeploymentReady(context.Background(), "main", sha, existing.ImageRef, "github_webhook_ready")
+		_, err := d.NotifyDeploymentReady(context.Background(), "main", sha, litestreamSHA, existing.ImageRef, "github_webhook_ready")
 		return err
 	}
 
 	slog.Info("Building new image for SHA", "sha", sha)
 
 	dep := &model.Deployment{
-		GitSHA:   sha,
-		ImageRef: "",
-		Source:   "main",
-		Status:   "building",
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ImageRef:      "",
+		Source:        "main",
+		Status:        "building",
 	}
 	depID, err := d.db.CreateDeployment(dep)
 	if err != nil {
@@ -63,11 +69,11 @@ func (d *Deployer) DeployNewSHA(sha string) error {
 	}
 
 	d.db.UpdateDeployment(depID, "ready", imageRef, "")
-	_, err = d.NotifyDeploymentReady(context.Background(), "main", sha, imageRef, "github_webhook_build")
+	_, err = d.NotifyDeploymentReady(context.Background(), "main", sha, litestreamSHA, imageRef, "github_webhook_build")
 	return err
 }
 
-func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, imageRef, trigger string) (string, error) {
+func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, litestreamSHA, imageRef, trigger string) (string, error) {
 	source = strings.TrimSpace(source)
 	if source == "" {
 		source = "main"
@@ -76,6 +82,7 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, image
 	if sha == "" {
 		return "", fmt.Errorf("deployment sha is required")
 	}
+	litestreamSHA = strings.TrimSpace(litestreamSHA)
 	trigger = strings.TrimSpace(trigger)
 	if trigger == "" {
 		trigger = "deploy_ready"
@@ -90,10 +97,11 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, image
 	}
 
 	if err := d.db.UpsertReadyDeployment(&model.Deployment{
-		GitSHA:   sha,
-		ImageRef: imageRef,
-		Source:   source,
-		Status:   "ready",
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ImageRef:      imageRef,
+		Source:        source,
+		Status:        "ready",
 	}); err != nil {
 		return "", fmt.Errorf("record ready deployment: %w", err)
 	}
@@ -102,16 +110,16 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, image
 	if len(shortSHA) > 12 {
 		shortSHA = shortSHA[:12]
 	}
-	message := fmt.Sprintf("Image ready for %s via %s", shortSHA, trigger)
+	message := fmt.Sprintf("Image ready for soak %s / litestream %s via %s", shortSHA, shortVersionValue(litestreamSHA), trigger)
 	if err := d.db.RecordEvent("", "deploy_ready_received", message, imageRef); err != nil {
 		return "", fmt.Errorf("record deploy event: %w", err)
 	}
 
-	slog.Info("Deployment ready, starting rolling update", "sha", sha, "image", imageRef, "trigger", trigger)
-	if err := d.manager.RollingUpdate(ctx, imageRef, sha); err != nil {
+	slog.Info("Deployment ready, starting rolling update", "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "trigger", trigger)
+	if err := d.manager.RollingUpdate(ctx, imageRef, sha, litestreamSHA); err != nil {
 		return "", err
 	}
-	if err := d.manager.ResumeDormantWorkers(ctx, source, imageRef, sha, trigger); err != nil {
+	if err := d.manager.ResumeDormantWorkers(ctx, source, imageRef, sha, litestreamSHA, trigger); err != nil {
 		return "", err
 	}
 
@@ -131,7 +139,7 @@ func (d *Deployer) buildImage(sha string) (string, error) {
 		"--build-only",
 		"--push",
 	}
-	if litestreamSHA := strings.TrimSpace(os.Getenv("LITESTREAM_SHA")); litestreamSHA != "" {
+	if litestreamSHA, err := resolveLitestreamBuildSHA(ctx, strings.TrimSpace(os.Getenv("LITESTREAM_SHA"))); err == nil && litestreamSHA != "" {
 		args = append(args, "--build-arg", fmt.Sprintf("LITESTREAM_SHA=%s", litestreamSHA))
 	}
 
@@ -151,4 +159,32 @@ func (d *Deployer) buildImage(sha string) (string, error) {
 
 	slog.Info("Image built successfully", "sha", sha, "image", imageTag)
 	return imageTag, nil
+}
+
+func resolveLitestreamBuildSHA(ctx context.Context, ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		ref = "main"
+	}
+	if len(ref) == 40 && !strings.ContainsAny(ref, "/ \t\n") {
+		return ref, nil
+	}
+
+	pattern := ref
+	if ref == "main" {
+		pattern = "refs/heads/main"
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "https://github.com/benbjohnson/litestream.git", pattern)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git ls-remote %s: %w", pattern, err)
+	}
+
+	fields := strings.Fields(string(output))
+	if len(fields) == 0 {
+		return "", fmt.Errorf("no upstream Litestream ref matched %q", ref)
+	}
+
+	return fields[0], nil
 }

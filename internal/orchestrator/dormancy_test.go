@@ -88,7 +88,7 @@ func TestInferDeploymentRolloutStatus(t *testing.T) {
 
 func TestSummarizeDeploymentRollout(t *testing.T) {
 	rollout := DeploymentRolloutResponse{
-		Deployment:     model.Deployment{GitSHA: "0123456789abcdef", Source: "main"},
+		Deployment:     model.Deployment{GitSHA: "0123456789abcdef", LitestreamSHA: "fedcba9876543210", Source: "main"},
 		Status:         "probing",
 		TotalWorkers:   9,
 		UpdatedWorkers: 9,
@@ -96,7 +96,7 @@ func TestSummarizeDeploymentRollout(t *testing.T) {
 	}
 
 	summary := summarizeDeploymentRollout(rollout)
-	if summary != "All 9 workers are on 0123456789ab; 3 worker(s) are still probing after wake-up." {
+	if summary != "All 9 workers are on soak 0123456789ab / litestream fedcba987654; 3 worker(s) are still probing after wake-up." {
 		t.Fatalf("summary=%q", summary)
 	}
 }

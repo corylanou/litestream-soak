@@ -94,6 +94,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image_ref: ${{ steps.build.outputs.image_ref }}
+      litestream_sha: ${{ steps.build.outputs.litestream_sha }}
     steps:
       - uses: actions/checkout@v4
 
@@ -110,10 +111,22 @@ jobs:
           short_sha="${GITHUB_SHA::12}"
           log_file="$(mktemp)"
           build_args=()
+          litestream_ref="${SOAK_LITESTREAM_SHA:-main}"
 
-          if [ -n "${SOAK_LITESTREAM_SHA}" ]; then
-            build_args+=(--build-arg "LITESTREAM_SHA=${SOAK_LITESTREAM_SHA}")
+          if [[ "${litestream_ref}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            litestream_sha="${litestream_ref}"
+          else
+            if [ "${litestream_ref}" = "main" ]; then
+              litestream_ref="refs/heads/main"
+            fi
+            litestream_sha="$(git ls-remote https://github.com/benbjohnson/litestream.git "${litestream_ref}" | awk 'NR==1{print $1}')"
+            if [ -z "${litestream_sha}" ]; then
+              echo "failed to resolve Litestream ref ${litestream_ref}" >&2
+              exit 1
+            fi
           fi
+
+          build_args+=(--build-arg "LITESTREAM_SHA=${litestream_sha}")
 
           flyctl deploy \
             --remote-only \
@@ -131,6 +144,7 @@ jobs:
           fi
 
           echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
+          echo "litestream_sha=${litestream_sha}" >> "${GITHUB_OUTPUT}"
 
   notify-worker-fleet:
     needs:
@@ -154,4 +168,4 @@ jobs:
           fi
 
           chmod +x scripts/notify-deployment-ready.sh
-          ./scripts/notify-deployment-ready.sh "${GITHUB_SHA}" main github_actions_main "${{ needs.build-worker-image.outputs.image_ref }}"
+          ./scripts/notify-deployment-ready.sh "${GITHUB_SHA}" main github_actions_main "${{ needs.build-worker-image.outputs.image_ref }}" "${{ needs.build-worker-image.outputs.litestream_sha }}"

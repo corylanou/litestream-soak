@@ -17,6 +17,11 @@ var (
 		Help: "Static info about the soak worker.",
 	}, []string{"worker_id", "git_sha", "profile", "source"})
 
+	workerVersionInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_worker_version_info",
+		Help: "Static version info about the soak worker and the Litestream build under test.",
+	}, []string{"worker_id", "git_sha", "litestream_sha", "profile", "source"})
+
 	workerUptime = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_worker_uptime_seconds",
 		Help: "Time since worker started.",
@@ -98,6 +103,7 @@ func SetWorkerInfo(cfg Config) {
 	metricStateMu.Unlock()
 
 	workerInfo.WithLabelValues(cfg.WorkerID, cfg.GitSHA, cfg.ProfileName, cfg.Source).Set(1)
+	workerVersionInfo.WithLabelValues(cfg.WorkerID, cfg.GitSHA, cfg.LitestreamSHA, cfg.ProfileName, cfg.Source).Set(1)
 }
 
 func SetUptime(seconds float64) {

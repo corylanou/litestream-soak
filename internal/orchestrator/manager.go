@@ -14,17 +14,18 @@ import (
 )
 
 type WorkerRequest struct {
-	WorkerID     string
-	Name         string
-	Source       string
-	GitSHA       string
-	PRNumber     int
-	ProfileName  string
-	ImageRef     string
-	Region       string
-	VolumeSizeGB int
-	ExpiresAt    *string
-	Workload     workload.Config
+	WorkerID      string
+	Name          string
+	Source        string
+	GitSHA        string
+	LitestreamSHA string
+	PRNumber      int
+	ProfileName   string
+	ImageRef      string
+	Region        string
+	VolumeSizeGB  int
+	ExpiresAt     *string
+	Workload      workload.Config
 }
 
 type Manager struct {
@@ -72,6 +73,7 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 		Status:        model.WorkerPending,
 		Source:        req.Source,
 		GitSHA:        req.GitSHA,
+		LitestreamSHA: req.LitestreamSHA,
 		PRNumber:      req.PRNumber,
 		ProfileName:   req.ProfileName,
 		ProfileConfig: workloadCfg.JSON(),
@@ -200,7 +202,7 @@ func (m *Manager) DestroyWorker(ctx context.Context, workerID string) error {
 	return nil
 }
 
-func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA string) error {
+func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA, newLitestreamSHA string) error {
 	workers, err := m.db.ListMainWorkers()
 	if err != nil {
 		return fmt.Errorf("list main workers: %w", err)
@@ -209,8 +211,8 @@ func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA string)
 	slog.Info("Starting rolling update", "workers", len(workers), "sha", newSHA, "image", newImageRef)
 
 	for _, w := range workers {
-		slog.Info("Updating worker", "name", w.Name, "old_sha", w.GitSHA, "new_sha", newSHA)
-		m.db.RecordEvent(w.ID, "rolling_update", fmt.Sprintf("Updating %s from %s to %s", w.Name, w.GitSHA, newSHA), "")
+		slog.Info("Updating worker", "name", w.Name, "old_sha", w.GitSHA, "new_sha", newSHA, "old_litestream_sha", w.LitestreamSHA, "new_litestream_sha", newLitestreamSHA)
+		m.db.RecordEvent(w.ID, "rolling_update", fmt.Sprintf("Updating %s from soak %s / litestream %s to soak %s / litestream %s", w.Name, shortVersionValue(w.GitSHA), shortVersionValue(w.LitestreamSHA), shortVersionValue(newSHA), shortVersionValue(newLitestreamSHA)), "")
 
 		if w.FlyMachineID != "" {
 			if err := m.fly.StopMachine(ctx, w.FlyMachineID); err != nil {
@@ -226,13 +228,14 @@ func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA string)
 		workloadCfg := resolveWorkerWorkload(w)
 
 		newWorker, err := m.CreateWorker(ctx, WorkerRequest{
-			WorkerID:    w.Name,
-			Name:        w.Name,
-			Source:      "main",
-			GitSHA:      newSHA,
-			ProfileName: w.ProfileName,
-			ImageRef:    newImageRef,
-			Workload:    workloadCfg,
+			WorkerID:      w.Name,
+			Name:          w.Name,
+			Source:        "main",
+			GitSHA:        newSHA,
+			LitestreamSHA: newLitestreamSHA,
+			ProfileName:   w.ProfileName,
+			ImageRef:      newImageRef,
+			Workload:      workloadCfg,
 		})
 		if err != nil {
 			slog.Error("Failed to create updated worker", "name", w.Name, "error", err)
