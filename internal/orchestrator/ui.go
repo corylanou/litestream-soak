@@ -15,18 +15,22 @@ import (
 )
 
 type homePageData struct {
-	GeneratedAt       time.Time
-	Summary           homeSummary
-	Diagnosis         diagnosisSnapshot
-	Coverage          coverageSnapshot
-	LatestDeployment  *DeploymentRolloutResponse
-	ReleaseComparison *DeploymentComparisonResponse
-	LatestRolloutURL  string
-	ComparisonJSONURL string
-	Spotlight         *FailureResponse
-	FailureQueue      []FailureResponse
-	Workers           []homeWorker
-	Events            []model.Event
+	GeneratedAt         time.Time
+	SelectedSource      string
+	SelectedSourceLabel string
+	ScopeSummary        string
+	Summary             homeSummary
+	Diagnosis           diagnosisSnapshot
+	Coverage            coverageSnapshot
+	LatestDeployment    *DeploymentRolloutResponse
+	ReleaseComparison   *DeploymentComparisonResponse
+	ActiveSources       []homeSourceCard
+	LatestRolloutURL    string
+	ComparisonJSONURL   string
+	Spotlight           *FailureResponse
+	FailureQueue        []FailureResponse
+	Workers             []homeWorker
+	Events              []model.Event
 }
 
 type homeSummary struct {
@@ -46,6 +50,16 @@ type homeWorker struct {
 	CurrentProbableSubsystem string
 }
 
+type homeSourceCard struct {
+	Source     string
+	Label      string
+	Summary    string
+	Status     string
+	Selected   bool
+	ViewURL    string
+	CompareURL string
+}
+
 type workerPageData struct {
 	GeneratedAt time.Time
 	Incident    *IncidentBundle
@@ -59,42 +73,42 @@ type helpPageData struct {
 }
 
 var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
-	"confidenceClass":   confidenceClass,
-	"comparisonBaseLabel": comparisonBaseLabel,
-	"comparisonCopyText": comparisonCopyText,
-	"comparisonHeadLabel": comparisonHeadLabel,
-	"comparisonModeSummary": comparisonModeSummary,
-	"comparisonTitle":   comparisonTitle,
-	"copyLabel":         copyLabel,
-	"deploymentSourceLabel": deploymentSourceLabel,
+	"confidenceClass":         confidenceClass,
+	"comparisonBaseLabel":     comparisonBaseLabel,
+	"comparisonCopyText":      comparisonCopyText,
+	"comparisonHeadLabel":     comparisonHeadLabel,
+	"comparisonModeSummary":   comparisonModeSummary,
+	"comparisonTitle":         comparisonTitle,
+	"copyLabel":               copyLabel,
+	"deploymentSourceLabel":   deploymentSourceLabel,
 	"deploymentSourceSummary": deploymentSourceSummary,
-	"deploymentSourceURL": deploymentSourceURL,
-	"deploymentCopyText": deploymentCopyText,
-	"deploymentClass":   deploymentStatusClass,
-	"eventClass":        eventClass,
-	"failureText":       failureText,
-	"formatDuration":    formatDurationMS,
-	"formatTime":        formatUITime,
-	"formatTimePtr":     formatUITimePtr,
-	"heartbeatClass":    heartbeatClass,
-	"json":              mustJSON,
-	"joinList":          strings.Join,
-	"pathEscape":        url.PathEscape,
-	"queryEscape":       url.QueryEscape,
-	"runtimeClass":      runtimeSnapshotClass,
-	"runtimeLabel":      runtimeSnapshotLabel,
-	"shorten":           shortenText,
-	"soakCommitURL":     soakCommitURL,
-	"sourceLabel":       sourceLabel,
-	"sourceURL":         sourceURL,
-	"statusClass":       statusClass,
-	"timeAgo":           formatTimeAgoPtr,
-	"timeAgoValue":      formatTimeAgo,
-	"litestreamCommitURL": litestreamCommitURL,
-	"trimSHA":           trimSHA,
-	"verificationClass": verificationClass,
-	"verificationLabel": verificationLabel,
-	"workerName":        workerName,
+	"deploymentSourceURL":     deploymentSourceURL,
+	"deploymentCopyText":      deploymentCopyText,
+	"deploymentClass":         deploymentStatusClass,
+	"eventClass":              eventClass,
+	"failureText":             failureText,
+	"formatDuration":          formatDurationMS,
+	"formatTime":              formatUITime,
+	"formatTimePtr":           formatUITimePtr,
+	"heartbeatClass":          heartbeatClass,
+	"json":                    mustJSON,
+	"joinList":                strings.Join,
+	"pathEscape":              url.PathEscape,
+	"queryEscape":             url.QueryEscape,
+	"runtimeClass":            runtimeSnapshotClass,
+	"runtimeLabel":            runtimeSnapshotLabel,
+	"shorten":                 shortenText,
+	"soakCommitURL":           soakCommitURL,
+	"sourceLabel":             sourceLabel,
+	"sourceURL":               sourceURL,
+	"statusClass":             statusClass,
+	"timeAgo":                 formatTimeAgoPtr,
+	"timeAgoValue":            formatTimeAgo,
+	"litestreamCommitURL":     litestreamCommitURL,
+	"trimSHA":                 trimSHA,
+	"verificationClass":       verificationClass,
+	"verificationLabel":       verificationLabel,
+	"workerName":              workerName,
 }).Parse(homePageTemplate + homeBodyTemplate + workerPageTemplate + helpPageTemplate))
 
 func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
@@ -125,6 +139,10 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		requestedSource = firstNonEmpty(strings.TrimSpace(r.URL.Query().Get("source")), "main")
 		baseSource = strings.TrimSpace(r.URL.Query().Get("base_source"))
 		headSource = strings.TrimSpace(r.URL.Query().Get("head_source"))
+	}
+	if requestedSource != "main" && baseSource == "" && headSource == "" {
+		baseSource = "main"
+		headSource = requestedSource
 	}
 	rolloutSource := firstNonEmpty(headSource, requestedSource, "main")
 	comparisonJSONURL := "/api/deployments/compare/latest"
@@ -241,20 +259,100 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		return homePageData{}, err
 	}
 
+	activeSources, err := a.buildHomeSourceCards(requestedSource)
+	if err != nil {
+		return homePageData{}, err
+	}
+
 	return homePageData{
-		GeneratedAt:       time.Now().UTC(),
-		Summary:           summary,
-		Diagnosis:         buildDiagnosisSnapshot(summaries),
-		Coverage:          buildCoverageSnapshot(summaries),
-		LatestDeployment:  rollout,
-		ReleaseComparison: releaseComparison,
-		LatestRolloutURL:  latestRolloutURL,
-		ComparisonJSONURL: comparisonJSONURL,
-		Spotlight:         spotlight,
-		FailureQueue:      queue,
-		Workers:           workerCards,
-		Events:            events,
+		GeneratedAt:         time.Now().UTC(),
+		SelectedSource:      requestedSource,
+		SelectedSourceLabel: sourceHumanLabel(requestedSource),
+		ScopeSummary:        buildHomeScopeSummary(requestedSource, rolloutSource, releaseComparison),
+		Summary:             summary,
+		Diagnosis:           buildDiagnosisSnapshot(summaries),
+		Coverage:            buildCoverageSnapshot(summaries),
+		LatestDeployment:    rollout,
+		ReleaseComparison:   releaseComparison,
+		ActiveSources:       activeSources,
+		LatestRolloutURL:    latestRolloutURL,
+		ComparisonJSONURL:   comparisonJSONURL,
+		Spotlight:           spotlight,
+		FailureQueue:        queue,
+		Workers:             workerCards,
+		Events:              events,
 	}, nil
+}
+
+func (a *API) buildHomeSourceCards(selectedSource string) ([]homeSourceCard, error) {
+	workers, err := a.db.ListWorkersFiltered("", "")
+	if err != nil {
+		return nil, err
+	}
+
+	type sourceCounts struct {
+		total     int
+		attention int
+	}
+
+	countsBySource := make(map[string]sourceCounts)
+	for _, worker := range workers {
+		source := firstNonEmpty(strings.TrimSpace(worker.Source), "main")
+		counts := countsBySource[source]
+		counts.total++
+		if worker.Status != model.WorkerRunning {
+			counts.attention++
+		}
+		countsBySource[source] = counts
+	}
+
+	cards := make([]homeSourceCard, 0, len(countsBySource))
+	for source, counts := range countsBySource {
+		card := homeSourceCard{
+			Source:   source,
+			Label:    sourceHumanLabel(source),
+			Summary:  fmt.Sprintf("%d workers, %d need attention", counts.total, counts.attention),
+			Selected: source == selectedSource,
+			ViewURL:  "/ui?source=" + url.QueryEscape(source),
+		}
+		if source != "main" {
+			card.CompareURL = fmt.Sprintf("/ui?source=%s&base_source=main&head_source=%s", url.QueryEscape(source), url.QueryEscape(source))
+		}
+		if latestDeployment, err := a.db.GetLatestDeployment(source); err == nil && latestDeployment != nil {
+			if rollout, err := a.buildDeploymentRollout(*latestDeployment); err == nil {
+				card.Status = rollout.Status
+			}
+		}
+		cards = append(cards, card)
+	}
+
+	sort.SliceStable(cards, func(i, j int) bool {
+		left := cards[i]
+		right := cards[j]
+		switch {
+		case left.Source == selectedSource && right.Source != selectedSource:
+			return true
+		case right.Source == selectedSource && left.Source != selectedSource:
+			return false
+		case left.Source == "main" && right.Source != "main":
+			return true
+		case right.Source == "main" && left.Source != "main":
+			return false
+		default:
+			return left.Label < right.Label
+		}
+	})
+
+	return cards, nil
+}
+
+func buildHomeScopeSummary(selectedSource, rolloutSource string, comparison *DeploymentComparisonResponse) string {
+	selectedLabel := sourceHumanLabel(selectedSource)
+	rolloutLabel := sourceHumanLabel(rolloutSource)
+	if comparison != nil && comparison.ComparisonKind == "cross_source" {
+		return fmt.Sprintf("You are viewing %s. Latest Rollout below is the latest %s rollout. Source Comparison is comparing %s against %s.", selectedLabel, rolloutLabel, sourceHumanLabel(comparison.HeadSource), sourceHumanLabel(comparison.BaseSource))
+	}
+	return fmt.Sprintf("You are viewing %s. Latest Rollout below is the latest %s rollout. Release Comparison shows the current %s rollout versus the previous %s rollout.", selectedLabel, rolloutLabel, selectedLabel, selectedLabel)
 }
 
 func (a *API) handleWorkerPage(w http.ResponseWriter, r *http.Request) {
@@ -995,6 +1093,29 @@ const homeBodyTemplate = `{{define "home_body"}}
     </div>
 
     <div class="guide-grid">
+      <div class="guide-card">
+        <h2>Viewing</h2>
+        <p class="lead">This page is scoped to {{.SelectedSourceLabel}}.</p>
+        <p>{{.ScopeSummary}}</p>
+        {{if .ActiveSources}}
+        <div class="detail-list">
+          {{range .ActiveSources}}
+          <div class="detail-row">
+            <div class="detail-label">{{.Label}}</div>
+            <div class="detail-value">
+              <div class="detail-main">{{.Summary}}</div>
+              <div class="chip-row">
+                {{if .Status}}<span class="badge badge-{{if eq (deploymentClass .Status) "status-good"}}good{{else if eq (deploymentClass .Status) "status-warn"}}warn{{else if eq (deploymentClass .Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Status}}</span>{{end}}
+                {{if .Selected}}<span class="badge badge-info">viewing</span>{{else}}<a class="btn" href="{{.ViewURL}}">View</a>{{end}}
+                {{if .CompareURL}}<a class="btn" href="{{.CompareURL}}">Compare to main</a>{{end}}
+              </div>
+            </div>
+          </div>
+          {{end}}
+        </div>
+        {{end}}
+      </div>
+
       <div class="guide-card">
         <h2>Current Diagnosis</h2>
         <p class="lead">{{.Diagnosis.Headline}}</p>

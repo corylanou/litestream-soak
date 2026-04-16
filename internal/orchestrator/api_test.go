@@ -360,6 +360,89 @@ func TestBuildLatestDeploymentComparison(t *testing.T) {
 	}
 }
 
+func TestBuildHomePageDataDefaultsPRSourceToMainComparison(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-main",
+		LitestreamSHA: "litestream-main",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-main",
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment(main) error = %v", err)
+	}
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-pr",
+		LitestreamSHA: "litestream-pr",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-pr",
+		Source:        "pr-1228",
+		PRNumber:      1228,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment(pr) error = %v", err)
+	}
+
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-low",
+		Name:          "worker-main-low",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "sha-main",
+		LitestreamSHA: "litestream-main",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-low",
+		Name:          "worker-pr-low",
+		Status:        model.WorkerRunning,
+		Source:        "pr-1228",
+		GitSHA:        "sha-pr",
+		LitestreamSHA: "litestream-pr",
+		PRNumber:      1228,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/ui?source=pr-1228", nil)
+	data, err := api.buildHomePageData(request)
+	if err != nil {
+		t.Fatalf("buildHomePageData() error = %v", err)
+	}
+
+	if data.SelectedSource != "pr-1228" {
+		t.Fatalf("SelectedSource = %q, want pr-1228", data.SelectedSource)
+	}
+	if data.ReleaseComparison == nil {
+		t.Fatal("ReleaseComparison = nil")
+	}
+	if data.ReleaseComparison.ComparisonKind != "cross_source" {
+		t.Fatalf("ComparisonKind = %q, want cross_source", data.ReleaseComparison.ComparisonKind)
+	}
+	if data.ReleaseComparison.BaseSource != "main" {
+		t.Fatalf("BaseSource = %q, want main", data.ReleaseComparison.BaseSource)
+	}
+	if data.ReleaseComparison.HeadSource != "pr-1228" {
+		t.Fatalf("HeadSource = %q, want pr-1228", data.ReleaseComparison.HeadSource)
+	}
+	if data.LatestRolloutURL != "/api/deployments/latest?source=pr-1228" {
+		t.Fatalf("LatestRolloutURL = %q", data.LatestRolloutURL)
+	}
+	if data.ComparisonJSONURL != "/api/deployments/compare/latest?base_source=main&head_source=pr-1228" {
+		t.Fatalf("ComparisonJSONURL = %q", data.ComparisonJSONURL)
+	}
+	if len(data.ActiveSources) != 2 {
+		t.Fatalf("len(ActiveSources) = %d, want 2", len(data.ActiveSources))
+	}
+	if !data.ActiveSources[0].Selected || data.ActiveSources[0].Source != "pr-1228" {
+		t.Fatalf("first ActiveSource = %+v, want selected pr-1228", data.ActiveSources[0])
+	}
+}
+
 func TestBuildRequestedDeploymentComparisonCrossSource(t *testing.T) {
 	t.Parallel()
 

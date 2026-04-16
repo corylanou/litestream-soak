@@ -141,3 +141,25 @@ func TestComparisonPresentationHelpers(t *testing.T) {
 		t.Fatalf("comparisonHeadLabel(crossSource) = %q", got)
 	}
 }
+
+func TestBuildHomeScopeSummary(t *testing.T) {
+	t.Parallel()
+
+	history := &DeploymentComparisonResponse{
+		BaseSource:     "main",
+		HeadSource:     "main",
+		ComparisonKind: "source_history",
+	}
+	if got := buildHomeScopeSummary("main", "main", history); got != "You are viewing main branch. Latest Rollout below is the latest main branch rollout. Release Comparison shows the current main branch rollout versus the previous main branch rollout." {
+		t.Fatalf("buildHomeScopeSummary(history) = %q", got)
+	}
+
+	crossSource := &DeploymentComparisonResponse{
+		BaseSource:     "main",
+		HeadSource:     "pr-1228",
+		ComparisonKind: "cross_source",
+	}
+	if got := buildHomeScopeSummary("pr-1228", "pr-1228", crossSource); got != "You are viewing PR #1228. Latest Rollout below is the latest PR #1228 rollout. Source Comparison is comparing PR #1228 against main branch." {
+		t.Fatalf("buildHomeScopeSummary(crossSource) = %q", got)
+	}
+}
