@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ type DesiredWorker struct {
 	Source        string
 	GitSHA        string
 	LitestreamSHA string
+	PRNumber      int
 	ProfileName   string
 	Region        string
 	VolumeSizeGB  int
@@ -247,6 +249,28 @@ func DefaultMainFleet() FleetSpec {
 	}
 }
 
+func DefaultFleetForSource(source, gitSHA, litestreamSHA string) FleetSpec {
+	spec := DefaultMainFleet()
+	normalizedSource := firstNonEmpty(source, "main")
+	prNumber := sourcePRNumber(normalizedSource)
+	workers := make([]DesiredWorker, 0, len(spec.Workers))
+	for _, desired := range spec.Workers {
+		rewritten := desired
+		rewritten.Source = normalizedSource
+		if strings.TrimSpace(gitSHA) != "" {
+			rewritten.GitSHA = gitSHA
+		}
+		if strings.TrimSpace(litestreamSHA) != "" {
+			rewritten.LitestreamSHA = litestreamSHA
+		}
+		rewritten.PRNumber = prNumber
+		rewritten.WorkerID = workerNameForSource(normalizedSource, firstNonEmpty(desired.WorkerID, desired.Name))
+		rewritten.Name = workerNameForSource(normalizedSource, desired.Name)
+		workers = append(workers, rewritten)
+	}
+	return FleetSpec{Workers: workers}
+}
+
 func (m *Manager) RunFleetReconciler(ctx context.Context, spec FleetSpec, interval time.Duration) {
 	m.reconcileFleet(ctx, spec)
 
@@ -274,17 +298,33 @@ func (m *Manager) reconcileFleet(ctx context.Context, spec FleetSpec) {
 		return
 	}
 
+	m.ensureFleetSpec(ctx, spec, imageRef)
+}
+
+func (m *Manager) EnsureSourceFleet(ctx context.Context, source, gitSHA, litestreamSHA, imageRef string) error {
+	if !supportsDefaultFleetSource(source) {
+		return nil
+	}
+	if strings.TrimSpace(imageRef) == "" {
+		currentImage, err := m.currentWorkerImage(ctx)
+		if err != nil {
+			return err
+		}
+		imageRef = currentImage
+	}
+	m.ensureFleetSpec(ctx, DefaultFleetForSource(source, gitSHA, litestreamSHA), imageRef)
+	return nil
+}
+
+func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef string) {
 	activeWorkers, err := m.db.ListWorkers("")
 	if err != nil {
-		slog.Error("Failed to list current main workers", "error", err)
+		slog.Error("Failed to list current workers for fleet reconciliation", "error", err)
 		return
 	}
 
 	byName := make(map[string]model.Worker, len(activeWorkers))
 	for _, worker := range activeWorkers {
-		if worker.Source != "main" {
-			continue
-		}
 		if worker.Status == model.WorkerStopped || worker.Status == model.WorkerFailed {
 			continue
 		}
@@ -302,6 +342,7 @@ func (m *Manager) reconcileFleet(ctx context.Context, spec FleetSpec) {
 			Source:        firstNonEmpty(desired.Source, "main"),
 			GitSHA:        firstNonEmpty(desired.GitSHA, "main"),
 			LitestreamSHA: strings.TrimSpace(desired.LitestreamSHA),
+			PRNumber:      desired.PRNumber,
 			ProfileName:   desired.ProfileName,
 			ImageRef:      imageRef,
 			Region:        desired.Region,
@@ -310,11 +351,11 @@ func (m *Manager) reconcileFleet(ctx context.Context, spec FleetSpec) {
 		}
 
 		if _, err := m.CreateWorker(ctx, request); err != nil {
-			slog.Error("Failed to create desired fleet worker", "name", desired.Name, "error", err)
+			slog.Error("Failed to create desired fleet worker", "name", desired.Name, "source", desired.Source, "error", err)
 			continue
 		}
 
-		slog.Info("Created desired fleet worker", "name", desired.Name, "profile", desired.ProfileName, "load_mode", desired.Workload.LoadMode)
+		slog.Info("Created desired fleet worker", "name", desired.Name, "source", desired.Source, "profile", desired.ProfileName, "load_mode", desired.Workload.LoadMode)
 	}
 }
 
@@ -362,4 +403,35 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func supportsDefaultFleetSource(source string) bool {
+	source = strings.TrimSpace(source)
+	return source == "main" || sourcePRNumber(source) > 0
+}
+
+func sourcePRNumber(source string) int {
+	source = strings.TrimSpace(source)
+	if !strings.HasPrefix(source, "pr-") {
+		return 0
+	}
+	prNumber, err := strconv.Atoi(strings.TrimPrefix(source, "pr-"))
+	if err != nil || prNumber <= 0 {
+		return 0
+	}
+	return prNumber
+}
+
+func workerNameForSource(source, baseName string) string {
+	source = strings.TrimSpace(source)
+	if source == "" || source == "main" {
+		return baseName
+	}
+	if strings.HasPrefix(baseName, "worker-main-") {
+		return "worker-" + source + "-" + strings.TrimPrefix(baseName, "worker-main-")
+	}
+	if strings.HasPrefix(baseName, "worker-") {
+		return "worker-" + source + "-" + strings.TrimPrefix(baseName, "worker-")
+	}
+	return "worker-" + source + "-" + baseName
 }

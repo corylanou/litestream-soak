@@ -101,6 +101,7 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 		LitestreamSHA: litestreamSHA,
 		ImageRef:      imageRef,
 		Source:        source,
+		PRNumber:      sourcePRNumber(source),
 		Status:        "ready",
 	}); err != nil {
 		return "", fmt.Errorf("record ready deployment: %w", err)
@@ -116,7 +117,10 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 	}
 
 	slog.Info("Deployment ready, starting rolling update", "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "trigger", trigger)
-	if err := d.manager.RollingUpdate(ctx, imageRef, sha, litestreamSHA); err != nil {
+	if err := d.manager.EnsureSourceFleet(ctx, source, sha, litestreamSHA, imageRef); err != nil {
+		return "", err
+	}
+	if err := d.manager.RollingUpdateSource(ctx, source, imageRef, sha, litestreamSHA); err != nil {
 		return "", err
 	}
 	if err := d.manager.ResumeDormantWorkers(ctx, source, imageRef, sha, litestreamSHA, trigger); err != nil {

@@ -203,14 +203,25 @@ func (m *Manager) DestroyWorker(ctx context.Context, workerID string) error {
 }
 
 func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA, newLitestreamSHA string) error {
-	workers, err := m.db.ListMainWorkers()
+	return m.RollingUpdateSource(ctx, "main", newImageRef, newSHA, newLitestreamSHA)
+}
+
+func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, newSHA, newLitestreamSHA string) error {
+	source = firstNonEmpty(strings.TrimSpace(source), "main")
+	workers, err := m.db.ListWorkersForSource(source)
 	if err != nil {
-		return fmt.Errorf("list main workers: %w", err)
+		return fmt.Errorf("list %s workers: %w", source, err)
 	}
 
-	slog.Info("Starting rolling update", "workers", len(workers), "sha", newSHA, "image", newImageRef)
+	slog.Info("Starting rolling update", "source", source, "workers", len(workers), "sha", newSHA, "image", newImageRef)
 
 	for _, w := range workers {
+		if w.Status == model.WorkerDormant {
+			continue
+		}
+		if workerMatchesDeployment(w, model.Deployment{GitSHA: newSHA, LitestreamSHA: newLitestreamSHA}) {
+			continue
+		}
 		slog.Info("Updating worker", "name", w.Name, "old_sha", w.GitSHA, "new_sha", newSHA, "old_litestream_sha", w.LitestreamSHA, "new_litestream_sha", newLitestreamSHA)
 		m.db.RecordEvent(w.ID, "rolling_update", fmt.Sprintf("Updating %s from soak %s / litestream %s to soak %s / litestream %s", w.Name, shortVersionValue(w.GitSHA), shortVersionValue(w.LitestreamSHA), shortVersionValue(newSHA), shortVersionValue(newLitestreamSHA)), "")
 
@@ -230,11 +241,13 @@ func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA, newLit
 		newWorker, err := m.CreateWorker(ctx, WorkerRequest{
 			WorkerID:      w.Name,
 			Name:          w.Name,
-			Source:        "main",
+			Source:        w.Source,
 			GitSHA:        newSHA,
 			LitestreamSHA: newLitestreamSHA,
+			PRNumber:      w.PRNumber,
 			ProfileName:   w.ProfileName,
 			ImageRef:      newImageRef,
+			Region:        w.Region,
 			Workload:      workloadCfg,
 		})
 		if err != nil {
