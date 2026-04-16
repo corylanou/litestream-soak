@@ -1381,18 +1381,18 @@ func inferDeploymentRolloutStatus(rollout DeploymentRolloutResponse) string {
 }
 
 func summarizeDeploymentRollout(rollout DeploymentRolloutResponse) string {
-	version := deploymentVersionSummary(rollout.Deployment)
+	subject := deploymentHumanLabel(rollout.Deployment)
 	switch rollout.Status {
 	case "no_workers":
-		return fmt.Sprintf("Deployment %s is recorded, but no %s workers are registered yet.", version, valueOrUnknown(rollout.Deployment.Source))
+		return fmt.Sprintf("The %s rollout is recorded, but no workers for that source are registered yet.", subject)
 	case "rolling_out":
-		return fmt.Sprintf("%d of %d workers are on %s; %d still need the new release, and %d updated worker(s) still await a post-rollout verification.", rollout.UpdatedWorkers, rollout.TotalWorkers, version, rollout.OutdatedWorkers, rollout.AwaitingVerification)
+		return fmt.Sprintf("The %s rollout is still in progress. %d of %d workers are updated, %d still need the new release, and %d updated workers still need a fresh verification.", subject, rollout.UpdatedWorkers, rollout.TotalWorkers, rollout.OutdatedWorkers, rollout.AwaitingVerification)
 	case "probing":
-		return fmt.Sprintf("All %d workers are on %s; %d updated worker(s) have verified since rollout and %d still await a post-rollout verification.", rollout.TotalWorkers, version, rollout.VerifiedSinceDeploy, rollout.AwaitingVerification)
+		return fmt.Sprintf("The %s rollout is still settling. All %d workers are on the new release, %d have verified since rollout, and %d still need a fresh verification.", subject, rollout.TotalWorkers, rollout.VerifiedSinceDeploy, rollout.AwaitingVerification)
 	case "needs_attention":
-		return fmt.Sprintf("All %d workers are on %s; %d still need attention (%d degraded, %d dormant) and %d updated worker(s) still await a post-rollout verification.", rollout.TotalWorkers, version, rollout.AttentionWorkers, rollout.DegradedWorkers, rollout.DormantWorkers, rollout.AwaitingVerification)
+		return fmt.Sprintf("The %s rollout needs attention. All %d workers are on the new release, but %s: %d degraded and %d dormant.", subject, rollout.TotalWorkers, workersNeedInvestigation(rollout.AttentionWorkers), rollout.DegradedWorkers, rollout.DormantWorkers)
 	default:
-		return fmt.Sprintf("All %d workers are on %s; %d updated worker(s) have verified since rollout and the fleet is stable.", rollout.TotalWorkers, version, rollout.VerifiedSinceDeploy)
+		return fmt.Sprintf("The %s rollout is stable. All %d workers are on the new release and %d have verified since rollout.", subject, rollout.TotalWorkers, rollout.VerifiedSinceDeploy)
 	}
 }
 
@@ -1421,29 +1421,32 @@ func summarizeDeploymentComparison(comparison DeploymentComparisonResponse) stri
 	includeSources := comparison.Base != nil && comparison.Base.Deployment.Source != comparison.Head.Deployment.Source
 	headVersion := comparisonSubjectSummary(comparison.Head.Deployment, includeSources)
 	if comparison.Base == nil {
-		return fmt.Sprintf("Latest rollout %s has no previous deployment to compare against yet.", headVersion)
+		return fmt.Sprintf("The latest %s rollout has no previous deployment to compare against yet.", headVersion)
 	}
 
 	baseVersion := comparisonSubjectSummary(comparison.Base.Deployment, includeSources)
 	switch comparison.Verdict {
 	case "insufficient_data":
-		return fmt.Sprintf("%s cannot be scored against %s yet because one of the deployment windows does not have enough post-rollout verification data.", headVersion, baseVersion)
+		return fmt.Sprintf("The %s rollout cannot be scored against the %s rollout yet because one of the deployment windows does not have enough post-rollout verification data.", headVersion, baseVersion)
 	case "better":
-		return fmt.Sprintf("%s looks better than %s so far: %d passed vs %d, %d failed vs %d.", headVersion, baseVersion, comparison.Head.PassedWorkers, comparison.Base.PassedWorkers, comparison.Head.FailedWorkers, comparison.Base.FailedWorkers)
+		return fmt.Sprintf("The %s rollout looks better than the %s rollout so far: %d workers passed versus %d, and %d failed versus %d.", headVersion, baseVersion, comparison.Head.PassedWorkers, comparison.Base.PassedWorkers, comparison.Head.FailedWorkers, comparison.Base.FailedWorkers)
 	case "worse":
-		return fmt.Sprintf("%s looks worse than %s so far: %d passed vs %d, %d failed vs %d.", headVersion, baseVersion, comparison.Head.PassedWorkers, comparison.Base.PassedWorkers, comparison.Head.FailedWorkers, comparison.Base.FailedWorkers)
+		return fmt.Sprintf("The %s rollout looks worse than the %s rollout so far: %d workers passed versus %d, and %d failed versus %d.", headVersion, baseVersion, comparison.Head.PassedWorkers, comparison.Base.PassedWorkers, comparison.Head.FailedWorkers, comparison.Base.FailedWorkers)
 	case "mixed":
-		return fmt.Sprintf("%s is mixed versus %s: %d workers improved, %d regressed, and %d still await verification.", headVersion, baseVersion, len(comparison.ImprovedWorkers), len(comparison.RegressedWorkers), comparison.Head.AwaitingWorkers)
+		return fmt.Sprintf("The %s rollout is mixed versus the %s rollout: %d workers improved, %d regressed, and %d still await verification.", headVersion, baseVersion, len(comparison.ImprovedWorkers), len(comparison.RegressedWorkers), comparison.Head.AwaitingWorkers)
 	default:
-		return fmt.Sprintf("%s is unchanged versus %s so far: %d passed, %d failed, and %d still await verification.", headVersion, baseVersion, comparison.Head.PassedWorkers, comparison.Head.FailedWorkers, comparison.Head.AwaitingWorkers)
+		return fmt.Sprintf("The %s rollout is unchanged versus the %s rollout so far: %d passed, %d failed, and %d still await verification.", headVersion, baseVersion, comparison.Head.PassedWorkers, comparison.Head.FailedWorkers, comparison.Head.AwaitingWorkers)
 	}
 }
 
 func comparisonSubjectSummary(deployment model.Deployment, includeSource bool) string {
 	if includeSource {
-		return fmt.Sprintf("%s (%s)", firstNonEmpty(strings.TrimSpace(deployment.Source), "main"), deploymentVersionSummary(deployment))
+		return deploymentHumanLabel(deployment)
 	}
-	return deploymentVersionSummary(deployment)
+	if deployment.PRNumber > 0 {
+		return deploymentHumanLabel(deployment)
+	}
+	return sourceHumanLabel(deployment.Source)
 }
 
 func deploymentVersionSummary(deployment model.Deployment) string {
@@ -1461,6 +1464,40 @@ func shortVersionValue(value string) string {
 		return "unknown"
 	}
 	return trimSHA(trimmed)
+}
+
+func deploymentHumanLabel(deployment model.Deployment) string {
+	if deployment.PRNumber > 0 {
+		return fmt.Sprintf("PR #%d", deployment.PRNumber)
+	}
+	return sourceHumanLabel(deployment.Source)
+}
+
+func sourceHumanLabel(source string) string {
+	source = firstNonEmpty(strings.TrimSpace(source), "main")
+	if prNumber := sourcePRNumber(source); prNumber > 0 {
+		return fmt.Sprintf("PR #%d", prNumber)
+	}
+	switch source {
+	case "main":
+		return "main branch"
+	default:
+		return fmt.Sprintf("%s branch", source)
+	}
+}
+
+func countNoun(count int, singular string) string {
+	if count == 1 {
+		return fmt.Sprintf("1 %s", singular)
+	}
+	return fmt.Sprintf("%d %ss", count, singular)
+}
+
+func workersNeedInvestigation(count int) string {
+	if count == 1 {
+		return "1 worker still needs investigation"
+	}
+	return fmt.Sprintf("%d workers still need investigation", count)
 }
 
 func applyDeploymentRolloutGuidance(rollout *DeploymentRolloutResponse, now time.Time) {

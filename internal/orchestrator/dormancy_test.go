@@ -98,7 +98,45 @@ func TestSummarizeDeploymentRollout(t *testing.T) {
 	}
 
 	summary := summarizeDeploymentRollout(rollout)
-	if summary != "All 9 workers are on soak 0123456789ab / litestream fedcba987654; 6 updated worker(s) have verified since rollout and 3 still await a post-rollout verification." {
+	if summary != "The main branch rollout is still settling. All 9 workers are on the new release, 6 have verified since rollout, and 3 still need a fresh verification." {
+		t.Fatalf("summary=%q", summary)
+	}
+}
+
+func TestSummarizeDeploymentRolloutUsesSingularAttentionGrammar(t *testing.T) {
+	rollout := DeploymentRolloutResponse{
+		Deployment:       model.Deployment{Source: "pr-1228", PRNumber: 1228},
+		Status:           "needs_attention",
+		TotalWorkers:     9,
+		UpdatedWorkers:   9,
+		AttentionWorkers: 1,
+		DegradedWorkers:  1,
+		DormantWorkers:   0,
+	}
+
+	summary := summarizeDeploymentRollout(rollout)
+	if summary != "The PR #1228 rollout needs attention. All 9 workers are on the new release, but 1 worker still needs investigation: 1 degraded and 0 dormant." {
+		t.Fatalf("summary=%q", summary)
+	}
+}
+
+func TestSummarizeDeploymentComparisonUsesPlainEnglish(t *testing.T) {
+	comparison := DeploymentComparisonResponse{
+		Base: &DeploymentScorecard{
+			Deployment: model.Deployment{Source: "main"},
+			PassedWorkers: 4,
+			FailedWorkers: 4,
+		},
+		Head: DeploymentScorecard{
+			Deployment: model.Deployment{Source: "pr-1228", PRNumber: 1228},
+			PassedWorkers: 9,
+			FailedWorkers: 0,
+		},
+		Verdict: "better",
+	}
+
+	summary := summarizeDeploymentComparison(comparison)
+	if summary != "The PR #1228 rollout looks better than the main branch rollout so far: 9 workers passed versus 4, and 0 failed versus 4." {
 		t.Fatalf("summary=%q", summary)
 	}
 }
