@@ -242,7 +242,7 @@
           "legendFormat": "worker"
         }
       ],
-      "title": "Worker Restarts (24h)",
+      "title": "Worker Restarts",
       "type": "stat",
       "options": {}
     },
@@ -278,7 +278,7 @@
           "legendFormat": "litestream"
         }
       ],
-      "title": "Litestream Restarts (24h)",
+      "title": "LS Restarts",
       "type": "stat",
       "options": {}
     },
@@ -651,9 +651,9 @@
       "id": 15,
       "options": {
         "legend": {
-          "displayMode": "list",
+          "displayMode": "hidden",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": false
         },
         "mergeValues": true,
         "rowHeight": 0.9,
@@ -676,13 +676,23 @@
         "defaults": {
           "color": {
             "mode": "palette-classic"
+          },
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "gray",
+                "value": null
+              }
+            ]
           }
         },
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "passed"
+              "options": "PASS"
             },
             "properties": [
               {
@@ -697,7 +707,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "failed"
+              "options": "FAIL"
             },
             "properties": [
               {
@@ -719,24 +729,31 @@
       },
       "id": 16,
       "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
+        "showUnfilled": true
       },
       "targets": [
         {
-          "expr": "sum by (result) (increase(soak_verification_total{worker_id=\"$worker\"}[30m])) or on() vector(0)",
-          "legendFormat": "{{result}}"
+          "expr": "increase(soak_verification_total{worker_id=\"$worker\",result=\"passed\"}[24h]) or on() vector(0)",
+          "instant": true,
+          "legendFormat": "PASS"
+        },
+        {
+          "expr": "increase(soak_verification_total{worker_id=\"$worker\",result=\"failed\"}[24h]) or on() vector(0)",
+          "instant": true,
+          "legendFormat": "FAIL"
         }
       ],
-      "title": "Verification Outcomes",
-      "type": "timeseries"
+      "title": "Verification Counts (24h)",
+      "type": "bargauge"
     },
     {
       "fieldConfig": {
