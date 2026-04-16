@@ -60,7 +60,11 @@ type helpPageData struct {
 
 var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"confidenceClass":   confidenceClass,
+	"comparisonBaseLabel": comparisonBaseLabel,
 	"comparisonCopyText": comparisonCopyText,
+	"comparisonHeadLabel": comparisonHeadLabel,
+	"comparisonModeSummary": comparisonModeSummary,
+	"comparisonTitle":   comparisonTitle,
 	"copyLabel":         copyLabel,
 	"deploymentSourceLabel": deploymentSourceLabel,
 	"deploymentSourceSummary": deploymentSourceSummary,
@@ -456,6 +460,40 @@ func comparisonCopyText(comparison *DeploymentComparisonResponse) string {
 	}
 	parts = append(parts, deploymentCopyText(comparison.Head.Deployment))
 	return strings.Join(parts, "\n")
+}
+
+func comparisonTitle(comparison *DeploymentComparisonResponse) string {
+	if comparison == nil {
+		return "Release Comparison"
+	}
+	if comparison.ComparisonKind == "cross_source" {
+		return "Source Comparison"
+	}
+	return "Release Comparison"
+}
+
+func comparisonModeSummary(comparison *DeploymentComparisonResponse) string {
+	if comparison == nil {
+		return ""
+	}
+	if comparison.ComparisonKind == "cross_source" {
+		return fmt.Sprintf("Compare mode: %s versus %s.", sourceHumanLabel(comparison.HeadSource), sourceHumanLabel(comparison.BaseSource))
+	}
+	return fmt.Sprintf("History mode: current %s rollout versus the previous %s rollout.", sourceHumanLabel(comparison.HeadSource), sourceHumanLabel(comparison.BaseSource))
+}
+
+func comparisonBaseLabel(comparison *DeploymentComparisonResponse) string {
+	if comparison != nil && comparison.ComparisonKind == "source_history" {
+		return fmt.Sprintf("Previous %s rollout", sourceHumanLabel(comparison.BaseSource))
+	}
+	return "Baseline"
+}
+
+func comparisonHeadLabel(comparison *DeploymentComparisonResponse) string {
+	if comparison != nil && comparison.ComparisonKind == "source_history" {
+		return fmt.Sprintf("Current %s rollout", sourceHumanLabel(comparison.HeadSource))
+	}
+	return "Candidate"
 }
 
 func shortenText(value string, limit int) string {
@@ -1083,8 +1121,9 @@ const homeBodyTemplate = `{{define "home_body"}}
       </div>
 
       <div class="guide-card">
-        <h2>Release Comparison</h2>
+        <h2>{{comparisonTitle .ReleaseComparison}}</h2>
         {{if .ReleaseComparison}}
+        <p class="detail-subtle">{{comparisonModeSummary .ReleaseComparison}}</p>
         <p class="lead">{{.ReleaseComparison.Summary}}</p>
         <div class="diag-meta">
           <span class="badge badge-{{if eq .ReleaseComparison.Verdict "better"}}good{{else if eq .ReleaseComparison.Verdict "worse"}}bad{{else if or (eq .ReleaseComparison.Verdict "mixed") (eq .ReleaseComparison.Verdict "insufficient_data")}}warn{{else}}neutral{{end}}">{{.ReleaseComparison.Verdict}}</span>
@@ -1094,7 +1133,7 @@ const homeBodyTemplate = `{{define "home_body"}}
         </div>
         <div class="detail-list">
           <div class="detail-row">
-            <div class="detail-label">Baseline</div>
+            <div class="detail-label">{{comparisonBaseLabel .ReleaseComparison}}</div>
             <div class="detail-value">
               {{if .ReleaseComparison.Base}}
               <div class="detail-main"><a class="badge badge-neutral badge-link" href="{{deploymentSourceURL .ReleaseComparison.Base.Deployment}}" target="_blank" rel="noreferrer">{{deploymentSourceLabel .ReleaseComparison.Base.Deployment}}</a></div>
@@ -1110,7 +1149,7 @@ const homeBodyTemplate = `{{define "home_body"}}
             </div>
           </div>
           <div class="detail-row">
-            <div class="detail-label">Candidate</div>
+            <div class="detail-label">{{comparisonHeadLabel .ReleaseComparison}}</div>
             <div class="detail-value">
               <div class="detail-main"><a class="badge badge-info badge-link" href="{{deploymentSourceURL .ReleaseComparison.Head.Deployment}}" target="_blank" rel="noreferrer">{{deploymentSourceLabel .ReleaseComparison.Head.Deployment}}</a></div>
               <div class="detail-subtle">{{deploymentSourceSummary .ReleaseComparison.Head.Deployment}}</div>

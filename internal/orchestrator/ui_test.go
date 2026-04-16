@@ -101,3 +101,43 @@ func TestComparisonCopyText(t *testing.T) {
 		}
 	}
 }
+
+func TestComparisonPresentationHelpers(t *testing.T) {
+	t.Parallel()
+
+	history := &DeploymentComparisonResponse{
+		BaseSource:     "main",
+		HeadSource:     "main",
+		ComparisonKind: "source_history",
+	}
+	if got := comparisonTitle(history); got != "Release Comparison" {
+		t.Fatalf("comparisonTitle(history) = %q", got)
+	}
+	if got := comparisonModeSummary(history); got != "History mode: current main branch rollout versus the previous main branch rollout." {
+		t.Fatalf("comparisonModeSummary(history) = %q", got)
+	}
+	if got := comparisonBaseLabel(history); got != "Previous main branch rollout" {
+		t.Fatalf("comparisonBaseLabel(history) = %q", got)
+	}
+	if got := comparisonHeadLabel(history); got != "Current main branch rollout" {
+		t.Fatalf("comparisonHeadLabel(history) = %q", got)
+	}
+
+	crossSource := &DeploymentComparisonResponse{
+		BaseSource:     "main",
+		HeadSource:     "pr-1228",
+		ComparisonKind: "cross_source",
+	}
+	if got := comparisonTitle(crossSource); got != "Source Comparison" {
+		t.Fatalf("comparisonTitle(crossSource) = %q", got)
+	}
+	if got := comparisonModeSummary(crossSource); got != "Compare mode: PR #1228 versus main branch." {
+		t.Fatalf("comparisonModeSummary(crossSource) = %q", got)
+	}
+	if got := comparisonBaseLabel(crossSource); got != "Baseline" {
+		t.Fatalf("comparisonBaseLabel(crossSource) = %q", got)
+	}
+	if got := comparisonHeadLabel(crossSource); got != "Candidate" {
+		t.Fatalf("comparisonHeadLabel(crossSource) = %q", got)
+	}
+}
