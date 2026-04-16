@@ -360,6 +360,154 @@ func TestBuildLatestDeploymentComparison(t *testing.T) {
 	}
 }
 
+func TestBuildRequestedDeploymentComparisonCrossSource(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-main",
+		LitestreamSHA: "litestream-main",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-main",
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment(main) error = %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-pr",
+		LitestreamSHA: "litestream-pr",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-pr",
+		Source:        "pr-1228",
+		PRNumber:      1228,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment(pr) error = %v", err)
+	}
+
+	mainDeployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment(main) error = %v", err)
+	}
+	prDeployment, err := db.GetLatestDeployment("pr-1228")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment(pr-1228) error = %v", err)
+	}
+
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-low",
+		Name:          "worker-main-low",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        mainDeployment.GitSHA,
+		LitestreamSHA: mainDeployment.LitestreamSHA,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-high",
+		Name:          "worker-main-high",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        mainDeployment.GitSHA,
+		LitestreamSHA: mainDeployment.LitestreamSHA,
+		ProfileName:   "high-volume",
+		ProfileConfig: "{}",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-1228-low",
+		Name:          "worker-pr-1228-low",
+		Status:        model.WorkerRunning,
+		Source:        "pr-1228",
+		GitSHA:        prDeployment.GitSHA,
+		LitestreamSHA: prDeployment.LitestreamSHA,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-1228-high",
+		Name:          "worker-pr-1228-high",
+		Status:        model.WorkerRunning,
+		Source:        "pr-1228",
+		GitSHA:        prDeployment.GitSHA,
+		LitestreamSHA: prDeployment.LitestreamSHA,
+		ProfileName:   "high-volume",
+		ProfileConfig: "{}",
+	})
+
+	mainPassAt := mainDeployment.StartedAt.Add(200 * time.Millisecond).UTC()
+	mainFailAt := mainDeployment.StartedAt.Add(400 * time.Millisecond).UTC()
+	prPassAt := prDeployment.StartedAt.Add(200 * time.Millisecond).UTC()
+
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-main-low",
+		StartedAt:   mainPassAt.Add(-15 * time.Second),
+		CompletedAt: &mainPassAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  15000,
+	})
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:     "worker-main-high",
+		StartedAt:    mainFailAt.Add(-15 * time.Second),
+		CompletedAt:  &mainFailAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		Passed:       false,
+		DurationMS:   15000,
+		ErrorMessage: `wrong # of entries in index idx_load_test_timestamp`,
+	})
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-pr-1228-low",
+		StartedAt:   prPassAt.Add(-15 * time.Second),
+		CompletedAt: &prPassAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  15000,
+	})
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-pr-1228-high",
+		StartedAt:   prPassAt.Add(-30 * time.Second),
+		CompletedAt: &prPassAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  15000,
+	})
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	comparison, err := api.buildRequestedDeploymentComparison("", "main", "pr-1228")
+	if err != nil {
+		t.Fatalf("buildRequestedDeploymentComparison() error = %v", err)
+	}
+	if comparison == nil {
+		t.Fatal("comparison = nil, want non-nil")
+	}
+	if comparison.ComparisonKind != "cross_source" {
+		t.Fatalf("ComparisonKind = %q, want cross_source", comparison.ComparisonKind)
+	}
+	if comparison.BaseSource != "main" || comparison.HeadSource != "pr-1228" {
+		t.Fatalf("sources = %q/%q, want main/pr-1228", comparison.BaseSource, comparison.HeadSource)
+	}
+	if comparison.Verdict != "better" {
+		t.Fatalf("Verdict = %q, want better", comparison.Verdict)
+	}
+	if comparison.PassDelta != 1 {
+		t.Fatalf("PassDelta = %d, want 1", comparison.PassDelta)
+	}
+	if comparison.FailDelta != -1 {
+		t.Fatalf("FailDelta = %d, want -1", comparison.FailDelta)
+	}
+	if len(comparison.ImprovedWorkers) != 1 || comparison.ImprovedWorkers[0].Profile != "high-volume" {
+		t.Fatalf("ImprovedWorkers = %+v, want high-volume", comparison.ImprovedWorkers)
+	}
+	if len(comparison.RegressedWorkers) != 0 {
+		t.Fatalf("RegressedWorkers = %+v, want none", comparison.RegressedWorkers)
+	}
+}
+
 func TestHandleListAlertsIncludesDeploymentTriage(t *testing.T) {
 	t.Parallel()
 

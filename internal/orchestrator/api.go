@@ -134,6 +134,9 @@ type DeploymentScorecard struct {
 }
 
 type DeploymentComparisonResponse struct {
+	BaseSource       string                    `json:"base_source"`
+	HeadSource       string                    `json:"head_source"`
+	ComparisonKind   string                    `json:"comparison_kind,omitempty"`
 	Base             *DeploymentScorecard      `json:"base,omitempty"`
 	Head             DeploymentScorecard       `json:"head"`
 	Verdict          string                    `json:"verdict"`
@@ -272,7 +275,11 @@ func (a *API) handleGetLatestDeployment(w http.ResponseWriter, r *http.Request) 
 }
 
 func (a *API) handleGetLatestDeploymentComparison(w http.ResponseWriter, r *http.Request) {
-	comparison, err := a.buildLatestDeploymentComparison(strings.TrimSpace(r.URL.Query().Get("source")))
+	comparison, err := a.buildRequestedDeploymentComparison(
+		strings.TrimSpace(r.URL.Query().Get("source")),
+		strings.TrimSpace(r.URL.Query().Get("base_source")),
+		strings.TrimSpace(r.URL.Query().Get("head_source")),
+	)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -323,6 +330,10 @@ func (a *API) buildDeploymentRollout(deployment model.Deployment) (DeploymentRol
 	return buildDeploymentRollout(a.db, deployment)
 }
 
+func (a *API) buildRequestedDeploymentComparison(source, baseSource, headSource string) (*DeploymentComparisonResponse, error) {
+	return buildRequestedDeploymentComparison(a.db, source, baseSource, headSource)
+}
+
 func (a *API) buildLatestDeploymentComparison(source string) (*DeploymentComparisonResponse, error) {
 	return buildLatestDeploymentComparison(a.db, source)
 }
@@ -359,9 +370,12 @@ func buildLatestDeploymentComparison(db *model.DB, source string) (*DeploymentCo
 	}
 
 	comparison := &DeploymentComparisonResponse{
-		Head:    headScorecard,
-		Verdict: "no_baseline",
-		Summary: fmt.Sprintf("Latest rollout %s has no previous deployment to compare against yet.", deploymentVersionSummary(head)),
+		BaseSource:     head.Source,
+		HeadSource:     head.Source,
+		ComparisonKind: "source_history",
+		Head:           headScorecard,
+		Verdict:        "no_baseline",
+		Summary:        fmt.Sprintf("Latest rollout %s has no previous deployment to compare against yet.", deploymentVersionSummary(head)),
 	}
 	if len(deployments) < 2 {
 		return comparison, nil
@@ -374,18 +388,93 @@ func buildLatestDeploymentComparison(db *model.DB, source string) (*DeploymentCo
 		return nil, err
 	}
 	comparison.Base = &baseScorecard
+	finalizeDeploymentComparison(comparison)
+	return comparison, nil
+}
+
+func buildRequestedDeploymentComparison(db *model.DB, source, baseSource, headSource string) (*DeploymentComparisonResponse, error) {
+	source = strings.TrimSpace(source)
+	baseSource = strings.TrimSpace(baseSource)
+	headSource = strings.TrimSpace(headSource)
+
+	if source == "" {
+		source = "main"
+	}
+	if baseSource == "" && headSource == "" {
+		return buildLatestDeploymentComparison(db, source)
+	}
+	if headSource == "" {
+		headSource = source
+	}
+	if baseSource == "" {
+		baseSource = "main"
+	}
+	if headSource == baseSource {
+		return buildLatestDeploymentComparison(db, headSource)
+	}
+	return buildLatestCrossSourceDeploymentComparison(db, baseSource, headSource)
+}
+
+func buildLatestCrossSourceDeploymentComparison(db *model.DB, baseSource, headSource string) (*DeploymentComparisonResponse, error) {
+	head, err := db.GetLatestDeployment(strings.TrimSpace(headSource))
+	if err != nil {
+		return nil, err
+	}
+	if head == nil {
+		return nil, nil
+	}
+
+	headScorecard, err := buildDeploymentScorecard(db, *head, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	comparison := &DeploymentComparisonResponse{
+		BaseSource:     firstNonEmpty(strings.TrimSpace(baseSource), "main"),
+		HeadSource:     firstNonEmpty(strings.TrimSpace(headSource), head.Source, "main"),
+		ComparisonKind: "cross_source",
+		Head:           headScorecard,
+		Verdict:        "no_baseline",
+	}
+
+	base, err := db.GetLatestDeployment(comparison.BaseSource)
+	if err != nil {
+		return nil, err
+	}
+	if base == nil {
+		comparison.Summary = fmt.Sprintf("Latest rollout %s has no current %s baseline to compare against yet.", deploymentVersionSummary(*head), comparison.BaseSource)
+		return comparison, nil
+	}
+
+	baseScorecard, err := buildDeploymentScorecard(db, *base, nil)
+	if err != nil {
+		return nil, err
+	}
+	comparison.Base = &baseScorecard
+
+	finalizeDeploymentComparison(comparison)
+	return comparison, nil
+}
+
+func finalizeDeploymentComparison(comparison *DeploymentComparisonResponse) {
+	if comparison == nil || comparison.Base == nil {
+		return
+	}
+
+	baseScorecard := *comparison.Base
+	headScorecard := comparison.Head
 
 	baseByWorker := make(map[string]DeploymentWorkerOutcome, len(baseScorecard.Outcomes))
 	for _, outcome := range baseScorecard.Outcomes {
-		baseByWorker[outcome.WorkerID] = outcome
+		baseByWorker[comparisonOutcomeKey(outcome)] = outcome
 	}
 	headByWorker := make(map[string]DeploymentWorkerOutcome, len(headScorecard.Outcomes))
 	for _, outcome := range headScorecard.Outcomes {
-		headByWorker[outcome.WorkerID] = outcome
+		headByWorker[comparisonOutcomeKey(outcome)] = outcome
 	}
 
-	for workerID, headOutcome := range headByWorker {
-		baseOutcome, ok := baseByWorker[workerID]
+	for outcomeKey, headOutcome := range headByWorker {
+		baseOutcome, ok := baseByWorker[outcomeKey]
 		if !ok {
 			continue
 		}
@@ -435,7 +524,10 @@ func buildLatestDeploymentComparison(db *model.DB, source string) (*DeploymentCo
 	comparison.AwaitingDelta = headScorecard.AwaitingWorkers - baseScorecard.AwaitingWorkers
 	comparison.Verdict = inferDeploymentComparisonVerdict(*comparison)
 	comparison.Summary = summarizeDeploymentComparison(*comparison)
-	return comparison, nil
+}
+
+func comparisonOutcomeKey(outcome DeploymentWorkerOutcome) string {
+	return firstNonEmpty(strings.TrimSpace(outcome.Profile), strings.TrimSpace(outcome.WorkerID), strings.TrimSpace(outcome.Name))
 }
 
 func buildDeploymentScorecard(db *model.DB, deployment model.Deployment, windowEnd *time.Time) (DeploymentScorecard, error) {
@@ -1324,12 +1416,13 @@ func inferDeploymentComparisonVerdict(comparison DeploymentComparisonResponse) s
 }
 
 func summarizeDeploymentComparison(comparison DeploymentComparisonResponse) string {
-	headVersion := deploymentVersionSummary(comparison.Head.Deployment)
+	includeSources := comparison.Base != nil && comparison.Base.Deployment.Source != comparison.Head.Deployment.Source
+	headVersion := comparisonSubjectSummary(comparison.Head.Deployment, includeSources)
 	if comparison.Base == nil {
 		return fmt.Sprintf("Latest rollout %s has no previous deployment to compare against yet.", headVersion)
 	}
 
-	baseVersion := deploymentVersionSummary(comparison.Base.Deployment)
+	baseVersion := comparisonSubjectSummary(comparison.Base.Deployment, includeSources)
 	switch comparison.Verdict {
 	case "insufficient_data":
 		return fmt.Sprintf("%s cannot be scored against %s yet because one of the deployment windows does not have enough post-rollout verification data.", headVersion, baseVersion)
@@ -1342,6 +1435,13 @@ func summarizeDeploymentComparison(comparison DeploymentComparisonResponse) stri
 	default:
 		return fmt.Sprintf("%s is unchanged versus %s so far: %d passed, %d failed, and %d still await verification.", headVersion, baseVersion, comparison.Head.PassedWorkers, comparison.Head.FailedWorkers, comparison.Head.AwaitingWorkers)
 	}
+}
+
+func comparisonSubjectSummary(deployment model.Deployment, includeSource bool) string {
+	if includeSource {
+		return fmt.Sprintf("%s (%s)", firstNonEmpty(strings.TrimSpace(deployment.Source), "main"), deploymentVersionSummary(deployment))
+	}
+	return deploymentVersionSummary(deployment)
 }
 
 func deploymentVersionSummary(deployment model.Deployment) string {

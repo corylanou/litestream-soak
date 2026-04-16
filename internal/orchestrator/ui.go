@@ -21,6 +21,8 @@ type homePageData struct {
 	Coverage          coverageSnapshot
 	LatestDeployment  *DeploymentRolloutResponse
 	ReleaseComparison *DeploymentComparisonResponse
+	LatestRolloutURL  string
+	ComparisonJSONURL string
 	Spotlight         *FailureResponse
 	FailureQueue      []FailureResponse
 	Workers           []homeWorker
@@ -68,6 +70,7 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"json":              mustJSON,
 	"joinList":          strings.Join,
 	"pathEscape":        url.PathEscape,
+	"queryEscape":       url.QueryEscape,
 	"runtimeClass":      runtimeSnapshotClass,
 	"runtimeLabel":      runtimeSnapshotLabel,
 	"shorten":           shortenText,
@@ -81,7 +84,7 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 }).Parse(homePageTemplate + homeBodyTemplate + workerPageTemplate + helpPageTemplate))
 
 func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
-	data, err := a.buildHomePageData()
+	data, err := a.buildHomePageData(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -91,7 +94,7 @@ func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleHomePartial(w http.ResponseWriter, r *http.Request) {
-	data, err := a.buildHomePageData()
+	data, err := a.buildHomePageData(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -100,13 +103,38 @@ func (a *API) handleHomePartial(w http.ResponseWriter, r *http.Request) {
 	renderHTML(w, "home_body", data)
 }
 
-func (a *API) buildHomePageData() (homePageData, error) {
+func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
+	requestedSource := "main"
+	baseSource := ""
+	headSource := ""
+	if r != nil {
+		requestedSource = firstNonEmpty(strings.TrimSpace(r.URL.Query().Get("source")), "main")
+		baseSource = strings.TrimSpace(r.URL.Query().Get("base_source"))
+		headSource = strings.TrimSpace(r.URL.Query().Get("head_source"))
+	}
+	rolloutSource := firstNonEmpty(headSource, requestedSource, "main")
+	comparisonJSONURL := "/api/deployments/compare/latest"
+	latestRolloutURL := "/api/deployments/latest"
+	if headSource != "" || baseSource != "" {
+		query := url.Values{}
+		if baseSource != "" {
+			query.Set("base_source", baseSource)
+		}
+		if headSource != "" {
+			query.Set("head_source", headSource)
+		}
+		comparisonJSONURL += "?" + query.Encode()
+	}
+	if rolloutSource != "main" {
+		latestRolloutURL += "?source=" + url.QueryEscape(rolloutSource)
+	}
+
 	summaries, err := a.listWorkerSummaries("")
 	if err != nil {
 		return homePageData{}, err
 	}
 
-	latestDeployment, err := a.db.GetLatestDeployment("main")
+	latestDeployment, err := a.db.GetLatestDeployment(rolloutSource)
 	if err != nil {
 		return homePageData{}, err
 	}
@@ -190,7 +218,7 @@ func (a *API) buildHomePageData() (homePageData, error) {
 		rollout = &progress
 	}
 
-	releaseComparison, err := a.buildLatestDeploymentComparison("main")
+	releaseComparison, err := a.buildRequestedDeploymentComparison(requestedSource, baseSource, headSource)
 	if err != nil {
 		return homePageData{}, err
 	}
@@ -202,6 +230,8 @@ func (a *API) buildHomePageData() (homePageData, error) {
 		Coverage:          buildCoverageSnapshot(summaries),
 		LatestDeployment:  rollout,
 		ReleaseComparison: releaseComparison,
+		LatestRolloutURL:  latestRolloutURL,
+		ComparisonJSONURL: comparisonJSONURL,
 		Spotlight:         spotlight,
 		FailureQueue:      queue,
 		Workers:           workerCards,
@@ -679,7 +709,7 @@ const homePageTemplate = `{{define "home"}}
       updateRefreshIndicator();
 
       try {
-        const resp = await fetch(window.location.origin + "/ui/partials/home", {
+        const resp = await fetch(window.location.origin + "/ui/partials/home" + window.location.search, {
           credentials: "same-origin",
           headers: { "X-Requested-With": "fetch" }
         });
@@ -861,7 +891,7 @@ const homeBodyTemplate = `{{define "home_body"}}
         </ul>
         {{end}}
         <div class="chip-row">
-          <a class="btn btn-primary" href="/api/deployments/latest">Latest rollout JSON</a>
+          <a class="btn btn-primary" href="{{.LatestRolloutURL}}">Latest rollout JSON</a>
           <a class="btn" href="/api/deployments">History</a>
         </div>
         {{else}}
@@ -875,6 +905,8 @@ const homeBodyTemplate = `{{define "home_body"}}
         <p class="lead">{{.ReleaseComparison.Summary}}</p>
         <div class="diag-meta">
           <span class="badge badge-{{if eq .ReleaseComparison.Verdict "better"}}good{{else if eq .ReleaseComparison.Verdict "worse"}}bad{{else if or (eq .ReleaseComparison.Verdict "mixed") (eq .ReleaseComparison.Verdict "insufficient_data")}}warn{{else}}neutral{{end}}">{{.ReleaseComparison.Verdict}}</span>
+          <span class="badge badge-neutral">base: {{.ReleaseComparison.BaseSource}}</span>
+          <span class="badge badge-neutral">head: {{.ReleaseComparison.HeadSource}}</span>
           <span class="badge badge-neutral">pass delta: {{.ReleaseComparison.PassDelta}}</span>
           <span class="badge badge-neutral">fail delta: {{.ReleaseComparison.FailDelta}}</span>
           <span class="badge badge-neutral">awaiting: {{.ReleaseComparison.Head.AwaitingWorkers}}</span>
@@ -892,8 +924,8 @@ const homeBodyTemplate = `{{define "home_body"}}
         </p>
         {{end}}
         <div class="chip-row">
-          <a class="btn btn-primary" href="/api/deployments/compare/latest">Comparison JSON</a>
-          <a class="btn" href="/api/deployments/latest">Latest rollout JSON</a>
+          <a class="btn btn-primary" href="{{.ComparisonJSONURL}}">Comparison JSON</a>
+          <a class="btn" href="{{.LatestRolloutURL}}">Latest rollout JSON</a>
         </div>
         {{else}}
         <p class="empty">No release comparison is available yet.</p>
@@ -1260,6 +1292,7 @@ const workerPageTemplate = `{{define "worker"}}
         <a class="topbar-link" href="/api/workers/{{pathEscape .Incident.Worker.ID}}">JSON</a>
         <a class="topbar-link" href="/api/workers/{{pathEscape .Incident.Worker.ID}}/incident">Incident</a>
         <a class="topbar-link" href="/api/workers/{{pathEscape .Incident.Worker.ID}}/prompt">Prompt</a>
+        {{if ne .Incident.Worker.Source "main"}}<a class="topbar-link" href="/ui?base_source=main&head_source={{queryEscape .Incident.Worker.Source}}">Compare to Main</a>{{end}}
       </div>
     </div>
 
