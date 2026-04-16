@@ -129,7 +129,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		latestRolloutURL += "?source=" + url.QueryEscape(rolloutSource)
 	}
 
-	summaries, err := a.listWorkerSummaries("")
+	summaries, err := a.listWorkerSummaries("", requestedSource)
 	if err != nil {
 		return homePageData{}, err
 	}
@@ -139,7 +139,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		return homePageData{}, err
 	}
 
-	failures, err := a.db.ListRecentFailedVerifications(8)
+	failures, err := a.db.ListRecentFailedVerifications(16)
 	if err != nil {
 		return homePageData{}, err
 	}
@@ -196,9 +196,13 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		worker, err := a.db.GetWorker(verification.WorkerID)
 		if err == nil {
 			card.Worker = worker
+			if requestedSource != "" && worker.Source != requestedSource {
+				continue
+			}
 		}
 		failureCards = append(failureCards, card)
 	}
+	summary.RecentFailures = len(failureCards)
 
 	var spotlight *FailureResponse
 	queue := make([]FailureResponse, 0)
@@ -253,7 +257,12 @@ func (a *API) handleWorkerPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleHelpPage(w http.ResponseWriter, r *http.Request) {
-	summaries, err := a.listWorkerSummaries("")
+	source := "main"
+	if r != nil {
+		source = firstNonEmpty(strings.TrimSpace(r.URL.Query().Get("source")), "main")
+	}
+
+	summaries, err := a.listWorkerSummaries("", source)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

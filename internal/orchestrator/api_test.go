@@ -580,6 +580,116 @@ func TestApplyDeploymentRolloutGuidanceGraceWindow(t *testing.T) {
 	}
 }
 
+func TestHandleListWorkerSummariesRespectsSource(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-one",
+		Name:          "worker-main-one",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "sha-main",
+		LitestreamSHA: "ls-main",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-one",
+		Name:          "worker-pr-one",
+		Status:        model.WorkerRunning,
+		Source:        "pr-1228",
+		GitSHA:        "sha-pr",
+		LitestreamSHA: "ls-pr",
+		ProfileName:   "high-volume",
+		ProfileConfig: "{}",
+	})
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/worker-summaries?source=pr-1228", nil)
+	recorder := httptest.NewRecorder()
+
+	api.handleListWorkerSummaries(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	var summaries []WorkerSummaryResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&summaries); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if len(summaries) != 1 {
+		t.Fatalf("len(summaries) = %d, want 1", len(summaries))
+	}
+	if summaries[0].Worker.Source != "pr-1228" {
+		t.Fatalf("Worker.Source = %q, want pr-1228", summaries[0].Worker.Source)
+	}
+}
+
+func TestHandleGetDiagnosisRespectsSource(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-one",
+		Name:          "worker-main-one",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "sha-main",
+		LitestreamSHA: "ls-main",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-one",
+		Name:          "worker-pr-one",
+		Status:        model.WorkerDegraded,
+		Source:        "pr-1228",
+		GitSHA:        "sha-pr",
+		LitestreamSHA: "ls-pr",
+		ProfileName:   "high-volume",
+		ProfileConfig: "{}",
+	})
+
+	failedAt := time.Now().UTC()
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:     "worker-pr-one",
+		StartedAt:    failedAt.Add(-15 * time.Second),
+		CompletedAt:  &failedAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		Passed:       false,
+		DurationMS:   15000,
+		ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`,
+	})
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/diagnosis?source=pr-1228", nil)
+	recorder := httptest.NewRecorder()
+
+	api.handleGetDiagnosis(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	var response struct {
+		Diagnosis diagnosisSnapshot `json:"diagnosis"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if response.Diagnosis.AffectedWorkers != 1 {
+		t.Fatalf("AffectedWorkers = %d, want 1", response.Diagnosis.AffectedWorkers)
+	}
+	if response.Diagnosis.DominantSignature != "litestream_sync_socket_refused" {
+		t.Fatalf("DominantSignature = %q, want litestream_sync_socket_refused", response.Diagnosis.DominantSignature)
+	}
+}
+
 func openTestDB(t *testing.T) *model.DB {
 	t.Helper()
 

@@ -216,7 +216,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (a *API) handleListWorkers(w http.ResponseWriter, r *http.Request) {
-	workers, err := a.db.ListWorkers(r.URL.Query().Get("status"))
+	workers, err := a.db.ListWorkersFiltered(r.URL.Query().Get("status"), strings.TrimSpace(r.URL.Query().Get("source")))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -225,7 +225,7 @@ func (a *API) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleListWorkerSummaries(w http.ResponseWriter, r *http.Request) {
-	summaries, err := a.listWorkerSummaries(r.URL.Query().Get("status"))
+	summaries, err := a.listWorkerSummaries(r.URL.Query().Get("status"), strings.TrimSpace(r.URL.Query().Get("source")))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -308,8 +308,8 @@ func (a *API) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
 	writeAPIJSON(w, rollout)
 }
 
-func (a *API) listWorkerSummaries(status string) ([]WorkerSummaryResponse, error) {
-	workers, err := a.db.ListWorkers(status)
+func (a *API) listWorkerSummaries(status, source string) ([]WorkerSummaryResponse, error) {
+	workers, err := a.db.ListWorkersFiltered(status, source)
 	if err != nil {
 		return nil, err
 	}
@@ -863,7 +863,7 @@ func (a *API) handleGetPrompt(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleGetDiagnosis(w http.ResponseWriter, r *http.Request) {
-	summaries, err := a.listWorkerSummaries(r.URL.Query().Get("status"))
+	summaries, err := a.listWorkerSummaries(r.URL.Query().Get("status"), strings.TrimSpace(r.URL.Query().Get("source")))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1233,7 +1233,7 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 		}
 	}
 
-	summaries, err := a.listWorkerSummaries("")
+	summaries, err := a.listWorkerSummaries("", detail.Worker.Source)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}

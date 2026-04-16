@@ -94,11 +94,19 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_verifications_worker ON verifications(worker_id);
+CREATE INDEX IF NOT EXISTS idx_verifications_worker_started ON verifications(worker_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_verifications_worker_failed_started ON verifications(worker_id, passed, status, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_verifications_passed_status_started ON verifications(passed, status, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_worker ON events(worker_id);
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
+CREATE INDEX IF NOT EXISTS idx_events_worker_created ON events(worker_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
+CREATE INDEX IF NOT EXISTS idx_workers_source_created ON workers(source, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workers_source_status_created ON workers(source, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_worker ON alerts(worker_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at);
+CREATE INDEX IF NOT EXISTS idx_deployments_source_started ON deployments(source, started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_deployments_source_version_started ON deployments(source, git_sha, litestream_sha, started_at DESC, id DESC);
 `
 
 type DB struct {
@@ -110,8 +118,8 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(4)
 
 	if _, err := db.Exec(migrationSQL); err != nil {
 		return nil, fmt.Errorf("run migrations: %w", err)
@@ -390,10 +398,22 @@ func (d *DB) GetWorker(id string) (*Worker, error) {
 }
 
 func (d *DB) ListWorkers(status string) ([]Worker, error) {
+	return d.ListWorkersFiltered(status, "")
+}
+
+func (d *DB) ListWorkersFiltered(status, source string) ([]Worker, error) {
 	query := `SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at FROM workers`
 	var args []any
+	if source != "" {
+		query += " WHERE source = ?"
+		args = append(args, source)
+	}
 	if status != "" {
-		query += " WHERE status = ?"
+		if len(args) == 0 {
+			query += " WHERE status = ?"
+		} else {
+			query += " AND status = ?"
+		}
 		args = append(args, status)
 	}
 	query += " ORDER BY created_at DESC"
