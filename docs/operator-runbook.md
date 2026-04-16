@@ -598,6 +598,10 @@ cat /data/litestream.yml
 sqlite3 /data/test.db 'pragma wal_checkpoint(passive);'
 ```
 
+The standard worker image includes `curl`, `jq`, `ripgrep`, `procps`,
+`iproute2`, and `sqlite3` so those commands work without a separate debug
+image.
+
 ## How To Debug Litestream Specifically
 
 The verifier flow is:

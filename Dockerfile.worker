@@ -26,7 +26,14 @@ RUN go build -ldflags "-s -w" -o /usr/local/bin/soakworker ./cmd/soakworker
 # Stage 3: Runtime image
 FROM debian:bookworm-slim
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates sqlite3 && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      iproute2 \
+      jq \
+      procps \
+      ripgrep \
+      sqlite3 && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=litestream-builder /usr/local/bin/litestream /usr/local/bin/litestream
 COPY --from=litestream-builder /usr/local/bin/litestream-test /usr/local/bin/litestream-test
