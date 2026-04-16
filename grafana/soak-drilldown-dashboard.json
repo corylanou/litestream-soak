@@ -125,12 +125,13 @@
       "id": 2,
       "targets": [
         {
-          "expr": "soak_control_worker_last_verification_result{worker_id=\"$worker\"}",
+          "expr": "max(soak_control_worker_last_verification_result{worker_id=\"$worker\"}) or on() vector(0)",
           "legendFormat": "last result"
         }
       ],
       "title": "Last Verification",
-      "type": "stat"
+      "type": "stat",
+      "options": {}
     },
     {
       "fieldConfig": {
@@ -170,7 +171,8 @@
         }
       ],
       "title": "Verification Age",
-      "type": "stat"
+      "type": "stat",
+      "options": {}
     },
     {
       "fieldConfig": {
@@ -205,7 +207,8 @@
         }
       ],
       "title": "Failures (24h)",
-      "type": "stat"
+      "type": "stat",
+      "options": {}
     },
     {
       "fieldConfig": {
@@ -240,7 +243,8 @@
         }
       ],
       "title": "Worker Restarts (24h)",
-      "type": "stat"
+      "type": "stat",
+      "options": {}
     },
     {
       "fieldConfig": {
@@ -275,7 +279,8 @@
         }
       ],
       "title": "Litestream Restarts (24h)",
-      "type": "stat"
+      "type": "stat",
+      "options": {}
     },
     {
       "fieldConfig": {
@@ -310,12 +315,13 @@
       "id": 7,
       "targets": [
         {
-          "expr": "soak_last_sync_age_seconds{worker_id=\"$worker\"}",
+          "expr": "max(soak_last_sync_age_seconds{worker_id=\"$worker\"}) or on() vector(0)",
           "legendFormat": "sync age"
         }
       ],
       "title": "Current Sync Age",
-      "type": "stat"
+      "type": "stat",
+      "options": {}
     },
     {
       "fieldConfig": {
@@ -360,41 +366,66 @@
       "id": 8,
       "targets": [
         {
-          "expr": "max(soak_db_status{worker_id=\"$worker\",status=\"replicating\"})",
+          "expr": "max(soak_db_status{worker_id=\"$worker\",status=\"replicating\"}) or on() vector(0)",
           "legendFormat": "replicating"
         }
       ],
       "title": "DB Replication",
-      "type": "stat"
+      "type": "stat",
+      "options": {}
     },
     {
       "fieldConfig": {
         "defaults": {
           "mappings": [
             {
+              "type": "value",
               "options": {
                 "0": {
-                  "color": "yellow",
-                  "text": "Paused"
+                  "color": "gray",
+                  "text": "unknown"
                 },
                 "1": {
                   "color": "green",
-                  "text": "Running"
+                  "text": "running"
+                },
+                "2": {
+                  "color": "red",
+                  "text": "degraded"
+                },
+                "3": {
+                  "color": "yellow",
+                  "text": "probing"
+                },
+                "4": {
+                  "color": "blue",
+                  "text": "dormant"
                 }
-              },
-              "type": "value"
+              }
             }
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "yellow",
+                "color": "gray",
                 "value": null
               },
               {
                 "color": "green",
                 "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              },
+              {
+                "color": "yellow",
+                "value": 3
+              },
+              {
+                "color": "blue",
+                "value": 4
               }
             ]
           }
@@ -410,12 +441,14 @@
       "id": 9,
       "targets": [
         {
-          "expr": "soak_load_running{worker_id=\"$worker\"}",
-          "legendFormat": "load"
+          "expr": "max((soak_control_worker_status{worker_id=\"$worker\",status=\"running\"} * 1) or (soak_control_worker_status{worker_id=\"$worker\",status=\"degraded\"} * 2) or (soak_control_worker_status{worker_id=\"$worker\",status=\"probing\"} * 3) or (soak_control_worker_status{worker_id=\"$worker\",status=\"dormant\"} * 4)) or on() vector(0)",
+          "instant": true,
+          "legendFormat": "status"
         }
       ],
-      "title": "Load State",
-      "type": "stat"
+      "title": "Control Status",
+      "type": "stat",
+      "options": {}
     },
     {
       "fieldConfig": {
@@ -433,12 +466,13 @@
       "id": 10,
       "targets": [
         {
-          "expr": "clamp_min(rate(soak_db_txid{worker_id=\"$worker\"}[5m]), 0)",
+          "expr": "max(clamp_min(rate(soak_db_txid{worker_id=\"$worker\"}[5m]), 0)) or on() vector(0)",
           "legendFormat": "txid/sec"
         }
       ],
       "title": "Write Rate",
-      "type": "stat"
+      "type": "stat",
+      "options": {}
     },
     {
       "fieldConfig": {
@@ -456,12 +490,13 @@
       "id": 11,
       "targets": [
         {
-          "expr": "soak_db_size_bytes{worker_id=\"$worker\"}",
+          "expr": "max(soak_db_size_bytes{worker_id=\"$worker\"}) or on() vector(0)",
           "legendFormat": "db"
         }
       ],
       "title": "DB Size",
-      "type": "stat"
+      "type": "stat",
+      "options": {}
     },
     {
       "fieldConfig": {
@@ -479,12 +514,13 @@
       "id": 12,
       "targets": [
         {
-          "expr": "soak_wal_size_bytes{worker_id=\"$worker\"}",
+          "expr": "max(soak_wal_size_bytes{worker_id=\"$worker\"}) or on() vector(0)",
           "legendFormat": "wal"
         }
       ],
       "title": "WAL Size",
-      "type": "stat"
+      "type": "stat",
+      "options": {}
     },
     {
       "fieldConfig": {
@@ -519,12 +555,13 @@
       "id": 13,
       "targets": [
         {
-          "expr": "(increase(soak_verification_duration_seconds_sum{worker_id=\"$worker\"}[6h]) / clamp_min(increase(soak_verification_duration_seconds_count{worker_id=\"$worker\"}[6h]), 1)) or on() vector(0)",
+          "expr": "max((increase(soak_verification_duration_seconds_sum{worker_id=\"$worker\"}[6h]) / clamp_min(increase(soak_verification_duration_seconds_count{worker_id=\"$worker\"}[6h]), 1)) or on() vector(0))",
           "legendFormat": "6h avg"
         }
       ],
       "title": "Verification Avg (6h)",
-      "type": "stat"
+      "type": "stat",
+      "options": {}
     },
     {
       "fieldConfig": {
@@ -584,17 +621,17 @@
         "defaults": {
           "mappings": [
             {
+              "type": "value",
               "options": {
                 "0": {
-                  "color": "yellow",
-                  "text": "Paused"
+                  "color": "transparent",
+                  "text": "off"
                 },
                 "1": {
                   "color": "green",
-                  "text": "Running"
+                  "text": "active"
                 }
-              },
-              "type": "value"
+              }
             }
           ],
           "min": 0,
@@ -614,23 +651,25 @@
       "id": 15,
       "options": {
         "legend": {
-          "displayMode": "hidden",
+          "displayMode": "list",
           "placement": "bottom",
-          "showLegend": false
+          "showLegend": true
         },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "never",
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "single"
         }
       },
       "targets": [
         {
-          "expr": "soak_load_running{worker_id=\"$worker\"}",
-          "legendFormat": "load"
+          "expr": "soak_control_worker_status{worker_id=\"$worker\"} == 1",
+          "legendFormat": "{{status}}"
         }
       ],
-      "title": "Load State Over Time",
-      "type": "timeseries"
+      "title": "Control Status Over Time",
+      "type": "state-timeline"
     },
     {
       "fieldConfig": {
@@ -692,7 +731,7 @@
       },
       "targets": [
         {
-          "expr": "increase(soak_verification_total{worker_id=\"$worker\"}[30m])",
+          "expr": "sum by (result) (increase(soak_verification_total{worker_id=\"$worker\"}[30m])) or on() vector(0)",
           "legendFormat": "{{result}}"
         }
       ],
@@ -757,11 +796,11 @@
       },
       "targets": [
         {
-          "expr": "increase(soak_verification_duration_seconds_sum{worker_id=\"$worker\"}[6h]) / clamp_min(increase(soak_verification_duration_seconds_count{worker_id=\"$worker\"}[6h]), 1)",
+          "expr": "max(increase(soak_verification_duration_seconds_sum{worker_id=\"$worker\"}[6h]) / clamp_min(increase(soak_verification_duration_seconds_count{worker_id=\"$worker\"}[6h]), 1)) or on() vector(0)",
           "legendFormat": "6h avg"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (increase(soak_verification_duration_seconds_bucket{worker_id=\"$worker\"}[6h])))",
+          "expr": "max(histogram_quantile(0.95, sum by (le) (increase(soak_verification_duration_seconds_bucket{worker_id=\"$worker\"}[6h])))) or on() vector(0)",
           "legendFormat": "6h p95"
         }
       ],
@@ -812,7 +851,7 @@
       },
       "targets": [
         {
-          "expr": "soak_last_sync_age_seconds{worker_id=\"$worker\"}",
+          "expr": "max by (worker_id) (soak_last_sync_age_seconds{worker_id=\"$worker\"})",
           "legendFormat": "sync age"
         }
       ],
@@ -877,11 +916,11 @@
       },
       "targets": [
         {
-          "expr": "soak_db_size_bytes{worker_id=\"$worker\"}",
+          "expr": "max by (worker_id) (soak_db_size_bytes{worker_id=\"$worker\"})",
           "legendFormat": "db"
         },
         {
-          "expr": "soak_wal_size_bytes{worker_id=\"$worker\"}",
+          "expr": "max by (worker_id) (soak_wal_size_bytes{worker_id=\"$worker\"})",
           "legendFormat": "wal"
         }
       ],
@@ -915,7 +954,7 @@
       },
       "targets": [
         {
-          "expr": "clamp_min(rate(soak_db_txid{worker_id=\"$worker\"}[5m]), 0)",
+          "expr": "max by (worker_id) (clamp_min(rate(soak_db_txid{worker_id=\"$worker\"}[5m]), 0))",
           "legendFormat": "txid/sec"
         }
       ],
@@ -980,11 +1019,11 @@
       },
       "targets": [
         {
-          "expr": "soak_worker_uptime_seconds{worker_id=\"$worker\"}",
+          "expr": "max by (worker_id) (soak_worker_uptime_seconds{worker_id=\"$worker\"})",
           "legendFormat": "worker"
         },
         {
-          "expr": "soak_litestream_uptime_seconds{worker_id=\"$worker\"}",
+          "expr": "max by (worker_id) (soak_litestream_uptime_seconds{worker_id=\"$worker\"})",
           "legendFormat": "litestream"
         }
       ],
@@ -1029,7 +1068,8 @@
         }
       ],
       "title": "Heartbeat Age",
-      "type": "stat"
+      "type": "stat",
+      "options": {}
     },
     {
       "fieldConfig": {
