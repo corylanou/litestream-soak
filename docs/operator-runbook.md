@@ -349,18 +349,46 @@ gh api repos/corylanou/litestream-soak/dispatches \
 
 The receiving workflow then builds and rolls the `pr-1221` soak fleet.
 
+A ready-to-copy upstream workflow template lives at:
+
+- `docs/examples/litestream-pr-soak-label.yml`
+
+That template uses `pull_request_target`, validates the labeling actor against
+an allowlist, then sends `repository_dispatch` into this repo.
+
 Security model:
 
 - control-plane admin actions require `SOAK_ADMIN_BEARER_TOKEN`
 - GitHub workflow runs require access to this repo's Actions and secrets
 - cross-repo dispatch requires a token with permission to dispatch into this repo
 - PR soak requests are allowlisted to `benbjohnson/litestream` by default
+- repository-dispatch PR soaks can also require an allowlisted triggering actor
+- label-based triggering should be treated as a convenience signal, not the only authorization check
 
 If you need to allow additional upstream repos later, set the repo variable:
 
 ```bash
 SOAK_PR_REPO_ALLOWLIST=benbjohnson/litestream,owner/another-repo
 ```
+
+If you want label-triggered PR soaks to be limited to specific people, set:
+
+```bash
+SOAK_PR_ACTOR_ALLOWLIST=corylanou,benbjohnson
+SOAK_PR_LABEL_NAME=soak:test
+```
+
+Then have the upstream label workflow include `actor` and `label` in the
+`repository_dispatch` payload. The receiving workflow in this repo will reject
+requests from non-allowlisted actors or unexpected labels.
+
+GitHub label permissions matter here:
+
+- on organization repositories, anyone with `triage` access or higher can apply and dismiss labels
+- on personal repositories, collaborators can manage labels
+
+So if you need admin-only behavior, do not rely on label permissions alone.
+Gate the dispatch on an actor allowlist, a restricted dispatch token, or both.
 
 To verify that a merge or manual handoff actually propagated through the fleet:
 

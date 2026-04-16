@@ -43,6 +43,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOAK_PR_REPO_ALLOWLIST: ${{ vars.SOAK_PR_REPO_ALLOWLIST }}
+          SOAK_PR_ACTOR_ALLOWLIST: ${{ vars.SOAK_PR_ACTOR_ALLOWLIST }}
+          SOAK_PR_LABEL_NAME: ${{ vars.SOAK_PR_LABEL_NAME }}
         run: |
           set -euo pipefail
 
@@ -50,6 +52,10 @@ jobs:
           repo_full_name="${{ github.event.client_payload.repo_full_name || github.event.inputs.repo_full_name || 'benbjohnson/litestream' }}"
           pr_sha="${{ github.event.client_payload.pr_sha || github.event.inputs.pr_sha || '' }}"
           allowed_repos="${SOAK_PR_REPO_ALLOWLIST:-benbjohnson/litestream}"
+          allowed_actors="${SOAK_PR_ACTOR_ALLOWLIST:-}"
+          actor_login="${{ github.event.client_payload.actor || '' }}"
+          requested_label="${{ github.event.client_payload.label || '' }}"
+          expected_label="${SOAK_PR_LABEL_NAME:-soak:test}"
 
           if [ -z "${pr_number}" ]; then
             echo "pr_number is required" >&2
@@ -63,6 +69,26 @@ jobs:
               exit 1
               ;;
           esac
+
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            if [ -z "${actor_login}" ]; then
+              echo "repository_dispatch requests must include client_payload.actor" >&2
+              exit 1
+            fi
+            if [ -n "${allowed_actors}" ]; then
+              case ",${allowed_actors}," in
+                *,"${actor_login}",*) ;;
+                *)
+                  echo "actor ${actor_login} is not in SOAK_PR_ACTOR_ALLOWLIST (${allowed_actors})" >&2
+                  exit 1
+                  ;;
+              esac
+            fi
+            if [ -n "${requested_label}" ] && [ "${requested_label}" != "${expected_label}" ]; then
+              echo "label ${requested_label} does not match SOAK_PR_LABEL_NAME (${expected_label})" >&2
+              exit 1
+            fi
+          fi
 
           if [ -z "${pr_sha}" ]; then
             pr_sha="$(gh api "repos/${repo_full_name}/pulls/${pr_number}" --jq .head.sha)"
