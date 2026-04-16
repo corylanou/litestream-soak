@@ -59,7 +59,7 @@
       "targetBlank": true,
       "title": "Latest Rollout",
       "type": "link",
-      "url": "https://litestream-soak-ctl.fly.dev/api/deployments/latest"
+      "url": "https://litestream-soak-ctl.fly.dev/api/deployments/latest?source=${source}"
     },
     {
       "targetBlank": true,
@@ -116,7 +116,7 @@
       },
       "targets": [
         {
-          "expr": "(sum(soak_control_worker_last_verification_result) or on() vector(0)) / clamp_min((count(soak_control_worker_last_verification_result) or on() vector(0)), 1)",
+          "expr": "(sum(soak_control_worker_last_verification_result{source=\"$source\"}) or on() vector(0)) / clamp_min((count(soak_control_worker_last_verification_result{source=\"$source\"}) or on() vector(0)), 1)",
           "instant": true,
           "legendFormat": "healthy"
         }
@@ -166,7 +166,7 @@
       },
       "targets": [
         {
-          "expr": "(count(soak_control_worker_last_verification_result) - sum(soak_control_worker_last_verification_result)) or on() vector(0)",
+          "expr": "(count(soak_control_worker_last_verification_result{source=\"$source\"}) - sum(soak_control_worker_last_verification_result{source=\"$source\"})) or on() vector(0)",
           "legendFormat": "failing"
         }
       ],
@@ -215,7 +215,7 @@
       },
       "targets": [
         {
-          "expr": "count(count by (failure_stage, failure_signature) (soak_control_worker_failure_info == 1))",
+          "expr": "count(count by (failure_stage, failure_signature) (soak_control_worker_failure_info{source=\"$source\"} == 1))",
           "legendFormat": "clusters"
         }
       ],
@@ -264,7 +264,7 @@
       },
       "targets": [
         {
-          "expr": "topk(1, count by (failure_signature) (soak_control_worker_failure_info == 1))",
+          "expr": "topk(1, count by (failure_signature) (soak_control_worker_failure_info{source=\"$source\"} == 1))",
           "instant": true,
           "legendFormat": "{{failure_signature}}"
         }
@@ -314,7 +314,7 @@
       },
       "targets": [
         {
-          "expr": "sum(soak_control_worker_last_verification_result) or on() vector(0)",
+          "expr": "sum(soak_control_worker_last_verification_result{source=\"$source\"}) or on() vector(0)",
           "legendFormat": "passing"
         }
       ],
@@ -447,7 +447,7 @@
       },
       "targets": [
         {
-          "expr": "topk(1, max by (status) (soak_control_latest_deployment_info))",
+          "expr": "topk(1, max by (status) (soak_control_latest_deployment_info{source=\"$source\"}))",
           "instant": true,
           "legendFormat": "{{status}}"
         }
@@ -502,7 +502,7 @@
       },
       "targets": [
         {
-          "expr": "time() - max(soak_control_worker_last_heartbeat_unixtime and on(worker_id) (soak_control_worker_status{status=~\"running|probing|degraded\"} == 1))",
+          "expr": "time() - max(soak_control_worker_last_heartbeat_unixtime{source=\"$source\"} and on(worker_id) (soak_control_worker_status{source=\"$source\",status=~\"running|probing|degraded\"} == 1))",
           "instant": true,
           "legendFormat": "latest heartbeat"
         }
@@ -557,7 +557,7 @@
       },
       "targets": [
         {
-          "expr": "time() - min(soak_control_worker_last_heartbeat_unixtime and on(worker_id) (soak_control_worker_status{status=~\"running|probing|degraded\"} == 1))",
+          "expr": "time() - min(soak_control_worker_last_heartbeat_unixtime{source=\"$source\"} and on(worker_id) (soak_control_worker_status{source=\"$source\",status=~\"running|probing|degraded\"} == 1))",
           "instant": true,
           "legendFormat": "stalest heartbeat"
         }
@@ -607,7 +607,7 @@
       },
       "targets": [
         {
-          "expr": "sum((time() - (soak_control_worker_last_heartbeat_unixtime and on(worker_id) (soak_control_worker_status{status=~\"running|probing|degraded\"} == 1))) > bool 180)",
+          "expr": "sum((time() - (soak_control_worker_last_heartbeat_unixtime{source=\"$source\"} and on(worker_id) (soak_control_worker_status{source=\"$source\",status=~\"running|probing|degraded\"} == 1))) > bool 180)",
           "instant": true,
           "legendFormat": "stale active workers"
         }
@@ -657,7 +657,7 @@
       },
       "targets": [
         {
-          "expr": "max(soak_control_latest_deployment_workers{worker_state=\"verified_since_deploy\"})",
+          "expr": "max(soak_control_latest_deployment_workers{source=\"$source\",worker_state=\"verified_since_deploy\"})",
           "instant": true,
           "legendFormat": "verified"
         }
@@ -707,7 +707,7 @@
       },
       "targets": [
         {
-          "expr": "max(soak_control_latest_deployment_workers{worker_state=\"awaiting_verification\"})",
+          "expr": "max(soak_control_latest_deployment_workers{source=\"$source\",worker_state=\"awaiting_verification\"})",
           "instant": true,
           "legendFormat": "awaiting"
         }
@@ -783,12 +783,12 @@
       },
       "targets": [
         {
-          "expr": "sum(soak_control_worker_last_verification_result) or on() vector(0)",
+          "expr": "sum(soak_control_worker_last_verification_result{source=\"$source\"}) or on() vector(0)",
           "instant": true,
           "legendFormat": "PASS"
         },
         {
-          "expr": "(count(soak_control_worker_last_verification_result) - sum(soak_control_worker_last_verification_result)) or on() vector(0)",
+          "expr": "(count(soak_control_worker_last_verification_result{source=\"$source\"}) - sum(soak_control_worker_last_verification_result{source=\"$source\"})) or on() vector(0)",
           "instant": true,
           "legendFormat": "FAIL"
         }
@@ -832,7 +832,7 @@
       },
       "targets": [
         {
-          "expr": "count by (failure_signature) (soak_control_worker_failure_info == 1)",
+          "expr": "count by (failure_signature) (soak_control_worker_failure_info{source=\"$source\"} == 1)",
           "instant": true,
           "legendFormat": "{{failure_signature}}"
         }
@@ -908,12 +908,12 @@
       },
       "targets": [
         {
-          "expr": "count(soak_control_worker_status{status=~\"running|degraded|probing|starting|building|pending\"} == 1)",
+          "expr": "count(soak_control_worker_status{source=\"$source\",status=~\"running|degraded|probing|starting|building|pending\"} == 1)",
           "instant": true,
           "legendFormat": "ACTIVE"
         },
         {
-          "expr": "count(soak_control_worker_status{status=\"dormant\"} == 1)",
+          "expr": "count(soak_control_worker_status{source=\"$source\",status=\"dormant\"} == 1)",
           "instant": true,
           "legendFormat": "PAUSED"
         }
@@ -928,7 +928,7 @@
             {
               "targetBlank": true,
               "title": "Open Worker",
-              "url": "https://litestream-soak-ctl.fly.dev/ui/workers/worker-main-${__series.name}"
+              "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__field.labels.worker_id}"
             }
           ],
           "mappings": [
@@ -971,8 +971,8 @@
       },
       "targets": [
         {
-          "expr": "label_replace(soak_control_worker_last_verification_result, \"worker\", \"$1\", \"worker_id\", \"worker-main-(.*)\")",
-          "legendFormat": "{{worker}}"
+          "expr": "soak_control_worker_last_verification_result{source=\"$source\"}",
+          "legendFormat": "{{profile}}"
         }
       ],
       "title": "Verification By Worker",
@@ -1805,17 +1805,36 @@
       {
         "current": {
           "selected": true,
-          "text": "worker-main-low-vol",
-          "value": "worker-main-low-vol"
+          "text": "main",
+          "value": "main"
         },
-        "definition": "label_values(soak_control_worker_info, worker_id)",
+        "definition": "label_values(soak_control_worker_info, source)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Source",
+        "multi": false,
+        "name": "source",
+        "options": [],
+        "query": "label_values(soak_control_worker_info, source)",
+        "refresh": 1,
+        "regex": "/^(?!unknown$).+/",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "worker-main-orders-replay",
+          "value": "worker-main-orders-replay"
+        },
+        "definition": "label_values(soak_control_worker_info{source=\"$source\"}, worker_id)",
         "hide": 0,
         "includeAll": false,
         "label": "Worker",
         "multi": false,
         "name": "worker",
         "options": [],
-        "query": "label_values(soak_control_worker_info, worker_id)",
+        "query": "label_values(soak_control_worker_info{source=\"$source\"}, worker_id)",
         "refresh": 1,
         "regex": "",
         "sort": 1,

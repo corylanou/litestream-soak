@@ -11,7 +11,7 @@
       "targetBlank": true,
       "title": "Overview Dashboard",
       "type": "link",
-      "url": "/d/litestream-soak-overview"
+      "url": "/d/litestream-soak-overview?var-source=${source}&var-worker=${worker}"
     },
     {
       "targetBlank": true,
@@ -200,7 +200,7 @@
       "id": 4,
       "targets": [
         {
-          "expr": "increase(soak_verification_total{worker_id=\"$worker\",result=\"failed\"}[24h])",
+          "expr": "increase(soak_verification_total{worker_id=\"$worker\",result=\"failed\"}[24h]) or on() vector(0)",
           "legendFormat": "failed"
         }
       ],
@@ -235,7 +235,7 @@
       "id": 5,
       "targets": [
         {
-          "expr": "resets(soak_worker_uptime_seconds{worker_id=\"$worker\"}[24h])",
+          "expr": "resets(soak_worker_uptime_seconds{worker_id=\"$worker\"}[24h]) or on() vector(0)",
           "legendFormat": "worker"
         }
       ],
@@ -270,7 +270,7 @@
       "id": 6,
       "targets": [
         {
-          "expr": "resets(soak_litestream_uptime_seconds{worker_id=\"$worker\"}[24h])",
+          "expr": "resets(soak_litestream_uptime_seconds{worker_id=\"$worker\"}[24h]) or on() vector(0)",
           "legendFormat": "litestream"
         }
       ],
@@ -519,7 +519,7 @@
       "id": 13,
       "targets": [
         {
-          "expr": "increase(soak_verification_duration_seconds_sum{worker_id=\"$worker\"}[6h]) / clamp_min(increase(soak_verification_duration_seconds_count{worker_id=\"$worker\"}[6h]), 1)",
+          "expr": "(increase(soak_verification_duration_seconds_sum{worker_id=\"$worker\"}[6h]) / clamp_min(increase(soak_verification_duration_seconds_count{worker_id=\"$worker\"}[6h]), 1)) or on() vector(0)",
           "legendFormat": "6h avg"
         }
       ],
@@ -543,7 +543,12 @@
               },
               "type": "value"
             }
-          ]
+          ],
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "palette-classic"
+          }
         },
         "overrides": []
       },
@@ -560,11 +565,9 @@
           "placement": "bottom",
           "showLegend": false
         },
-        "mergeValues": true,
-        "rowHeight": 0.9,
-        "showValue": "never",
         "tooltip": {
-          "mode": "single"
+          "mode": "single",
+          "sort": "none"
         }
       },
       "targets": [
@@ -574,7 +577,7 @@
         }
       ],
       "title": "Verification State Over Time",
-      "type": "state-timeline"
+      "type": "timeseries"
     },
     {
       "fieldConfig": {
@@ -593,7 +596,12 @@
               },
               "type": "value"
             }
-          ]
+          ],
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "palette-classic"
+          }
         },
         "overrides": []
       },
@@ -610,11 +618,9 @@
           "placement": "bottom",
           "showLegend": false
         },
-        "mergeValues": true,
-        "rowHeight": 0.9,
-        "showValue": "never",
         "tooltip": {
-          "mode": "single"
+          "mode": "single",
+          "sort": "none"
         }
       },
       "targets": [
@@ -624,7 +630,7 @@
         }
       ],
       "title": "Load State Over Time",
-      "type": "state-timeline"
+      "type": "timeseries"
     },
     {
       "fieldConfig": {
@@ -1121,7 +1127,7 @@
       },
       "targets": [
         {
-          "expr": "soak_control_worker_status == 1",
+          "expr": "soak_control_worker_status{source=\"$source\"} == 1",
           "format": "table",
           "instant": true
         }
@@ -1155,7 +1161,7 @@
       },
       "targets": [
         {
-          "expr": "soak_control_worker_failure_info == 1",
+          "expr": "soak_control_worker_failure_info{source=\"$source\"} == 1",
           "format": "table",
           "instant": true
         }
@@ -1189,7 +1195,7 @@
       },
       "targets": [
         {
-          "expr": "soak_control_worker_workload_info == 1",
+          "expr": "soak_control_worker_workload_info{source=\"$source\"} == 1",
           "format": "table",
           "instant": true
         }
@@ -1223,7 +1229,7 @@
       },
       "targets": [
         {
-          "expr": "soak_control_worker_last_failure_info == 1",
+          "expr": "soak_control_worker_last_failure_info{source=\"$source\"} == 1",
           "format": "table",
           "instant": true
         }
@@ -1259,7 +1265,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(time() - soak_control_worker_last_failure_unixtime)",
+          "expr": "sort_desc(time() - soak_control_worker_last_failure_unixtime{source=\"$source\"})",
           "format": "table",
           "instant": true
         }
@@ -1328,7 +1334,7 @@
       },
       "targets": [
         {
-          "expr": "soak_control_worker_runtime_snapshot_status == 1",
+          "expr": "soak_control_worker_runtime_snapshot_status{source=\"$source\"} == 1",
           "format": "table",
           "instant": true
         }
@@ -1362,7 +1368,7 @@
       },
       "targets": [
         {
-          "expr": "count by (runtime_status) (soak_control_worker_runtime_snapshot_status == 1)",
+          "expr": "count by (runtime_status) (soak_control_worker_runtime_snapshot_status{source=\"$source\"} == 1)",
           "format": "table",
           "instant": true
         }
@@ -1396,7 +1402,7 @@
       },
       "targets": [
         {
-          "expr": "count by (failure_stage, failure_signature, runtime_status) ((soak_control_worker_failure_info == 1) * on(worker_id) group_left(runtime_status) (soak_control_worker_runtime_snapshot_status == 1))",
+          "expr": "count by (failure_stage, failure_signature, runtime_status) ((soak_control_worker_failure_info{source=\"$source\"} == 1) * on(worker_id) group_left(runtime_status) (soak_control_worker_runtime_snapshot_status{source=\"$source\"} == 1))",
           "format": "table",
           "instant": true
         }
@@ -1430,7 +1436,7 @@
       },
       "targets": [
         {
-          "expr": "(soak_control_worker_failure_info == 1) * on(worker_id) group_left(runtime_status) (soak_control_worker_runtime_snapshot_status == 1)",
+          "expr": "(soak_control_worker_failure_info{source=\"$source\"} == 1) * on(worker_id) group_left(runtime_status) (soak_control_worker_runtime_snapshot_status{source=\"$source\"} == 1)",
           "format": "table",
           "instant": true
         }
@@ -1514,17 +1520,36 @@
       {
         "current": {
           "selected": true,
-          "text": "worker-main-low-vol",
-          "value": "worker-main-low-vol"
+          "text": "main",
+          "value": "main"
         },
-        "definition": "label_values(soak_control_worker_info, worker_id)",
+        "definition": "label_values(soak_control_worker_info, source)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Source",
+        "multi": false,
+        "name": "source",
+        "options": [],
+        "query": "label_values(soak_control_worker_info, source)",
+        "refresh": 1,
+        "regex": "/^(?!unknown$).+/",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "worker-main-orders-replay",
+          "value": "worker-main-orders-replay"
+        },
+        "definition": "label_values(soak_control_worker_info{source=\"$source\"}, worker_id)",
         "hide": 0,
         "includeAll": false,
         "label": "Worker",
         "multi": false,
         "name": "worker",
         "options": [],
-        "query": "label_values(soak_control_worker_info, worker_id)",
+        "query": "label_values(soak_control_worker_info{source=\"$source\"}, worker_id)",
         "refresh": 1,
         "regex": "",
         "sort": 1,
