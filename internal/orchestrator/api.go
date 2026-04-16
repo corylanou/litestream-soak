@@ -697,6 +697,8 @@ func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (Deployme
 func (a *API) observeLatestDeploymentState(source string) {
 	if a.metrics != nil {
 		a.metrics.observeLatestDeployment(a.db)
+		a.metrics.observeLatestDeploymentComparison(a.db)
+		a.metrics.observeSourceComparisons(a.db)
 	}
 	if a.alerts == nil {
 		return
