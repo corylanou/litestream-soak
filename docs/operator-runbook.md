@@ -23,7 +23,8 @@ password in your local `.envrc`.
 
 Deployment automation uses a separate bearer token for admin endpoints. Keep
 that in GitHub Actions secrets as `SOAK_ADMIN_BEARER_TOKEN` instead of reusing
-the UI basic-auth credentials.
+the UI basic-auth credentials. `/api/admin/*` is reserved for bearer-authenticated
+admin automation only.
 
 Grafana:
 
@@ -151,7 +152,7 @@ new deploy:
 
 ```bash
 curl -X POST -sS \
-  -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  -H "Authorization: Bearer $SOAK_ADMIN_BEARER_TOKEN" \
   "https://litestream-soak-ctl.fly.dev/api/admin/resume-dormant?source=main&trigger=manual_resume" | jq .
 ```
 
@@ -237,7 +238,7 @@ fly deploy \
   --build-only \
   --push \
   --build-arg "LITESTREAM_SHA=${LITESTREAM_SHA}" \
-  --image-label "sha-${SHORT_SHA}"
+  --image-label "sha-${SHORT_SHA}-ls-${LITESTREAM_SHA::12}"
 
 CONTROL_BASE_URL=https://litestream-soak-ctl.fly.dev \
 SOAK_ADMIN_BEARER_TOKEN=... \
@@ -245,7 +246,7 @@ SOAK_ADMIN_BEARER_TOKEN=... \
   "$SHA" \
   main \
   manual_main \
-  "registry.fly.io/litestream-soak:sha-${SHORT_SHA}" \
+  "registry.fly.io/litestream-soak:sha-${SHORT_SHA}-ls-${LITESTREAM_SHA::12}" \
   "$LITESTREAM_SHA"
 ```
 
@@ -254,8 +255,111 @@ in Fly:
 
 ```bash
 curl -X POST -sS \
-  -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  -H "Authorization: Bearer $SOAK_ADMIN_BEARER_TOKEN" \
   "https://litestream-soak-ctl.fly.dev/api/admin/resume-dormant?source=main&trigger=manual_resume" | jq .
+```
+
+## Automatic Upstream Main Pickup
+
+The soak system can now rebuild itself against the latest upstream Litestream
+`main` without waiting for a change in this repo.
+
+Workflow:
+
+- `.github/workflows/sync-upstream-main.yml`
+
+Behavior:
+
+- runs on a schedule and via manual `workflow_dispatch`
+- resolves the latest `github.com/benbjohnson/litestream` `refs/heads/main`
+- checks the currently deployed `main` worker fleet from the public `/metrics`
+- skips the build if the upstream Litestream SHA under test is already current
+- otherwise builds a new worker image and notifies the control plane
+
+Required GitHub settings:
+
+```bash
+FLY_API_TOKEN=<fly token with deploy access>
+SOAK_ADMIN_BEARER_TOKEN=<admin api token for soakctl>
+SOAK_CONTROL_BASE_URL=https://litestream-soak-ctl.fly.dev
+```
+
+Use `workflow_dispatch` with `force=true` if you want to rebuild against the
+current upstream `main` SHA anyway.
+
+## PR Soak Triggers
+
+PR-specific soak testing now has three supported trigger paths.
+
+### GitHub Actions Manual Trigger
+
+Workflow:
+
+- `.github/workflows/soak-pr.yml`
+
+Inputs:
+
+- `pr_number`
+- optional `repo_full_name` (defaults to `benbjohnson/litestream`)
+- optional `pr_sha`
+
+This resolves the PR head SHA, builds a worker image against that Litestream
+commit, then calls `/api/admin/deployments/ready` with `source=pr-<number>`.
+The control plane creates or updates a PR-specific worker fleet under that
+source automatically.
+
+### Local CLI Trigger
+
+If you want to start a PR soak from your machine without waiting for GitHub
+Actions secrets or UI access:
+
+```bash
+SOAK_ADMIN_BEARER_TOKEN=... ./scripts/start-pr-soak.sh 1221
+```
+
+Optional arguments:
+
+```bash
+SOAK_ADMIN_BEARER_TOKEN=... ./scripts/start-pr-soak.sh 1221 benbjohnson/litestream
+SOAK_ADMIN_BEARER_TOKEN=... ./scripts/start-pr-soak.sh 1221 benbjohnson/litestream <explicit-pr-head-sha>
+```
+
+That script:
+
+- resolves the PR head SHA from GitHub unless you provide one
+- builds a worker image with `LITESTREAM_SHA=<pr-head-sha>`
+- notifies the control plane with `source=pr-1221`
+
+### GitHub Label Or Cross-Repo Automation
+
+This repo also accepts `repository_dispatch` with event type
+`litestream_pr_soak_requested`.
+
+That is the receiving side for a future label-based workflow in
+`benbjohnson/litestream`. The upstream repo can react to a label like
+`soak:test` and send:
+
+```bash
+gh api repos/corylanou/litestream-soak/dispatches \
+  -X POST \
+  -f event_type=litestream_pr_soak_requested \
+  -F client_payload[pr_number]=1221 \
+  -F client_payload[repo_full_name]=benbjohnson/litestream
+```
+
+The receiving workflow then builds and rolls the `pr-1221` soak fleet.
+
+Security model:
+
+- control-plane admin actions require `SOAK_ADMIN_BEARER_TOKEN`
+- GitHub workflow runs require access to this repo's Actions and secrets
+- cross-repo dispatch requires a token with permission to dispatch into this repo
+- PR soak requests are allowlisted to `benbjohnson/litestream` by default
+
+If you need to allow additional upstream repos later, set the repo variable:
+
+```bash
+SOAK_PR_REPO_ALLOWLIST=benbjohnson/litestream,owner/another-repo
 ```
 
 To verify that a merge or manual handoff actually propagated through the fleet:

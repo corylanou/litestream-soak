@@ -127,12 +127,13 @@ jobs:
           fi
 
           build_args+=(--build-arg "LITESTREAM_SHA=${litestream_sha}")
+          image_label="sha-${short_sha}-ls-${litestream_sha::12}"
 
           flyctl deploy \
             --remote-only \
             --app litestream-soak \
             --config fly.toml \
-            --image-label "sha-${short_sha}" \
+            --image-label "${image_label}" \
             "${build_args[@]}" \
             --build-only \
             --push 2>&1 | tee "${log_file}"

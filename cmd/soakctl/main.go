@@ -179,16 +179,21 @@ func newAuthMiddleware(username, password, adminBearerToken string) func(http.Ha
 				return
 			}
 
+			if strings.HasPrefix(r.URL.Path, "/api/admin/") {
+				if isAdminBearerAuthorized(r, adminBearerToken) {
+					next.ServeHTTP(w, r)
+					return
+				}
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+
 			if isAdminBearerAuthorized(r, adminBearerToken) {
 				next.ServeHTTP(w, r)
 				return
 			}
 
 			if username == "" || password == "" {
-				if strings.HasPrefix(r.URL.Path, "/api/admin/") {
-					http.Error(w, "unauthorized", http.StatusUnauthorized)
-					return
-				}
 				next.ServeHTTP(w, r)
 				return
 			}
