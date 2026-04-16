@@ -163,3 +163,37 @@ func TestBuildHomeScopeSummary(t *testing.T) {
 		t.Fatalf("buildHomeScopeSummary(crossSource) = %q", got)
 	}
 }
+
+func TestBuildHomeActionPlan(t *testing.T) {
+	t.Parallel()
+
+	diagnosis := diagnosisSnapshot{
+		Clusters: []diagnosisCluster{
+			{
+				Stage:     "integrity_check",
+				Signature: "validation_failed",
+				RepresentativeWorker: diagnosisWorkerRef{
+					ID:   "worker-pr-1228-low-vol",
+					Name: "worker-pr-1228-low-vol",
+				},
+			},
+		},
+	}
+
+	plan := buildHomeActionPlan("pr-1228", diagnosis)
+	if plan == nil {
+		t.Fatal("buildHomeActionPlan() = nil")
+	}
+	if plan.WorkerURL != "/ui/workers/worker-pr-1228-low-vol" {
+		t.Fatalf("WorkerURL = %q", plan.WorkerURL)
+	}
+	if plan.PromptURL != "/api/workers/worker-pr-1228-low-vol/prompt?mode=triage" {
+		t.Fatalf("PromptURL = %q", plan.PromptURL)
+	}
+	if plan.CompareURL != "/ui?source=pr-1228&base_source=main&head_source=pr-1228" {
+		t.Fatalf("CompareURL = %q", plan.CompareURL)
+	}
+	if len(plan.Steps) < 4 {
+		t.Fatalf("len(Steps) = %d, want at least 4", len(plan.Steps))
+	}
+}

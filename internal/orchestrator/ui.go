@@ -19,6 +19,7 @@ type homePageData struct {
 	SelectedSource      string
 	SelectedSourceLabel string
 	ScopeSummary        string
+	HomeAction          *homeActionPlan
 	Summary             homeSummary
 	Diagnosis           diagnosisSnapshot
 	Coverage            coverageSnapshot
@@ -58,6 +59,17 @@ type homeSourceCard struct {
 	Selected   bool
 	ViewURL    string
 	CompareURL string
+}
+
+type homeActionPlan struct {
+	Headline    string
+	Summary     string
+	WorkerName  string
+	WorkerURL   string
+	PromptURL   string
+	IncidentURL string
+	CompareURL  string
+	Steps       []string
 }
 
 type workerPageData struct {
@@ -264,13 +276,16 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		return homePageData{}, err
 	}
 
+	diagnosis := buildDiagnosisSnapshot(summaries)
+
 	return homePageData{
 		GeneratedAt:         time.Now().UTC(),
 		SelectedSource:      requestedSource,
 		SelectedSourceLabel: sourceHumanLabel(requestedSource),
 		ScopeSummary:        buildHomeScopeSummary(requestedSource, rolloutSource, releaseComparison),
+		HomeAction:          buildHomeActionPlan(requestedSource, diagnosis),
 		Summary:             summary,
-		Diagnosis:           buildDiagnosisSnapshot(summaries),
+		Diagnosis:           diagnosis,
 		Coverage:            buildCoverageSnapshot(summaries),
 		LatestDeployment:    rollout,
 		ReleaseComparison:   releaseComparison,
@@ -353,6 +368,37 @@ func buildHomeScopeSummary(selectedSource, rolloutSource string, comparison *Dep
 		return fmt.Sprintf("You are viewing %s. Latest Rollout below is the latest %s rollout. Source Comparison is comparing %s against %s.", selectedLabel, rolloutLabel, sourceHumanLabel(comparison.HeadSource), sourceHumanLabel(comparison.BaseSource))
 	}
 	return fmt.Sprintf("You are viewing %s. Latest Rollout below is the latest %s rollout. Release Comparison shows the current %s rollout versus the previous %s rollout.", selectedLabel, rolloutLabel, selectedLabel, selectedLabel)
+}
+
+func buildHomeActionPlan(selectedSource string, diagnosis diagnosisSnapshot) *homeActionPlan {
+	if len(diagnosis.Clusters) == 0 {
+		return nil
+	}
+
+	cluster := diagnosis.Clusters[0]
+	workerID := cluster.RepresentativeWorker.ID
+	if strings.TrimSpace(workerID) == "" {
+		return nil
+	}
+
+	plan := &homeActionPlan{
+		Headline:    fmt.Sprintf("Open %s and hand that incident to AI.", cluster.RepresentativeWorker.Name),
+		Summary:     fmt.Sprintf("This is the fastest path to debug %s in %s.", valueOrUnknown(cluster.Signature), sourceHumanLabel(selectedSource)),
+		WorkerName:  cluster.RepresentativeWorker.Name,
+		WorkerURL:   "/ui/workers/" + url.PathEscape(workerID),
+		PromptURL:   "/api/workers/" + url.PathEscape(workerID) + "/prompt?mode=triage",
+		IncidentURL: "/api/workers/" + url.PathEscape(workerID) + "/incident",
+		Steps: []string{
+			fmt.Sprintf("Open %s.", cluster.RepresentativeWorker.Name),
+			"Copy the AI prompt and give it to your debugging agent.",
+			fmt.Sprintf("Ask the agent to explain %s during %s and propose the next commands to run.", valueOrUnknown(cluster.Signature), valueOrUnknown(cluster.Stage)),
+		},
+	}
+	if selectedSource != "main" {
+		plan.CompareURL = fmt.Sprintf("/ui?source=%s&base_source=main&head_source=%s", url.QueryEscape(selectedSource), url.QueryEscape(selectedSource))
+		plan.Steps = append(plan.Steps, "Check the Source Comparison card against main before deciding whether the PR is better or worse.")
+	}
+	return plan
 }
 
 func (a *API) handleWorkerPage(w http.ResponseWriter, r *http.Request) {
@@ -1039,17 +1085,24 @@ const homePageTemplate = `{{define "home"}}
           if (href) window.location = href;
       });
 
-      root.addEventListener("click", async function(e) {
-        var button = e.target.closest("[data-copy]");
-        if (!button) return;
-        e.preventDefault();
-        var text = button.getAttribute("data-copy");
-        if (!text || !navigator.clipboard) return;
-        var original = button.textContent;
-        try {
-          await navigator.clipboard.writeText(text);
-          button.textContent = "Copied";
-          setTimeout(function() {
+	root.addEventListener("click", async function(e) {
+		var button = e.target.closest("[data-copy],[data-copy-url]");
+		if (!button) return;
+		e.preventDefault();
+		if (!navigator.clipboard) return;
+		var original = button.textContent;
+		try {
+			var text = button.getAttribute("data-copy");
+			var copyURL = button.getAttribute("data-copy-url");
+			if (!text && copyURL) {
+				var resp = await fetch(copyURL, { credentials: "same-origin" });
+				if (!resp.ok) return;
+				text = await resp.text();
+			}
+			if (!text) return;
+			await navigator.clipboard.writeText(text);
+			button.textContent = "Copied";
+			setTimeout(function() {
             button.textContent = original;
           }, 1200);
         } catch (_) {}
@@ -1115,6 +1168,25 @@ const homeBodyTemplate = `{{define "home_body"}}
         </div>
         {{end}}
       </div>
+
+      {{if .HomeAction}}
+      <div class="guide-card">
+        <h2>Do This Now</h2>
+        <p class="lead">{{.HomeAction.Headline}}</p>
+        <p>{{.HomeAction.Summary}}</p>
+        <ul>
+          {{range .HomeAction.Steps}}
+          <li>{{.}}</li>
+          {{end}}
+        </ul>
+        <div class="chip-row">
+          <a class="btn btn-primary" href="{{.HomeAction.WorkerURL}}">Open {{.HomeAction.WorkerName}}</a>
+          <button type="button" class="btn" data-copy-url="{{.HomeAction.PromptURL}}">Copy AI prompt</button>
+          <a class="btn" href="{{.HomeAction.IncidentURL}}">Incident JSON</a>
+          {{if .HomeAction.CompareURL}}<a class="btn" href="{{.HomeAction.CompareURL}}">Compare to main</a>{{end}}
+        </div>
+      </div>
+      {{end}}
 
       <div class="guide-card">
         <h2>Current Diagnosis</h2>
