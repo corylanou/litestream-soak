@@ -31,7 +31,7 @@ Grafana:
 - import `grafana/soak-overview-dashboard.json`
 - import `grafana/soak-release-quality-dashboard.json`
 - import `grafana/soak-source-compare-dashboard.json`
-- import `grafana/soak-dashboard.json`
+- import `grafana/soak-drilldown-dashboard.json`
 
 ## What To Look At First
 
@@ -710,7 +710,7 @@ Use the incident bundle to answer:
 ## Onboarding Checklist
 
 1. Get control-plane credentials and store them locally in `.envrc`.
-2. Import the Grafana dashboard from `grafana/soak-dashboard.json`.
+2. Import the Grafana dashboard from `grafana/soak-drilldown-dashboard.json`.
 3. Learn the three main endpoints:
    - `/ui`
    - `/api/worker-summaries`
