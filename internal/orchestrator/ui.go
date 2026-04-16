@@ -60,6 +60,8 @@ type helpPageData struct {
 
 var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"confidenceClass":   confidenceClass,
+	"deploymentSourceLabel": deploymentSourceLabel,
+	"deploymentSourceURL": deploymentSourceURL,
 	"deploymentClass":   deploymentStatusClass,
 	"eventClass":        eventClass,
 	"failureText":       failureText,
@@ -74,9 +76,13 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"runtimeClass":      runtimeSnapshotClass,
 	"runtimeLabel":      runtimeSnapshotLabel,
 	"shorten":           shortenText,
+	"soakCommitURL":     soakCommitURL,
+	"sourceLabel":       sourceLabel,
+	"sourceURL":         sourceURL,
 	"statusClass":       statusClass,
 	"timeAgo":           formatTimeAgoPtr,
 	"timeAgoValue":      formatTimeAgo,
+	"litestreamCommitURL": litestreamCommitURL,
 	"trimSHA":           trimSHA,
 	"verificationClass": verificationClass,
 	"verificationLabel": verificationLabel,
@@ -328,6 +334,62 @@ func trimSHA(value string) string {
 		return value
 	}
 	return value[:12]
+}
+
+const (
+	soakGitHubRepo       = "https://github.com/corylanou/litestream-soak"
+	litestreamGitHubRepo = "https://github.com/benbjohnson/litestream"
+)
+
+func sourceLabel(source string) string {
+	prNumber := sourcePRNumber(strings.TrimSpace(source))
+	if prNumber > 0 {
+		return fmt.Sprintf("PR #%d", prNumber)
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return "main"
+	}
+	return source
+}
+
+func sourceURL(source string) string {
+	prNumber := sourcePRNumber(strings.TrimSpace(source))
+	if prNumber > 0 {
+		return fmt.Sprintf("%s/pull/%d", litestreamGitHubRepo, prNumber)
+	}
+	source = firstNonEmpty(strings.TrimSpace(source), "main")
+	return fmt.Sprintf("%s/tree/%s", litestreamGitHubRepo, url.PathEscape(source))
+}
+
+func deploymentSourceLabel(dep model.Deployment) string {
+	if dep.PRNumber > 0 {
+		return fmt.Sprintf("PR #%d", dep.PRNumber)
+	}
+	return sourceLabel(dep.Source)
+}
+
+func deploymentSourceURL(dep model.Deployment) string {
+	if dep.PRNumber > 0 {
+		return fmt.Sprintf("%s/pull/%d", litestreamGitHubRepo, dep.PRNumber)
+	}
+	return sourceURL(dep.Source)
+}
+
+func soakCommitURL(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/commit/%s", soakGitHubRepo, sha)
+}
+
+func litestreamCommitURL(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/commit/%s", litestreamGitHubRepo, sha)
 }
 
 func shortenText(value string, limit int) string {
@@ -630,6 +692,7 @@ const homePageTemplate = `{{define "home"}}
     .badge-warn { background: var(--amber-dim); color: var(--amber); }
     .badge-bad { background: var(--red-dim); color: var(--red); }
     .badge-neutral { background: rgba(139,148,158,0.15); color: var(--muted); }
+    .badge-link:hover { text-decoration: none; filter: brightness(1.08); }
 
     /* Panels */
     .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; }
@@ -872,8 +935,9 @@ const homeBodyTemplate = `{{define "home_body"}}
         <p class="lead">{{.LatestDeployment.Summary}}</p>
         <div class="diag-meta">
           <span class="badge badge-{{if eq (deploymentClass .LatestDeployment.Status) "status-good"}}good{{else if eq (deploymentClass .LatestDeployment.Status) "status-warn"}}warn{{else if eq (deploymentClass .LatestDeployment.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.LatestDeployment.Status}}</span>
-          <span class="badge badge-neutral">soak: {{trimSHA .LatestDeployment.Deployment.GitSHA}}</span>
-          <span class="badge badge-neutral">litestream: {{trimSHA .LatestDeployment.Deployment.LitestreamSHA}}</span>
+          <a class="badge badge-neutral badge-link" href="{{deploymentSourceURL .LatestDeployment.Deployment}}" target="_blank" rel="noreferrer">source: {{deploymentSourceLabel .LatestDeployment.Deployment}}</a>
+          <a class="badge badge-neutral badge-link" href="{{soakCommitURL .LatestDeployment.Deployment.GitSHA}}" target="_blank" rel="noreferrer">soak: {{trimSHA .LatestDeployment.Deployment.GitSHA}}</a>
+          <a class="badge badge-neutral badge-link" href="{{litestreamCommitURL .LatestDeployment.Deployment.LitestreamSHA}}" target="_blank" rel="noreferrer">litestream: {{trimSHA .LatestDeployment.Deployment.LitestreamSHA}}</a>
           <span class="badge badge-neutral">{{.LatestDeployment.UpdatedWorkers}}/{{.LatestDeployment.TotalWorkers}} updated</span>
           {{if gt .LatestDeployment.ProbingWorkers 0}}<span class="badge badge-warn">{{.LatestDeployment.ProbingWorkers}} probing</span>{{end}}
           {{if gt .LatestDeployment.DormantWorkers 0}}<span class="badge badge-bad">{{.LatestDeployment.DormantWorkers}} dormant</span>{{end}}
@@ -914,13 +978,19 @@ const homeBodyTemplate = `{{define "home_body"}}
         <p class="lead">{{.ReleaseComparison.Summary}}</p>
         <div class="diag-meta">
           <span class="badge badge-{{if eq .ReleaseComparison.Verdict "better"}}good{{else if eq .ReleaseComparison.Verdict "worse"}}bad{{else if or (eq .ReleaseComparison.Verdict "mixed") (eq .ReleaseComparison.Verdict "insufficient_data")}}warn{{else}}neutral{{end}}">{{.ReleaseComparison.Verdict}}</span>
-          <span class="badge badge-neutral">base: {{.ReleaseComparison.BaseSource}}</span>
-          <span class="badge badge-neutral">head: {{.ReleaseComparison.HeadSource}}</span>
+          {{if .ReleaseComparison.Base}}
+          <a class="badge badge-neutral badge-link" href="{{deploymentSourceURL .ReleaseComparison.Base.Deployment}}" target="_blank" rel="noreferrer">base: {{deploymentSourceLabel .ReleaseComparison.Base.Deployment}}</a>
+          <a class="badge badge-neutral badge-link" href="{{soakCommitURL .ReleaseComparison.Base.Deployment.GitSHA}}" target="_blank" rel="noreferrer">base soak: {{trimSHA .ReleaseComparison.Base.Deployment.GitSHA}}</a>
+          <a class="badge badge-neutral badge-link" href="{{litestreamCommitURL .ReleaseComparison.Base.Deployment.LitestreamSHA}}" target="_blank" rel="noreferrer">base litestream: {{trimSHA .ReleaseComparison.Base.Deployment.LitestreamSHA}}</a>
+          {{else}}
+          <a class="badge badge-neutral badge-link" href="{{sourceURL .ReleaseComparison.BaseSource}}" target="_blank" rel="noreferrer">base: {{sourceLabel .ReleaseComparison.BaseSource}}</a>
+          {{end}}
+          <a class="badge badge-neutral badge-link" href="{{deploymentSourceURL .ReleaseComparison.Head.Deployment}}" target="_blank" rel="noreferrer">head: {{deploymentSourceLabel .ReleaseComparison.Head.Deployment}}</a>
+          <a class="badge badge-neutral badge-link" href="{{soakCommitURL .ReleaseComparison.Head.Deployment.GitSHA}}" target="_blank" rel="noreferrer">head soak: {{trimSHA .ReleaseComparison.Head.Deployment.GitSHA}}</a>
+          <a class="badge badge-neutral badge-link" href="{{litestreamCommitURL .ReleaseComparison.Head.Deployment.LitestreamSHA}}" target="_blank" rel="noreferrer">head litestream: {{trimSHA .ReleaseComparison.Head.Deployment.LitestreamSHA}}</a>
           <span class="badge badge-neutral">pass delta: {{.ReleaseComparison.PassDelta}}</span>
           <span class="badge badge-neutral">fail delta: {{.ReleaseComparison.FailDelta}}</span>
           <span class="badge badge-neutral">awaiting: {{.ReleaseComparison.Head.AwaitingWorkers}}</span>
-          {{if .ReleaseComparison.Base}}<span class="badge badge-neutral">base: {{trimSHA .ReleaseComparison.Base.Deployment.LitestreamSHA}}</span>{{end}}
-          <span class="badge badge-neutral">head: {{trimSHA .ReleaseComparison.Head.Deployment.LitestreamSHA}}</span>
         </div>
         {{if .ReleaseComparison.RegressedWorkers}}
         <p style="margin-top:10px;"><strong>Regressed:</strong>
