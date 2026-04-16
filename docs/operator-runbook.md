@@ -28,6 +28,9 @@ admin automation only.
 
 Grafana:
 
+- import `grafana/soak-overview-dashboard.json`
+- import `grafana/soak-release-quality-dashboard.json`
+- import `grafana/soak-source-compare-dashboard.json`
 - import `grafana/soak-dashboard.json`
 
 ## What To Look At First

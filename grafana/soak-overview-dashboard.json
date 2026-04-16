@@ -21,6 +21,12 @@
     },
     {
       "targetBlank": true,
+      "title": "Source Compare",
+      "type": "link",
+      "url": "/d/litestream-source-compare"
+    },
+    {
+      "targetBlank": true,
       "title": "Control Plane",
       "type": "link",
       "url": "https://litestream-soak-ctl.fly.dev/ui"

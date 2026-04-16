@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Latest-vs-previous release quality view for the Litestream soak project. This board compares the most recent deployment window against the immediately previous one using control-plane rollout scorecards. Use it to answer whether the latest Litestream-under-test got better, worse, or is still inconclusive.",
+  "description": "Cross-source comparison view for Litestream soak. Select a PR or alternate source and compare its latest rollout directly against main using control-plane scorecards.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 2,
@@ -15,33 +15,33 @@
     },
     {
       "targetBlank": true,
-      "title": "Drilldown Dashboard",
+      "title": "Release Quality",
       "type": "link",
-      "url": "/d/litestream-soak"
+      "url": "/d/litestream-release-quality"
     },
     {
       "targetBlank": true,
-      "title": "Source Compare",
+      "title": "Control Plane Compare",
       "type": "link",
-      "url": "/d/litestream-source-compare"
+      "url": "https://litestream-soak-ctl.fly.dev/ui?base_source=main&head_source=${compare_source}"
     },
     {
       "targetBlank": true,
-      "title": "Control Plane",
+      "title": "Main Rollout",
       "type": "link",
-      "url": "https://litestream-soak-ctl.fly.dev/ui"
+      "url": "https://litestream-soak-ctl.fly.dev/api/deployments/latest?source=main"
     },
     {
       "targetBlank": true,
-      "title": "Latest Rollout",
+      "title": "Selected Rollout",
       "type": "link",
-      "url": "https://litestream-soak-ctl.fly.dev/api/deployments/latest"
+      "url": "https://litestream-soak-ctl.fly.dev/api/deployments/latest?source=${compare_source}"
     },
     {
       "targetBlank": true,
       "title": "Comparison JSON",
       "type": "link",
-      "url": "https://litestream-soak-ctl.fly.dev/api/deployments/compare/latest"
+      "url": "https://litestream-soak-ctl.fly.dev/api/deployments/compare/latest?base_source=main&head_source=${compare_source}"
     }
   ],
   "panels": [
@@ -83,7 +83,7 @@
       },
       "targets": [
         {
-          "expr": "topk(1, max by (verdict) (soak_control_latest_deployment_comparison_info))",
+          "expr": "topk(1, max by (verdict) (soak_control_source_comparison_info{base_source=\"main\",head_source=\"$compare_source\"}))",
           "instant": true,
           "legendFormat": "{{verdict}}"
         }
@@ -133,12 +133,12 @@
       },
       "targets": [
         {
-          "expr": "max(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"verified\"})",
+          "expr": "max(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"verified\"})",
           "instant": true,
-          "legendFormat": "previous verified"
+          "legendFormat": "main verified"
         }
       ],
-      "title": "Previous Verified",
+      "title": "Main Verified",
       "type": "stat"
     },
     {
@@ -183,12 +183,12 @@
       },
       "targets": [
         {
-          "expr": "max(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"verified\"})",
+          "expr": "max(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"verified\"})",
           "instant": true,
-          "legendFormat": "current verified"
+          "legendFormat": "selected verified"
         }
       ],
-      "title": "Current Verified",
+      "title": "Selected Verified",
       "type": "stat"
     },
     {
@@ -233,12 +233,12 @@
       },
       "targets": [
         {
-          "expr": "max(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"awaiting\"})",
+          "expr": "max(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"awaiting\"})",
           "instant": true,
-          "legendFormat": "previous awaiting"
+          "legendFormat": "main awaiting"
         }
       ],
-      "title": "Previous Awaiting",
+      "title": "Main Awaiting",
       "type": "stat"
     },
     {
@@ -283,12 +283,12 @@
       },
       "targets": [
         {
-          "expr": "max(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"awaiting\"})",
+          "expr": "max(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"awaiting\"})",
           "instant": true,
-          "legendFormat": "current awaiting"
+          "legendFormat": "selected awaiting"
         }
       ],
-      "title": "Current Awaiting",
+      "title": "Selected Awaiting",
       "type": "stat"
     },
     {
@@ -333,7 +333,7 @@
       },
       "targets": [
         {
-          "expr": "max(soak_control_latest_deployment_comparison_delta{delta_type=\"new_failures\"})",
+          "expr": "max(soak_control_source_comparison_delta{base_source=\"main\",head_source=\"$compare_source\",delta_type=\"new_failures\"})",
           "instant": true,
           "legendFormat": "new_failures"
         }
@@ -383,7 +383,7 @@
       },
       "targets": [
         {
-          "expr": "max(soak_control_latest_deployment_comparison_delta{delta_type=\"resolved_failures\"})",
+          "expr": "max(soak_control_source_comparison_delta{base_source=\"main\",head_source=\"$compare_source\",delta_type=\"resolved_failures\"})",
           "instant": true,
           "legendFormat": "resolved_failures"
         }
@@ -438,14 +438,14 @@
       },
       "targets": [
         {
-          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"passed\"}) / clamp_min(sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"total\"}), 1)",
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"passed\"}) / clamp_min(sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"total\"}), 1)",
           "instant": true,
-          "legendFormat": "previous"
+          "legendFormat": "main"
         },
         {
-          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"passed\"}) / clamp_min(sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"total\"}), 1)",
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"passed\"}) / clamp_min(sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"total\"}), 1)",
           "instant": true,
-          "legendFormat": "current"
+          "legendFormat": "${compare_source}"
         }
       ],
       "title": "Pass Rate",
@@ -488,34 +488,34 @@
       },
       "targets": [
         {
-          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"passed\"})",
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"passed\"})",
           "instant": true,
-          "legendFormat": "previous passed"
+          "legendFormat": "main passed"
         },
         {
-          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"failed\"})",
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"failed\"})",
           "instant": true,
-          "legendFormat": "previous failed"
+          "legendFormat": "main failed"
         },
         {
-          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"awaiting\"})",
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"awaiting\"})",
           "instant": true,
-          "legendFormat": "previous awaiting"
+          "legendFormat": "main awaiting"
         },
         {
-          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"passed\"})",
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"passed\"})",
           "instant": true,
-          "legendFormat": "current passed"
+          "legendFormat": "${compare_source} passed"
         },
         {
-          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"failed\"})",
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"failed\"})",
           "instant": true,
-          "legendFormat": "current failed"
+          "legendFormat": "${compare_source} failed"
         },
         {
-          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"awaiting\"})",
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"awaiting\"})",
           "instant": true,
-          "legendFormat": "current awaiting"
+          "legendFormat": "${compare_source} awaiting"
         }
       ],
       "title": "Outcome Counts",
@@ -558,12 +558,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (failure_signature) (soak_control_latest_deployment_comparison_failure{comparison_role=\"head\"})",
+          "expr": "sum by (failure_signature) (soak_control_source_comparison_failure{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\"})",
           "instant": true,
           "legendFormat": "{{failure_signature}}"
         }
       ],
-      "title": "Current Failure Signatures",
+      "title": "Selected Failure Signatures",
       "type": "bargauge"
     },
     {
@@ -603,12 +603,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (failure_signature) (soak_control_latest_deployment_comparison_failure{comparison_role=\"new\"})",
+          "expr": "sum by (failure_signature) (soak_control_source_comparison_failure{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"new\"})",
           "instant": true,
           "legendFormat": "new {{failure_signature}}"
         },
         {
-          "expr": "sum by (failure_signature) (soak_control_latest_deployment_comparison_failure{comparison_role=\"resolved\"})",
+          "expr": "sum by (failure_signature) (soak_control_source_comparison_failure{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"resolved\"})",
           "instant": true,
           "legendFormat": "resolved {{failure_signature}}"
         }
@@ -653,34 +653,34 @@
       },
       "targets": [
         {
-          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"verified\"})",
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"verified\"})",
           "instant": true,
-          "legendFormat": "previous verified"
+          "legendFormat": "main verified"
         },
         {
-          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"awaiting\"})",
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"awaiting\"})",
           "instant": true,
-          "legendFormat": "previous awaiting"
+          "legendFormat": "main awaiting"
         },
         {
-          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"base\",worker_state=\"total\"})",
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"total\"})",
           "instant": true,
-          "legendFormat": "previous total"
+          "legendFormat": "main total"
         },
         {
-          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"verified\"})",
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"verified\"})",
           "instant": true,
-          "legendFormat": "current verified"
+          "legendFormat": "${compare_source} verified"
         },
         {
-          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"awaiting\"})",
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"awaiting\"})",
           "instant": true,
-          "legendFormat": "current awaiting"
+          "legendFormat": "${compare_source} awaiting"
         },
         {
-          "expr": "sum(soak_control_latest_deployment_comparison_workers{comparison_role=\"head\",worker_state=\"total\"})",
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"total\"})",
           "instant": true,
-          "legendFormat": "current total"
+          "legendFormat": "${compare_source} total"
         }
       ],
       "title": "Verification Coverage",
@@ -696,7 +696,27 @@
     "release-quality"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "pr-1228",
+          "value": "pr-1228"
+        },
+        "definition": "label_values(soak_control_source_comparison_info, head_source)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Compare Source",
+        "multi": false,
+        "name": "compare_source",
+        "options": [],
+        "query": "label_values(soak_control_source_comparison_info, head_source)",
+        "refresh": 1,
+        "regex": "/^(?!main$).+/",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-24h",
@@ -704,8 +724,8 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "Litestream Release Quality",
-  "uid": "litestream-release-quality",
+  "title": "Litestream Source Compare",
+  "uid": "litestream-source-compare",
   "version": 1,
   "weekStart": ""
 }
