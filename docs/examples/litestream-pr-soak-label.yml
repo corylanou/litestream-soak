@@ -21,13 +21,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          allowed_actors="${SOAK_PR_ACTOR_ALLOWLIST}"
+          allowed_actors="${SOAK_PR_ACTOR_ALLOWLIST:-benbjohnson,corylanou}"
           actor_login="${{ github.actor }}"
-
-          if [ -z "${allowed_actors}" ]; then
-            echo "SOAK_PR_ACTOR_ALLOWLIST must be set" >&2
-            exit 1
-          fi
 
           if ! printf '%s\n' "${allowed_actors}" | tr ',' '\n' | grep -Fxq "${actor_login}"; then
             echo "actor ${actor_login} is not allowed to trigger soak dispatch" >&2

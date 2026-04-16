@@ -362,7 +362,7 @@ Security model:
 - GitHub workflow runs require access to this repo's Actions and secrets
 - cross-repo dispatch requires a token with permission to dispatch into this repo
 - PR soak requests are allowlisted to `benbjohnson/litestream` by default
-- repository-dispatch PR soaks can also require an allowlisted triggering actor
+- repository-dispatch PR soaks require an allowlisted triggering actor
 - label-based triggering should be treated as a convenience signal, not the only authorization check
 
 If you need to allow additional upstream repos later, set the repo variable:
@@ -371,10 +371,16 @@ If you need to allow additional upstream repos later, set the repo variable:
 SOAK_PR_REPO_ALLOWLIST=benbjohnson/litestream,owner/another-repo
 ```
 
-If you want label-triggered PR soaks to be limited to specific people, set:
+Current default actor allowlist:
 
 ```bash
-SOAK_PR_ACTOR_ALLOWLIST=corylanou,benbjohnson
+SOAK_PR_ACTOR_ALLOWLIST=benbjohnson,corylanou
+```
+
+If you want to override that list later, set:
+
+```bash
+SOAK_PR_ACTOR_ALLOWLIST=benbjohnson,corylanou,another-admin
 SOAK_PR_LABEL_NAME=soak:test
 ```
 
