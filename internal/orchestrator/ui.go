@@ -60,8 +60,12 @@ type helpPageData struct {
 
 var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"confidenceClass":   confidenceClass,
+	"comparisonCopyText": comparisonCopyText,
+	"copyLabel":         copyLabel,
 	"deploymentSourceLabel": deploymentSourceLabel,
+	"deploymentSourceSummary": deploymentSourceSummary,
 	"deploymentSourceURL": deploymentSourceURL,
+	"deploymentCopyText": deploymentCopyText,
 	"deploymentClass":   deploymentStatusClass,
 	"eventClass":        eventClass,
 	"failureText":       failureText,
@@ -376,6 +380,13 @@ func deploymentSourceURL(dep model.Deployment) string {
 	return sourceURL(dep.Source)
 }
 
+func deploymentSourceSummary(dep model.Deployment) string {
+	if dep.PRNumber > 0 {
+		return fmt.Sprintf("%s from benbjohnson/litestream", deploymentSourceLabel(dep))
+	}
+	return fmt.Sprintf("%s branch from benbjohnson/litestream", deploymentSourceLabel(dep))
+}
+
 func soakCommitURL(sha string) string {
 	sha = strings.TrimSpace(sha)
 	if sha == "" {
@@ -390,6 +401,61 @@ func litestreamCommitURL(sha string) string {
 		return ""
 	}
 	return fmt.Sprintf("%s/commit/%s", litestreamGitHubRepo, sha)
+}
+
+func copyLabel(text string) string {
+	if sourcePRNumber(strings.TrimSpace(text)) > 0 {
+		return "PR"
+	}
+	if strings.TrimSpace(text) == "" {
+		return "Source"
+	}
+	return strings.TrimSpace(text)
+}
+
+func deploymentCopyText(dep model.Deployment) string {
+	parts := []string{
+		fmt.Sprintf("source=%s", firstNonEmpty(strings.TrimSpace(dep.Source), "main")),
+		fmt.Sprintf("source_label=%s", deploymentSourceLabel(dep)),
+	}
+	if dep.PRNumber > 0 {
+		parts = append(parts, fmt.Sprintf("pr_url=%s", deploymentSourceURL(dep)))
+	} else {
+		parts = append(parts, fmt.Sprintf("branch_url=%s", deploymentSourceURL(dep)))
+	}
+	if sha := strings.TrimSpace(dep.GitSHA); sha != "" {
+		parts = append(parts,
+			fmt.Sprintf("soak_sha=%s", sha),
+			fmt.Sprintf("soak_commit_url=%s", soakCommitURL(sha)),
+		)
+	}
+	if sha := strings.TrimSpace(dep.LitestreamSHA); sha != "" {
+		parts = append(parts,
+			fmt.Sprintf("litestream_sha=%s", sha),
+			fmt.Sprintf("litestream_commit_url=%s", litestreamCommitURL(sha)),
+		)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func comparisonCopyText(comparison *DeploymentComparisonResponse) string {
+	if comparison == nil {
+		return ""
+	}
+	parts := []string{
+		fmt.Sprintf("verdict=%s", comparison.Verdict),
+		fmt.Sprintf("summary=%s", comparison.Summary),
+		fmt.Sprintf("base_source=%s", comparison.BaseSource),
+		fmt.Sprintf("head_source=%s", comparison.HeadSource),
+		fmt.Sprintf("pass_delta=%d", comparison.PassDelta),
+		fmt.Sprintf("fail_delta=%d", comparison.FailDelta),
+		fmt.Sprintf("awaiting_delta=%d", comparison.AwaitingDelta),
+	}
+	if comparison.Base != nil {
+		parts = append(parts, deploymentCopyText(comparison.Base.Deployment))
+	}
+	parts = append(parts, deploymentCopyText(comparison.Head.Deployment))
+	return strings.Join(parts, "\n")
 }
 
 func shortenText(value string, limit int) string {
@@ -692,6 +758,7 @@ const homePageTemplate = `{{define "home"}}
     .badge-warn { background: var(--amber-dim); color: var(--amber); }
     .badge-bad { background: var(--red-dim); color: var(--red); }
     .badge-neutral { background: rgba(139,148,158,0.15); color: var(--muted); }
+    .badge-info { background: var(--blue-dim); color: var(--blue); }
     .badge-link:hover { text-decoration: none; filter: brightness(1.08); }
 
     /* Panels */
@@ -708,6 +775,14 @@ const homePageTemplate = `{{define "home"}}
     .chip strong { color: var(--blue); }
     .diag-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
     .diag-meta .badge { text-transform: none; letter-spacing: 0; }
+    .detail-list { display: grid; gap: 10px; margin-top: 12px; }
+    .detail-row { display: grid; grid-template-columns: 110px 1fr; gap: 12px; align-items: start; padding-top: 10px; border-top: 1px solid var(--border-subtle); }
+    .detail-row:first-child { border-top: none; padding-top: 0; }
+    .detail-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+    .detail-value { min-width: 0; }
+    .detail-main { color: var(--text); font-size: 13px; font-weight: 500; }
+    .detail-subtle { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .action-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .cluster-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin: 16px 0; }
     .cluster-card ul { margin: 10px 0 0 18px; }
     .cluster-card li + li { margin-top: 6px; }
@@ -827,6 +902,22 @@ const homePageTemplate = `{{define "home"}}
         var href = row.dataset.href;
           if (href) window.location = href;
       });
+
+      root.addEventListener("click", async function(e) {
+        var button = e.target.closest("[data-copy]");
+        if (!button) return;
+        e.preventDefault();
+        var text = button.getAttribute("data-copy");
+        if (!text || !navigator.clipboard) return;
+        var original = button.textContent;
+        try {
+          await navigator.clipboard.writeText(text);
+          button.textContent = "Copied";
+          setTimeout(function() {
+            button.textContent = original;
+          }, 1200);
+        } catch (_) {}
+      });
     }
 
     document.addEventListener("DOMContentLoaded", function() {
@@ -935,14 +1026,33 @@ const homeBodyTemplate = `{{define "home_body"}}
         <p class="lead">{{.LatestDeployment.Summary}}</p>
         <div class="diag-meta">
           <span class="badge badge-{{if eq (deploymentClass .LatestDeployment.Status) "status-good"}}good{{else if eq (deploymentClass .LatestDeployment.Status) "status-warn"}}warn{{else if eq (deploymentClass .LatestDeployment.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.LatestDeployment.Status}}</span>
-          <a class="badge badge-neutral badge-link" href="{{deploymentSourceURL .LatestDeployment.Deployment}}" target="_blank" rel="noreferrer">source: {{deploymentSourceLabel .LatestDeployment.Deployment}}</a>
-          <a class="badge badge-neutral badge-link" href="{{soakCommitURL .LatestDeployment.Deployment.GitSHA}}" target="_blank" rel="noreferrer">soak: {{trimSHA .LatestDeployment.Deployment.GitSHA}}</a>
-          <a class="badge badge-neutral badge-link" href="{{litestreamCommitURL .LatestDeployment.Deployment.LitestreamSHA}}" target="_blank" rel="noreferrer">litestream: {{trimSHA .LatestDeployment.Deployment.LitestreamSHA}}</a>
           <span class="badge badge-neutral">{{.LatestDeployment.UpdatedWorkers}}/{{.LatestDeployment.TotalWorkers}} updated</span>
           {{if gt .LatestDeployment.ProbingWorkers 0}}<span class="badge badge-warn">{{.LatestDeployment.ProbingWorkers}} probing</span>{{end}}
           {{if gt .LatestDeployment.DormantWorkers 0}}<span class="badge badge-bad">{{.LatestDeployment.DormantWorkers}} dormant</span>{{end}}
           {{if gt .LatestDeployment.DegradedWorkers 0}}<span class="badge badge-bad">{{.LatestDeployment.DegradedWorkers}} degraded</span>{{end}}
           {{if .LatestDeployment.GraceWindowExceeded}}<span class="badge badge-bad">beyond 45m grace</span>{{end}}
+        </div>
+        <div class="detail-list">
+          <div class="detail-row">
+            <div class="detail-label">Testing</div>
+            <div class="detail-value">
+              <div class="detail-main">
+                <a class="badge badge-info badge-link" href="{{deploymentSourceURL .LatestDeployment.Deployment}}" target="_blank" rel="noreferrer">{{deploymentSourceLabel .LatestDeployment.Deployment}}</a>
+              </div>
+              <div class="detail-subtle">{{deploymentSourceSummary .LatestDeployment.Deployment}}</div>
+            </div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">Code Links</div>
+            <div class="detail-value">
+              <div class="detail-subtle">Open the exact soak build or Litestream commit only when you need to investigate or hand off to AI.</div>
+              <div class="action-row">
+                <a class="btn" href="{{soakCommitURL .LatestDeployment.Deployment.GitSHA}}" target="_blank" rel="noreferrer">Open soak commit</a>
+                <a class="btn" href="{{litestreamCommitURL .LatestDeployment.Deployment.LitestreamSHA}}" target="_blank" rel="noreferrer">Open Litestream commit</a>
+                <button type="button" class="btn" data-copy="{{deploymentCopyText .LatestDeployment.Deployment}}">Copy rollout context</button>
+              </div>
+            </div>
+          </div>
         </div>
         {{if .LatestDeployment.NextAction}}
         <p style="margin-top:10px;"><strong>Next action:</strong> {{.LatestDeployment.NextAction}}</p>
@@ -978,19 +1088,39 @@ const homeBodyTemplate = `{{define "home_body"}}
         <p class="lead">{{.ReleaseComparison.Summary}}</p>
         <div class="diag-meta">
           <span class="badge badge-{{if eq .ReleaseComparison.Verdict "better"}}good{{else if eq .ReleaseComparison.Verdict "worse"}}bad{{else if or (eq .ReleaseComparison.Verdict "mixed") (eq .ReleaseComparison.Verdict "insufficient_data")}}warn{{else}}neutral{{end}}">{{.ReleaseComparison.Verdict}}</span>
-          {{if .ReleaseComparison.Base}}
-          <a class="badge badge-neutral badge-link" href="{{deploymentSourceURL .ReleaseComparison.Base.Deployment}}" target="_blank" rel="noreferrer">base: {{deploymentSourceLabel .ReleaseComparison.Base.Deployment}}</a>
-          <a class="badge badge-neutral badge-link" href="{{soakCommitURL .ReleaseComparison.Base.Deployment.GitSHA}}" target="_blank" rel="noreferrer">base soak: {{trimSHA .ReleaseComparison.Base.Deployment.GitSHA}}</a>
-          <a class="badge badge-neutral badge-link" href="{{litestreamCommitURL .ReleaseComparison.Base.Deployment.LitestreamSHA}}" target="_blank" rel="noreferrer">base litestream: {{trimSHA .ReleaseComparison.Base.Deployment.LitestreamSHA}}</a>
-          {{else}}
-          <a class="badge badge-neutral badge-link" href="{{sourceURL .ReleaseComparison.BaseSource}}" target="_blank" rel="noreferrer">base: {{sourceLabel .ReleaseComparison.BaseSource}}</a>
-          {{end}}
-          <a class="badge badge-neutral badge-link" href="{{deploymentSourceURL .ReleaseComparison.Head.Deployment}}" target="_blank" rel="noreferrer">head: {{deploymentSourceLabel .ReleaseComparison.Head.Deployment}}</a>
-          <a class="badge badge-neutral badge-link" href="{{soakCommitURL .ReleaseComparison.Head.Deployment.GitSHA}}" target="_blank" rel="noreferrer">head soak: {{trimSHA .ReleaseComparison.Head.Deployment.GitSHA}}</a>
-          <a class="badge badge-neutral badge-link" href="{{litestreamCommitURL .ReleaseComparison.Head.Deployment.LitestreamSHA}}" target="_blank" rel="noreferrer">head litestream: {{trimSHA .ReleaseComparison.Head.Deployment.LitestreamSHA}}</a>
           <span class="badge badge-neutral">pass delta: {{.ReleaseComparison.PassDelta}}</span>
           <span class="badge badge-neutral">fail delta: {{.ReleaseComparison.FailDelta}}</span>
           <span class="badge badge-neutral">awaiting: {{.ReleaseComparison.Head.AwaitingWorkers}}</span>
+        </div>
+        <div class="detail-list">
+          <div class="detail-row">
+            <div class="detail-label">Baseline</div>
+            <div class="detail-value">
+              {{if .ReleaseComparison.Base}}
+              <div class="detail-main"><a class="badge badge-neutral badge-link" href="{{deploymentSourceURL .ReleaseComparison.Base.Deployment}}" target="_blank" rel="noreferrer">{{deploymentSourceLabel .ReleaseComparison.Base.Deployment}}</a></div>
+              <div class="detail-subtle">{{deploymentSourceSummary .ReleaseComparison.Base.Deployment}}</div>
+              <div class="action-row">
+                <a class="btn" href="{{soakCommitURL .ReleaseComparison.Base.Deployment.GitSHA}}" target="_blank" rel="noreferrer">Open soak commit</a>
+                <a class="btn" href="{{litestreamCommitURL .ReleaseComparison.Base.Deployment.LitestreamSHA}}" target="_blank" rel="noreferrer">Open Litestream commit</a>
+              </div>
+              {{else}}
+              <div class="detail-main"><a class="badge badge-neutral badge-link" href="{{sourceURL .ReleaseComparison.BaseSource}}" target="_blank" rel="noreferrer">{{sourceLabel .ReleaseComparison.BaseSource}}</a></div>
+              <div class="detail-subtle">No completed baseline deployment is available yet.</div>
+              {{end}}
+            </div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">Candidate</div>
+            <div class="detail-value">
+              <div class="detail-main"><a class="badge badge-info badge-link" href="{{deploymentSourceURL .ReleaseComparison.Head.Deployment}}" target="_blank" rel="noreferrer">{{deploymentSourceLabel .ReleaseComparison.Head.Deployment}}</a></div>
+              <div class="detail-subtle">{{deploymentSourceSummary .ReleaseComparison.Head.Deployment}}</div>
+              <div class="action-row">
+                <a class="btn" href="{{soakCommitURL .ReleaseComparison.Head.Deployment.GitSHA}}" target="_blank" rel="noreferrer">Open soak commit</a>
+                <a class="btn" href="{{litestreamCommitURL .ReleaseComparison.Head.Deployment.LitestreamSHA}}" target="_blank" rel="noreferrer">Open Litestream commit</a>
+                <button type="button" class="btn" data-copy="{{comparisonCopyText .ReleaseComparison}}">Copy comparison context</button>
+              </div>
+            </div>
+          </div>
         </div>
         {{if .ReleaseComparison.RegressedWorkers}}
         <p style="margin-top:10px;"><strong>Regressed:</strong>
