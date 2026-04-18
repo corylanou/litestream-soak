@@ -103,9 +103,9 @@ func (a *GHArchiveAdapter) Rows() (RowIterator, error) {
 }
 
 type ghEvent struct {
-	ID        string    `json:"id"`
-	Type      string    `json:"type"`
-	Actor     struct {
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	Actor struct {
 		Login string `json:"login"`
 	} `json:"actor"`
 	Repo struct {
@@ -140,7 +140,13 @@ func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 	e := it.event
 	ts := e.CreatedAt.Format(time.RFC3339)
 
-	_, err := db.Exec(`INSERT OR IGNORE INTO gh_events (id, type, actor_login, repo_name, created_at, payload) VALUES (?, ?, ?, ?, ?, ?)`,
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`INSERT OR IGNORE INTO gh_events (id, type, actor_login, repo_name, created_at, payload) VALUES (?, ?, ?, ?, ?, ?)`,
 		e.ID, e.Type, e.Actor.Login, e.Repo.Name, ts, string(e.Payload))
 	if err != nil {
 		return err
@@ -153,7 +159,7 @@ func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 			Commits []any  `json:"commits"`
 		}
 		json.Unmarshal(e.Payload, &p)
-		_, err = db.Exec(`INSERT INTO gh_push_events (event_id, repo_name, actor_login, ref, commit_count, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		_, err = tx.Exec(`INSERT INTO gh_push_events (event_id, repo_name, actor_login, ref, commit_count, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 			e.ID, e.Repo.Name, e.Actor.Login, p.Ref, len(p.Commits), ts)
 
 	case "IssuesEvent":
@@ -165,7 +171,7 @@ func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 			} `json:"issue"`
 		}
 		json.Unmarshal(e.Payload, &p)
-		_, err = db.Exec(`INSERT INTO gh_issue_events (event_id, repo_name, actor_login, action, issue_number, title, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		_, err = tx.Exec(`INSERT INTO gh_issue_events (event_id, repo_name, actor_login, action, issue_number, title, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			e.ID, e.Repo.Name, e.Actor.Login, p.Action, p.Issue.Number, p.Issue.Title, ts)
 
 	case "PullRequestEvent":
@@ -177,15 +183,19 @@ func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 			} `json:"pull_request"`
 		}
 		json.Unmarshal(e.Payload, &p)
-		_, err = db.Exec(`INSERT INTO gh_pr_events (event_id, repo_name, actor_login, action, pr_number, title, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		_, err = tx.Exec(`INSERT INTO gh_pr_events (event_id, repo_name, actor_login, action, pr_number, title, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			e.ID, e.Repo.Name, e.Actor.Login, p.Action, p.PullRequest.Number, p.PullRequest.Title, ts)
 
 	case "WatchEvent":
-		_, err = db.Exec(`INSERT INTO gh_watch_events (event_id, repo_name, actor_login, created_at) VALUES (?, ?, ?, ?)`,
+		_, err = tx.Exec(`INSERT INTO gh_watch_events (event_id, repo_name, actor_login, created_at) VALUES (?, ?, ?, ?)`,
 			e.ID, e.Repo.Name, e.Actor.Login, ts)
 	}
 
-	return err
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (it *ghArchiveIterator) Err() error { return it.err }

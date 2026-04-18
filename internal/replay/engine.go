@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -72,10 +73,12 @@ func NewEngine(cfg Config, adapter Adapter) *Engine {
 
 func (e *Engine) Run(ctx context.Context) error {
 	var err error
-	e.db, err = sql.Open("sqlite", e.cfg.DBPath+"?_journal_mode=WAL")
+	e.db, err = sql.Open("sqlite", e.cfg.DBPath+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
+	e.db.SetMaxOpenConns(1)
+	e.db.SetMaxIdleConns(1)
 	defer e.db.Close()
 
 	if err := e.adapter.CreateTables(e.db); err != nil {
@@ -142,7 +145,7 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 		prevTS = ts
 
 		start := time.Now()
-		if err := iter.Insert(e.db); err != nil {
+		if err := e.insertWithRetry(ctx, func() error { return iter.Insert(e.db) }); err != nil {
 			replayErrorsTotal.WithLabelValues(labels...).Inc()
 			slog.Error("Replay insert failed", "dataset", name, "error", err)
 			continue
@@ -163,6 +166,33 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 
 	slog.Info("Replay pass complete", "dataset", name, "total_rows", count)
 	return nil
+}
+
+func (e *Engine) insertWithRetry(ctx context.Context, fn func() error) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		if !isBusyError(err) || time.Now().After(deadline) {
+			return err
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func isBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "SQLITE_BUSY") || strings.Contains(msg, "database is locked")
 }
 
 func (e *Engine) metricLabels(dataset string) []string {
