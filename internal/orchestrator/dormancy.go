@@ -52,22 +52,33 @@ func normalizeWorkloadConfig(cfg workload.Config) workload.Config {
 func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) map[string]string {
 	s3Path := fmt.Sprintf("soak/%s", worker.Name)
 	env := map[string]string{
-		"WORKER_ID":         worker.ID,
-		"WORKER_NAME":       worker.Name,
-		"GIT_SHA":           worker.GitSHA,
-		"SOURCE":            worker.Source,
-		"PROFILE":           worker.ProfileName,
-		"INITIAL_SIZE":      workloadCfg.InitialSize,
-		"VERIFY_INTERVAL":   workloadCfg.VerifyInterval,
-		"VERIFY_TYPE":       workloadCfg.VerifyType,
-		"SNAPSHOT_INTERVAL": workloadCfg.SnapshotInterval,
-		"SYNC_INTERVAL":     workloadCfg.SyncInterval,
-		"LOAD_MODE":         workloadCfg.LoadMode,
-		"REPLICA_TYPE":      "s3",
-		"S3_BUCKET":         m.s3Bucket,
-		"S3_PATH":           s3Path,
-		"S3_ENDPOINT":       m.s3Endpoint,
-		"CONTROL_BASE_URL":  m.controlBaseURL,
+		"WORKER_ID":           worker.ID,
+		"WORKER_NAME":         worker.Name,
+		"GIT_SHA":             worker.GitSHA,
+		"SOURCE":              worker.Source,
+		"PROFILE":             worker.ProfileName,
+		"INITIAL_SIZE":        workloadCfg.InitialSize,
+		"VERIFY_INTERVAL":     workloadCfg.VerifyInterval,
+		"VERIFY_TYPE":         workloadCfg.VerifyType,
+		"SNAPSHOT_INTERVAL":   workloadCfg.SnapshotInterval,
+		"SYNC_INTERVAL":       workloadCfg.SyncInterval,
+		"LOAD_MODE":           workloadCfg.LoadMode,
+		"REPLICA_TYPE":        "s3",
+		"S3_BUCKET":           m.replica.Bucket,
+		"BUCKET_NAME":         m.replica.Bucket,
+		"S3_PATH":             s3Path,
+		"S3_ENDPOINT":         m.replica.Endpoint,
+		"AWS_ENDPOINT_URL_S3": m.replica.Endpoint,
+		"CONTROL_BASE_URL":    m.controlBaseURL,
+	}
+	if m.replica.AccessKey != "" {
+		env["AWS_ACCESS_KEY_ID"] = m.replica.AccessKey
+	}
+	if m.replica.SecretKey != "" {
+		env["AWS_SECRET_ACCESS_KEY"] = m.replica.SecretKey
+	}
+	if m.replica.Region != "" {
+		env["AWS_REGION"] = m.replica.Region
 	}
 	if strings.TrimSpace(worker.LitestreamSHA) != "" {
 		env["LITESTREAM_SHA"] = worker.LitestreamSHA

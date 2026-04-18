@@ -36,6 +36,9 @@ func main() {
 	dbPath := envOrDefault("DB_PATH", "/data/soakctl.db")
 	s3Bucket := envOrDefault("S3_BUCKET", os.Getenv("BUCKET_NAME"))
 	s3Endpoint := envOrDefault("S3_ENDPOINT", os.Getenv("AWS_ENDPOINT_URL_S3"))
+	s3AccessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+	s3SecretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	s3Region := os.Getenv("AWS_REGION")
 	controlBaseURL := envOrDefault("CONTROL_BASE_URL", "https://litestream-soak-ctl.fly.dev")
 	alertWebhookURL := os.Getenv("SOAK_ALERT_WEBHOOK_URL")
 	alertWebhookToken := os.Getenv("SOAK_ALERT_WEBHOOK_BEARER_TOKEN")
@@ -63,7 +66,13 @@ func main() {
 	metrics := orchestrator.NewControlMetrics(db)
 	alerts := orchestrator.NewAlertDispatcher(db, controlBaseURL, alertWebhookURL, alertWebhookToken)
 	fly := flyapi.NewClient(workerAppName, flyToken)
-	mgr := orchestrator.NewManager(fly, db, metrics, alerts, workerAppName, s3Bucket, s3Endpoint, controlBaseURL, platformLogToken)
+	mgr := orchestrator.NewManager(fly, db, metrics, alerts, workerAppName, orchestrator.ReplicaConfig{
+		Bucket:    s3Bucket,
+		Endpoint:  s3Endpoint,
+		AccessKey: s3AccessKey,
+		SecretKey: s3SecretKey,
+		Region:    s3Region,
+	}, controlBaseURL, platformLogToken)
 	deployer := orchestrator.NewDeployer(mgr, db, workerAppName, webhookDeployEnabled)
 	webhookHandler := orchestrator.NewWebhookHandler(webhookSecret, deployer, webhookDeployEnabled)
 	api := orchestrator.NewAPI(db, fly, metrics, alerts, mgr, deployer)
