@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 func TestRecordWindowedEventAt(t *testing.T) {
@@ -130,5 +132,76 @@ func TestUpsertReadyDeploymentKeepsLitestreamVersionsDistinct(t *testing.T) {
 	}
 	if deployment.LitestreamSHA != "litestream-a" {
 		t.Fatalf("deployment.LitestreamSHA = %q, want litestream-a", deployment.LitestreamSHA)
+	}
+}
+
+func TestCreateWorkerResetsRuntimeStateOnReuse(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	worker := &Worker{
+		ID:            "worker-pr-1228-low-vol",
+		Name:          "worker-pr-1228-low-vol",
+		Status:        WorkerRunning,
+		Source:        "pr-1228",
+		GitSHA:        "old-soak",
+		LitestreamSHA: "old-litestream",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	}
+	if err := db.CreateWorker(worker); err != nil {
+		t.Fatalf("CreateWorker(first) error = %v", err)
+	}
+	if err := db.UpdateWorkerHeartbeat(worker.ID); err != nil {
+		t.Fatalf("UpdateWorkerHeartbeat() error = %v", err)
+	}
+	if err := db.UpdateWorkerRuntimeSnapshot(worker.ID, reporting.RuntimePayload{}); err != nil {
+		t.Fatalf("UpdateWorkerRuntimeSnapshot() error = %v", err)
+	}
+
+	reused, err := db.GetWorker(worker.ID)
+	if err != nil {
+		t.Fatalf("GetWorker(before reuse) error = %v", err)
+	}
+	if reused.LastHeartbeatAt == nil {
+		t.Fatalf("LastHeartbeatAt before reuse = nil, want value")
+	}
+	if reused.LastRuntimeAt == nil {
+		t.Fatalf("LastRuntimeAt before reuse = nil, want value")
+	}
+	createdAtBeforeReuse := reused.CreatedAt
+
+	time.Sleep(1100 * time.Millisecond)
+
+	worker.GitSHA = "new-soak"
+	worker.LitestreamSHA = "new-litestream"
+	worker.Status = WorkerPending
+	if err := db.CreateWorker(worker); err != nil {
+		t.Fatalf("CreateWorker(reuse) error = %v", err)
+	}
+
+	reused, err = db.GetWorker(worker.ID)
+	if err != nil {
+		t.Fatalf("GetWorker(after reuse) error = %v", err)
+	}
+	if reused.LastHeartbeatAt != nil {
+		t.Fatalf("LastHeartbeatAt after reuse = %v, want nil", reused.LastHeartbeatAt)
+	}
+	if reused.LastRuntimeAt != nil {
+		t.Fatalf("LastRuntimeAt after reuse = %v, want nil", reused.LastRuntimeAt)
+	}
+	if reused.LastRuntimeJSON != "" {
+		t.Fatalf("LastRuntimeJSON after reuse = %q, want empty", reused.LastRuntimeJSON)
+	}
+	if !reused.CreatedAt.After(createdAtBeforeReuse) {
+		t.Fatalf("CreatedAt after reuse = %s, want reset to a newer timestamp", reused.CreatedAt)
 	}
 }

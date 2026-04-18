@@ -140,8 +140,8 @@ func TestBuildDeploymentRollout(t *testing.T) {
 	if rollout.Workers[0].LitestreamSHA != "litestream-old" {
 		t.Fatalf("first worker LitestreamSHA = %q, want litestream-old", rollout.Workers[0].LitestreamSHA)
 	}
-	if rollout.Workers[1].CurrentFailureSignature != "litestream_sync_socket_refused" {
-		t.Fatalf("CurrentFailureSignature = %q, want litestream_sync_socket_refused", rollout.Workers[1].CurrentFailureSignature)
+	if rollout.Workers[1].CurrentFailureSignature != "" {
+		t.Fatalf("CurrentFailureSignature = %q, want empty for pre-rollout verification", rollout.Workers[1].CurrentFailureSignature)
 	}
 	if !rollout.Workers[2].VerifiedSinceDeploy {
 		t.Fatalf("VerifiedSinceDeploy = false, want true for worker-main-running")
@@ -202,6 +202,53 @@ func TestHandleGetLatestDeployment(t *testing.T) {
 	}
 	if rollout.NextAction == "" {
 		t.Fatalf("NextAction should not be empty")
+	}
+}
+
+func TestBuildWorkerSummaryIgnoresPrecreationVerification(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	worker := model.Worker{
+		ID:            "worker-pr-1228-low-vol",
+		Name:          "worker-pr-1228-low-vol",
+		Status:        model.WorkerRunning,
+		Source:        "pr-1228",
+		GitSHA:        "sha-pr",
+		LitestreamSHA: "litestream-pr",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	}
+	createTestWorker(t, db, worker)
+
+	storedWorker, err := db.GetWorker(worker.ID)
+	if err != nil {
+		t.Fatalf("GetWorker() error = %v", err)
+	}
+
+	oldFailureAt := storedWorker.CreatedAt.Add(-1 * time.Minute).UTC()
+	if err := db.RecordVerification(&model.Verification{
+		WorkerID:     worker.ID,
+		StartedAt:    oldFailureAt.Add(-10 * time.Second),
+		CompletedAt:  &oldFailureAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		Passed:       false,
+		ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`,
+	}); err != nil {
+		t.Fatalf("RecordVerification() error = %v", err)
+	}
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	summary, err := api.buildWorkerSummary(*storedWorker)
+	if err != nil {
+		t.Fatalf("buildWorkerSummary() error = %v", err)
+	}
+	if summary.LastVerification != nil {
+		t.Fatalf("LastVerification = %#v, want nil for precreation verification", summary.LastVerification)
+	}
+	if summary.CurrentFailureSignature != "" {
+		t.Fatalf("CurrentFailureSignature = %q, want empty", summary.CurrentFailureSignature)
 	}
 }
 

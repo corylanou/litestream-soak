@@ -635,13 +635,13 @@ func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (Deployme
 
 		verifications, err := db.ListVerifications(worker.ID, 1)
 		if err == nil && len(verifications) > 0 {
-			if observedAt, ok := verificationObservedAt(verifications[0]); ok {
+			if observedAt, ok := verificationObservedAt(verifications[0]); ok && !observedAt.Before(worker.CreatedAt.UTC()) {
 				progress.LastVerificationAt = &observedAt
 				progress.VerifiedSinceDeploy = progress.Updated && workerNeedsPostDeployVerification(worker.Status) && !deployment.StartedAt.IsZero() && !observedAt.Before(deployment.StartedAt)
-			}
-			if activeFailure(&verifications[0]) {
-				progress.CurrentFailureStage = inferFailureStage(&verifications[0])
-				progress.CurrentFailureSignature = inferFailureSignature(&verifications[0])
+				if activeFailure(&verifications[0]) {
+					progress.CurrentFailureStage = inferFailureStage(&verifications[0])
+					progress.CurrentFailureSignature = inferFailureSignature(&verifications[0])
+				}
 			}
 		}
 
@@ -814,11 +814,13 @@ func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, er
 	}
 	if len(verifications) > 0 {
 		verification := verifications[0]
-		summary.LastVerification = &verification
-		if activeFailure(&verification) {
-			summary.CurrentFailureStage = inferFailureStage(&verification)
-			summary.CurrentFailureSignature = inferFailureSignature(&verification)
-			summary.CurrentProbableSubsystem = inferProbableSubsystem(summary.CurrentFailureStage, summary.CurrentFailureSignature)
+		if observedAt, ok := verificationObservedAt(verification); ok && !observedAt.Before(worker.CreatedAt.UTC()) {
+			summary.LastVerification = &verification
+			if activeFailure(&verification) {
+				summary.CurrentFailureStage = inferFailureStage(&verification)
+				summary.CurrentFailureSignature = inferFailureSignature(&verification)
+				summary.CurrentProbableSubsystem = inferProbableSubsystem(summary.CurrentFailureStage, summary.CurrentFailureSignature)
+			}
 		}
 	}
 
