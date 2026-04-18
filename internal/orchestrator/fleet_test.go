@@ -57,4 +57,27 @@ func TestDefaultFleetForSource(t *testing.T) {
 	if first.Name != "worker-pr-1221-low-vol" {
 		t.Fatalf("first.Name = %q, want worker-pr-1221-low-vol", first.Name)
 	}
+
+	var highVolume DesiredWorker
+	foundHighVolume := false
+	for _, worker := range spec.Workers {
+		if worker.ProfileName != "high-volume" {
+			continue
+		}
+		highVolume = worker
+		foundHighVolume = true
+		break
+	}
+	if !foundHighVolume {
+		t.Fatal("DefaultFleetForSource() missing high-volume worker")
+	}
+	if highVolume.VolumeSizeGB != 100 {
+		t.Fatalf("highVolume.VolumeSizeGB = %d, want 100", highVolume.VolumeSizeGB)
+	}
+	if highVolume.Workload.VolumeSizeGB != 100 {
+		t.Fatalf("highVolume.Workload.VolumeSizeGB = %d, want 100", highVolume.Workload.VolumeSizeGB)
+	}
+	if highVolume.Name != "worker-pr-1221-high-vol" {
+		t.Fatalf("highVolume.Name = %q, want worker-pr-1221-high-vol", highVolume.Name)
+	}
 }
