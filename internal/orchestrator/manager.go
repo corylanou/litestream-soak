@@ -243,6 +243,7 @@ func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, 
 		}
 
 		workloadCfg := resolveWorkerWorkload(w)
+		volumeSizeGB := resolveWorkerVolumeSize(w, workloadCfg)
 
 		newWorker, err := m.CreateWorker(ctx, WorkerRequest{
 			WorkerID:      w.Name,
@@ -254,6 +255,7 @@ func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, 
 			ProfileName:   w.ProfileName,
 			ImageRef:      newImageRef,
 			Region:        w.Region,
+			VolumeSizeGB:  volumeSizeGB,
 			Workload:      workloadCfg,
 		})
 		if err != nil {

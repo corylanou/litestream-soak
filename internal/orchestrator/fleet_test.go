@@ -1,6 +1,11 @@
 package orchestrator
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/workload"
+)
 
 func TestSourcePRNumber(t *testing.T) {
 	t.Parallel()
@@ -58,26 +63,40 @@ func TestDefaultFleetForSource(t *testing.T) {
 		t.Fatalf("first.Name = %q, want worker-pr-1221-low-vol", first.Name)
 	}
 
-	var highVolume DesiredWorker
-	foundHighVolume := false
+	volumeSizes := map[string]int{}
 	for _, worker := range spec.Workers {
-		if worker.ProfileName != "high-volume" {
-			continue
+		if worker.VolumeSizeGB != 0 {
+			volumeSizes[worker.ProfileName] = worker.VolumeSizeGB
 		}
-		highVolume = worker
-		foundHighVolume = true
-		break
+		if worker.VolumeSizeGB != 0 && worker.Workload.VolumeSizeGB != worker.VolumeSizeGB {
+			t.Fatalf("%s Workload.VolumeSizeGB = %d, want %d", worker.ProfileName, worker.Workload.VolumeSizeGB, worker.VolumeSizeGB)
+		}
 	}
-	if !foundHighVolume {
-		t.Fatal("DefaultFleetForSource() missing high-volume worker")
+	if got := volumeSizes["high-volume"]; got != 100 {
+		t.Fatalf("high-volume VolumeSizeGB = %d, want 100", got)
 	}
-	if highVolume.VolumeSizeGB != 100 {
-		t.Fatalf("highVolume.VolumeSizeGB = %d, want 100", highVolume.VolumeSizeGB)
+	if got := volumeSizes["burst-volume"]; got != 100 {
+		t.Fatalf("burst-volume VolumeSizeGB = %d, want 100", got)
 	}
-	if highVolume.Workload.VolumeSizeGB != 100 {
-		t.Fatalf("highVolume.Workload.VolumeSizeGB = %d, want 100", highVolume.Workload.VolumeSizeGB)
+	if desired, ok := defaultFleetDesiredWorker("pr-1221", "worker-pr-1221-high-vol", "worker-pr-1221-high-vol"); !ok {
+		t.Fatal("defaultFleetDesiredWorker() missing PR high-volume worker")
+	} else if desired.Name != "worker-pr-1221-high-vol" {
+		t.Fatalf("desired.Name = %q, want worker-pr-1221-high-vol", desired.Name)
 	}
-	if highVolume.Name != "worker-pr-1221-high-vol" {
-		t.Fatalf("highVolume.Name = %q, want worker-pr-1221-high-vol", highVolume.Name)
+}
+
+func TestResolveWorkerVolumeSizeUsesDefaultFleetForRollouts(t *testing.T) {
+	t.Parallel()
+
+	worker := model.Worker{
+		ID:            "worker-pr-1228-high-vol",
+		Name:          "worker-pr-1228-high-vol",
+		Source:        "pr-1228",
+		ProfileName:   "high-volume",
+		ProfileConfig: workload.Config{LoadMode: "synthetic"}.JSON(),
+	}
+
+	if got := resolveWorkerVolumeSize(worker, normalizeWorkload(workload.ParseConfig(worker.ProfileConfig))); got != 100 {
+		t.Fatalf("resolveWorkerVolumeSize() = %d, want 100", got)
 	}
 }
