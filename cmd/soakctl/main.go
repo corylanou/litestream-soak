@@ -52,6 +52,7 @@ func main() {
 	dormancyMinFailures := intEnvOrDefault("SOAK_DORMANCY_MIN_FAILURES", 3)
 	platformLogMonitorEnabled := envOrDefault("SOAK_PLATFORM_LOG_MONITOR_ENABLED", "true") == "true"
 	platformLogPollInterval := durationEnvOrDefault("SOAK_PLATFORM_LOG_POLL_INTERVAL", time.Minute)
+	volumeInventoryPollInterval := durationEnvOrDefault("SOAK_VOLUME_INVENTORY_POLL_INTERVAL", 10*time.Minute)
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	webhookDeployEnabled := envOrDefault("GITHUB_WEBHOOK_DEPLOY_ENABLED", "false") == "true"
 	listenAddr := envOrDefault("LISTEN_ADDR", ":8080")
@@ -117,6 +118,7 @@ func main() {
 	if platformLogMonitorEnabled {
 		go mgr.RunPlatformLogMonitor(ctx, platformLogPollInterval)
 	}
+	go mgr.RunVolumeInventoryMonitor(ctx, volumeInventoryPollInterval)
 
 	slog.Info("soakctl starting",
 		"listen", listenAddr,
@@ -133,6 +135,7 @@ func main() {
 		"dormancy_min_failures", dormancyMinFailures,
 		"platform_log_monitor_enabled", platformLogMonitorEnabled,
 		"platform_log_poll_interval", platformLogPollInterval,
+		"volume_inventory_poll_interval", volumeInventoryPollInterval,
 		"platform_log_token_overridden", platformLogToken != flyToken,
 		"webhook_deploy_enabled", webhookDeployEnabled,
 	)

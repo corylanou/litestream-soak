@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -36,6 +37,7 @@ type Runner struct {
 	reporter      *Reporter
 	snapshotMu    sync.Mutex
 	snapshot      runtimeSnapshot
+	lastLocalPoll time.Time
 }
 
 func NewRunner(cfg Config) *Runner {
@@ -400,6 +402,11 @@ func (r *Runner) pollDBStats() {
 		SetWALSize(info.Size())
 		r.setWALSize(info.Size())
 	}
+	r.pollDataDiskStats()
+	if time.Since(r.lastLocalPoll) >= time.Minute {
+		r.lastLocalPoll = time.Now()
+		r.pollLitestreamLocalState()
+	}
 
 	client := r.ipcClient()
 	snapshot, err := r.collectLitestreamRuntime(client, time.Now().UTC())
@@ -592,6 +599,63 @@ func (r *Runner) setWALSize(bytes int64) {
 	r.snapshotMu.Lock()
 	defer r.snapshotMu.Unlock()
 	r.snapshot.RuntimePayload.WALSizeBytes = bytes
+}
+
+func (r *Runner) pollDataDiskStats() {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(r.cfg.DataDir, &stat); err != nil {
+		return
+	}
+
+	total := stat.Blocks * uint64(stat.Bsize)
+	free := stat.Bfree * uint64(stat.Bsize)
+	available := stat.Bavail * uint64(stat.Bsize)
+	used := total - free
+	usedPercent := 0.0
+	if total > 0 {
+		usedPercent = float64(used) / float64(total) * 100
+	}
+
+	SetDataDiskStats(total, used, free, usedPercent)
+	r.snapshotMu.Lock()
+	defer r.snapshotMu.Unlock()
+	r.snapshot.RuntimePayload.DataDiskTotalBytes = total
+	r.snapshot.RuntimePayload.DataDiskUsedBytes = used
+	r.snapshot.RuntimePayload.DataDiskFreeBytes = free
+	r.snapshot.RuntimePayload.DataDiskAvailableBytes = available
+	r.snapshot.RuntimePayload.DataDiskUsedPercent = usedPercent
+}
+
+func (r *Runner) pollLitestreamLocalState() {
+	stateDir := litestreamStateDir(r.cfg.DBPath)
+	dirBytes := directorySize(stateDir)
+	ltxBytes := directorySize(filepath.Join(stateDir, "ltx"))
+
+	SetLitestreamLocalStateSize(dirBytes, ltxBytes)
+	r.snapshotMu.Lock()
+	defer r.snapshotMu.Unlock()
+	r.snapshot.RuntimePayload.LitestreamDirSizeBytes = dirBytes
+	r.snapshot.RuntimePayload.LitestreamLTXSizeBytes = ltxBytes
+}
+
+func litestreamStateDir(dbPath string) string {
+	return filepath.Join(filepath.Dir(dbPath), "."+filepath.Base(dbPath)+"-litestream")
+}
+
+func directorySize(path string) int64 {
+	var total int64
+	_ = filepath.WalkDir(path, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	return total
 }
 
 func (r *Runner) setLitestreamSnapshot(snapshot reporting.RuntimePayload) {

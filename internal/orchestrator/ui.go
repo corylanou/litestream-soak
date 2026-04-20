@@ -843,6 +843,7 @@ const homePageTemplate = `{{define "home"}}
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <title>Litestream Soak</title>
   <style>
     :root {
@@ -1545,6 +1546,7 @@ const workerPageTemplate = `{{define "worker"}}
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <title>{{.Incident.Worker.Name}} · Litestream Soak</title>
   <style>
     :root {
@@ -1983,6 +1985,7 @@ const helpPageTemplate = `{{define "help"}}
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <title>Operator Help · Litestream Soak</title>
   <style>
     :root {

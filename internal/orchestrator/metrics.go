@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/reporting"
 	"github.com/prometheus/client_golang/prometheus"
@@ -33,6 +34,7 @@ type controlMetrics struct {
 	sourceComparisonWorkers map[string]labelMetricState
 	sourceComparisonDeltas  map[string]labelMetricState
 	sourceComparisonFailure map[string]labelMetricState
+	volumeInventory         map[string]volumeMetricState
 }
 
 type labelMetricState struct {
@@ -41,6 +43,12 @@ type labelMetricState struct {
 
 type failureMetricState struct {
 	labels []string
+}
+
+type volumeMetricState struct {
+	labels  []string
+	count   float64
+	totalGB float64
 }
 
 var (
@@ -88,6 +96,46 @@ var (
 		Name: "soak_control_worker_runtime_snapshot_status",
 		Help: "Current runtime snapshot health classification tracked by the control plane.",
 	}, []string{"worker_id", "profile", "source", "app_name", "region", "runtime_status"})
+
+	controlWorkerDataDiskTotalSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_data_disk_total_bytes",
+		Help: "Total size of the worker data filesystem in bytes from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerDataDiskUsedSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_data_disk_used_bytes",
+		Help: "Used size of the worker data filesystem in bytes from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerDataDiskFreeSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_data_disk_free_bytes",
+		Help: "Free size of the worker data filesystem in bytes from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerDataDiskUsedPercent = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_data_disk_used_percent",
+		Help: "Used percentage of the worker data filesystem from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerDBSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_db_size_bytes",
+		Help: "Current database file size in bytes from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerWALSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_wal_size_bytes",
+		Help: "Current WAL file size in bytes from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerLitestreamLocalStateSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_litestream_local_state_bytes",
+		Help: "Recursive size of the local Litestream state directory in bytes from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerLitestreamLocalLTXSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_litestream_local_ltx_bytes",
+		Help: "Recursive size of the local Litestream LTX directory in bytes from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
 
 	controlWorkerLatestPlatformEventInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_control_worker_latest_platform_event_info",
@@ -183,6 +231,16 @@ var (
 		Name: "soak_control_source_comparison_failure",
 		Help: "Failure signature counts for the latest cross-source comparison.",
 	}, []string{"base_source", "head_source", "comparison_role", "git_sha", "litestream_sha", "failure_stage", "failure_signature"})
+
+	controlAppVolumeCount = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_app_volume_count",
+		Help: "Fly volume count grouped by app, region, attachment state, and configured size.",
+	}, []string{"app_name", "region", "attachment_state", "size_gb"})
+
+	controlAppVolumeSizeGB = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_app_volume_size_gb",
+		Help: "Total Fly volume size in gigabytes grouped by app, region, attachment state, and configured size.",
+	}, []string{"app_name", "region", "attachment_state", "size_gb"})
 )
 
 func NewControlMetrics(db *model.DB) *controlMetrics {
@@ -202,6 +260,7 @@ func NewControlMetrics(db *model.DB) *controlMetrics {
 		sourceComparisonWorkers: make(map[string]labelMetricState),
 		sourceComparisonDeltas:  make(map[string]labelMetricState),
 		sourceComparisonFailure: make(map[string]labelMetricState),
+		volumeInventory:         make(map[string]volumeMetricState),
 	}
 	m.syncFromDB(db)
 	return m
@@ -314,6 +373,16 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 		controlWorkerRuntimeSnapshotStatus.WithLabelValues(previousRuntime.labels...).Set(0)
 	}
 	controlWorkerRuntimeSnapshotStatus.WithLabelValues(runtimeLabels...).Set(1)
+	if runtime := extractReportedRuntime(worker, nil); runtime != nil {
+		controlWorkerDataDiskTotalSize.WithLabelValues(labels...).Set(float64(runtime.DataDiskTotalBytes))
+		controlWorkerDataDiskUsedSize.WithLabelValues(labels...).Set(float64(runtime.DataDiskUsedBytes))
+		controlWorkerDataDiskFreeSize.WithLabelValues(labels...).Set(float64(runtime.DataDiskFreeBytes))
+		controlWorkerDataDiskUsedPercent.WithLabelValues(labels...).Set(runtime.DataDiskUsedPercent)
+		controlWorkerDBSize.WithLabelValues(labels...).Set(float64(runtime.DBSizeBytes))
+		controlWorkerWALSize.WithLabelValues(labels...).Set(float64(runtime.WALSizeBytes))
+		controlWorkerLitestreamLocalStateSize.WithLabelValues(labels...).Set(float64(runtime.LitestreamDirSizeBytes))
+		controlWorkerLitestreamLocalLTXSize.WithLabelValues(labels...).Set(float64(runtime.LitestreamLTXSizeBytes))
+	}
 
 	if previousStatus != "" && previousStatus != string(worker.Status) {
 		controlWorkerStatus.WithLabelValues(append(labels, previousStatus)...).Set(0)
@@ -956,6 +1025,64 @@ func workerRegion(worker model.Worker) string {
 		return "unknown"
 	}
 	return worker.Region
+}
+
+func (m *controlMetrics) observeVolumes(appName string, volumes []flyapi.Volume) {
+	appName = metricValueOrUnknown(appName)
+	next := make(map[string]volumeMetricState)
+	for _, volume := range volumes {
+		if skipVolumeInventoryState(volume.State) {
+			continue
+		}
+		attachmentState := "unattached"
+		if strings.TrimSpace(volume.AttachedMachineID) != "" {
+			attachmentState = "attached"
+		}
+		labels := []string{
+			appName,
+			metricValueOrUnknown(volume.Region),
+			attachmentState,
+			metricIntLabel(volume.SizeGB),
+		}
+		key := strings.Join(labels, ":")
+		state := next[key]
+		if len(state.labels) == 0 {
+			state.labels = labels
+		}
+		state.count++
+		state.totalGB += float64(volume.SizeGB)
+		next[key] = state
+	}
+
+	m.mu.Lock()
+	previous := make([]volumeMetricState, 0, len(m.volumeInventory))
+	for key, state := range m.volumeInventory {
+		if _, ok := next[key]; !ok {
+			previous = append(previous, state)
+		}
+	}
+	m.volumeInventory = next
+	m.mu.Unlock()
+
+	for _, state := range previous {
+		if len(state.labels) > 0 {
+			controlAppVolumeCount.WithLabelValues(state.labels...).Set(0)
+			controlAppVolumeSizeGB.WithLabelValues(state.labels...).Set(0)
+		}
+	}
+	for _, state := range next {
+		controlAppVolumeCount.WithLabelValues(state.labels...).Set(state.count)
+		controlAppVolumeSizeGB.WithLabelValues(state.labels...).Set(state.totalGB)
+	}
+}
+
+func skipVolumeInventoryState(state string) bool {
+	switch strings.TrimSpace(strings.ToLower(state)) {
+	case "destroyed", "deleting", "pending_destroy":
+		return true
+	default:
+		return false
+	}
 }
 
 func metricValueOrUnknown(v string) string {

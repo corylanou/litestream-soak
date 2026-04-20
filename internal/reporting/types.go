@@ -29,8 +29,15 @@ type WorkerIdentity struct {
 
 type RuntimePayload struct {
 	UptimeSeconds             float64   `json:"uptime_seconds,omitempty"`
+	DataDiskTotalBytes        uint64    `json:"data_disk_total_bytes,omitempty"`
+	DataDiskUsedBytes         uint64    `json:"data_disk_used_bytes,omitempty"`
+	DataDiskFreeBytes         uint64    `json:"data_disk_free_bytes,omitempty"`
+	DataDiskAvailableBytes    uint64    `json:"data_disk_available_bytes,omitempty"`
+	DataDiskUsedPercent       float64   `json:"data_disk_used_percent,omitempty"`
 	DBSizeBytes               int64     `json:"db_size_bytes,omitempty"`
 	WALSizeBytes              int64     `json:"wal_size_bytes,omitempty"`
+	LitestreamDirSizeBytes    int64     `json:"litestream_dir_size_bytes,omitempty"`
+	LitestreamLTXSizeBytes    int64     `json:"litestream_ltx_size_bytes,omitempty"`
 	DBTXID                    uint64    `json:"db_txid,omitempty"`
 	DBStatus                  string    `json:"db_status,omitempty"`
 	LastSyncAgeSeconds        float64   `json:"last_sync_age_seconds,omitempty"`

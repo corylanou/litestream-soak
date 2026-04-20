@@ -70,6 +70,15 @@ func TestPollDBStatsMarksSnapshotHealthy(t *testing.T) {
 	if snapshot.WALSizeBytes != 5 {
 		t.Fatalf("wal size=%d want 5", snapshot.WALSizeBytes)
 	}
+	if snapshot.DataDiskTotalBytes == 0 {
+		t.Fatal("expected data disk total bytes")
+	}
+	if snapshot.DataDiskUsedBytes == 0 {
+		t.Fatal("expected data disk used bytes")
+	}
+	if snapshot.DataDiskUsedPercent == 0 {
+		t.Fatal("expected data disk used percent")
+	}
 	if snapshot.SnapshotCollectedAt.IsZero() {
 		t.Fatal("expected snapshot collected timestamp")
 	}
@@ -126,11 +135,47 @@ func TestPollDBStatsClearsStaleLitestreamStateOnFailure(t *testing.T) {
 	if snapshot.WALSizeBytes != 5 {
 		t.Fatalf("wal size=%d want 5", snapshot.WALSizeBytes)
 	}
+	if snapshot.DataDiskTotalBytes == 0 {
+		t.Fatal("expected data disk total bytes")
+	}
 	if !strings.Contains(snapshot.LitestreamSnapshotError, "read txid") {
 		t.Fatalf("snapshot error=%q", snapshot.LitestreamSnapshotError)
 	}
 	if snapshot.SnapshotCollectedAt.IsZero() {
 		t.Fatal("expected snapshot collected timestamp")
+	}
+}
+
+func TestPollLitestreamLocalState(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, ".test.db-litestream")
+	if err := os.MkdirAll(filepath.Join(stateDir, "ltx"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "meta"), []byte("123"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "ltx", "0001.ltx"), []byte("12345"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.WorkerID = "test-worker-local-state"
+	cfg.ProfileName = "test-profile"
+	cfg.Source = "test"
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+
+	SetWorkerInfo(cfg)
+	runner := NewRunner(cfg)
+	runner.pollLitestreamLocalState()
+
+	snapshot := runner.currentSnapshot()
+	if snapshot.LitestreamDirSizeBytes != 8 {
+		t.Fatalf("litestream dir size=%d want 8", snapshot.LitestreamDirSizeBytes)
+	}
+	if snapshot.LitestreamLTXSizeBytes != 5 {
+		t.Fatalf("litestream ltx size=%d want 5", snapshot.LitestreamLTXSizeBytes)
 	}
 }
 

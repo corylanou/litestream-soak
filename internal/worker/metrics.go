@@ -58,6 +58,36 @@ var (
 		Help: "Current WAL file size in bytes.",
 	}, []string{"worker_id", "profile", "source"})
 
+	dataDiskTotalSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_data_disk_total_bytes",
+		Help: "Total size of the worker data filesystem in bytes.",
+	}, []string{"worker_id", "profile", "source"})
+
+	dataDiskUsedSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_data_disk_used_bytes",
+		Help: "Used size of the worker data filesystem in bytes.",
+	}, []string{"worker_id", "profile", "source"})
+
+	dataDiskFreeSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_data_disk_free_bytes",
+		Help: "Free size of the worker data filesystem in bytes.",
+	}, []string{"worker_id", "profile", "source"})
+
+	dataDiskUsedPercent = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_data_disk_used_percent",
+		Help: "Used percentage of the worker data filesystem.",
+	}, []string{"worker_id", "profile", "source"})
+
+	litestreamDirSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_local_state_bytes",
+		Help: "Recursive size of the local Litestream state directory in bytes.",
+	}, []string{"worker_id", "profile", "source"})
+
+	litestreamLTXSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_local_ltx_bytes",
+		Help: "Recursive size of the local Litestream LTX directory in bytes.",
+	}, []string{"worker_id", "profile", "source"})
+
 	dbTXID = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_db_txid",
 		Help: "Current transaction ID from litestream.",
@@ -136,6 +166,20 @@ func SetDBSize(bytes int64) {
 
 func SetWALSize(bytes int64) {
 	walSize.WithLabelValues(currentMetricLabels()...).Set(float64(bytes))
+}
+
+func SetDataDiskStats(total, used, free uint64, usedPercent float64) {
+	labels := currentMetricLabels()
+	dataDiskTotalSize.WithLabelValues(labels...).Set(float64(total))
+	dataDiskUsedSize.WithLabelValues(labels...).Set(float64(used))
+	dataDiskFreeSize.WithLabelValues(labels...).Set(float64(free))
+	dataDiskUsedPercent.WithLabelValues(labels...).Set(usedPercent)
+}
+
+func SetLitestreamLocalStateSize(dirBytes, ltxBytes int64) {
+	labels := currentMetricLabels()
+	litestreamDirSize.WithLabelValues(labels...).Set(float64(dirBytes))
+	litestreamLTXSize.WithLabelValues(labels...).Set(float64(ltxBytes))
 }
 
 func SetDBTXID(txid float64) {

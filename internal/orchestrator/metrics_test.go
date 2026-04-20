@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -189,6 +190,46 @@ func TestControlMetricsExposeLatestDeploymentComparison(t *testing.T) {
 		"failure_stage":     "integrity",
 		"failure_signature": "sqlite_index_mismatch",
 	}, 1)
+}
+
+func TestControlMetricsExposeVolumeInventory(t *testing.T) {
+	db := openTestDB(t)
+	metrics := NewControlMetrics(db)
+	metrics.observeVolumes("metrics-volume-app", []flyapi.Volume{
+		{Region: "ord", SizeGB: 100, AttachedMachineID: "machine-one"},
+		{Region: "ord", SizeGB: 10},
+		{Region: "ord", SizeGB: 10},
+		{Region: "ord", State: "pending_destroy", SizeGB: 100},
+	})
+
+	assertGatheredGaugeValue(t, "soak_control_app_volume_count", map[string]string{
+		"app_name":         "metrics-volume-app",
+		"region":           "ord",
+		"attachment_state": "attached",
+		"size_gb":          "100",
+	}, 1)
+	assertGatheredGaugeValue(t, "soak_control_app_volume_size_gb", map[string]string{
+		"app_name":         "metrics-volume-app",
+		"region":           "ord",
+		"attachment_state": "unattached",
+		"size_gb":          "10",
+	}, 20)
+
+	metrics.observeVolumes("metrics-volume-app", []flyapi.Volume{
+		{Region: "ord", SizeGB: 10, AttachedMachineID: "machine-two"},
+	})
+	assertGatheredGaugeValue(t, "soak_control_app_volume_count", map[string]string{
+		"app_name":         "metrics-volume-app",
+		"region":           "ord",
+		"attachment_state": "unattached",
+		"size_gb":          "10",
+	}, 0)
+	assertGatheredGaugeValue(t, "soak_control_app_volume_size_gb", map[string]string{
+		"app_name":         "metrics-volume-app",
+		"region":           "ord",
+		"attachment_state": "attached",
+		"size_gb":          "10",
+	}, 10)
 }
 
 func assertGatheredGaugeValue(t *testing.T, metricName string, expectedLabels map[string]string, expectedValue float64) {

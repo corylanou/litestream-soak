@@ -459,7 +459,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
+        "w": 4,
         "x": 0,
         "y": 8
       },
@@ -477,14 +477,57 @@
     {
       "fieldConfig": {
         "defaults": {
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 8
+      },
+      "id": 36,
+      "targets": [
+        {
+          "expr": "max(soak_control_worker_data_disk_used_percent{worker_id=\"$worker\"}) or max(soak_data_disk_used_percent{worker_id=\"$worker\"}) or on() vector(0)",
+          "legendFormat": "disk used"
+        }
+      ],
+      "title": "Data Disk Used",
+      "type": "stat",
+      "options": {}
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
           "unit": "bytes"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 6,
+        "w": 4,
+        "x": 8,
         "y": 8
       },
       "id": 11,
@@ -507,7 +550,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
+        "w": 4,
         "x": 12,
         "y": 8
       },
@@ -519,6 +562,30 @@
         }
       ],
       "title": "WAL Size",
+      "type": "stat",
+      "options": {}
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 8
+      },
+      "id": 37,
+      "targets": [
+        {
+          "expr": "max(soak_control_worker_litestream_local_ltx_bytes{worker_id=\"$worker\"}) or max(soak_litestream_local_ltx_bytes{worker_id=\"$worker\"}) or on() vector(0)",
+          "legendFormat": "local ltx"
+        }
+      ],
+      "title": "Local LTX State",
       "type": "stat",
       "options": {}
     },
@@ -548,8 +615,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 18,
+        "w": 4,
+        "x": 20,
         "y": 8
       },
       "id": 13,
@@ -910,6 +977,36 @@
                 }
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "data disk used"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "local ltx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
           }
         ]
       },
@@ -933,15 +1030,23 @@
       },
       "targets": [
         {
+          "expr": "max by (worker_id) (soak_control_worker_data_disk_used_bytes{worker_id=\"$worker\"}) or max by (worker_id) (soak_data_disk_used_bytes{worker_id=\"$worker\"})",
+          "legendFormat": "data disk used"
+        },
+        {
           "expr": "max by (worker_id) (soak_db_size_bytes{worker_id=\"$worker\"})",
           "legendFormat": "db"
         },
         {
           "expr": "max by (worker_id) (soak_wal_size_bytes{worker_id=\"$worker\"})",
           "legendFormat": "wal"
+        },
+        {
+          "expr": "max by (worker_id) (soak_control_worker_litestream_local_ltx_bytes{worker_id=\"$worker\"}) or max by (worker_id) (soak_litestream_local_ltx_bytes{worker_id=\"$worker\"})",
+          "legendFormat": "local ltx"
         }
       ],
-      "title": "DB and WAL Size",
+      "title": "Storage Trend",
       "type": "timeseries"
     },
     {
@@ -1586,7 +1691,18 @@
         "label": "Source",
         "multi": false,
         "name": "source",
-        "options": [],
+        "options": [
+          {
+            "selected": true,
+            "text": "main",
+            "value": "main"
+          },
+          {
+            "selected": false,
+            "text": "pr-1228",
+            "value": "pr-1228"
+          }
+        ],
         "query": "label_values(soak_control_worker_info, source)",
         "refresh": 1,
         "regex": "/^(?!unknown$).+/",
@@ -1605,7 +1721,18 @@
         "label": "Worker",
         "multi": false,
         "name": "worker",
-        "options": [],
+        "options": [
+          {
+            "selected": true,
+            "text": "worker-main-orders-replay",
+            "value": "worker-main-orders-replay"
+          },
+          {
+            "selected": false,
+            "text": "worker-pr-1228-high-vol",
+            "value": "worker-pr-1228-high-vol"
+          }
+        ],
         "query": "label_values(soak_control_worker_info{source=\"$source\"}, worker_id)",
         "refresh": 1,
         "regex": "",
@@ -1620,5 +1747,5 @@
   },
   "title": "Litestream Soak Drilldown",
   "uid": "litestream-soak",
-  "version": 7
+  "version": 8
 }

@@ -709,7 +709,13 @@
         "label": "Compare Source",
         "multi": false,
         "name": "compare_source",
-        "options": [],
+        "options": [
+          {
+            "selected": true,
+            "text": "pr-1228",
+            "value": "pr-1228"
+          }
+        ],
         "query": "label_values(soak_control_source_comparison_info, head_source)",
         "refresh": 1,
         "regex": "/^(?!main$).+/",

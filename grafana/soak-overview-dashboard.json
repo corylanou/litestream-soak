@@ -1790,6 +1790,125 @@
       ],
       "title": "Platform Signals",
       "type": "row"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "links": [
+            {
+              "targetBlank": true,
+              "title": "Open Worker",
+              "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__series.name}"
+            }
+          ],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 45
+      },
+      "id": 140,
+      "options": {
+        "displayMode": "basic",
+        "namePlacement": "left",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": false,
+        "sizing": "manual",
+        "text": {}
+      },
+      "targets": [
+        {
+          "expr": "sort_desc(max by (worker_id) (soak_control_worker_data_disk_used_percent{source=\"$source\"})) or sort_desc(max by (worker_id) (soak_data_disk_used_percent{source=\"$source\"})) or on() vector(0)",
+          "legendFormat": "{{worker_id}}"
+        }
+      ],
+      "title": "Disk Pressure By Worker",
+      "type": "bargauge"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 45
+      },
+      "id": 141,
+      "options": {
+        "displayMode": "basic",
+        "namePlacement": "left",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": false,
+        "sizing": "manual",
+        "text": {}
+      },
+      "targets": [
+        {
+          "expr": "sum by (attachment_state) (soak_control_app_volume_size_gb) or on() vector(0)",
+          "legendFormat": "{{attachment_state}}"
+        }
+      ],
+      "title": "Volume GB By State",
+      "type": "bargauge"
     }
   ],
   "refresh": "30s",
@@ -1814,7 +1933,18 @@
         "label": "Source",
         "multi": false,
         "name": "source",
-        "options": [],
+        "options": [
+          {
+            "selected": true,
+            "text": "main",
+            "value": "main"
+          },
+          {
+            "selected": false,
+            "text": "pr-1228",
+            "value": "pr-1228"
+          }
+        ],
         "query": "label_values(soak_control_worker_info, source)",
         "refresh": 1,
         "regex": "/^(?!unknown$).+/",
@@ -1833,7 +1963,18 @@
         "label": "Worker",
         "multi": false,
         "name": "worker",
-        "options": [],
+        "options": [
+          {
+            "selected": true,
+            "text": "worker-main-orders-replay",
+            "value": "worker-main-orders-replay"
+          },
+          {
+            "selected": false,
+            "text": "worker-pr-1228-high-vol",
+            "value": "worker-pr-1228-high-vol"
+          }
+        ],
         "query": "label_values(soak_control_worker_info{source=\"$source\"}, worker_id)",
         "refresh": 1,
         "regex": "",
@@ -1848,5 +1989,5 @@
   },
   "title": "Litestream Soak Overview",
   "uid": "litestream-soak-overview",
-  "version": 11
+  "version": 12
 }

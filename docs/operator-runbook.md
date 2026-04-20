@@ -486,11 +486,17 @@ The dashboard is strongest at:
 - sync age drift
 - worker restarts and Litestream restarts
 - workload shape comparison
+- disk pressure and local Litestream state growth
 - current failure labels
 - last failure labels even after a worker recovers
 
 The key dashboard panels are:
 
+- `Disk Pressure By Worker`
+- `Volume GB By State`
+- `Data Disk Used`
+- `Local LTX State`
+- `Storage Trend`
 - `Fleet Last Failure Classes`
 - `Fleet Last Failure Age`
 - `Fleet Workload Shapes`
@@ -591,16 +597,26 @@ Inside the worker machine, these checks are usually the most useful:
 
 ```bash
 ps aux | rg litestream
+ss -xlpn | rg litestream.sock
+lsof /data/test.db /data/test.db-wal /data/litestream.sock
+df -h /data
+du -sh /data/test.db /data/test.db-wal /data/.test.db-litestream 2>/dev/null
 ls -lah /data
 ls -lah /data/litestream.sock
 tail -n 50 /data/verification.log
 cat /data/litestream.yml
 sqlite3 /data/test.db 'pragma wal_checkpoint(passive);'
+litestream ltx -level all /data/test.db
+/usr/bin/time -p curl --unix-socket /data/litestream.sock \
+  'http://localhost/txid?path=/data/test.db'
+s3cmd --access_key="$AWS_ACCESS_KEY_ID" --secret_key="$AWS_SECRET_ACCESS_KEY" \
+  --host=fly.storage.tigris.dev --host-bucket='%(bucket)s.fly.storage.tigris.dev' \
+  --region="$AWS_REGION" ls "s3://$S3_BUCKET/$S3_PATH/"
 ```
 
 The standard worker image includes `curl`, `jq`, `ripgrep`, `procps`,
-`iproute2`, and `sqlite3` so those commands work without a separate debug
-image.
+`iproute2`, `sqlite3`, `time`, `lsof`, `strace`, `file`, `netcat-openbsd`,
+`dnsutils`, and `s3cmd` so those commands work without a separate debug image.
 
 ## How To Debug Litestream Specifically
 
