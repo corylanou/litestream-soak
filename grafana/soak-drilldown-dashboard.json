@@ -1685,7 +1685,7 @@
           "text": "main",
           "value": "main"
         },
-        "definition": "label_values(soak_control_worker_info, source)",
+        "definition": "main,pr-1228",
         "hide": 0,
         "includeAll": false,
         "label": "Source",
@@ -1703,11 +1703,11 @@
             "value": "pr-1228"
           }
         ],
-        "query": "label_values(soak_control_worker_info, source)",
-        "refresh": 1,
-        "regex": "/^(?!unknown$).+/",
+        "query": "main,pr-1228",
+        "refresh": 0,
+        "regex": "",
         "sort": 1,
-        "type": "query"
+        "type": "custom"
       },
       {
         "current": {

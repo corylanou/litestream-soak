@@ -11,7 +11,7 @@
       "targetBlank": true,
       "title": "Overview Dashboard",
       "type": "link",
-      "url": "/d/litestream-soak-overview"
+      "url": "/d/litestream-soak-overview?var-source=main&var-worker=worker-main-orders-replay"
     },
     {
       "targetBlank": true,
@@ -703,7 +703,7 @@
           "text": "pr-1228",
           "value": "pr-1228"
         },
-        "definition": "label_values(soak_control_source_comparison_info, head_source)",
+        "definition": "pr-1228",
         "hide": 0,
         "includeAll": false,
         "label": "Compare Source",
@@ -716,11 +716,11 @@
             "value": "pr-1228"
           }
         ],
-        "query": "label_values(soak_control_source_comparison_info, head_source)",
-        "refresh": 1,
-        "regex": "/^(?!main$).+/",
+        "query": "pr-1228",
+        "refresh": 0,
+        "regex": "",
         "sort": 1,
-        "type": "query"
+        "type": "custom"
       }
     ]
   },

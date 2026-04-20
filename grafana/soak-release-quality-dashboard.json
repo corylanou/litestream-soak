@@ -11,19 +11,19 @@
       "targetBlank": true,
       "title": "Overview Dashboard",
       "type": "link",
-      "url": "/d/litestream-soak-overview"
+      "url": "/d/litestream-soak-overview?var-source=main&var-worker=worker-main-orders-replay"
     },
     {
       "targetBlank": true,
       "title": "Drilldown Dashboard",
       "type": "link",
-      "url": "/d/litestream-soak"
+      "url": "/d/litestream-soak?var-source=main&var-worker=worker-main-orders-replay"
     },
     {
       "targetBlank": true,
       "title": "Source Compare",
       "type": "link",
-      "url": "/d/litestream-source-compare"
+      "url": "/d/litestream-source-compare?var-compare_source=pr-1228"
     },
     {
       "targetBlank": true,
