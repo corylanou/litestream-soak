@@ -5,13 +5,12 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
-	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/s3util"
 	"github.com/corylanou/litestream-soak/internal/workload"
 	"github.com/google/uuid"
 )
@@ -158,35 +157,24 @@ func (m *Manager) clearWorkerReplicaPrefix(ctx context.Context, worker model.Wor
 	defer cancel()
 
 	replicaURL := fmt.Sprintf("s3://%s/%s/", bucket, prefix)
-	args := []string{"s3", "rm", "--recursive", replicaURL}
-	if endpoint := strings.TrimSpace(m.replica.Endpoint); endpoint != "" {
-		args = append(args, "--endpoint-url", endpoint)
-	}
-
-	cmd := exec.CommandContext(clearCtx, "aws", args...)
-	cmd.Env = os.Environ()
-	if accessKey := strings.TrimSpace(m.replica.AccessKey); accessKey != "" {
-		cmd.Env = append(cmd.Env, "AWS_ACCESS_KEY_ID="+accessKey)
-	}
-	if secretKey := strings.TrimSpace(m.replica.SecretKey); secretKey != "" {
-		cmd.Env = append(cmd.Env, "AWS_SECRET_ACCESS_KEY="+secretKey)
-	}
-	if region := strings.TrimSpace(m.replica.Region); region != "" {
-		cmd.Env = append(cmd.Env, "AWS_REGION="+region)
-	}
-
-	output, err := cmd.CombinedOutput()
+	deleted, err := s3util.DeletePrefix(clearCtx, s3util.Config{
+		Bucket:    bucket,
+		Endpoint:  m.replica.Endpoint,
+		AccessKey: m.replica.AccessKey,
+		SecretKey: m.replica.SecretKey,
+		Region:    m.replica.Region,
+	}, prefix)
 	if clearCtx.Err() == context.DeadlineExceeded {
 		return fmt.Errorf("timed out clearing %s", replicaURL)
 	}
 	if err != nil {
-		return fmt.Errorf("aws s3 rm %s failed: %w: %s", replicaURL, err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("clear %s: %w", replicaURL, err)
 	}
 
 	if m.db != nil {
-		_ = m.db.RecordEvent(worker.ID, "replica_prefix_cleared", fmt.Sprintf("Cleared replica prefix %s", replicaURL), "")
+		_ = m.db.RecordEvent(worker.ID, "replica_prefix_cleared", fmt.Sprintf("Cleared %d object(s) from replica prefix %s", deleted, replicaURL), "")
 	}
-	slog.Info("Cleared worker replica prefix", "worker_id", worker.ID, "prefix", replicaURL)
+	slog.Info("Cleared worker replica prefix", "worker_id", worker.ID, "prefix", replicaURL, "objects", deleted)
 	return nil
 }
 
