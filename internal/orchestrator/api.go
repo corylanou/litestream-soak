@@ -1480,6 +1480,8 @@ func inferDeploymentRolloutStatus(rollout DeploymentRolloutResponse) string {
 		return "probing"
 	case rollout.DormantWorkers > 0 || rollout.DegradedWorkers > 0:
 		return "needs_attention"
+	case rollout.AwaitingVerification > 0:
+		return "settling"
 	default:
 		return "stable"
 	}
@@ -1494,6 +1496,8 @@ func summarizeDeploymentRollout(rollout DeploymentRolloutResponse) string {
 		return fmt.Sprintf("The %s rollout is still in progress. %d of %d workers are updated, %d still need the new release, and %d updated workers still need a fresh verification.", subject, rollout.UpdatedWorkers, rollout.TotalWorkers, rollout.OutdatedWorkers, rollout.AwaitingVerification)
 	case "probing":
 		return fmt.Sprintf("The %s rollout is still settling. All %d workers are on the new release, %d have verified since rollout, and %d still need a fresh verification.", subject, rollout.TotalWorkers, rollout.VerifiedSinceDeploy, rollout.AwaitingVerification)
+	case "settling":
+		return fmt.Sprintf("The %s rollout is waiting for verification. All %d workers are on the new release, %d have verified since rollout, and %d still need a fresh verification.", subject, rollout.TotalWorkers, rollout.VerifiedSinceDeploy, rollout.AwaitingVerification)
 	case "needs_attention":
 		return fmt.Sprintf("The %s rollout needs attention. All %d workers are on the new release, but %s: %d degraded and %d dormant.", subject, rollout.TotalWorkers, workersNeedInvestigation(rollout.AttentionWorkers), rollout.DegradedWorkers, rollout.DormantWorkers)
 	default:
@@ -1643,6 +1647,11 @@ func inferDeploymentNextAction(rollout DeploymentRolloutResponse) string {
 			return "Open probing workers now. The rollout has not settled after a full verification cycle."
 		}
 		return "Wait for the next verification cycle to finish before deciding whether the release helped."
+	case "settling":
+		if rollout.GraceWindowExceeded {
+			return "Open workers that still have no fresh verification. The rollout has not completed a verification cycle."
+		}
+		return "Wait for the first post-rollout verification cycle to finish before scoring this release."
 	case "needs_attention":
 		if rollout.GraceWindowExceeded {
 			return "Treat this as a failed rollout until the degraded or dormant workers are explained."
@@ -1672,6 +1681,12 @@ func inferDeploymentNextChecks(rollout DeploymentRolloutResponse) []string {
 			"Wait for the next verification cycle to finish.",
 			"Check that awaiting_verification_workers falls as updated workers report fresh results.",
 			"Open workers still marked probing after that cycle.",
+		)
+	case "settling":
+		checks = append(checks,
+			"Wait for the first post-rollout verification cycle to finish.",
+			"Check that awaiting_verification_workers falls to zero.",
+			"Open any worker that still has no fresh verification after the grace window.",
 		)
 	case "needs_attention":
 		checks = append(checks,

@@ -195,8 +195,8 @@ func TestHandleGetLatestDeployment(t *testing.T) {
 	if rollout.Deployment.LitestreamSHA != "litestream-latest" {
 		t.Fatalf("Deployment.LitestreamSHA = %q, want litestream-latest", rollout.Deployment.LitestreamSHA)
 	}
-	if rollout.Status != "stable" {
-		t.Fatalf("Status = %q, want stable", rollout.Status)
+	if rollout.Status != "settling" {
+		t.Fatalf("Status = %q, want settling", rollout.Status)
 	}
 	if rollout.UpdatedWorkers != 1 || rollout.TotalWorkers != 1 {
 		t.Fatalf("updated/total = %d/%d, want 1/1", rollout.UpdatedWorkers, rollout.TotalWorkers)
