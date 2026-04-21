@@ -284,12 +284,26 @@ func TestBuildTriageCommandsUseBasicAuth(t *testing.T) {
 	if !strings.Contains(text, "/api/diagnosis") {
 		t.Fatalf("triage commands missing diagnosis endpoint: %s", text)
 	}
+	if !strings.Contains(text, "/debug-snapshot") {
+		t.Fatalf("triage commands missing debug snapshot endpoint: %s", text)
+	}
 }
 
 func TestBuildPromptIncludesFleetDiagnosisAndAuthGuidance(t *testing.T) {
+	failureDebug := &reporting.FailureDebugSnapshot{
+		Reason: "wait for sync: connection refused",
+		Run: reporting.WorkerIdentity{
+			WorkerID: "worker-main-burst-vol",
+			RunID:    "run-123",
+		},
+		FDCounts: []reporting.ProcessFDCounts{
+			{PID: 100, Command: "litestream", Total: 12, ByType: map[string]int{"socket": 10}},
+		},
+	}
 	legacyEventDetails, err := json.Marshal(reporting.VerificationPayload{
 		WorkerIdentity: reporting.WorkerIdentity{
 			WorkerID: "worker-main-burst-vol",
+			RunID:    "run-123",
 		},
 		StartedAt:    timeMustParse("2026-04-11T20:30:00Z"),
 		CompletedAt:  timeMustParse("2026-04-11T20:30:02Z"),
@@ -297,6 +311,10 @@ func TestBuildPromptIncludesFleetDiagnosisAndAuthGuidance(t *testing.T) {
 		Status:       "failed",
 		Passed:       false,
 		ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`,
+		Steps: []reporting.VerificationStep{
+			{Name: "sync", Status: "error", Error: "connection refused"},
+		},
+		FailureDebug: failureDebug,
 		RuntimePayload: reporting.RuntimePayload{
 			DBStatus: "replicating",
 			DBTXID:   42,
@@ -349,8 +367,10 @@ func TestBuildPromptIncludesFleetDiagnosisAndAuthGuidance(t *testing.T) {
 			LitestreamSnapshotHealthy: false,
 			LitestreamSnapshotError:   "read txid: dial unix /data/litestream.sock: connect: connection refused",
 		},
+		FailureDebug: failureDebug,
 		TriageCommands: []string{
 			`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/workers/worker-main-burst-vol/incident | jq .`,
+			`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/workers/worker-main-burst-vol/debug-snapshot | jq .`,
 			`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/diagnosis | jq .`,
 		},
 		RecentEvents: []model.Event{
@@ -369,9 +389,15 @@ func TestBuildPromptIncludesFleetDiagnosisAndAuthGuidance(t *testing.T) {
 		"<related_clusters>",
 		"<control_plane_access>",
 		"shared across the fleet or isolated",
+		"<worker_debug_tools>",
+		"debug-snapshot",
+		"<failure_debug_snapshot>",
 		"<reported_runtime>",
 		"<runtime_interpretation>",
 		"<recent_event_summaries>",
+		`"run_id": "run-123"`,
+		`"failure_debug_captured": true`,
+		`"name": "sync"`,
 		"litestream_snapshot_healthy",
 		"current_runtime_snapshot_status: unknown",
 		`"runtime_snapshot_status": "legacy"`,

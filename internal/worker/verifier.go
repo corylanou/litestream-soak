@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 type VerificationResult struct {
@@ -25,6 +27,7 @@ type VerificationResult struct {
 	DurationMS   int
 	DBSizeBytes  int64
 	WALSizeBytes int64
+	Steps        []reporting.VerificationStep
 }
 
 type Verifier struct {
@@ -41,16 +44,16 @@ func NewVerifier(cfg Config, loadCmd *exec.Cmd) *Verifier {
 	}
 }
 
-func (v *Verifier) RunCycle(ctx context.Context) (VerificationResult, error) {
+func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, retErr error) {
 	start := time.Now()
-	result := VerificationResult{
+	result = VerificationResult{
 		StartedAt: start.UTC(),
 		CheckType: v.cfg.VerifyType,
 		Status:    "running",
 	}
 	slog.Info("Starting verification cycle")
 
-	if err := v.pauseLoad(); err != nil {
+	if err := recordVerificationStep(&result, "pause_load", v.pauseLoad); err != nil {
 		result.Status = "failed"
 		result.ErrorMessage = fmt.Sprintf("pause load: %v", err)
 		result.Summary = summarizeVerificationMessage(result.ErrorMessage)
@@ -58,15 +61,24 @@ func (v *Verifier) RunCycle(ctx context.Context) (VerificationResult, error) {
 		v.logResult(start, false, result.ErrorMessage)
 		return result, fmt.Errorf("pause load: %w", err)
 	}
-	defer v.resumeLoad()
+	defer func() {
+		_ = recordVerificationStep(&result, "resume_load", func() error {
+			v.resumeLoad()
+			return nil
+		})
+	}()
 
 	time.Sleep(2 * time.Second)
 
-	if err := v.checkpoint(ctx); err != nil {
+	if err := recordVerificationStep(&result, "checkpoint", func() error {
+		return v.checkpoint(ctx)
+	}); err != nil {
 		slog.Warn("Checkpoint failed (non-fatal)", "error", err)
 	}
 
-	if err := v.waitForSync(ctx); err != nil {
+	if err := recordVerificationStep(&result, "sync", func() error {
+		return v.waitForSync(ctx)
+	}); err != nil {
 		result.Status = "failed"
 		result.ErrorMessage = fmt.Sprintf("wait for sync: %v", err)
 		result.Summary = summarizeVerificationMessage(result.ErrorMessage)
@@ -75,18 +87,23 @@ func (v *Verifier) RunCycle(ctx context.Context) (VerificationResult, error) {
 		return result, fmt.Errorf("wait for sync: %w", err)
 	}
 
-	passed, err := v.validate(ctx)
+	var passed bool
+	var err error
+	validateErr := recordVerificationStep(&result, "restore_validate", func() error {
+		passed, err = v.validate(ctx)
+		return err
+	})
 	duration := time.Since(start).Seconds()
 	RecordVerification(passed, duration)
 
-	if err != nil {
+	if validateErr != nil {
 		result.Status = "failed"
-		result.ErrorMessage = err.Error()
+		result.ErrorMessage = validateErr.Error()
 		result.Summary = summarizeVerificationMessage(result.ErrorMessage)
 		v.finalizeResult(&result)
-		slog.Error("Verification failed", "error", err, "duration", time.Since(start))
+		slog.Error("Verification failed", "error", validateErr, "duration", time.Since(start))
 		v.logResult(start, false, result.ErrorMessage)
-		return result, err
+		return result, validateErr
 	}
 
 	if passed {
@@ -229,6 +246,25 @@ func (v *Verifier) finalizeResult(result *VerificationResult) {
 	result.DurationMS = int(result.CompletedAt.Sub(result.StartedAt).Milliseconds())
 	result.DBSizeBytes = fileSize(v.cfg.DBPath)
 	result.WALSizeBytes = fileSize(v.cfg.DBPath + "-wal")
+}
+
+func recordVerificationStep(result *VerificationResult, name string, fn func() error) error {
+	startedAt := time.Now().UTC()
+	err := fn()
+	completedAt := time.Now().UTC()
+	step := reporting.VerificationStep{
+		Name:        name,
+		StartedAt:   startedAt,
+		CompletedAt: completedAt,
+		DurationMS:  int(completedAt.Sub(startedAt).Milliseconds()),
+		Status:      "ok",
+	}
+	if err != nil {
+		step.Status = "error"
+		step.Error = err.Error()
+	}
+	result.Steps = append(result.Steps, step)
+	return err
 }
 
 func fileSize(path string) int64 {

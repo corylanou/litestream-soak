@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -25,6 +26,7 @@ func NewReporter(cfg Config) *Reporter {
 		return nil
 	}
 
+	profileConfig := cfg.WorkloadConfig().JSON()
 	return &Reporter{
 		baseURL: baseURL,
 		client: &http.Client{
@@ -36,8 +38,13 @@ func NewReporter(cfg Config) *Reporter {
 			Source:        cfg.Source,
 			GitSHA:        cfg.GitSHA,
 			LitestreamSHA: cfg.LitestreamSHA,
+			RunID:         cfg.RunID,
+			ImageRef:      cfg.ImageRef,
+			VolumeID:      cfg.VolumeID,
+			VolumeSizeGB:  cfg.VolumeSizeGB,
 			ProfileName:   cfg.ProfileName,
-			ProfileConfig: cfg.WorkloadConfig().JSON(),
+			ProfileConfig: profileConfig,
+			ProfileHash:   profileHash(profileConfig),
 			AppName:       cfg.AppName,
 			MachineID:     cfg.MachineID,
 			Region:        cfg.Region,
@@ -71,6 +78,18 @@ func (r *Reporter) SendVerification(ctx context.Context, payload reporting.Verif
 	return r.postJSON(ctx, "/api/workers/"+url.PathEscape(r.identity.WorkerID)+"/verifications", payload)
 }
 
+func (r *Reporter) SendEvent(ctx context.Context, payload reporting.WorkerEventPayload) error {
+	if !r.Enabled() {
+		return nil
+	}
+
+	payload.WorkerIdentity = r.identity
+	if payload.SentAt.IsZero() {
+		payload.SentAt = time.Now().UTC()
+	}
+	return r.postJSON(ctx, "/api/workers/"+url.PathEscape(r.identity.WorkerID)+"/events", payload)
+}
+
 func (r *Reporter) postJSON(ctx context.Context, path string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -94,4 +113,9 @@ func (r *Reporter) postJSON(ctx context.Context, path string, payload any) error
 	}
 
 	return nil
+}
+
+func profileHash(profileConfig string) string {
+	sum := sha256.Sum256([]byte(profileConfig))
+	return fmt.Sprintf("%x", sum[:8])
 }

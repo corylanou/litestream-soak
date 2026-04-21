@@ -248,5 +248,5 @@ func skipBasicAuth(r *http.Request) bool {
 		return false
 	}
 	return strings.HasPrefix(r.URL.Path, "/api/workers/") &&
-		(strings.HasSuffix(r.URL.Path, "/heartbeat") || strings.HasSuffix(r.URL.Path, "/verifications"))
+		(strings.HasSuffix(r.URL.Path, "/heartbeat") || strings.HasSuffix(r.URL.Path, "/verifications") || strings.HasSuffix(r.URL.Path, "/events"))
 }

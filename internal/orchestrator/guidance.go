@@ -88,19 +88,22 @@ type coverageSnapshot struct {
 }
 
 type promptEventSummary struct {
-	CreatedAt             time.Time  `json:"created_at"`
-	EventType             string     `json:"event_type"`
-	Message               string     `json:"message"`
-	CollapsedCount        int        `json:"collapsed_count,omitempty"`
-	CollapsedWindowStart  *time.Time `json:"collapsed_window_start,omitempty"`
-	CollapsedWindowEnd    *time.Time `json:"collapsed_window_end,omitempty"`
-	CheckType             string     `json:"check_type,omitempty"`
-	VerificationStatus    string     `json:"verification_status,omitempty"`
-	Passed                *bool      `json:"passed,omitempty"`
-	FailureStage          string     `json:"failure_stage,omitempty"`
-	FailureSignature      string     `json:"failure_signature,omitempty"`
-	RuntimeSnapshotStatus string     `json:"runtime_snapshot_status,omitempty"`
-	RuntimeSnapshotError  string     `json:"runtime_snapshot_error,omitempty"`
+	CreatedAt             time.Time                    `json:"created_at"`
+	EventType             string                       `json:"event_type"`
+	Message               string                       `json:"message"`
+	CollapsedCount        int                          `json:"collapsed_count,omitempty"`
+	CollapsedWindowStart  *time.Time                   `json:"collapsed_window_start,omitempty"`
+	CollapsedWindowEnd    *time.Time                   `json:"collapsed_window_end,omitempty"`
+	CheckType             string                       `json:"check_type,omitempty"`
+	VerificationStatus    string                       `json:"verification_status,omitempty"`
+	Passed                *bool                        `json:"passed,omitempty"`
+	FailureStage          string                       `json:"failure_stage,omitempty"`
+	FailureSignature      string                       `json:"failure_signature,omitempty"`
+	RuntimeSnapshotStatus string                       `json:"runtime_snapshot_status,omitempty"`
+	RuntimeSnapshotError  string                       `json:"runtime_snapshot_error,omitempty"`
+	RunID                 string                       `json:"run_id,omitempty"`
+	VerificationSteps     []reporting.VerificationStep `json:"verification_steps,omitempty"`
+	FailureDebugCaptured  bool                         `json:"failure_debug_captured,omitempty"`
 }
 
 func parsePromptMode(raw string, recommended string) promptMode {
@@ -495,6 +498,15 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 		)
 	}
 
+	sections = append(
+		sections,
+		"",
+		"<worker_debug_tools>",
+		"Standard worker images include curl, jq, rg, procps, iproute2/ss, sqlite3, /usr/bin/time, lsof, strace, file, netcat-openbsd, dnsutils, and s3cmd.",
+		"Use /api/workers/{id}/debug-snapshot when it exists before asking an operator to SSH. The snapshot is failure-triggered, bounded, and may be absent for successful checks or repeated same-signature failures.",
+		"</worker_debug_tools>",
+	)
+
 	if bundle.Diagnosis.Headline != "" {
 		sections = append(
 			sections,
@@ -550,6 +562,26 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 			"<reported_runtime>",
 			mustJSON(bundle.ReportedRuntime),
 			"</reported_runtime>",
+		)
+	}
+
+	if bundle.FailureDebug != nil {
+		sections = append(
+			sections,
+			"",
+			"<failure_debug_snapshot>",
+			"This worker captured a bounded failure-time snapshot automatically. Prefer this over ad-hoc SSH when ranking hypotheses.",
+			"It includes process table, per-process FD counts and FD type breakdowns, Litestream socket summary, disk/cgroup state, verification substep timings, run identity, recent process log tails, and object storage prefix summary when available.",
+			mustJSON(bundle.FailureDebug),
+			"</failure_debug_snapshot>",
+		)
+	} else {
+		sections = append(
+			sections,
+			"",
+			"<failure_debug_snapshot>",
+			"No failure-time debug snapshot is attached. Use the triage commands if you need live process, FD, disk, or socket evidence.",
+			"</failure_debug_snapshot>",
 		)
 	}
 
@@ -645,7 +677,7 @@ func buildPromptEventSummaries(events []model.Event) []promptEventSummary {
 			CollapsedWindowEnd:   event.CollapsedWindowEnd,
 		}
 
-		if strings.HasPrefix(event.EventType, "verification_") {
+		if strings.HasPrefix(event.EventType, "verification_") || event.EventType == "first_failure" {
 			var payload reporting.VerificationPayload
 			if err := json.Unmarshal([]byte(event.Details), &payload); err == nil {
 				summary.CheckType = payload.CheckType
@@ -655,6 +687,9 @@ func buildPromptEventSummaries(events []model.Event) []promptEventSummary {
 				runtime := payload.RuntimePayload.Normalize(event.CreatedAt.UTC())
 				summary.RuntimeSnapshotStatus = reporting.SnapshotStatus(&runtime)
 				summary.RuntimeSnapshotError = runtime.LitestreamSnapshotError
+				summary.RunID = payload.RunID
+				summary.VerificationSteps = payload.Steps
+				summary.FailureDebugCaptured = payload.FailureDebug != nil
 
 				verification := model.Verification{
 					WorkerID:     payload.WorkerID,
@@ -667,6 +702,15 @@ func buildPromptEventSummaries(events []model.Event) []promptEventSummary {
 				}
 				summary.FailureStage = inferFailureStage(&verification)
 				summary.FailureSignature = inferFailureSignature(&verification)
+			}
+		} else if event.EventType == "worker_failed" {
+			var payload reporting.WorkerEventPayload
+			if err := json.Unmarshal([]byte(event.Details), &payload); err == nil {
+				summary.RunID = payload.RunID
+				summary.FailureDebugCaptured = payload.FailureDebug != nil
+				runtime := payload.RuntimePayload.Normalize(event.CreatedAt.UTC())
+				summary.RuntimeSnapshotStatus = reporting.SnapshotStatus(&runtime)
+				summary.RuntimeSnapshotError = runtime.LitestreamSnapshotError
 			}
 		}
 
@@ -696,7 +740,7 @@ func promptReturnFormat(mode promptMode) string {
 	case promptModeLitestream:
 		return strings.Join([]string{
 			"1. Most likely Litestream subsystem",
-			"2. Evidence for that subsystem",
+			"2. Evidence for that subsystem, prioritizing the failure_debug_snapshot and verification step timings",
 			"3. Competing hypotheses",
 			"4. Whether this looks shared across the fleet or isolated, using the fleet diagnosis and related clusters",
 			"5. Exact next commands or files to inspect, preferring the auth-safe control-plane and Fly commands already provided",
@@ -704,7 +748,7 @@ func promptReturnFormat(mode promptMode) string {
 	case promptModeHarness:
 		return strings.Join([]string{
 			"1. Most likely non-Litestream cause",
-			"2. Evidence for that cause",
+			"2. Evidence for that cause, prioritizing process FD/socket snapshots, cgroup state, child exit evidence, and step timings",
 			"3. What would falsify this hypothesis",
 			"4. Whether the workload shape or fleet clustering is a clue",
 			"5. Exact next commands or files to inspect, preferring the auth-safe control-plane and Fly commands already provided",
@@ -713,7 +757,7 @@ func promptReturnFormat(mode promptMode) string {
 		return strings.Join([]string{
 			"1. Likely subsystem",
 			"2. Top three hypotheses ranked",
-			"3. Evidence for each",
+			"3. Evidence for each, using failure_debug_snapshot before older repeated failure messages",
 			"4. Whether this looks shared across the fleet or isolated, with evidence",
 			"5. Fastest next commands or logs, preferring the auth-safe control-plane and Fly commands already provided",
 			"6. Whether to investigate Litestream, runtime, S3, or the harness first",

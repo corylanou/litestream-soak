@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 func TestBuildDeploymentRollout(t *testing.T) {
@@ -755,6 +756,71 @@ func TestHandleListWorkerSummariesRespectsSource(t *testing.T) {
 	}
 	if summaries[0].Worker.Source != "pr-1228" {
 		t.Fatalf("Worker.Source = %q, want pr-1228", summaries[0].Worker.Source)
+	}
+}
+
+func TestGetWorkerDebugSnapshotReturnsLatestFailureSnapshot(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	worker := model.Worker{
+		ID:            "worker-main-low-volume",
+		Name:          "worker-main-low-volume",
+		Status:        model.WorkerDegraded,
+		Source:        "main",
+		GitSHA:        "soak-sha",
+		LitestreamSHA: "litestream-sha",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	}
+	createTestWorker(t, db, worker)
+
+	details, err := json.Marshal(reporting.VerificationPayload{
+		WorkerIdentity: reporting.WorkerIdentity{
+			WorkerID: worker.ID,
+			RunID:    "run-123",
+		},
+		Status:       "failed",
+		Passed:       false,
+		ErrorMessage: "wait for sync: connection refused",
+		FailureDebug: &reporting.FailureDebugSnapshot{
+			Reason: "wait for sync: connection refused",
+			Run: reporting.WorkerIdentity{
+				WorkerID: worker.ID,
+				RunID:    "run-123",
+			},
+			SocketSummary: reporting.SocketSummary{
+				Path:      "/data/litestream.sock",
+				LineCount: 42,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal details: %v", err)
+	}
+	if err := db.RecordEvent(worker.ID, "verification_failed", "sync failed", string(details)); err != nil {
+		t.Fatalf("RecordEvent() error = %v", err)
+	}
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/workers/worker-main-low-volume/debug-snapshot", nil)
+	request.SetPathValue("id", worker.ID)
+	recorder := httptest.NewRecorder()
+
+	api.handleGetWorkerDebugSnapshot(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var snapshot reporting.FailureDebugSnapshot
+	if err := json.NewDecoder(recorder.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if snapshot.Run.RunID != "run-123" {
+		t.Fatalf("RunID = %q, want run-123", snapshot.Run.RunID)
+	}
+	if snapshot.SocketSummary.LineCount != 42 {
+		t.Fatalf("SocketSummary.LineCount = %d, want 42", snapshot.SocketSummary.LineCount)
 	}
 }
 

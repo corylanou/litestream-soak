@@ -2170,6 +2170,7 @@ const helpPageTemplate = `{{define "help"}}
           {{end}}
         </ul>
         <p>Ask the model to rank hypotheses, cite evidence from the incident bundle, and give exact next commands before proposing code changes.</p>
+        <p>When a failed worker has a <code>failure_debug_snapshot</code>, use that first. It includes verifier substep timing, process and FD evidence, socket state, disk and cgroup snapshots, child exit evidence, and the worker tools available for live follow-up.</p>
       </div>
 
       <div class="panel">
@@ -2191,6 +2192,7 @@ const helpPageTemplate = `{{define "help"}}
           <li><code>/api/failures</code></li>
           <li><code>/api/workers/{id}/incident</code></li>
           <li><code>/api/workers/{id}/prompt?mode=triage|litestream|harness</code></li>
+          <li><code>/api/workers/{id}/debug-snapshot</code></li>
         </ul>
       </div>
 

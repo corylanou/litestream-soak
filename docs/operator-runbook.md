@@ -82,6 +82,7 @@ These are the fastest machine-readable views:
 - `/api/workers/{id}`
 - `/api/workers/{id}/incident`
 - `/api/workers/{id}/prompt`
+- `/api/workers/{id}/debug-snapshot`
 
 Use `/api/worker-summaries` to understand fleet posture in one request. It
 includes workload config, last verification, latest failure, classified failure
@@ -95,6 +96,10 @@ hand to an LLM.
 
 Use `/api/workers/{id}/prompt` when you want a copy-paste triage prompt
 immediately.
+
+Use `/api/workers/{id}/debug-snapshot` when a worker has a recorded failure
+debug bundle and you want only the captured evidence, not the full incident
+context. This endpoint returns `404` when no failure snapshot has been captured.
 
 Use `/api/events` for the default operator event feed. It now collapses repeated
 platform signals into rolling incident rows so the feed stays readable. Use
@@ -443,6 +448,18 @@ The incident prompt is built from the worker, workload, latest failure, recent
 verifications, recent events, machine metadata, and triage commands in
 `internal/orchestrator/api.go`.
 
+Failed verifications and unexpected worker exits can attach a bounded
+`failure_debug_snapshot`. The worker captures process state, FD counts, socket
+summary, disk usage, cgroup state, Litestream child exit evidence, verifier
+substep timings, recent process log tails, and object storage prefix summary
+when available. The prompt includes this snapshot automatically and tells the
+debugging agent to prioritize it over repeated final error messages.
+
+The snapshot is failure-triggered and rate-limited for repeated same-signature
+failures. It does not add steady-state compute. It adds small failure-time CPU
+and disk reads, one bounded object-storage listing when S3/Tigris is configured,
+and bounded control-plane event JSON storage.
+
 ## Platform Signals
 
 The control plane now polls Fly app logs for each active worker and records
@@ -473,6 +490,11 @@ Each worker page now exposes three AI prompt modes:
 - `Fast triage`
 - `Litestream deep dive`
 - `Harness sanity check`
+
+All prompt modes include the standard worker debug tools so another AI session
+knows what it can ask an operator to run: `curl`, `jq`, `rg`, `procps`,
+`iproute2`/`ss`, `sqlite3`, `/usr/bin/time`, `lsof`, `strace`, `file`,
+`netcat-openbsd`, `dnsutils`, and `s3cmd`.
 
 ## How Grafana Helps Debug
 

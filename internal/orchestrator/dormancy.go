@@ -10,6 +10,7 @@ import (
 	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/workload"
+	"github.com/google/uuid"
 )
 
 type DormancyPolicy struct {
@@ -128,12 +129,20 @@ func (m *Manager) flyClientForWorker(worker model.Worker) *flyapi.Client {
 
 func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, imageRef string, volumeID string, workloadCfg workload.Config) (*flyapi.Machine, error) {
 	workloadCfg = normalizeWorkloadConfig(workloadCfg)
+	env := m.workerEnv(worker, workloadCfg)
+	env["SOAK_RUN_ID"] = uuid.NewString()
+	env["SOAK_IMAGE_REF"] = imageRef
+	env["SOAK_VOLUME_ID"] = volumeID
+	if workloadCfg.VolumeSizeGB > 0 {
+		env["SOAK_VOLUME_SIZE_GB"] = fmt.Sprintf("%d", workloadCfg.VolumeSizeGB)
+	}
+
 	request := flyapi.CreateMachineRequest{
 		Name:   worker.Name,
 		Region: worker.Region,
 		Config: flyapi.MachineConfig{
 			Image: imageRef,
-			Env:   m.workerEnv(worker, workloadCfg),
+			Env:   env,
 			Guest: flyapi.Guest{
 				CPUKind:  "shared",
 				CPUs:     workloadCfg.CPUs,

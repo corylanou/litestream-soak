@@ -29,6 +29,7 @@ func TestSkipBasicAuthAllowsWorkerReportsAndWebhook(t *testing.T) {
 		"/webhooks/github",
 		"/api/workers/example/heartbeat",
 		"/api/workers/example/verifications",
+		"/api/workers/example/events",
 	}
 
 	for _, path := range paths {

@@ -31,21 +31,29 @@ type runtimeSnapshot struct {
 type Runner struct {
 	cfg Config
 
-	litestreamCmd  *exec.Cmd
-	litestreamDone chan struct{}
-	litestreamErr  error
-	litestreamMu   sync.Mutex
-	loadCmd        *exec.Cmd
-	verifier       *Verifier
-	reporter       *Reporter
-	snapshotMu     sync.Mutex
-	snapshot       runtimeSnapshot
-	lastLocalPoll  time.Time
+	litestreamCmd   *exec.Cmd
+	litestreamDone  chan struct{}
+	litestreamErr   error
+	litestreamExit  *reporting.ProcessExitSnapshot
+	litestreamLog   *lineBuffer
+	litestreamMu    sync.Mutex
+	failureDebugMu  sync.Mutex
+	failureDebugKey string
+	failureDebugAt  time.Time
+	loadCmd         *exec.Cmd
+	loadLog         *lineBuffer
+	verifier        *Verifier
+	reporter        *Reporter
+	snapshotMu      sync.Mutex
+	snapshot        runtimeSnapshot
+	lastLocalPoll   time.Time
 }
 
 func NewRunner(cfg Config) *Runner {
 	return &Runner{
-		cfg: cfg,
+		cfg:           cfg,
+		litestreamLog: newLineBuffer(120),
+		loadLog:       newLineBuffer(120),
 		snapshot: runtimeSnapshot{
 			RuntimePayload: reporting.RuntimePayload{
 				DBStatus:                "unknown",
@@ -113,7 +121,11 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	r.verifier = NewVerifier(r.cfg, r.loadCmd)
 
-	return r.runVerifyLoop(runCtx)
+	if err := r.runVerifyLoop(runCtx); err != nil {
+		r.sendWorkerFailureEvent(err)
+		return err
+	}
+	return nil
 }
 
 func (r *Runner) populate(ctx context.Context) error {
@@ -198,8 +210,8 @@ func (r *Runner) startLitestream(ctx context.Context) error {
 	slog.Info("Starting Litestream")
 
 	r.litestreamCmd = exec.CommandContext(ctx, "litestream", "replicate", "-config", r.cfg.ConfigPath)
-	r.litestreamCmd.Stdout = os.Stdout
-	r.litestreamCmd.Stderr = os.Stderr
+	r.litestreamCmd.Stdout = io.MultiWriter(os.Stdout, r.litestreamLog)
+	r.litestreamCmd.Stderr = io.MultiWriter(os.Stderr, r.litestreamLog)
 
 	if r.cfg.ReplicaType == "s3" {
 		r.litestreamCmd.Env = append(os.Environ(),
@@ -222,6 +234,7 @@ func (r *Runner) startLitestream(ctx context.Context) error {
 		err := cmd.Wait()
 		r.litestreamMu.Lock()
 		r.litestreamErr = err
+		r.litestreamExit = processExitSnapshot("litestream", time.Now().UTC(), err)
 		r.litestreamMu.Unlock()
 		close(done)
 	}(r.litestreamCmd)
@@ -315,8 +328,8 @@ func (r *Runner) startLoad(ctx context.Context) error {
 		"-read-ratio", fmt.Sprintf("%.2f", r.cfg.ReadRatio),
 		"-workers", strconv.Itoa(r.cfg.Workers),
 	)
-	r.loadCmd.Stdout = os.Stdout
-	r.loadCmd.Stderr = os.Stderr
+	r.loadCmd.Stdout = io.MultiWriter(os.Stdout, r.loadLog)
+	r.loadCmd.Stderr = io.MultiWriter(os.Stderr, r.loadLog)
 
 	if err := r.loadCmd.Start(); err != nil {
 		return fmt.Errorf("start load: %w", err)
@@ -632,6 +645,12 @@ func (r *Runner) sendVerification(ctx context.Context, result VerificationResult
 	}
 
 	snapshot := r.currentSnapshot()
+	var failureDebug *reporting.FailureDebugSnapshot
+	if !result.Passed {
+		failureDebug = r.captureFailureDebugSnapshotIfDue(result)
+	} else {
+		r.resetFailureDebugState()
+	}
 	reportCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -644,10 +663,88 @@ func (r *Runner) sendVerification(ctx context.Context, result VerificationResult
 		Summary:        result.Summary,
 		ErrorMessage:   result.ErrorMessage,
 		DurationMS:     result.DurationMS,
+		Steps:          result.Steps,
+		FailureDebug:   failureDebug,
 		RuntimePayload: snapshot.RuntimePayload,
 	}); err != nil {
 		slog.Warn("Failed to send verification report", "error", err)
 	}
+}
+
+func (r *Runner) captureFailureDebugSnapshotIfDue(result VerificationResult) *reporting.FailureDebugSnapshot {
+	reason := firstNonEmpty(result.Summary, summarizeVerificationMessage(result.ErrorMessage), result.Status, "verification_failed")
+	key := failureDebugKey(result, reason)
+	now := time.Now().UTC()
+
+	r.failureDebugMu.Lock()
+	defer r.failureDebugMu.Unlock()
+	if r.failureDebugKey == key && now.Sub(r.failureDebugAt) < 6*time.Hour {
+		return nil
+	}
+	r.failureDebugKey = key
+	r.failureDebugAt = now
+	return r.captureFailureDebugSnapshot(reason, result.Steps)
+}
+
+func failureDebugKey(result VerificationResult, reason string) string {
+	text := strings.ToLower(result.Status + " " + result.Summary + " " + result.ErrorMessage + " " + reason)
+	switch {
+	case strings.Contains(text, "too many open files"):
+		return "sync_fd_exhausted"
+	case strings.Contains(text, "litestream.sock") && strings.Contains(text, "connection refused"):
+		return "sync_socket_refused"
+	case strings.Contains(text, "wait for sync") || strings.Contains(text, "sync request"):
+		return "sync_failure"
+	case strings.Contains(text, "no space left on device"):
+		return "disk_full"
+	case strings.Contains(text, "accessdenied") || strings.Contains(text, "403"):
+		return "object_storage_access_denied"
+	case strings.Contains(text, "408") || strings.Contains(text, "timeout"):
+		return "timeout"
+	case strings.Contains(text, "sqlite_index_mismatch"):
+		return "sqlite_index_mismatch"
+	case strings.Contains(text, "validation failed"):
+		return "validation_failed"
+	default:
+		return firstNonEmpty(result.CheckType, result.Status, "verification_failed")
+	}
+}
+
+func (r *Runner) resetFailureDebugState() {
+	r.failureDebugMu.Lock()
+	defer r.failureDebugMu.Unlock()
+	r.failureDebugKey = ""
+	r.failureDebugAt = time.Time{}
+}
+
+func (r *Runner) sendWorkerFailureEvent(err error) {
+	if r.reporter == nil || !r.reporter.Enabled() {
+		return
+	}
+
+	snapshot := r.currentSnapshot()
+	message := err.Error()
+	failureDebug := r.captureFailureDebugSnapshot(message, nil)
+	reportCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if sendErr := r.reporter.SendEvent(reportCtx, reporting.WorkerEventPayload{
+		EventType:      "worker_failed",
+		Message:        message,
+		SentAt:         time.Now().UTC(),
+		FailureDebug:   failureDebug,
+		RuntimePayload: snapshot.RuntimePayload,
+	}); sendErr != nil {
+		slog.Warn("Failed to send worker failure event", "error", sendErr)
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (r *Runner) currentSnapshot() runtimeSnapshot {

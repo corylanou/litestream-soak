@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -125,6 +126,121 @@ func TestPollDBStatsClosesIPCConnections(t *testing.T) {
 		return tracker.Active() == 0
 	}) {
 		t.Fatalf("active IPC connections=%d want 0", tracker.Active())
+	}
+}
+
+func TestVerifierWaitForSyncClosesIPCConnection(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("litestream-soak-sync-%d.sock", time.Now().UnixNano()))
+
+	tracker := startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sync" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+
+	verifier := NewVerifier(cfg, nil)
+	if err := verifier.waitForSync(context.Background()); err != nil {
+		t.Fatalf("waitForSync() error = %v", err)
+	}
+
+	if !waitUntil(2*time.Second, 10*time.Millisecond, func() bool {
+		return tracker.Active() == 0
+	}) {
+		t.Fatalf("active IPC connections=%d want 0", tracker.Active())
+	}
+}
+
+func TestRecordVerificationStepCapturesTimingAndError(t *testing.T) {
+	result := VerificationResult{}
+	stepErr := errors.New("sync failed")
+
+	err := recordVerificationStep(&result, "sync", func() error {
+		return stepErr
+	})
+
+	if !errors.Is(err, stepErr) {
+		t.Fatalf("recordVerificationStep() error = %v want %v", err, stepErr)
+	}
+	if len(result.Steps) != 1 {
+		t.Fatalf("steps=%d want 1", len(result.Steps))
+	}
+	step := result.Steps[0]
+	if step.Name != "sync" {
+		t.Fatalf("step name=%q want sync", step.Name)
+	}
+	if step.Status != "error" {
+		t.Fatalf("step status=%q want error", step.Status)
+	}
+	if step.Error != "sync failed" {
+		t.Fatalf("step error=%q want sync failed", step.Error)
+	}
+	if step.StartedAt.IsZero() || step.CompletedAt.IsZero() {
+		t.Fatal("expected step timestamps")
+	}
+}
+
+func TestFailureDebugSnapshotIsRateLimitedForRepeatedFailure(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.SocketPath = filepath.Join(dir, "litestream.sock")
+	cfg.WorkerID = "worker-test"
+	cfg.WorkerName = "worker-test"
+	cfg.ProfileName = "low-volume"
+	if err := os.WriteFile(cfg.DBPath, []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.ConfigPath, []byte("dbs: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewRunner(cfg)
+	result := VerificationResult{
+		Status:       "failed",
+		Summary:      "wait for sync: connection refused",
+		ErrorMessage: "wait for sync: connection refused",
+	}
+
+	first := runner.captureFailureDebugSnapshotIfDue(result)
+	if first == nil {
+		t.Fatal("expected first failure to capture debug snapshot")
+	}
+	second := runner.captureFailureDebugSnapshotIfDue(result)
+	if second != nil {
+		t.Fatal("expected repeated same failure to skip debug snapshot")
+	}
+	runner.resetFailureDebugState()
+	third := runner.captureFailureDebugSnapshotIfDue(result)
+	if third == nil {
+		t.Fatal("expected reset failure state to capture debug snapshot")
+	}
+
+	runner.resetFailureDebugState()
+	validationA := VerificationResult{
+		Status:       "failed",
+		CheckType:    "integrity",
+		Summary:      "validation failed (exit 1): time=2026-04-21T10:00:00Z",
+		ErrorMessage: "validation failed (exit 1): time=2026-04-21T10:00:00Z",
+	}
+	validationB := VerificationResult{
+		Status:       "failed",
+		CheckType:    "integrity",
+		Summary:      "validation failed (exit 1): time=2026-04-21T10:30:00Z",
+		ErrorMessage: "validation failed (exit 1): time=2026-04-21T10:30:00Z",
+	}
+	if runner.captureFailureDebugSnapshotIfDue(validationA) == nil {
+		t.Fatal("expected first validation failure to capture debug snapshot")
+	}
+	if runner.captureFailureDebugSnapshotIfDue(validationB) != nil {
+		t.Fatal("expected repeated validation failure with a new timestamp to skip debug snapshot")
 	}
 }
 

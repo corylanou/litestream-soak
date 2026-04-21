@@ -20,8 +20,13 @@ type WorkerIdentity struct {
 	Source        string `json:"source"`
 	GitSHA        string `json:"git_sha"`
 	LitestreamSHA string `json:"litestream_sha,omitempty"`
+	RunID         string `json:"run_id,omitempty"`
+	ImageRef      string `json:"image_ref,omitempty"`
+	VolumeID      string `json:"volume_id,omitempty"`
+	VolumeSizeGB  string `json:"volume_size_gb,omitempty"`
 	ProfileName   string `json:"profile_name"`
 	ProfileConfig string `json:"profile_config,omitempty"`
+	ProfileHash   string `json:"profile_hash,omitempty"`
 	AppName       string `json:"app_name,omitempty"`
 	MachineID     string `json:"machine_id,omitempty"`
 	Region        string `json:"region,omitempty"`
@@ -97,13 +102,116 @@ type HeartbeatPayload struct {
 
 type VerificationPayload struct {
 	WorkerIdentity
-	StartedAt    time.Time `json:"started_at"`
-	CompletedAt  time.Time `json:"completed_at"`
-	CheckType    string    `json:"check_type"`
-	Status       string    `json:"status"`
-	Passed       bool      `json:"passed"`
-	Summary      string    `json:"summary,omitempty"`
-	ErrorMessage string    `json:"error_message,omitempty"`
-	DurationMS   int       `json:"duration_ms,omitempty"`
+	StartedAt    time.Time             `json:"started_at"`
+	CompletedAt  time.Time             `json:"completed_at"`
+	CheckType    string                `json:"check_type"`
+	Status       string                `json:"status"`
+	Passed       bool                  `json:"passed"`
+	Summary      string                `json:"summary,omitempty"`
+	ErrorMessage string                `json:"error_message,omitempty"`
+	DurationMS   int                   `json:"duration_ms,omitempty"`
+	Steps        []VerificationStep    `json:"steps,omitempty"`
+	FailureDebug *FailureDebugSnapshot `json:"failure_debug,omitempty"`
 	RuntimePayload
+}
+
+type WorkerEventPayload struct {
+	WorkerIdentity
+	EventType    string                `json:"event_type"`
+	Message      string                `json:"message,omitempty"`
+	SentAt       time.Time             `json:"sent_at"`
+	FailureDebug *FailureDebugSnapshot `json:"failure_debug,omitempty"`
+	RuntimePayload
+}
+
+type VerificationStep struct {
+	Name        string    `json:"name"`
+	StartedAt   time.Time `json:"started_at"`
+	CompletedAt time.Time `json:"completed_at"`
+	DurationMS  int       `json:"duration_ms"`
+	Status      string    `json:"status"`
+	Error       string    `json:"error,omitempty"`
+}
+
+type FailureDebugSnapshot struct {
+	CapturedAt          time.Time                    `json:"captured_at"`
+	Reason              string                       `json:"reason,omitempty"`
+	Run                 WorkerIdentity               `json:"run"`
+	ProcessTable        []ProcessSnapshot            `json:"process_table,omitempty"`
+	FDCounts            []ProcessFDCounts            `json:"fd_counts,omitempty"`
+	SocketSummary       SocketSummary                `json:"socket_summary,omitempty"`
+	Disk                DiskSnapshot                 `json:"disk,omitempty"`
+	Cgroup              CgroupSnapshot               `json:"cgroup,omitempty"`
+	LitestreamExit      *ProcessExitSnapshot         `json:"litestream_exit,omitempty"`
+	VerificationSteps   []VerificationStep           `json:"verification_steps,omitempty"`
+	ObjectStoragePrefix *ObjectStoragePrefixSnapshot `json:"object_storage_prefix,omitempty"`
+	CommandOutputs      []CommandOutput              `json:"command_outputs,omitempty"`
+	LitestreamLogTail   []string                     `json:"litestream_log_tail,omitempty"`
+	LoadLogTail         []string                     `json:"load_log_tail,omitempty"`
+}
+
+type ProcessSnapshot struct {
+	PID     int    `json:"pid"`
+	PPID    int    `json:"ppid,omitempty"`
+	State   string `json:"state,omitempty"`
+	Command string `json:"command,omitempty"`
+	Args    string `json:"args,omitempty"`
+}
+
+type ProcessFDCounts struct {
+	PID     int            `json:"pid"`
+	Command string         `json:"command,omitempty"`
+	Total   int            `json:"total"`
+	ByType  map[string]int `json:"by_type,omitempty"`
+	Samples []string       `json:"samples,omitempty"`
+	Error   string         `json:"error,omitempty"`
+}
+
+type SocketSummary struct {
+	Path        string   `json:"path"`
+	LineCount   int      `json:"line_count"`
+	SampleLines []string `json:"sample_lines,omitempty"`
+	Error       string   `json:"error,omitempty"`
+}
+
+type DiskSnapshot struct {
+	DataDir      string            `json:"data_dir"`
+	DataFiles    map[string]string `json:"data_files,omitempty"`
+	DataUsage    string            `json:"data_usage,omitempty"`
+	LargestPaths []string          `json:"largest_paths,omitempty"`
+	Error        string            `json:"error,omitempty"`
+}
+
+type CgroupSnapshot struct {
+	MemoryCurrent string            `json:"memory_current,omitempty"`
+	MemoryMax     string            `json:"memory_max,omitempty"`
+	CPUStat       map[string]string `json:"cpu_stat,omitempty"`
+	PidsCurrent   string            `json:"pids_current,omitempty"`
+	PidsMax       string            `json:"pids_max,omitempty"`
+	Error         string            `json:"error,omitempty"`
+}
+
+type ProcessExitSnapshot struct {
+	Process  string    `json:"process"`
+	ExitedAt time.Time `json:"exited_at"`
+	Error    string    `json:"error,omitempty"`
+	ExitCode *int      `json:"exit_code,omitempty"`
+	Signal   string    `json:"signal,omitempty"`
+}
+
+type ObjectStoragePrefixSnapshot struct {
+	URL              string         `json:"url"`
+	ObjectCount      int            `json:"object_count,omitempty"`
+	TotalBytes       int64          `json:"total_bytes,omitempty"`
+	LevelCounts      map[string]int `json:"level_counts,omitempty"`
+	LatestObjects    []string       `json:"latest_objects,omitempty"`
+	CommandTruncated bool           `json:"command_truncated,omitempty"`
+	Error            string         `json:"error,omitempty"`
+}
+
+type CommandOutput struct {
+	Name      string `json:"name"`
+	Output    string `json:"output,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
 }

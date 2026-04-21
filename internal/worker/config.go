@@ -14,6 +14,10 @@ type Config struct {
 	WorkerName    string
 	GitSHA        string
 	LitestreamSHA string
+	RunID         string
+	ImageRef      string
+	VolumeID      string
+	VolumeSizeGB  string
 	Source        string // "main" or "pr"
 	AppName       string
 	MachineID     string
@@ -125,6 +129,18 @@ func ConfigFromEnv() (Config, error) {
 		c.GitSHA = v
 	}
 	c.LitestreamSHA = resolveLitestreamSHA()
+	if v := os.Getenv("SOAK_RUN_ID"); v != "" {
+		c.RunID = v
+	}
+	if v := os.Getenv("SOAK_IMAGE_REF"); v != "" {
+		c.ImageRef = v
+	}
+	if v := os.Getenv("SOAK_VOLUME_ID"); v != "" {
+		c.VolumeID = v
+	}
+	if v := os.Getenv("SOAK_VOLUME_SIZE_GB"); v != "" {
+		c.VolumeSizeGB = v
+	}
 	if v := os.Getenv("SOURCE"); v != "" {
 		c.Source = v
 	}

@@ -153,27 +153,28 @@ type DeploymentComparisonResponse struct {
 const rolloutAttentionGraceWindow = 45 * time.Minute
 
 type IncidentBundle struct {
-	GeneratedAt           time.Time                 `json:"generated_at"`
-	Worker                model.Worker              `json:"worker"`
-	Workload              workload.Config           `json:"workload"`
-	LatestFailure         *model.Verification       `json:"latest_failure,omitempty"`
-	LatestPlatformEvent   *model.Event              `json:"latest_platform_event,omitempty"`
-	ActiveFailure         bool                      `json:"active_failure"`
-	FailureStage          string                    `json:"failure_stage,omitempty"`
-	FailureSignature      string                    `json:"failure_signature,omitempty"`
-	ProbableSubsystem     string                    `json:"probable_subsystem,omitempty"`
-	RuntimeSnapshotStatus string                    `json:"runtime_snapshot_status,omitempty"`
-	ReportedRuntime       *reporting.RuntimePayload `json:"reported_runtime,omitempty"`
-	Guide                 incidentGuide             `json:"guide"`
-	Diagnosis             diagnosisSnapshot         `json:"diagnosis"`
-	RelatedClusters       []diagnosisCluster        `json:"related_clusters,omitempty"`
-	PromptModes           []promptModeInfo          `json:"prompt_modes,omitempty"`
-	RecentVerifications   []model.Verification      `json:"recent_verifications"`
-	RecentEvents          []model.Event             `json:"recent_events"`
-	Machine               *flyapi.Machine           `json:"machine,omitempty"`
-	MachineError          string                    `json:"machine_error,omitempty"`
-	TriageCommands        []string                  `json:"triage_commands,omitempty"`
-	Prompt                string                    `json:"prompt"`
+	GeneratedAt           time.Time                       `json:"generated_at"`
+	Worker                model.Worker                    `json:"worker"`
+	Workload              workload.Config                 `json:"workload"`
+	LatestFailure         *model.Verification             `json:"latest_failure,omitempty"`
+	LatestPlatformEvent   *model.Event                    `json:"latest_platform_event,omitempty"`
+	ActiveFailure         bool                            `json:"active_failure"`
+	FailureStage          string                          `json:"failure_stage,omitempty"`
+	FailureSignature      string                          `json:"failure_signature,omitempty"`
+	ProbableSubsystem     string                          `json:"probable_subsystem,omitempty"`
+	RuntimeSnapshotStatus string                          `json:"runtime_snapshot_status,omitempty"`
+	ReportedRuntime       *reporting.RuntimePayload       `json:"reported_runtime,omitempty"`
+	FailureDebug          *reporting.FailureDebugSnapshot `json:"failure_debug,omitempty"`
+	Guide                 incidentGuide                   `json:"guide"`
+	Diagnosis             diagnosisSnapshot               `json:"diagnosis"`
+	RelatedClusters       []diagnosisCluster              `json:"related_clusters,omitempty"`
+	PromptModes           []promptModeInfo                `json:"prompt_modes,omitempty"`
+	RecentVerifications   []model.Verification            `json:"recent_verifications"`
+	RecentEvents          []model.Event                   `json:"recent_events"`
+	Machine               *flyapi.Machine                 `json:"machine,omitempty"`
+	MachineError          string                          `json:"machine_error,omitempty"`
+	TriageCommands        []string                        `json:"triage_commands,omitempty"`
+	Prompt                string                          `json:"prompt"`
 }
 
 func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *AlertDispatcher, manager *Manager, deployer *Deployer) *API {
@@ -210,8 +211,10 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/workers/{id}", a.handleGetWorker)
 	mux.HandleFunc("GET /api/workers/{id}/incident", a.handleGetIncident)
 	mux.HandleFunc("GET /api/workers/{id}/prompt", a.handleGetPrompt)
+	mux.HandleFunc("GET /api/workers/{id}/debug-snapshot", a.handleGetWorkerDebugSnapshot)
 	mux.HandleFunc("POST /api/workers/{id}/heartbeat", a.handleHeartbeat)
 	mux.HandleFunc("POST /api/workers/{id}/verifications", a.handleVerification)
+	mux.HandleFunc("POST /api/workers/{id}/events", a.handleWorkerEvent)
 	mux.HandleFunc("GET /api/events", a.handleListEvents)
 	mux.HandleFunc("GET /api/failures", a.handleListFailures)
 	mux.HandleFunc("GET /api/alerts", a.handleListAlerts)
@@ -866,6 +869,27 @@ func (a *API) handleGetPrompt(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(buildPrompt(bundle, mode)))
 }
 
+func (a *API) handleGetWorkerDebugSnapshot(w http.ResponseWriter, r *http.Request) {
+	workerID := r.PathValue("id")
+	if _, err := a.db.GetWorker(workerID); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	events, err := a.db.ListWorkerEvents(workerID, 40)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	snapshot := latestFailureDebugSnapshot(events)
+	if snapshot == nil {
+		http.Error(w, "no failure debug snapshot recorded for worker", http.StatusNotFound)
+		return
+	}
+	writeAPIJSON(w, snapshot)
+}
+
 func (a *API) handleGetDiagnosis(w http.ResponseWriter, r *http.Request) {
 	summaries, err := a.listWorkerSummaries(r.URL.Query().Get("status"), strings.TrimSpace(r.URL.Query().Get("source")))
 	if err != nil {
@@ -1130,6 +1154,9 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if !payload.Passed && workerBeforeUpdate != nil && workerBeforeUpdate.Status != model.WorkerDegraded && workerBeforeUpdate.Status != model.WorkerDormant {
+		_ = a.db.RecordEvent(workerID, "first_failure", "Worker transitioned from healthy to failing", string(details))
+	}
 
 	if workerBeforeUpdate != nil && workerBeforeUpdate.Status == model.WorkerProbing {
 		if payload.Passed {
@@ -1155,6 +1182,61 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		if a.alerts != nil {
 			a.alerts.NotifyVerificationFailure(*worker, *verification)
 		}
+	}
+
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
+	workerID := r.PathValue("id")
+	var payload reporting.WorkerEventPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+	payload.WorkerID = workerID
+	if payload.Name == "" {
+		payload.Name = workerID
+	}
+	if strings.TrimSpace(payload.EventType) == "" {
+		http.Error(w, "event_type is required", http.StatusBadRequest)
+		return
+	}
+	observedAt := payload.SentAt
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+	payload.RuntimePayload = payload.RuntimePayload.Normalize(observedAt)
+
+	if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.db.UpdateWorkerRuntimeSnapshot(workerID, payload.RuntimePayload); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	details, err := json.Marshal(payload)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	message := payload.Message
+	if strings.TrimSpace(message) == "" {
+		message = payload.EventType
+	}
+	if err := a.db.RecordEvent(workerID, payload.EventType, message, string(details)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if worker, err := a.db.GetWorker(workerID); err == nil {
+		a.metrics.observeWorker(*worker)
+		if events, err := a.db.ListWorkerEvents(workerID, 20); err == nil {
+			a.metrics.observePlatformEvent(*worker, latestPlatformEvent(coalesceEventFeed(events)))
+		}
+		a.observeLatestDeploymentState(worker.Source)
 	}
 
 	w.WriteHeader(http.StatusAccepted)
@@ -1245,6 +1327,7 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 	diagnosis := buildDiagnosisSnapshot(summaries)
 	probableSubsystem := inferProbableSubsystem(inferFailureStage(latestFailure), inferFailureSignature(latestFailure))
 	reportedRuntime := extractReportedRuntime(detail.Worker, detail.RecentEvents)
+	failureDebug := latestFailureDebugSnapshot(detail.RecentEvents)
 
 	bundle := &IncidentBundle{
 		GeneratedAt:           time.Now().UTC(),
@@ -1258,6 +1341,7 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 		ProbableSubsystem:     probableSubsystem,
 		RuntimeSnapshotStatus: reporting.SnapshotStatus(reportedRuntime),
 		ReportedRuntime:       reportedRuntime,
+		FailureDebug:          failureDebug,
 		Diagnosis:             diagnosis,
 		RelatedClusters:       relatedDiagnosisClusters(diagnosis, detail.Worker.ID, inferFailureSignature(latestFailure), probableSubsystem),
 		RecentVerifications:   detail.RecentVerifications,
@@ -1270,6 +1354,23 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 	bundle.PromptModes = buildPromptModes(bundle.Guide.RecommendedPromptMode)
 	bundle.Prompt = buildPrompt(bundle, parsePromptMode("", bundle.Guide.RecommendedPromptMode))
 	return bundle, http.StatusOK, nil
+}
+
+func latestFailureDebugSnapshot(events []model.Event) *reporting.FailureDebugSnapshot {
+	for _, event := range events {
+		if event.EventType != "verification_failed" && event.EventType != "worker_failed" && event.EventType != "first_failure" {
+			continue
+		}
+		var verificationPayload reporting.VerificationPayload
+		if err := json.Unmarshal([]byte(event.Details), &verificationPayload); err == nil && verificationPayload.FailureDebug != nil {
+			return verificationPayload.FailureDebug
+		}
+		var eventPayload reporting.WorkerEventPayload
+		if err := json.Unmarshal([]byte(event.Details), &eventPayload); err == nil && eventPayload.FailureDebug != nil {
+			return eventPayload.FailureDebug
+		}
+	}
+	return nil
 }
 
 func extractReportedRuntime(worker model.Worker, events []model.Event) *reporting.RuntimePayload {
@@ -1648,6 +1749,7 @@ func buildTriageCommands(worker model.Worker, hasMachine bool) []string {
 	}
 	commands = append(commands,
 		fmt.Sprintf(`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/workers/%s/incident | jq .`, worker.ID),
+		fmt.Sprintf(`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/workers/%s/debug-snapshot | jq .`, worker.ID),
 		`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/diagnosis | jq .`,
 	)
 
