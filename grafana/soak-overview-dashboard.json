@@ -662,7 +662,7 @@
           "legendFormat": "verified"
         }
       ],
-      "title": "Verified This Rollout",
+      "title": "Checked This Rollout",
       "type": "stat"
     },
     {
@@ -712,7 +712,7 @@
           "legendFormat": "awaiting"
         }
       ],
-      "title": "Awaiting Verify",
+      "title": "Awaiting Check",
       "type": "stat"
     },
     {
