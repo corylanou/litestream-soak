@@ -296,18 +296,29 @@ func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, 
 
 		if w.FlyMachineID != "" {
 			if err := m.fly.StopMachine(ctx, w.FlyMachineID); err != nil {
-				slog.Error("Failed to stop machine for update", "machine_id", w.FlyMachineID, "error", err)
-				continue
-			}
-			if err := m.fly.DestroyMachine(ctx, w.FlyMachineID, true); err != nil {
-				slog.Error("Failed to destroy old machine", "machine_id", w.FlyMachineID, "error", err)
-				continue
+				if flyapi.IsNotFound(err) {
+					slog.Warn("Old worker machine already gone during update", "machine_id", w.FlyMachineID, "worker_id", w.ID)
+				} else {
+					slog.Error("Failed to stop machine for update", "machine_id", w.FlyMachineID, "error", err)
+					continue
+				}
+			} else if err := m.fly.DestroyMachine(ctx, w.FlyMachineID, true); err != nil {
+				if flyapi.IsNotFound(err) {
+					slog.Warn("Old worker machine already destroyed during update", "machine_id", w.FlyMachineID, "worker_id", w.ID)
+				} else {
+					slog.Error("Failed to destroy old machine", "machine_id", w.FlyMachineID, "error", err)
+					continue
+				}
 			}
 		}
 		if w.FlyVolumeID != "" {
 			if err := m.flyClientForWorker(w).DestroyVolume(ctx, w.FlyVolumeID); err != nil {
-				slog.Error("Failed to destroy old worker volume", "volume_id", w.FlyVolumeID, "error", err)
-				continue
+				if flyapi.IsNotFound(err) {
+					slog.Warn("Old worker volume already gone during update", "volume_id", w.FlyVolumeID, "worker_id", w.ID)
+				} else {
+					slog.Error("Failed to destroy old worker volume", "volume_id", w.FlyVolumeID, "error", err)
+					continue
+				}
 			}
 		}
 

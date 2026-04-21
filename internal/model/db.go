@@ -114,12 +114,12 @@ type DB struct {
 }
 
 func Open(path string) (*DB, error) {
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=30000")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
-	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(4)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 
 	if _, err := db.Exec(migrationSQL); err != nil {
 		return nil, fmt.Errorf("run migrations: %w", err)

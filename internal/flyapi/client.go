@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -18,6 +18,20 @@ type Client struct {
 	appName    string
 	token      string
 	httpClient *http.Client
+}
+
+type APIError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Body)
+}
+
+func IsNotFound(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
 func NewClient(appName, token string) *Client {
@@ -58,7 +72,7 @@ func (c *Client) ListMachines(ctx context.Context) ([]Machine, error) {
 func (c *Client) GetMachine(ctx context.Context, id string) (*Machine, error) {
 	var machine Machine
 	if err := c.do(ctx, "GET", fmt.Sprintf("/apps/%s/machines/%s", c.appName, id), nil, &machine); err != nil {
-		if strings.Contains(err.Error(), "API error 404") {
+		if IsNotFound(err) {
 			machines, listErr := c.ListMachines(ctx)
 			if listErr == nil {
 				for _, candidate := range machines {
@@ -174,7 +188,7 @@ func (c *Client) doAbsolute(ctx context.Context, method, endpoint string, body i
 	}
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+		return &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	if result != nil && len(respBody) > 0 {
