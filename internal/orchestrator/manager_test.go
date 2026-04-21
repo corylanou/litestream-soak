@@ -43,6 +43,9 @@ func TestManagerWorkerEnvIncludesReplicaConfig(t *testing.T) {
 	if got, want := env["S3_ENDPOINT"], "https://fly.storage.tigris.dev"; got != want {
 		t.Fatalf("S3_ENDPOINT=%q, want %q", got, want)
 	}
+	if got, want := env["S3_PATH"], "soak/worker-main-gharchive"; got != want {
+		t.Fatalf("S3_PATH=%q, want %q", got, want)
+	}
 	if got, want := env["AWS_ENDPOINT_URL_S3"], "https://fly.storage.tigris.dev"; got != want {
 		t.Fatalf("AWS_ENDPOINT_URL_S3=%q, want %q", got, want)
 	}

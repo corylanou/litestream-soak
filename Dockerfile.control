@@ -13,7 +13,7 @@ RUN curl -fsSL https://fly.io/install.sh | FLYCTL_INSTALL=/opt/fly sh
 
 FROM debian:bookworm-slim
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates curl && \
+    apt-get install -y --no-install-recommends ca-certificates curl awscli && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=flyctl /opt/fly/bin/ /usr/local/bin/
 COPY --from=builder /usr/local/bin/soakctl /usr/local/bin/soakctl

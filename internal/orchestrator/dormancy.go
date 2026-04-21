@@ -51,7 +51,7 @@ func normalizeWorkloadConfig(cfg workload.Config) workload.Config {
 }
 
 func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) map[string]string {
-	s3Path := fmt.Sprintf("soak/%s", worker.Name)
+	s3Path := workerReplicaPath(worker)
 	env := map[string]string{
 		"WORKER_ID":           worker.ID,
 		"WORKER_NAME":         worker.Name,

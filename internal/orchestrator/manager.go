@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"os"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
@@ -93,6 +96,12 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 
 	m.db.RecordEvent(workerID, "worker_creating", fmt.Sprintf("Creating worker %s with profile %s", req.Name, req.ProfileName), "")
 
+	if err := m.clearWorkerReplicaPrefix(ctx, *worker); err != nil {
+		m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error())
+		m.observeWorkerByID(workerID)
+		return nil, fmt.Errorf("clear replica prefix: %w", err)
+	}
+
 	volSize := req.VolumeSizeGB
 	if volSize == 0 {
 		volSize = 10
@@ -128,6 +137,57 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 	slog.Info("Worker created", "name", req.Name, "machine_id", machine.ID, "volume_id", vol.ID, "profile", req.ProfileName)
 
 	return worker, nil
+}
+
+func workerReplicaPath(worker model.Worker) string {
+	return fmt.Sprintf("soak/%s", worker.Name)
+}
+
+func (m *Manager) clearWorkerReplicaPrefix(ctx context.Context, worker model.Worker) error {
+	bucket := strings.TrimSpace(m.replica.Bucket)
+	if bucket == "" {
+		return nil
+	}
+
+	prefix := strings.Trim(workerReplicaPath(worker), "/")
+	if prefix == "" {
+		return fmt.Errorf("worker replica prefix is empty")
+	}
+
+	clearCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
+	replicaURL := fmt.Sprintf("s3://%s/%s/", bucket, prefix)
+	args := []string{"s3", "rm", "--recursive", replicaURL}
+	if endpoint := strings.TrimSpace(m.replica.Endpoint); endpoint != "" {
+		args = append(args, "--endpoint-url", endpoint)
+	}
+
+	cmd := exec.CommandContext(clearCtx, "aws", args...)
+	cmd.Env = os.Environ()
+	if accessKey := strings.TrimSpace(m.replica.AccessKey); accessKey != "" {
+		cmd.Env = append(cmd.Env, "AWS_ACCESS_KEY_ID="+accessKey)
+	}
+	if secretKey := strings.TrimSpace(m.replica.SecretKey); secretKey != "" {
+		cmd.Env = append(cmd.Env, "AWS_SECRET_ACCESS_KEY="+secretKey)
+	}
+	if region := strings.TrimSpace(m.replica.Region); region != "" {
+		cmd.Env = append(cmd.Env, "AWS_REGION="+region)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if clearCtx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("timed out clearing %s", replicaURL)
+	}
+	if err != nil {
+		return fmt.Errorf("aws s3 rm %s failed: %w: %s", replicaURL, err, strings.TrimSpace(string(output)))
+	}
+
+	if m.db != nil {
+		_ = m.db.RecordEvent(worker.ID, "replica_prefix_cleared", fmt.Sprintf("Cleared replica prefix %s", replicaURL), "")
+	}
+	slog.Info("Cleared worker replica prefix", "worker_id", worker.ID, "prefix", replicaURL)
+	return nil
 }
 
 func flyVolumeName(workerName string) string {
@@ -201,6 +261,9 @@ func (m *Manager) DestroyWorker(ctx context.Context, workerID string) error {
 			slog.Warn("Failed to destroy volume", "volume_id", worker.FlyVolumeID, "error", err)
 		}
 	}
+	if err := m.clearWorkerReplicaPrefix(ctx, *worker); err != nil {
+		slog.Warn("Failed to clear worker replica prefix", "worker_id", workerID, "error", err)
+	}
 
 	m.db.UpdateWorkerStatus(workerID, model.WorkerStopped, "")
 	m.observeWorkerByID(workerID)
@@ -238,6 +301,12 @@ func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, 
 			}
 			if err := m.fly.DestroyMachine(ctx, w.FlyMachineID, true); err != nil {
 				slog.Error("Failed to destroy old machine", "machine_id", w.FlyMachineID, "error", err)
+				continue
+			}
+		}
+		if w.FlyVolumeID != "" {
+			if err := m.flyClientForWorker(w).DestroyVolume(ctx, w.FlyVolumeID); err != nil {
+				slog.Error("Failed to destroy old worker volume", "volume_id", w.FlyVolumeID, "error", err)
 				continue
 			}
 		}
