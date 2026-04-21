@@ -31,13 +31,16 @@ type runtimeSnapshot struct {
 type Runner struct {
 	cfg Config
 
-	litestreamCmd *exec.Cmd
-	loadCmd       *exec.Cmd
-	verifier      *Verifier
-	reporter      *Reporter
-	snapshotMu    sync.Mutex
-	snapshot      runtimeSnapshot
-	lastLocalPoll time.Time
+	litestreamCmd  *exec.Cmd
+	litestreamDone chan struct{}
+	litestreamErr  error
+	litestreamMu   sync.Mutex
+	loadCmd        *exec.Cmd
+	verifier       *Verifier
+	reporter       *Reporter
+	snapshotMu     sync.Mutex
+	snapshot       runtimeSnapshot
+	lastLocalPoll  time.Time
 }
 
 func NewRunner(cfg Config) *Runner {
@@ -53,6 +56,9 @@ func NewRunner(cfg Config) *Runner {
 }
 
 func (r *Runner) Run(ctx context.Context) error {
+	runCtx, cancelRun := context.WithCancelCause(ctx)
+	defer cancelRun(nil)
+
 	SetWorkerInfo(r.cfg)
 	startTime := time.Now()
 	r.reporter = NewReporter(r.cfg)
@@ -62,19 +68,19 @@ func (r *Runner) Run(ctx context.Context) error {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			case <-ticker.C:
 				uptime := time.Since(startTime).Seconds()
 				SetUptime(uptime)
 				r.setUptime(uptime)
 				r.pollDBStats()
-				r.sendHeartbeat(ctx)
+				r.sendHeartbeat(runCtx)
 			}
 		}
 	}()
 
-	if err := r.populate(ctx); err != nil {
+	if err := r.populate(runCtx); err != nil {
 		return fmt.Errorf("populate: %w", err)
 	}
 
@@ -82,31 +88,32 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("write litestream config: %w", err)
 	}
 
-	if err := r.startLitestream(ctx); err != nil {
+	if err := r.startLitestream(runCtx); err != nil {
 		return fmt.Errorf("start litestream: %w", err)
 	}
 	defer r.stopLitestream()
+	r.monitorLitestream(runCtx, cancelRun)
 
-	if err := r.waitForFirstSync(ctx); err != nil {
+	if err := r.waitForFirstSync(runCtx); err != nil {
 		return fmt.Errorf("wait for first sync: %w", err)
 	}
 
 	if r.cfg.LoadMode == "synthetic" || r.cfg.LoadMode == "both" {
-		if err := r.startLoad(ctx); err != nil {
+		if err := r.startLoad(runCtx); err != nil {
 			return fmt.Errorf("start load: %w", err)
 		}
 		defer r.stopLoad()
 	}
 
 	if r.cfg.LoadMode == "replay" || r.cfg.LoadMode == "both" {
-		if err := r.startReplay(ctx); err != nil {
+		if err := r.startReplay(runCtx); err != nil {
 			return fmt.Errorf("start replay: %w", err)
 		}
 	}
 
 	r.verifier = NewVerifier(r.cfg, r.loadCmd)
 
-	return r.runVerifyLoop(ctx)
+	return r.runVerifyLoop(runCtx)
 }
 
 func (r *Runner) populate(ctx context.Context) error {
@@ -201,7 +208,25 @@ func (r *Runner) startLitestream(ctx context.Context) error {
 		)
 	}
 
-	return r.litestreamCmd.Start()
+	if err := r.litestreamCmd.Start(); err != nil {
+		return err
+	}
+
+	done := make(chan struct{})
+	r.litestreamMu.Lock()
+	r.litestreamDone = done
+	r.litestreamErr = nil
+	r.litestreamMu.Unlock()
+
+	go func(cmd *exec.Cmd) {
+		err := cmd.Wait()
+		r.litestreamMu.Lock()
+		r.litestreamErr = err
+		r.litestreamMu.Unlock()
+		close(done)
+	}(r.litestreamCmd)
+
+	return nil
 }
 
 func (r *Runner) stopLitestream() {
@@ -209,8 +234,43 @@ func (r *Runner) stopLitestream() {
 		return
 	}
 	slog.Info("Stopping Litestream")
-	r.litestreamCmd.Process.Signal(os.Interrupt)
-	r.litestreamCmd.Wait()
+	if err := r.litestreamCmd.Process.Signal(os.Interrupt); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		slog.Warn("Failed to interrupt Litestream", "error", err)
+	}
+	if done := r.litestreamDoneChan(); done != nil {
+		<-done
+	}
+}
+
+func (r *Runner) monitorLitestream(ctx context.Context, cancel context.CancelCauseFunc) {
+	done := r.litestreamDoneChan()
+	if done == nil {
+		return
+	}
+
+	go func() {
+		<-done
+		if ctx.Err() != nil {
+			return
+		}
+		if err := r.litestreamExitError(); err != nil {
+			cancel(fmt.Errorf("litestream exited unexpectedly: %w", err))
+			return
+		}
+		cancel(errors.New("litestream exited unexpectedly"))
+	}()
+}
+
+func (r *Runner) litestreamDoneChan() <-chan struct{} {
+	r.litestreamMu.Lock()
+	defer r.litestreamMu.Unlock()
+	return r.litestreamDone
+}
+
+func (r *Runner) litestreamExitError() error {
+	r.litestreamMu.Lock()
+	defer r.litestreamMu.Unlock()
+	return r.litestreamErr
 }
 
 func (r *Runner) waitForFirstSync(ctx context.Context) error {
@@ -223,6 +283,9 @@ func (r *Runner) waitForFirstSync(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+				return cause
+			}
 			return ctx.Err()
 		case <-deadline:
 			return fmt.Errorf("timed out waiting for first sync")
@@ -409,6 +472,7 @@ func (r *Runner) pollDBStats() {
 	}
 
 	client := r.ipcClient()
+	defer client.CloseIdleConnections()
 	snapshot, err := r.collectLitestreamRuntime(client, time.Now().UTC())
 	if err != nil {
 		r.setLitestreamSnapshotFailure(time.Now().UTC(), err)
@@ -418,13 +482,19 @@ func (r *Runner) pollDBStats() {
 }
 
 func (r *Runner) ipcClient() *http.Client {
+	return newIPCClient(r.cfg.SocketPath, 5*time.Second)
+}
+
+func newIPCClient(socketPath string, timeout time.Duration) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
+			DisableKeepAlives: true,
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", r.cfg.SocketPath)
+				var dialer net.Dialer
+				return dialer.DialContext(ctx, "unix", socketPath)
 			},
 		},
-		Timeout: 5 * time.Second,
+		Timeout: timeout,
 	}
 }
 
@@ -522,6 +592,9 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			slog.Info("Verification loop stopped")
+			if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+				return cause
+			}
 			return nil
 		case <-ticker.C:
 			result, err := r.verifier.RunCycle(ctx)

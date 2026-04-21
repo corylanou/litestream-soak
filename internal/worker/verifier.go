@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -36,16 +35,9 @@ type Verifier struct {
 
 func NewVerifier(cfg Config, loadCmd *exec.Cmd) *Verifier {
 	return &Verifier{
-		cfg:     cfg,
-		loadCmd: loadCmd,
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					return net.Dial("unix", cfg.SocketPath)
-				},
-			},
-			Timeout: 90 * time.Second,
-		},
+		cfg:        cfg,
+		loadCmd:    loadCmd,
+		httpClient: newIPCClient(cfg.SocketPath, 90*time.Second),
 	}
 }
 
@@ -195,6 +187,7 @@ func (v *Verifier) waitForSync(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("sync request: %w", err)
 	}
+	defer v.httpClient.CloseIdleConnections()
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {

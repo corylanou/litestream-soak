@@ -1,12 +1,15 @@
 package worker
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -84,6 +87,44 @@ func TestPollDBStatsMarksSnapshotHealthy(t *testing.T) {
 	}
 	if snapshot.LitestreamSnapshotError != "" {
 		t.Fatalf("unexpected snapshot error %q", snapshot.LitestreamSnapshotError)
+	}
+}
+
+func TestPollDBStatsClosesIPCConnections(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkerID = "test-worker-ipc-cleanup"
+	cfg.ProfileName = "test-profile"
+	cfg.Source = "test"
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("litestream-soak-%d.sock", time.Now().UnixNano()))
+
+	if err := os.WriteFile(cfg.DBPath, []byte("1234567890"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/txid":
+			_, _ = w.Write([]byte(`{"txid":42}`))
+		case "/info":
+			_, _ = w.Write([]byte(`{"uptime_seconds":99}`))
+		case "/list":
+			lastSyncAt := time.Now().Add(-3 * time.Second).UTC().Format(time.RFC3339Nano)
+			_, _ = w.Write([]byte(`{"databases":[{"status":"replicating","last_sync_at":"` + lastSyncAt + `"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	runner := NewRunner(cfg)
+	runner.pollDBStats()
+
+	if !waitUntil(2*time.Second, 10*time.Millisecond, func() bool {
+		return tracker.Active() == 0
+	}) {
+		t.Fatalf("active IPC connections=%d want 0", tracker.Active())
 	}
 }
 
@@ -179,6 +220,28 @@ func TestPollLitestreamLocalState(t *testing.T) {
 	}
 }
 
+func TestMonitorLitestreamCancelsRunContextOnUnexpectedExit(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+
+	runner := NewRunner(DefaultConfig())
+	done := make(chan struct{})
+	runner.litestreamDone = done
+
+	runner.monitorLitestream(ctx, cancel)
+	close(done)
+
+	if !waitUntil(2*time.Second, 10*time.Millisecond, func() bool {
+		return ctx.Err() != nil
+	}) {
+		t.Fatal("context was not canceled after Litestream exit")
+	}
+
+	if got := context.Cause(ctx); got == nil || got.Error() != "litestream exited unexpectedly" {
+		t.Fatalf("context cause=%v want litestream exited unexpectedly", got)
+	}
+}
+
 func startTestUnixServer(t *testing.T, socketPath string, handler http.Handler) {
 	t.Helper()
 
@@ -198,4 +261,86 @@ func startTestUnixServer(t *testing.T, socketPath string, handler http.Handler) 
 		_ = listener.Close()
 		_ = os.Remove(socketPath)
 	})
+}
+
+type unixServerTracker struct {
+	active atomic.Int64
+}
+
+func (s *unixServerTracker) Active() int64 {
+	return s.active.Load()
+}
+
+func startTrackedUnixServer(t *testing.T, socketPath string, handler http.Handler) *unixServerTracker {
+	t.Helper()
+
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := &unixServerTracker{}
+	server := &http.Server{Handler: handler}
+	go func() {
+		_ = server.Serve(&trackedListener{
+			Listener: listener,
+			active:   &tracker.active,
+		})
+	}()
+
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	})
+
+	return tracker
+}
+
+type trackedListener struct {
+	net.Listener
+	active *atomic.Int64
+}
+
+func (l *trackedListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	l.active.Add(1)
+	return &trackedConn{Conn: conn, active: l.active}, nil
+}
+
+type trackedConn struct {
+	net.Conn
+	active *atomic.Int64
+	once   sync.Once
+}
+
+func (c *trackedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() {
+		c.active.Add(-1)
+	})
+	return err
+}
+
+func waitUntil(timeout, interval time.Duration, condition func() bool) bool {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		if condition() {
+			return true
+		}
+		select {
+		case <-deadline.C:
+			return condition()
+		case <-ticker.C:
+		}
+	}
 }
