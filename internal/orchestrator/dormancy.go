@@ -224,6 +224,7 @@ func (m *Manager) evaluateDormancy(ctx context.Context, policy DormancyPolicy) {
 			slog.Error("Failed to list worker verifications for dormancy", "worker_id", worker.ID, "error", err)
 			continue
 		}
+		verifications = verificationsSince(verifications, dormancyEvaluationStart(worker))
 
 		candidate, ok := detectDormancyCandidate(verifications, now, policy.Threshold, policy.MinFailures)
 		if !ok {
@@ -235,6 +236,32 @@ func (m *Manager) evaluateDormancy(ctx context.Context, policy DormancyPolicy) {
 			slog.Error("Failed to pause dormant worker", "worker_id", worker.ID, "error", err)
 		}
 	}
+}
+
+func dormancyEvaluationStart(worker model.Worker) time.Time {
+	start := worker.CreatedAt
+	if worker.LastProbeAt != nil && worker.LastProbeAt.After(start) {
+		start = *worker.LastProbeAt
+	}
+	return start
+}
+
+func verificationsSince(verifications []model.Verification, cutoff time.Time) []model.Verification {
+	if cutoff.IsZero() {
+		return verifications
+	}
+
+	filtered := verifications[:0]
+	for _, verification := range verifications {
+		observedAt := verification.StartedAt
+		if verification.CompletedAt != nil && !verification.CompletedAt.IsZero() {
+			observedAt = *verification.CompletedAt
+		}
+		if !observedAt.Before(cutoff) {
+			filtered = append(filtered, verification)
+		}
+	}
+	return filtered
 }
 
 func detectDormancyCandidate(verifications []model.Verification, now time.Time, threshold time.Duration, minFailures int) (dormancyCandidate, bool) {

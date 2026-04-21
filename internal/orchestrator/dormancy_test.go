@@ -64,6 +64,37 @@ func TestDetectDormancyCandidateRequiresSameSignature(t *testing.T) {
 	}
 }
 
+func TestVerificationsSinceIgnoresFailuresBeforeWorkerRun(t *testing.T) {
+	now := time.Date(2026, 4, 13, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-10 * time.Minute)
+	verifications := []model.Verification{
+		failedVerificationAt(now.Add(-1*time.Minute), `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`),
+		failedVerificationAt(now.Add(-12*time.Hour), `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`),
+		failedVerificationAt(now.Add(-25*time.Hour), `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`),
+	}
+
+	filtered := verificationsSince(verifications, cutoff)
+	if len(filtered) != 1 {
+		t.Fatalf("len(filtered)=%d want 1", len(filtered))
+	}
+	if _, ok := detectDormancyCandidate(filtered, now, 24*time.Hour, 3); ok {
+		t.Fatal("expected no dormancy candidate from pre-run failures")
+	}
+}
+
+func TestDormancyEvaluationStartUsesProbeTime(t *testing.T) {
+	createdAt := time.Date(2026, 4, 13, 8, 0, 0, 0, time.UTC)
+	lastProbeAt := createdAt.Add(4 * time.Hour)
+	worker := model.Worker{
+		CreatedAt:   createdAt,
+		LastProbeAt: &lastProbeAt,
+	}
+
+	if got := dormancyEvaluationStart(worker); !got.Equal(lastProbeAt) {
+		t.Fatalf("dormancyEvaluationStart()=%s want %s", got, lastProbeAt)
+	}
+}
+
 func TestInferDeploymentRolloutStatus(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -123,12 +154,12 @@ func TestSummarizeDeploymentRolloutUsesSingularAttentionGrammar(t *testing.T) {
 func TestSummarizeDeploymentComparisonUsesPlainEnglish(t *testing.T) {
 	comparison := DeploymentComparisonResponse{
 		Base: &DeploymentScorecard{
-			Deployment: model.Deployment{Source: "main"},
+			Deployment:    model.Deployment{Source: "main"},
 			PassedWorkers: 4,
 			FailedWorkers: 4,
 		},
 		Head: DeploymentScorecard{
-			Deployment: model.Deployment{Source: "pr-1228", PRNumber: 1228},
+			Deployment:    model.Deployment{Source: "pr-1228", PRNumber: 1228},
 			PassedWorkers: 9,
 			FailedWorkers: 0,
 		},
