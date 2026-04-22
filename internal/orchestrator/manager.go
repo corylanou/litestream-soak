@@ -127,6 +127,12 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 	}
 
 	if err := m.db.UpdateWorkerMachine(workerID, machine.ID, vol.ID); err != nil {
+		if destroyErr := m.fly.DestroyMachine(ctx, machine.ID, true); destroyErr != nil && !flyapi.IsNotFound(destroyErr) {
+			slog.Warn("Failed to destroy worker machine after database update failure", "worker_id", workerID, "machine_id", machine.ID, "error", destroyErr)
+		}
+		if destroyErr := m.fly.DestroyVolume(ctx, vol.ID); destroyErr != nil && !flyapi.IsNotFound(destroyErr) {
+			slog.Warn("Failed to destroy worker volume after database update failure", "worker_id", workerID, "volume_id", vol.ID, "error", destroyErr)
+		}
 		return nil, fmt.Errorf("update worker machine: %w", err)
 	}
 	m.db.UpdateWorkerStatus(workerID, model.WorkerRunning, "")
