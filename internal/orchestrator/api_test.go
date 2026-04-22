@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,6 +147,76 @@ func TestBuildDeploymentRollout(t *testing.T) {
 	}
 	if !rollout.Workers[2].VerifiedSinceDeploy {
 		t.Fatalf("VerifiedSinceDeploy = false, want true for worker-main-running")
+	}
+}
+
+func TestBuildDeploymentRolloutCountsRuntimeUnhealthy(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-runtime",
+		LitestreamSHA: "litestream-runtime",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-runtime",
+		Source:        "pr-1228",
+		PRNumber:      1228,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+
+	deployment, err := db.GetLatestDeployment("pr-1228")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment() error = %v", err)
+	}
+
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-1228-gharchive",
+		Name:          "worker-pr-1228-gharchive",
+		Status:        model.WorkerRunning,
+		Source:        "pr-1228",
+		GitSHA:        "sha-runtime",
+		LitestreamSHA: "litestream-runtime",
+		ProfileName:   "gharchive-replay",
+		ProfileConfig: "{}",
+	})
+	if err := db.UpdateWorkerRuntimeSnapshot("worker-pr-1228-gharchive", reporting.RuntimePayload{
+		SnapshotCollectedAt:     deployment.StartedAt.Add(2 * time.Minute).UTC(),
+		LitestreamSnapshotError: "litestream process not responding",
+	}); err != nil {
+		t.Fatalf("UpdateWorkerRuntimeSnapshot() error = %v", err)
+	}
+	passedAt := deployment.StartedAt.Add(3 * time.Minute).UTC()
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-pr-1228-gharchive",
+		StartedAt:   passedAt.Add(-15 * time.Second),
+		CompletedAt: &passedAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  15000,
+	})
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	rollout, err := api.buildDeploymentRollout(*deployment)
+	if err != nil {
+		t.Fatalf("buildDeploymentRollout() error = %v", err)
+	}
+
+	if rollout.RuntimeUnhealthyWorkers != 1 {
+		t.Fatalf("RuntimeUnhealthyWorkers = %d, want 1", rollout.RuntimeUnhealthyWorkers)
+	}
+	if rollout.AttentionWorkers != 1 {
+		t.Fatalf("AttentionWorkers = %d, want 1", rollout.AttentionWorkers)
+	}
+	if rollout.Status != "needs_attention" {
+		t.Fatalf("Status = %q, want needs_attention", rollout.Status)
+	}
+	if rollout.Workers[0].RuntimeSnapshotStatus != reporting.RuntimeSnapshotStatusUnhealthy {
+		t.Fatalf("RuntimeSnapshotStatus = %q, want unhealthy", rollout.Workers[0].RuntimeSnapshotStatus)
+	}
+	if !strings.Contains(rollout.Summary, "1 runtime-unhealthy worker") {
+		t.Fatalf("Summary = %q, want runtime-unhealthy worker", rollout.Summary)
 	}
 }
 

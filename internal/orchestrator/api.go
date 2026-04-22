@@ -83,23 +83,24 @@ type DeploymentWorkerProgress struct {
 }
 
 type DeploymentRolloutResponse struct {
-	Deployment           model.Deployment           `json:"deployment"`
-	Status               string                     `json:"status"`
-	Summary              string                     `json:"summary"`
-	NextAction           string                     `json:"next_action,omitempty"`
-	NextChecks           []string                   `json:"next_checks,omitempty"`
-	GraceWindowExceeded  bool                       `json:"grace_window_exceeded,omitempty"`
-	TotalWorkers         int                        `json:"total_workers"`
-	UpdatedWorkers       int                        `json:"updated_workers"`
-	OutdatedWorkers      int                        `json:"outdated_workers"`
-	RunningWorkers       int                        `json:"running_workers"`
-	DegradedWorkers      int                        `json:"degraded_workers"`
-	DormantWorkers       int                        `json:"dormant_workers"`
-	ProbingWorkers       int                        `json:"probing_workers"`
-	AttentionWorkers     int                        `json:"attention_workers"`
-	VerifiedSinceDeploy  int                        `json:"verified_since_deploy_workers"`
-	AwaitingVerification int                        `json:"awaiting_verification_workers"`
-	Workers              []DeploymentWorkerProgress `json:"workers,omitempty"`
+	Deployment              model.Deployment           `json:"deployment"`
+	Status                  string                     `json:"status"`
+	Summary                 string                     `json:"summary"`
+	NextAction              string                     `json:"next_action,omitempty"`
+	NextChecks              []string                   `json:"next_checks,omitempty"`
+	GraceWindowExceeded     bool                       `json:"grace_window_exceeded,omitempty"`
+	TotalWorkers            int                        `json:"total_workers"`
+	UpdatedWorkers          int                        `json:"updated_workers"`
+	OutdatedWorkers         int                        `json:"outdated_workers"`
+	RunningWorkers          int                        `json:"running_workers"`
+	DegradedWorkers         int                        `json:"degraded_workers"`
+	DormantWorkers          int                        `json:"dormant_workers"`
+	ProbingWorkers          int                        `json:"probing_workers"`
+	RuntimeUnhealthyWorkers int                        `json:"runtime_unhealthy_workers"`
+	AttentionWorkers        int                        `json:"attention_workers"`
+	VerifiedSinceDeploy     int                        `json:"verified_since_deploy_workers"`
+	AwaitingVerification    int                        `json:"awaiting_verification_workers"`
+	Workers                 []DeploymentWorkerProgress `json:"workers,omitempty"`
 }
 
 type DeploymentFailureCount struct {
@@ -667,7 +668,10 @@ func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (Deployme
 		case model.WorkerProbing:
 			response.ProbingWorkers++
 		}
-		if worker.Status != model.WorkerRunning {
+		if runtimeSnapshotNeedsAttention(runtimeStatus) {
+			response.RuntimeUnhealthyWorkers++
+		}
+		if workerNeedsAttention(worker.Status, runtimeStatus) {
 			response.AttentionWorkers++
 		}
 		if progress.Updated && workerNeedsPostDeployVerification(worker.Status) {
@@ -687,8 +691,8 @@ func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (Deployme
 		if left.Updated != right.Updated {
 			return !left.Updated
 		}
-		if workerRank(left.Status) != workerRank(right.Status) {
-			return workerRank(left.Status) < workerRank(right.Status)
+		if deploymentWorkerRank(left) != deploymentWorkerRank(right) {
+			return deploymentWorkerRank(left) < deploymentWorkerRank(right)
 		}
 		return left.Name < right.Name
 	})
@@ -1047,6 +1051,21 @@ func workerMatchesDeployment(worker model.Worker, deployment model.Deployment) b
 	}
 
 	return strings.TrimSpace(worker.LitestreamSHA) == deploymentLitestreamSHA
+}
+
+func workerNeedsAttention(status model.WorkerStatus, runtimeStatus string) bool {
+	return status != model.WorkerRunning || runtimeSnapshotNeedsAttention(runtimeStatus)
+}
+
+func runtimeSnapshotNeedsAttention(status string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), reporting.RuntimeSnapshotStatusUnhealthy)
+}
+
+func deploymentWorkerRank(progress DeploymentWorkerProgress) int {
+	if progress.Status == model.WorkerRunning && runtimeSnapshotNeedsAttention(progress.RuntimeSnapshotStatus) {
+		return workerRank(model.WorkerDegraded)
+	}
+	return workerRank(progress.Status)
 }
 
 func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -1478,7 +1497,7 @@ func inferDeploymentRolloutStatus(rollout DeploymentRolloutResponse) string {
 		return "rolling_out"
 	case rollout.ProbingWorkers > 0:
 		return "probing"
-	case rollout.DormantWorkers > 0 || rollout.DegradedWorkers > 0:
+	case rollout.DormantWorkers > 0 || rollout.DegradedWorkers > 0 || rollout.RuntimeUnhealthyWorkers > 0:
 		return "needs_attention"
 	case rollout.AwaitingVerification > 0:
 		return "settling"
@@ -1499,7 +1518,7 @@ func summarizeDeploymentRollout(rollout DeploymentRolloutResponse) string {
 	case "settling":
 		return fmt.Sprintf("The %s rollout is waiting for verification. All %d workers are on the new release, %d have verified since rollout, and %d still need a fresh verification.", subject, rollout.TotalWorkers, rollout.VerifiedSinceDeploy, rollout.AwaitingVerification)
 	case "needs_attention":
-		return fmt.Sprintf("The %s rollout needs attention. All %d workers are on the new release, but %s: %d degraded and %d dormant.", subject, rollout.TotalWorkers, workersNeedInvestigation(rollout.AttentionWorkers), rollout.DegradedWorkers, rollout.DormantWorkers)
+		return fmt.Sprintf("The %s rollout needs attention. All %d workers are on the new release, but %s: %s.", subject, rollout.TotalWorkers, workersNeedInvestigation(rollout.AttentionWorkers), rolloutAttentionSignalSummary(rollout))
 	default:
 		return fmt.Sprintf("The %s rollout is stable. All %d workers are on the new release and %d have verified since rollout.", subject, rollout.TotalWorkers, rollout.VerifiedSinceDeploy)
 	}
@@ -1609,6 +1628,36 @@ func workersNeedInvestigation(count int) string {
 	return fmt.Sprintf("%d workers still need investigation", count)
 }
 
+func rolloutAttentionSignalSummary(rollout DeploymentRolloutResponse) string {
+	signals := make([]string, 0, 3)
+	if rollout.DegradedWorkers > 0 {
+		signals = append(signals, countNoun(rollout.DegradedWorkers, "degraded worker"))
+	}
+	if rollout.DormantWorkers > 0 {
+		signals = append(signals, countNoun(rollout.DormantWorkers, "dormant worker"))
+	}
+	if rollout.RuntimeUnhealthyWorkers > 0 {
+		signals = append(signals, countNoun(rollout.RuntimeUnhealthyWorkers, "runtime-unhealthy worker"))
+	}
+	if len(signals) == 0 {
+		return "attention signal present"
+	}
+	return joinEnglish(signals)
+}
+
+func joinEnglish(values []string) string {
+	switch len(values) {
+	case 0:
+		return ""
+	case 1:
+		return values[0]
+	case 2:
+		return values[0] + " and " + values[1]
+	default:
+		return strings.Join(values[:len(values)-1], ", ") + ", and " + values[len(values)-1]
+	}
+}
+
 func applyDeploymentRolloutGuidance(rollout *DeploymentRolloutResponse, now time.Time) {
 	if rollout == nil {
 		return
@@ -1654,9 +1703,9 @@ func inferDeploymentNextAction(rollout DeploymentRolloutResponse) string {
 		return "Wait for the first post-rollout verification cycle to finish before scoring this release."
 	case "needs_attention":
 		if rollout.GraceWindowExceeded {
-			return "Treat this as a failed rollout until the degraded or dormant workers are explained."
+			return "Treat this as a failed rollout until every attention worker is explained."
 		}
-		return "Watch the affected workers through one full verification cycle, then open any that stay degraded or dormant."
+		return "Watch the affected workers through one full verification cycle, then open any that still need attention."
 	default:
 		return "No immediate action. Spot-check one worker, then keep watching diagnosis for regressions."
 	}
@@ -1690,10 +1739,13 @@ func inferDeploymentNextChecks(rollout DeploymentRolloutResponse) []string {
 		)
 	case "needs_attention":
 		checks = append(checks,
-			"Open degraded and dormant workers first.",
+			"Open degraded, dormant, and runtime-unhealthy workers first.",
 			"Check that awaiting_verification_workers is not masking workers that simply have not rerun yet.",
 			"Check failure stage, signature, and probable subsystem on those workers.",
 		)
+		if rollout.RuntimeUnhealthyWorkers > 0 {
+			checks = append(checks, "For runtime-unhealthy workers, open the incident JSON or prompt bundle and treat the current runtime snapshot as stronger evidence than older passing checks.")
+		}
 	default:
 		checks = append(checks,
 			"Spot-check one worker incident bundle after the rollout.",

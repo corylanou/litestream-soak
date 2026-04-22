@@ -529,6 +529,7 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 		"degraded":              float64(rollout.DegradedWorkers),
 		"dormant":               float64(rollout.DormantWorkers),
 		"probing":               float64(rollout.ProbingWorkers),
+		"runtime_unhealthy":     float64(rollout.RuntimeUnhealthyWorkers),
 		"attention":             float64(rollout.AttentionWorkers),
 		"verified_since_deploy": float64(rollout.VerifiedSinceDeploy),
 		"awaiting_verification": float64(rollout.AwaitingVerification),

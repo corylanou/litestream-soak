@@ -211,10 +211,10 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 			CurrentProbableSubsystem: workerSummary.CurrentProbableSubsystem,
 		}
 
-		if workerSummary.Worker.Status == model.WorkerRunning {
-			summary.HealthyWorkers++
-		} else {
+		if workerNeedsAttention(workerSummary.Worker.Status, workerSummary.RuntimeSnapshotStatus) {
 			summary.AttentionWorkers++
+		} else {
+			summary.HealthyWorkers++
 		}
 
 		workerCards = append(workerCards, card)
@@ -223,8 +223,8 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 	sort.SliceStable(workerCards, func(i, j int) bool {
 		left := workerCards[i]
 		right := workerCards[j]
-		if workerRank(left.Worker.Status) != workerRank(right.Worker.Status) {
-			return workerRank(left.Worker.Status) < workerRank(right.Worker.Status)
+		if homeWorkerRank(left) != homeWorkerRank(right) {
+			return homeWorkerRank(left) < homeWorkerRank(right)
 		}
 		return heartbeatUnix(left.Worker.LastHeartbeatAt) > heartbeatUnix(right.Worker.LastHeartbeatAt)
 	})
@@ -313,9 +313,10 @@ func (a *API) buildHomeSourceCards(selectedSource string) ([]homeSourceCard, err
 	countsBySource := make(map[string]sourceCounts)
 	for _, worker := range workers {
 		source := firstNonEmpty(strings.TrimSpace(worker.Source), "main")
+		runtimeStatus := reporting.SnapshotStatus(extractReportedRuntime(worker, nil))
 		counts := countsBySource[source]
 		counts.total++
-		if worker.Status != model.WorkerRunning {
+		if workerNeedsAttention(worker.Status, runtimeStatus) {
 			counts.attention++
 		}
 		countsBySource[source] = counts
@@ -830,6 +831,13 @@ func workerRank(status model.WorkerStatus) int {
 	}
 }
 
+func homeWorkerRank(worker homeWorker) int {
+	if worker.Worker.Status == model.WorkerRunning && runtimeSnapshotNeedsAttention(worker.RuntimeSnapshotStatus) {
+		return workerRank(model.WorkerDegraded)
+	}
+	return workerRank(worker.Worker.Status)
+}
+
 func heartbeatUnix(value *time.Time) int64 {
 	if value == nil {
 		return 0
@@ -1214,7 +1222,7 @@ const homeBodyTemplate = `{{define "home_body"}}
         <h2>Start Here</h2>
         <p>Use the control plane for incident context and Grafana for cluster shape.</p>
         <ul>
-          <li>Open a worker marked <strong>degraded</strong>, <strong>dormant</strong>, or <strong>probing</strong>.</li>
+          <li>Open a worker marked <strong>degraded</strong>, <strong>dormant</strong>, <strong>probing</strong>, or <strong>snapshot unhealthy</strong>.</li>
           <li>Check failure stage, signature, and probable subsystem.</li>
           <li>If the worker is <strong>dormant</strong>, the control plane already paused compute after sustained same-signature failures.</li>
           <li>Copy the AI prompt or incident JSON.</li>
@@ -1262,6 +1270,7 @@ const homeBodyTemplate = `{{define "home_body"}}
           {{if gt .LatestDeployment.ProbingWorkers 0}}<span class="badge badge-warn">{{.LatestDeployment.ProbingWorkers}} probing</span>{{end}}
           {{if gt .LatestDeployment.DormantWorkers 0}}<span class="badge badge-bad">{{.LatestDeployment.DormantWorkers}} dormant</span>{{end}}
           {{if gt .LatestDeployment.DegradedWorkers 0}}<span class="badge badge-bad">{{.LatestDeployment.DegradedWorkers}} degraded</span>{{end}}
+          {{if gt .LatestDeployment.RuntimeUnhealthyWorkers 0}}<span class="badge badge-bad">{{.LatestDeployment.RuntimeUnhealthyWorkers}} runtime unhealthy</span>{{end}}
           {{if .LatestDeployment.GraceWindowExceeded}}<span class="badge badge-bad">beyond 45m grace</span>{{end}}
         </div>
         <div class="detail-list">
@@ -1454,8 +1463,8 @@ const homeBodyTemplate = `{{define "home_body"}}
         </thead>
         <tbody>
           {{range .Workers}}
-          <tr class="clickable-row {{if eq (statusClass .Worker.Status) "status-bad"}}row-bad{{else if eq (statusClass .Worker.Status) "status-warn"}}row-warn{{end}}" data-href="/ui/workers/{{pathEscape .Worker.ID}}">
-            <td><span class="dot dot-{{if eq (statusClass .Worker.Status) "status-good"}}good{{else if eq (statusClass .Worker.Status) "status-warn"}}warn{{else if eq (statusClass .Worker.Status) "status-bad"}}bad{{else}}neutral{{end}}"></span></td>
+          <tr class="clickable-row {{if or (eq (statusClass .Worker.Status) "status-bad") (eq (runtimeClass .RuntimeSnapshotStatus) "status-bad")}}row-bad{{else if or (eq (statusClass .Worker.Status) "status-warn") (eq (runtimeClass .RuntimeSnapshotStatus) "status-warn")}}row-warn{{end}}" data-href="/ui/workers/{{pathEscape .Worker.ID}}">
+            <td><span class="dot dot-{{if or (eq (statusClass .Worker.Status) "status-bad") (eq (runtimeClass .RuntimeSnapshotStatus) "status-bad")}}bad{{else if or (eq (statusClass .Worker.Status) "status-warn") (eq (runtimeClass .RuntimeSnapshotStatus) "status-warn")}}warn{{else if eq (statusClass .Worker.Status) "status-good"}}good{{else}}neutral{{end}}"></span></td>
             <td><strong>{{.Worker.Name}}</strong></td>
             <td><span class="badge badge-{{if eq (statusClass .Worker.Status) "status-good"}}good{{else if eq (statusClass .Worker.Status) "status-warn"}}warn{{else if eq (statusClass .Worker.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Worker.Status}}</span></td>
             <td><span class="{{heartbeatClass .Worker.LastHeartbeatAt}}">{{timeAgo .Worker.LastHeartbeatAt}}</span></td>
