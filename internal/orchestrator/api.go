@@ -207,6 +207,8 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/deployments/latest", a.handleGetLatestDeployment)
 	mux.HandleFunc("GET /api/deployments/compare/latest", a.handleGetLatestDeploymentComparison)
 	mux.HandleFunc("GET /api/deployments/{sha}", a.handleGetDeployment)
+	mux.HandleFunc("GET /api/run-archives", a.handleListRunArchives)
+	mux.HandleFunc("GET /api/run-archives/{id}", a.handleGetRunArchive)
 	mux.HandleFunc("POST /api/admin/deployments/ready", a.handleDeploymentReady)
 	mux.HandleFunc("POST /api/admin/resume-dormant", a.handleResumeDormantWorkers)
 	mux.HandleFunc("GET /api/workers/{id}", a.handleGetWorker)
@@ -312,6 +314,34 @@ func (a *API) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAPIJSON(w, rollout)
+}
+
+func (a *API) handleListRunArchives(w http.ResponseWriter, r *http.Request) {
+	archives, err := a.db.ListRunArchives(
+		strings.TrimSpace(r.URL.Query().Get("source")),
+		strings.TrimSpace(r.URL.Query().Get("type")),
+		readLimit(r, 20),
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeAPIJSON(w, archives)
+}
+
+func (a *API) handleGetRunArchive(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(strings.TrimSpace(r.PathValue("id")))
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid archive id", http.StatusBadRequest)
+		return
+	}
+
+	archive, err := a.db.GetRunArchive(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeAPIJSON(w, archive)
 }
 
 func (a *API) listWorkerSummaries(status, source string) ([]WorkerSummaryResponse, error) {

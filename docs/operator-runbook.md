@@ -118,9 +118,10 @@ live machine-readable diagnosis summary that powers the home page.
 
 The control plane can now act as a circuit breaker for sustained failures.
 
-When enabled, it watches main-fleet workers and looks for a consecutive run of
-the same active failure signature. If that signature persists long enough, the
-worker is moved to `dormant` and the Fly Machine is stopped.
+When enabled, it watches active workers across sources and looks for a
+consecutive run of the same active failure signature. If that signature persists
+long enough, the control plane archives failure evidence, moves the worker to
+`dormant`, and stops the Fly Machine.
 
 Interpret the new worker states this way:
 
@@ -131,6 +132,7 @@ Interpret the new worker states this way:
 Current dormancy behavior:
 
 - compute is stopped, but the Fly volume is kept
+- failure evidence is written to `/api/run-archives?type=failure`
 - the control plane records `dormant_at`, `dormant_reason`, `dormant_signature`, and `resume_trigger`
 - a new deploy wakes dormant main workers into `probing`
 - if the probe fails, the worker returns to `dormant`
@@ -146,6 +148,41 @@ SOAK_DORMANCY_ENABLED=true
 SOAK_DORMANCY_THRESHOLD=24h
 SOAK_DORMANCY_CHECK_INTERVAL=10m
 SOAK_DORMANCY_MIN_FAILURES=3
+```
+
+## Successful Run Teardown
+
+Successful PR soaks can be archived and torn down automatically to avoid paying
+for idle worker Machines, attached volumes, and stale replica prefixes after the
+run has proven clean.
+
+Current success teardown behavior:
+
+- only sources matching `SOAK_SUCCESS_TEARDOWN_SOURCES` are eligible; the
+  default is `pr-*`, so `main` is not auto-destroyed
+- every worker must be on the latest deployment, running, runtime-healthy, and
+  freshly heartbeating
+- every worker must have a passing verification after the full soak window
+- any failed verification in the deployment window blocks success teardown
+- evidence is archived to `/api/run-archives?type=success` before deletion
+- after archival, the control plane destroys worker Machines, volumes, and the
+  worker replica prefix
+
+Control it with these env vars on `litestream-soak-ctl`:
+
+```bash
+SOAK_SUCCESS_TEARDOWN_ENABLED=true
+SOAK_SUCCESS_TEARDOWN_THRESHOLD=24h
+SOAK_SUCCESS_TEARDOWN_CHECK_INTERVAL=10m
+SOAK_SUCCESS_TEARDOWN_HEARTBEAT_STALE_AFTER=15m
+SOAK_SUCCESS_TEARDOWN_SOURCES=pr-*
+```
+
+List archived runs with:
+
+```bash
+curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  "https://litestream-soak-ctl.fly.dev/api/run-archives?source=pr-1228&type=success" | jq .
 ```
 
 If you want to inspect dormant workers quickly:

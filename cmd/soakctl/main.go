@@ -50,6 +50,11 @@ func main() {
 	dormancyThreshold := durationEnvOrDefault("SOAK_DORMANCY_THRESHOLD", 24*time.Hour)
 	dormancyInterval := durationEnvOrDefault("SOAK_DORMANCY_CHECK_INTERVAL", 10*time.Minute)
 	dormancyMinFailures := intEnvOrDefault("SOAK_DORMANCY_MIN_FAILURES", 3)
+	successTeardownEnabled := envOrDefault("SOAK_SUCCESS_TEARDOWN_ENABLED", "false") == "true"
+	successTeardownThreshold := durationEnvOrDefault("SOAK_SUCCESS_TEARDOWN_THRESHOLD", 24*time.Hour)
+	successTeardownInterval := durationEnvOrDefault("SOAK_SUCCESS_TEARDOWN_CHECK_INTERVAL", 10*time.Minute)
+	successTeardownHeartbeatStaleAfter := durationEnvOrDefault("SOAK_SUCCESS_TEARDOWN_HEARTBEAT_STALE_AFTER", 15*time.Minute)
+	successTeardownSources := listEnvOrDefault("SOAK_SUCCESS_TEARDOWN_SOURCES", []string{"pr-*"})
 	platformLogMonitorEnabled := envOrDefault("SOAK_PLATFORM_LOG_MONITOR_ENABLED", "true") == "true"
 	platformLogPollInterval := durationEnvOrDefault("SOAK_PLATFORM_LOG_POLL_INTERVAL", time.Minute)
 	volumeInventoryPollInterval := durationEnvOrDefault("SOAK_VOLUME_INVENTORY_POLL_INTERVAL", 10*time.Minute)
@@ -120,6 +125,14 @@ func main() {
 			MinFailures:   dormancyMinFailures,
 		})
 	}
+	if successTeardownEnabled {
+		go mgr.RunSuccessTeardownLoop(ctx, orchestrator.SuccessTeardownPolicy{
+			Threshold:           successTeardownThreshold,
+			CheckInterval:       successTeardownInterval,
+			HeartbeatStaleAfter: successTeardownHeartbeatStaleAfter,
+			SourceAllowlist:     successTeardownSources,
+		})
+	}
 	if platformLogMonitorEnabled {
 		go mgr.RunPlatformLogMonitor(ctx, platformLogPollInterval)
 	}
@@ -138,6 +151,11 @@ func main() {
 		"dormancy_threshold", dormancyThreshold,
 		"dormancy_check_interval", dormancyInterval,
 		"dormancy_min_failures", dormancyMinFailures,
+		"success_teardown_enabled", successTeardownEnabled,
+		"success_teardown_threshold", successTeardownThreshold,
+		"success_teardown_check_interval", successTeardownInterval,
+		"success_teardown_heartbeat_stale_after", successTeardownHeartbeatStaleAfter,
+		"success_teardown_sources", strings.Join(successTeardownSources, ","),
 		"platform_log_monitor_enabled", platformLogMonitorEnabled,
 		"platform_log_poll_interval", platformLogPollInterval,
 		"volume_inventory_poll_interval", volumeInventoryPollInterval,
@@ -188,6 +206,26 @@ func intEnvOrDefault(key string, def int) int {
 		return def
 	}
 	return value
+}
+
+func listEnvOrDefault(key string, def []string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+
+	values := make([]string, 0)
+	for _, part := range strings.Split(raw, ",") {
+		value := strings.TrimSpace(part)
+		if value == "" {
+			continue
+		}
+		values = append(values, value)
+	}
+	if len(values) == 0 {
+		return def
+	}
+	return values
 }
 
 func newAuthMiddleware(username, password, adminBearerToken string) func(http.Handler) http.Handler {

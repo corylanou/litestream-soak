@@ -83,6 +83,21 @@ type Event struct {
 	CollapsedWindowEnd   *time.Time `json:"collapsed_window_end,omitempty"`
 }
 
+type RunArchive struct {
+	ID            int       `json:"id"`
+	DeploymentID  int       `json:"deployment_id"`
+	Source        string    `json:"source"`
+	WorkerID      string    `json:"worker_id,omitempty"`
+	ArchiveType   string    `json:"archive_type"`
+	GitSHA        string    `json:"git_sha"`
+	LitestreamSHA string    `json:"litestream_sha,omitempty"`
+	ImageRef      string    `json:"image_ref,omitempty"`
+	Status        string    `json:"status"`
+	Summary       string    `json:"summary"`
+	Payload       string    `json:"payload"`
+	ArchivedAt    time.Time `json:"archived_at"`
+}
+
 type AlertDelivery struct {
 	ID               int        `json:"id"`
 	WorkerID         string     `json:"worker_id,omitempty"`

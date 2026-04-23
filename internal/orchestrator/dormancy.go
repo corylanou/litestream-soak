@@ -216,9 +216,9 @@ func (m *Manager) RunDormancyLoop(ctx context.Context, policy DormancyPolicy) {
 }
 
 func (m *Manager) evaluateDormancy(ctx context.Context, policy DormancyPolicy) {
-	workers, err := m.db.ListMainWorkers()
+	workers, err := m.db.ListDormancyWorkers()
 	if err != nil {
-		slog.Error("Failed to list main workers for dormancy", "error", err)
+		slog.Error("Failed to list workers for dormancy", "error", err)
 		return
 	}
 
@@ -241,6 +241,12 @@ func (m *Manager) evaluateDormancy(ctx context.Context, policy DormancyPolicy) {
 		}
 
 		reason := fmt.Sprintf("worker paused after %d consecutive %s failures since %s", candidate.Count, candidate.Signature, candidate.Since.Format(time.RFC3339))
+		archive, created, err := m.archiveFailureWorker(worker, candidate, reason, now)
+		if err != nil {
+			slog.Warn("Failed to archive dormant worker failure evidence", "worker_id", worker.ID, "error", err)
+		} else if created {
+			_ = m.db.RecordEvent(worker.ID, "run_failure_archived", "Archived failure evidence before pausing worker compute", fmt.Sprintf("archive_id=%d", archive.ID))
+		}
 		if err := m.DormantWorker(ctx, worker.ID, reason, candidate.Signature, "sustained_failure"); err != nil {
 			slog.Error("Failed to pause dormant worker", "worker_id", worker.ID, "error", err)
 		}

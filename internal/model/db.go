@@ -93,6 +93,21 @@ CREATE TABLE IF NOT EXISTS alerts (
     sent_at DATETIME
 );
 
+CREATE TABLE IF NOT EXISTS run_archives (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deployment_id INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT '',
+    worker_id TEXT NOT NULL DEFAULT '',
+    archive_type TEXT NOT NULL,
+    git_sha TEXT NOT NULL DEFAULT '',
+    litestream_sha TEXT NOT NULL DEFAULT '',
+    image_ref TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    payload TEXT NOT NULL DEFAULT '{}',
+    archived_at DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_verifications_worker ON verifications(worker_id);
 CREATE INDEX IF NOT EXISTS idx_verifications_worker_started ON verifications(worker_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_verifications_worker_failed_started ON verifications(worker_id, passed, status, started_at DESC);
@@ -107,6 +122,8 @@ CREATE INDEX IF NOT EXISTS idx_alerts_worker ON alerts(worker_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at);
 CREATE INDEX IF NOT EXISTS idx_deployments_source_started ON deployments(source, started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_deployments_source_version_started ON deployments(source, git_sha, litestream_sha, started_at DESC, id DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_run_archives_unique ON run_archives(deployment_id, archive_type, worker_id);
+CREATE INDEX IF NOT EXISTS idx_run_archives_source_type_archived ON run_archives(source, archive_type, archived_at DESC);
 `
 
 type DB struct {
@@ -439,6 +456,53 @@ func (d *DB) ListWorkersFiltered(status, source string) ([]Worker, error) {
 	return workers, nil
 }
 
+func (d *DB) ListDormancyWorkers() ([]Worker, error) {
+	rows, err := d.db.Query(`
+		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at
+		FROM workers
+		WHERE status IN ('running', 'degraded')
+		ORDER BY source, created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	workers := make([]Worker, 0)
+	for rows.Next() {
+		var w Worker
+		if err := scanWorker(rows, &w); err != nil {
+			return nil, err
+		}
+		workers = append(workers, w)
+	}
+	return workers, nil
+}
+
+func (d *DB) ListActiveWorkerSources() ([]string, error) {
+	rows, err := d.db.Query(`
+		SELECT DISTINCT source
+		FROM workers
+		WHERE status NOT IN ('stopped', 'failed')
+		ORDER BY source`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	sources := make([]string, 0)
+	for rows.Next() {
+		var source string
+		if err := rows.Scan(&source); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(source) == "" {
+			source = "main"
+		}
+		sources = append(sources, source)
+	}
+	return sources, nil
+}
+
 func (d *DB) ListExpiredWorkers() ([]Worker, error) {
 	rows, err := d.db.Query(`
 		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at
@@ -662,6 +726,116 @@ func (d *DB) GetLatestDeployment(source string) (*Deployment, error) {
 		return nil, err
 	}
 	return &dep, nil
+}
+
+func (d *DB) RecordRunArchive(archive *RunArchive) (bool, error) {
+	if archive == nil {
+		return false, errors.New("run archive is nil")
+	}
+	if strings.TrimSpace(archive.Payload) == "" {
+		archive.Payload = "{}"
+	}
+	if archive.ArchivedAt.IsZero() {
+		archive.ArchivedAt = time.Now().UTC()
+	}
+
+	result, err := d.db.Exec(`
+		INSERT OR IGNORE INTO run_archives (deployment_id, source, worker_id, archive_type, git_sha, litestream_sha, image_ref, status, summary, payload, archived_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		archive.DeploymentID,
+		archive.Source,
+		archive.WorkerID,
+		archive.ArchiveType,
+		archive.GitSHA,
+		archive.LitestreamSHA,
+		archive.ImageRef,
+		archive.Status,
+		archive.Summary,
+		archive.Payload,
+		archive.ArchivedAt,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if rowsAffected == 0 {
+		err := d.db.QueryRow(`
+			SELECT id, archived_at
+			FROM run_archives
+			WHERE deployment_id = ? AND archive_type = ? AND worker_id = ?`,
+			archive.DeploymentID,
+			archive.ArchiveType,
+			archive.WorkerID,
+		).Scan(&archive.ID, &archive.ArchivedAt)
+		return false, err
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return false, err
+	}
+	archive.ID = int(id)
+	return true, nil
+}
+
+func (d *DB) ListRunArchives(source, archiveType string, limit int) ([]RunArchive, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	query := `
+		SELECT id, deployment_id, source, worker_id, archive_type, git_sha, litestream_sha, image_ref, status, summary, payload, archived_at
+		FROM run_archives`
+	args := make([]any, 0, 3)
+	clauses := make([]string, 0, 2)
+	if strings.TrimSpace(source) != "" {
+		clauses = append(clauses, "source = ?")
+		args = append(args, strings.TrimSpace(source))
+	}
+	if strings.TrimSpace(archiveType) != "" {
+		clauses = append(clauses, "archive_type = ?")
+		args = append(args, strings.TrimSpace(archiveType))
+	}
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	query += " ORDER BY archived_at DESC, id DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	archives := make([]RunArchive, 0)
+	for rows.Next() {
+		var archive RunArchive
+		if err := scanRunArchive(rows, &archive); err != nil {
+			return nil, err
+		}
+		archives = append(archives, archive)
+	}
+	return archives, nil
+}
+
+func (d *DB) GetRunArchive(id int) (*RunArchive, error) {
+	var archive RunArchive
+	err := scanRunArchive(
+		d.db.QueryRow(`
+			SELECT id, deployment_id, source, worker_id, archive_type, git_sha, litestream_sha, image_ref, status, summary, payload, archived_at
+			FROM run_archives
+			WHERE id = ?`, id),
+		&archive,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &archive, nil
 }
 
 func (d *DB) RecordEvent(workerID, eventType, message, details string) error {
@@ -1065,6 +1239,27 @@ type workerScanner interface {
 
 type deploymentScanner interface {
 	Scan(dest ...any) error
+}
+
+type runArchiveScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRunArchive(scanner runArchiveScanner, archive *RunArchive) error {
+	return scanner.Scan(
+		&archive.ID,
+		&archive.DeploymentID,
+		&archive.Source,
+		&archive.WorkerID,
+		&archive.ArchiveType,
+		&archive.GitSHA,
+		&archive.LitestreamSHA,
+		&archive.ImageRef,
+		&archive.Status,
+		&archive.Summary,
+		&archive.Payload,
+		&archive.ArchivedAt,
+	)
 }
 
 func scanDeployment(scanner deploymentScanner, dep *Deployment) error {
