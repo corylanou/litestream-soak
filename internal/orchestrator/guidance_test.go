@@ -123,6 +123,37 @@ func TestBuildIncidentGuideLegacyRuntimeTelemetry(t *testing.T) {
 	}
 }
 
+func TestBuildIncidentGuideHealthyUsesBaselineMode(t *testing.T) {
+	bundle := &IncidentBundle{
+		Worker: model.Worker{
+			ID:     "worker-pr-1228-low-vol",
+			Status: model.WorkerRunning,
+		},
+		ActiveFailure: false,
+		ReportedRuntime: &reporting.RuntimePayload{
+			SnapshotCollectedAt:       timeMustParse("2026-04-23T14:00:00Z"),
+			LitestreamSnapshotHealthy: true,
+			DBStatus:                  "replicating",
+		},
+		Workload: workload.Config{
+			LoadMode: "synthetic",
+			Pattern:  "steady",
+		},
+		TriageCommands: []string{"curl -sS https://litestream-soak-ctl.fly.dev/api/workers/worker-pr-1228-low-vol/incident"},
+	}
+
+	guide := buildIncidentGuide(bundle)
+	if guide.ProbableSubsystem != "Healthy baseline" {
+		t.Fatalf("guide probable subsystem=%q", guide.ProbableSubsystem)
+	}
+	if guide.RecommendedPromptMode != "healthy" {
+		t.Fatalf("guide recommended prompt=%q", guide.RecommendedPromptMode)
+	}
+	if !strings.Contains(strings.Join(guide.NextSteps, "\n"), "clean baseline") {
+		t.Fatalf("expected healthy baseline next step, got %v", guide.NextSteps)
+	}
+}
+
 func TestBuildDiagnosisSnapshotUsesCurrentFailures(t *testing.T) {
 	summaries := []WorkerSummaryResponse{
 		{
@@ -410,6 +441,58 @@ func TestBuildPromptIncludesFleetDiagnosisAndAuthGuidance(t *testing.T) {
 	}
 	if strings.Contains(prompt, "<recent_events>") {
 		t.Fatalf("prompt should not include raw recent events: %s", prompt)
+	}
+}
+
+func TestBuildPromptHealthyBaseline(t *testing.T) {
+	bundle := &IncidentBundle{
+		GeneratedAt: timeMustParse("2026-04-23T14:00:00Z"),
+		Worker: model.Worker{
+			ID:     "worker-pr-1228-low-vol",
+			Status: model.WorkerRunning,
+		},
+		Workload: workload.Config{
+			LoadMode: "synthetic",
+			Pattern:  "steady",
+		},
+		Guide: incidentGuide{
+			Summary:               "No active failure is present on this worker.",
+			ProbableSubsystem:     "Healthy baseline",
+			RecommendedPromptMode: "healthy",
+			WhyLikely:             []string{"The worker status is running and the latest verification is not actively failing."},
+			NextSteps:             []string{"Capture this prompt as a clean baseline before the next deploy or workload change."},
+		},
+		RuntimeSnapshotStatus: reporting.RuntimeSnapshotStatusHealthy,
+		ReportedRuntime: &reporting.RuntimePayload{
+			SnapshotCollectedAt:       timeMustParse("2026-04-23T14:00:10Z"),
+			LitestreamSnapshotHealthy: true,
+			DBStatus:                  "replicating",
+		},
+		RecentVerifications: []model.Verification{
+			{
+				WorkerID:   "worker-pr-1228-low-vol",
+				StartedAt:  timeMustParse("2026-04-23T13:59:30Z"),
+				Status:     "passed",
+				CheckType:  "integrity",
+				Passed:     true,
+				DurationMS: 15000,
+			},
+		},
+	}
+
+	prompt := buildPrompt(bundle, promptModeHealthy)
+	for _, want := range []string{
+		"healthy Litestream soak baseline",
+		"<mode>",
+		"healthy",
+		"Why this looks healthy enough to use as a baseline",
+		"future regressions should be compared against",
+		"<reported_runtime>",
+		"current_runtime_snapshot_status: healthy",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q", want)
+		}
 	}
 }
 

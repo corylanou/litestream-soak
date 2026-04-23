@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -277,6 +278,73 @@ func TestHandleGetLatestDeployment(t *testing.T) {
 	}
 }
 
+func TestHandleGetLatestDeploymentPromptUsesHealthyModeForStableRollout(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-latest",
+		LitestreamSHA: "litestream-latest",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-latest",
+		Source:        "pr-1228",
+		PRNumber:      1228,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+
+	deployment, err := db.GetLatestDeployment("pr-1228")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment() error = %v", err)
+	}
+
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-1228-low",
+		Name:          "worker-pr-1228-low",
+		Status:        model.WorkerRunning,
+		Source:        "pr-1228",
+		GitSHA:        deployment.GitSHA,
+		LitestreamSHA: deployment.LitestreamSHA,
+		PRNumber:      1228,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	if err := db.UpdateWorkerRuntimeSnapshot("worker-pr-1228-low", reporting.RuntimePayload{
+		SnapshotCollectedAt:       deployment.StartedAt.Add(2 * time.Minute).UTC(),
+		LitestreamSnapshotHealthy: true,
+		DBStatus:                  "replicating",
+	}); err != nil {
+		t.Fatalf("UpdateWorkerRuntimeSnapshot() error = %v", err)
+	}
+	passedAt := deployment.StartedAt.Add(25 * time.Hour).UTC()
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-pr-1228-low",
+		StartedAt:   passedAt.Add(-15 * time.Second),
+		CompletedAt: &passedAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  15000,
+	})
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/deployments/latest/prompt?source=pr-1228", nil)
+	recorder := httptest.NewRecorder()
+
+	api.handleGetLatestDeploymentPrompt(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "<mode>\nhealthy\n</mode>") {
+		t.Fatalf("body missing healthy mode: %s", body)
+	}
+	if !strings.Contains(body, "<latest_rollout>") {
+		t.Fatalf("body missing latest rollout section: %s", body)
+	}
+}
+
 func TestBuildWorkerSummaryIgnoresPrecreationVerification(t *testing.T) {
 	t.Parallel()
 
@@ -321,6 +389,43 @@ func TestBuildWorkerSummaryIgnoresPrecreationVerification(t *testing.T) {
 	}
 	if summary.CurrentFailureSignature != "" {
 		t.Fatalf("CurrentFailureSignature = %q, want empty", summary.CurrentFailureSignature)
+	}
+}
+
+func TestHandleGetRunArchivePromptUsesHealthyModeForSuccessArchive(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	archive := &model.RunArchive{
+		DeploymentID:  99,
+		Source:        "pr-1228",
+		ArchiveType:   "success",
+		GitSHA:        "soak-sha",
+		LitestreamSHA: "litestream-sha",
+		Status:        "stable",
+		Summary:       "PR #1228 completed cleanly.",
+		Payload:       `{"rollout":{"status":"stable"}}`,
+	}
+	if _, err := db.RecordRunArchive(archive); err != nil {
+		t.Fatalf("RecordRunArchive() error = %v", err)
+	}
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/run-archives/1/prompt", nil)
+	request.SetPathValue("id", strconv.Itoa(archive.ID))
+	recorder := httptest.NewRecorder()
+
+	api.handleGetRunArchivePrompt(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "<mode>\nhealthy\n</mode>") {
+		t.Fatalf("body missing healthy mode: %s", body)
+	}
+	if !strings.Contains(body, "<archived_payload>") {
+		t.Fatalf("body missing archived payload: %s", body)
 	}
 }
 

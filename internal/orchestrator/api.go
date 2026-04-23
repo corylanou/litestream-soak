@@ -205,10 +205,13 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/diagnosis", a.handleGetDiagnosis)
 	mux.HandleFunc("GET /api/deployments", a.handleListDeployments)
 	mux.HandleFunc("GET /api/deployments/latest", a.handleGetLatestDeployment)
+	mux.HandleFunc("GET /api/deployments/latest/prompt", a.handleGetLatestDeploymentPrompt)
 	mux.HandleFunc("GET /api/deployments/compare/latest", a.handleGetLatestDeploymentComparison)
+	mux.HandleFunc("GET /api/deployments/compare/latest/prompt", a.handleGetLatestDeploymentComparisonPrompt)
 	mux.HandleFunc("GET /api/deployments/{sha}", a.handleGetDeployment)
 	mux.HandleFunc("GET /api/run-archives", a.handleListRunArchives)
 	mux.HandleFunc("GET /api/run-archives/{id}", a.handleGetRunArchive)
+	mux.HandleFunc("GET /api/run-archives/{id}/prompt", a.handleGetRunArchivePrompt)
 	mux.HandleFunc("POST /api/admin/deployments/ready", a.handleDeploymentReady)
 	mux.HandleFunc("POST /api/admin/resume-dormant", a.handleResumeDormantWorkers)
 	mux.HandleFunc("GET /api/workers/{id}", a.handleGetWorker)
@@ -282,6 +285,28 @@ func (a *API) handleGetLatestDeployment(w http.ResponseWriter, r *http.Request) 
 	writeAPIJSON(w, rollout)
 }
 
+func (a *API) handleGetLatestDeploymentPrompt(w http.ResponseWriter, r *http.Request) {
+	deployment, err := a.db.GetLatestDeployment(strings.TrimSpace(r.URL.Query().Get("source")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if deployment == nil {
+		http.Error(w, "deployment not found", http.StatusNotFound)
+		return
+	}
+
+	rollout, err := a.buildDeploymentRollout(*deployment)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	mode := parsePromptMode(r.URL.Query().Get("mode"), defaultPromptModeForRollout(rollout))
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(buildRolloutPrompt(rollout, nil, mode)))
+}
+
 func (a *API) handleGetLatestDeploymentComparison(w http.ResponseWriter, r *http.Request) {
 	comparison, err := a.buildRequestedDeploymentComparison(
 		strings.TrimSpace(r.URL.Query().Get("source")),
@@ -298,6 +323,27 @@ func (a *API) handleGetLatestDeploymentComparison(w http.ResponseWriter, r *http
 	}
 
 	writeAPIJSON(w, comparison)
+}
+
+func (a *API) handleGetLatestDeploymentComparisonPrompt(w http.ResponseWriter, r *http.Request) {
+	comparison, err := a.buildRequestedDeploymentComparison(
+		strings.TrimSpace(r.URL.Query().Get("source")),
+		strings.TrimSpace(r.URL.Query().Get("base_source")),
+		strings.TrimSpace(r.URL.Query().Get("head_source")),
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if comparison == nil {
+		http.Error(w, "deployment not found", http.StatusNotFound)
+		return
+	}
+
+	mode := parsePromptMode(r.URL.Query().Get("mode"), defaultPromptModeForComparison(*comparison))
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(buildComparisonPrompt(*comparison, mode)))
 }
 
 func (a *API) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
@@ -342,6 +388,24 @@ func (a *API) handleGetRunArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAPIJSON(w, archive)
+}
+
+func (a *API) handleGetRunArchivePrompt(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(strings.TrimSpace(r.PathValue("id")))
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid archive id", http.StatusBadRequest)
+		return
+	}
+
+	archive, err := a.db.GetRunArchive(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	mode := parsePromptMode(r.URL.Query().Get("mode"), defaultPromptModeForArchive(*archive))
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(buildRunArchivePrompt(*archive, mode)))
 }
 
 func (a *API) listWorkerSummaries(status, source string) ([]WorkerSummaryResponse, error) {
@@ -901,6 +965,27 @@ func (a *API) handleGetPrompt(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte(buildPrompt(bundle, mode)))
+}
+
+func defaultPromptModeForRollout(rollout DeploymentRolloutResponse) string {
+	if rollout.Status == "stable" {
+		return string(promptModeHealthy)
+	}
+	return string(promptModeTriage)
+}
+
+func defaultPromptModeForComparison(comparison DeploymentComparisonResponse) string {
+	if comparison.Head.FailedWorkers == 0 && comparison.Head.AwaitingWorkers == 0 {
+		return string(promptModeHealthy)
+	}
+	return string(promptModeTriage)
+}
+
+func defaultPromptModeForArchive(archive model.RunArchive) string {
+	if archive.ArchiveType == runArchiveTypeSuccess {
+		return string(promptModeHealthy)
+	}
+	return string(promptModeTriage)
 }
 
 func (a *API) handleGetWorkerDebugSnapshot(w http.ResponseWriter, r *http.Request) {

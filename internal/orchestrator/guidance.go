@@ -14,6 +14,7 @@ import (
 type promptMode string
 
 const (
+	promptModeHealthy    promptMode = "healthy"
 	promptModeTriage     promptMode = "triage"
 	promptModeLitestream promptMode = "litestream"
 	promptModeHarness    promptMode = "harness"
@@ -108,12 +109,12 @@ type promptEventSummary struct {
 
 func parsePromptMode(raw string, recommended string) promptMode {
 	switch promptMode(strings.ToLower(strings.TrimSpace(raw))) {
-	case promptModeTriage, promptModeLitestream, promptModeHarness:
+	case promptModeHealthy, promptModeTriage, promptModeLitestream, promptModeHarness:
 		return promptMode(strings.ToLower(strings.TrimSpace(raw)))
 	}
 
 	switch promptMode(strings.ToLower(strings.TrimSpace(recommended))) {
-	case promptModeTriage, promptModeLitestream, promptModeHarness:
+	case promptModeHealthy, promptModeTriage, promptModeLitestream, promptModeHarness:
 		return promptMode(strings.ToLower(strings.TrimSpace(recommended)))
 	default:
 		return promptModeTriage
@@ -123,6 +124,12 @@ func parsePromptMode(raw string, recommended string) promptMode {
 func buildPromptModes(recommended string) []promptModeInfo {
 	mode := parsePromptMode("", recommended)
 	return []promptModeInfo{
+		{
+			ID:          string(promptModeHealthy),
+			Label:       "Healthy baseline",
+			Summary:     "Explain why the worker or rollout looks healthy and what future regressions should be compared against.",
+			Recommended: mode == promptModeHealthy,
+		},
 		{
 			ID:          string(promptModeTriage),
 			Label:       "Fast triage",
@@ -152,17 +159,24 @@ func buildIncidentGuide(bundle *IncidentBundle) incidentGuide {
 
 	headline := "Worker currently passing verification"
 	summary := "No active failure is present on this worker."
-	if bundle.ActiveFailure && bundle.LatestFailure != nil {
+	if bundle.ActiveFailure {
 		headline = fmt.Sprintf("Active incident likely in %s", subsystem)
 		summary = fmt.Sprintf("The latest verification is failing during %s with signature %s.", valueOrUnknown(stage), valueOrUnknown(signature))
 	} else if bundle.LatestFailure != nil {
-		headline = fmt.Sprintf("Worker recovered; latest recorded failure points to %s", subsystem)
+		headline = fmt.Sprintf("Worker recovered; use this as the current healthy baseline")
 		summary = fmt.Sprintf("This worker is running now, but its latest recorded failure happened during %s with signature %s.", valueOrUnknown(stage), valueOrUnknown(signature))
+		recommendedMode = promptModeHealthy
+		subsystem = "Healthy baseline"
+	} else {
+		recommendedMode = promptModeHealthy
+		subsystem = "Healthy baseline"
 	}
 
 	why := make([]string, 0, 4)
 	if bundle.ActiveFailure {
 		why = append(why, fmt.Sprintf("The latest verification is still failing, and the worker status is %s.", bundle.Worker.Status))
+	} else {
+		why = append(why, fmt.Sprintf("The worker status is %s and the latest verification is not actively failing.", bundle.Worker.Status))
 	}
 	if stage != "" {
 		why = append(why, fmt.Sprintf("The failure stage is classified as %s.", stage))
@@ -454,9 +468,13 @@ func buildCoverageSnapshot(summaries []WorkerSummaryResponse) coverageSnapshot {
 func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 	task := promptTask(mode)
 	returnFormat := promptReturnFormat(mode)
+	intro := "You are diagnosing a Litestream soak incident."
+	if mode == promptModeHealthy {
+		intro = "You are reviewing a healthy Litestream soak baseline."
+	}
 
 	sections := []string{
-		"You are diagnosing a Litestream soak incident.",
+		intro,
 		"",
 		"<mode>",
 		string(mode),
@@ -726,6 +744,8 @@ func boolPtr(value bool) *bool {
 
 func promptTask(mode promptMode) string {
 	switch mode {
+	case promptModeHealthy:
+		return "Explain why this worker, rollout, or archived run currently looks healthy enough to use as a baseline. Call out the strongest health evidence, anything unusual but not yet failing, and what future regressions should be compared against."
 	case promptModeLitestream:
 		return "Assume the most likely issue is in Litestream sync, restore, or replication behavior. Use both the worker incident evidence and the fleet diagnosis to explain whether the failure is in the control socket, restore path, replica object fetch path, or restore correctness."
 	case promptModeHarness:
@@ -737,6 +757,14 @@ func promptTask(mode promptMode) string {
 
 func promptReturnFormat(mode promptMode) string {
 	switch mode {
+	case promptModeHealthy:
+		return strings.Join([]string{
+			"1. Why this looks healthy enough to use as a baseline",
+			"2. The strongest evidence for that, using verification results, runtime snapshots, and rollout/comparison status",
+			"3. Anything unusual or worth watching even though it is not failing yet",
+			"4. What future failures or regressions should be compared against",
+			"5. Exact next checks or dashboards to revisit after the next release",
+		}, "\n")
 	case promptModeLitestream:
 		return strings.Join([]string{
 			"1. Most likely Litestream subsystem",
@@ -783,6 +811,8 @@ func inferProbableSubsystem(stage, signature string) string {
 
 func recommendedPromptModeForSubsystem(subsystem string) promptMode {
 	switch subsystem {
+	case "Healthy baseline":
+		return promptModeHealthy
 	case "Litestream sync/control socket", "Replication or restore path", "Restore correctness / integrity validation":
 		return promptModeLitestream
 	case "Soak harness or worker runtime":
@@ -794,6 +824,18 @@ func recommendedPromptModeForSubsystem(subsystem string) promptMode {
 
 func incidentNextSteps(subsystem string, bundle *IncidentBundle) []string {
 	steps := make([]string, 0, 6)
+	if subsystem == "Healthy baseline" {
+		steps = append(steps,
+			"Capture this prompt as a clean baseline before the next deploy or workload change.",
+			"Use the latest verification result, runtime snapshot, and comparison verdict as the reference point for future regressions.",
+			"After the next release, compare any worker that needs attention against this healthy baseline before blaming Litestream or the harness.",
+		)
+		if len(bundle.TriageCommands) > 0 {
+			steps = append(steps, fmt.Sprintf("If you want a live follow-up snapshot, start with %s.", bundle.TriageCommands[0]))
+		}
+		return steps
+	}
+
 	if bundle.LatestPlatformEvent != nil {
 		switch bundle.LatestPlatformEvent.EventType {
 		case "platform_oom":
@@ -850,6 +892,135 @@ func incidentNextSteps(subsystem string, bundle *IncidentBundle) []string {
 		steps = append(steps, fmt.Sprintf("Run the triage commands listed on this page, starting with %s.", bundle.TriageCommands[0]))
 	}
 	return steps
+}
+
+func buildRolloutPrompt(rollout DeploymentRolloutResponse, comparison *DeploymentComparisonResponse, mode promptMode) string {
+	task := promptTask(mode)
+	returnFormat := promptReturnFormat(mode)
+	intro := "You are reviewing a Litestream soak rollout."
+	if mode == promptModeHealthy {
+		intro = "You are reviewing a healthy Litestream soak rollout baseline."
+	}
+
+	sections := []string{
+		intro,
+		"",
+		"<mode>",
+		string(mode),
+		"</mode>",
+		"",
+		"<task>",
+		task,
+		"</task>",
+		"",
+		"<return_format>",
+		returnFormat,
+		"</return_format>",
+		"",
+		"<rollout_summary>",
+		fmt.Sprintf("status: %s", rollout.Status),
+		fmt.Sprintf("summary: %s", rollout.Summary),
+		fmt.Sprintf("next_action: %s", valueOrUnknown(rollout.NextAction)),
+		fmt.Sprintf("grace_window_exceeded: %t", rollout.GraceWindowExceeded),
+		"</rollout_summary>",
+		"",
+		"<latest_rollout>",
+		mustJSON(rollout),
+		"</latest_rollout>",
+	}
+
+	if comparison != nil {
+		sections = append(
+			sections,
+			"",
+			"<release_comparison>",
+			mustJSON(comparison),
+			"</release_comparison>",
+		)
+	}
+
+	return strings.Join(sections, "\n")
+}
+
+func buildComparisonPrompt(comparison DeploymentComparisonResponse, mode promptMode) string {
+	task := promptTask(mode)
+	returnFormat := promptReturnFormat(mode)
+	intro := "You are reviewing a Litestream soak release comparison."
+	if mode == promptModeHealthy {
+		intro = "You are reviewing a healthy Litestream soak comparison baseline."
+	}
+
+	sections := []string{
+		intro,
+		"",
+		"<mode>",
+		string(mode),
+		"</mode>",
+		"",
+		"<task>",
+		task,
+		"</task>",
+		"",
+		"<return_format>",
+		returnFormat,
+		"</return_format>",
+		"",
+		"<comparison_summary>",
+		fmt.Sprintf("verdict: %s", comparison.Verdict),
+		fmt.Sprintf("summary: %s", comparison.Summary),
+		fmt.Sprintf("base_source: %s", comparison.BaseSource),
+		fmt.Sprintf("head_source: %s", comparison.HeadSource),
+		"</comparison_summary>",
+		"",
+		"<release_comparison>",
+		mustJSON(comparison),
+		"</release_comparison>",
+	}
+
+	return strings.Join(sections, "\n")
+}
+
+func buildRunArchivePrompt(archive model.RunArchive, mode promptMode) string {
+	task := promptTask(mode)
+	returnFormat := promptReturnFormat(mode)
+	intro := "You are reviewing an archived Litestream soak run."
+	if mode == promptModeHealthy {
+		intro = "You are reviewing an archived healthy Litestream soak baseline."
+	}
+
+	sections := []string{
+		intro,
+		"",
+		"<mode>",
+		string(mode),
+		"</mode>",
+		"",
+		"<task>",
+		task,
+		"</task>",
+		"",
+		"<return_format>",
+		returnFormat,
+		"</return_format>",
+		"",
+		"<run_archive>",
+		mustJSON(archive),
+		"</run_archive>",
+		"",
+		"<archived_payload>",
+		prettyRawJSON(archive.Payload),
+		"</archived_payload>",
+	}
+
+	return strings.Join(sections, "\n")
+}
+
+func prettyRawJSON(raw string) string {
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return raw
+	}
+	return mustJSON(value)
 }
 
 func diagnosisNextSteps(subsystem string, example WorkerSummaryResponse) []string {

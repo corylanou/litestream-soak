@@ -15,23 +15,27 @@ import (
 )
 
 type homePageData struct {
-	GeneratedAt         time.Time
-	SelectedSource      string
-	SelectedSourceLabel string
-	ScopeSummary        string
-	HomeAction          *homeActionPlan
-	Summary             homeSummary
-	Diagnosis           diagnosisSnapshot
-	Coverage            coverageSnapshot
-	LatestDeployment    *DeploymentRolloutResponse
-	ReleaseComparison   *DeploymentComparisonResponse
-	ActiveSources       []homeSourceCard
-	LatestRolloutURL    string
-	ComparisonJSONURL   string
-	Spotlight           *FailureResponse
-	FailureQueue        []FailureResponse
-	Workers             []homeWorker
-	Events              []model.Event
+	GeneratedAt              time.Time
+	SelectedSource           string
+	SelectedSourceLabel      string
+	ScopeSummary             string
+	HomeAction               *homeActionPlan
+	Summary                  homeSummary
+	Diagnosis                diagnosisSnapshot
+	Coverage                 coverageSnapshot
+	LatestDeployment         *DeploymentRolloutResponse
+	ReleaseComparison        *DeploymentComparisonResponse
+	ActiveSources            []homeSourceCard
+	LatestRolloutURL         string
+	LatestRolloutPromptURL   string
+	LatestRolloutPromptLabel string
+	ComparisonJSONURL        string
+	ComparisonPromptURL      string
+	ComparisonPromptLabel    string
+	Spotlight                *FailureResponse
+	FailureQueue             []FailureResponse
+	Workers                  []homeWorker
+	Events                   []model.Event
 }
 
 type homeSummary struct {
@@ -120,6 +124,7 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"trimSHA":                 trimSHA,
 	"verificationClass":       verificationClass,
 	"verificationLabel":       verificationLabel,
+	"workerPromptURL":         workerPromptURL,
 	"workerName":              workerName,
 }).Parse(homePageTemplate + homeBodyTemplate + workerPageTemplate + helpPageTemplate))
 
@@ -271,6 +276,11 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		return homePageData{}, err
 	}
 
+	latestRolloutPromptURL := rolloutPromptURL(rolloutSource, rollout)
+	latestRolloutPromptLabel := promptActionLabelForMode(defaultPromptModeForRolloutValue(rollout))
+	comparisonPromptURL := comparisonPromptURL(requestedSource, baseSource, headSource, releaseComparison)
+	comparisonPromptLabel := comparisonPromptActionLabelForMode(defaultPromptModeForComparisonValue(releaseComparison))
+
 	activeSources, err := a.buildHomeSourceCards(requestedSource)
 	if err != nil {
 		return homePageData{}, err
@@ -279,23 +289,27 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 	diagnosis := buildDiagnosisSnapshot(summaries)
 
 	return homePageData{
-		GeneratedAt:         time.Now().UTC(),
-		SelectedSource:      requestedSource,
-		SelectedSourceLabel: sourceHumanLabel(requestedSource),
-		ScopeSummary:        buildHomeScopeSummary(requestedSource, rolloutSource, releaseComparison),
-		HomeAction:          buildHomeActionPlan(requestedSource, diagnosis),
-		Summary:             summary,
-		Diagnosis:           diagnosis,
-		Coverage:            buildCoverageSnapshot(summaries),
-		LatestDeployment:    rollout,
-		ReleaseComparison:   releaseComparison,
-		ActiveSources:       activeSources,
-		LatestRolloutURL:    latestRolloutURL,
-		ComparisonJSONURL:   comparisonJSONURL,
-		Spotlight:           spotlight,
-		FailureQueue:        queue,
-		Workers:             workerCards,
-		Events:              events,
+		GeneratedAt:              time.Now().UTC(),
+		SelectedSource:           requestedSource,
+		SelectedSourceLabel:      sourceHumanLabel(requestedSource),
+		ScopeSummary:             buildHomeScopeSummary(requestedSource, rolloutSource, releaseComparison),
+		HomeAction:               buildHomeActionPlan(requestedSource, diagnosis),
+		Summary:                  summary,
+		Diagnosis:                diagnosis,
+		Coverage:                 buildCoverageSnapshot(summaries),
+		LatestDeployment:         rollout,
+		ReleaseComparison:        releaseComparison,
+		ActiveSources:            activeSources,
+		LatestRolloutURL:         latestRolloutURL,
+		LatestRolloutPromptURL:   latestRolloutPromptURL,
+		LatestRolloutPromptLabel: latestRolloutPromptLabel,
+		ComparisonJSONURL:        comparisonJSONURL,
+		ComparisonPromptURL:      comparisonPromptURL,
+		ComparisonPromptLabel:    comparisonPromptLabel,
+		Spotlight:                spotlight,
+		FailureQueue:             queue,
+		Workers:                  workerCards,
+		Events:                   events,
 	}, nil
 }
 
@@ -400,6 +414,68 @@ func buildHomeActionPlan(selectedSource string, diagnosis diagnosisSnapshot) *ho
 		plan.Steps = append(plan.Steps, "Check the Source Comparison card against main before deciding whether the PR is better or worse.")
 	}
 	return plan
+}
+
+func rolloutPromptURL(source string, rollout *DeploymentRolloutResponse) string {
+	query := url.Values{}
+	if source != "" && source != "main" {
+		query.Set("source", source)
+	}
+	query.Set("mode", defaultPromptModeForRolloutValue(rollout))
+	return "/api/deployments/latest/prompt?" + query.Encode()
+}
+
+func comparisonPromptURL(source, baseSource, headSource string, comparison *DeploymentComparisonResponse) string {
+	query := url.Values{}
+	if source != "" && baseSource == "" && headSource == "" {
+		query.Set("source", source)
+	}
+	if baseSource != "" {
+		query.Set("base_source", baseSource)
+	}
+	if headSource != "" {
+		query.Set("head_source", headSource)
+	}
+	query.Set("mode", defaultPromptModeForComparisonValue(comparison))
+	return "/api/deployments/compare/latest/prompt?" + query.Encode()
+}
+
+func defaultPromptModeForRolloutValue(rollout *DeploymentRolloutResponse) string {
+	if rollout == nil {
+		return string(promptModeTriage)
+	}
+	return defaultPromptModeForRollout(*rollout)
+}
+
+func defaultPromptModeForComparisonValue(comparison *DeploymentComparisonResponse) string {
+	if comparison == nil {
+		return string(promptModeTriage)
+	}
+	return defaultPromptModeForComparison(*comparison)
+}
+
+func promptActionLabelForMode(mode string) string {
+	if mode == string(promptModeHealthy) {
+		return "Copy healthy baseline prompt"
+	}
+	return "Copy rollout prompt"
+}
+
+func comparisonPromptActionLabelForMode(mode string) string {
+	if mode == string(promptModeHealthy) {
+		return "Copy healthy comparison prompt"
+	}
+	return "Copy comparison prompt"
+}
+
+func workerPromptURL(worker model.Worker, failureSignature, runtimeSnapshotStatus string) string {
+	query := url.Values{}
+	if strings.TrimSpace(failureSignature) != "" || workerNeedsAttention(worker.Status, runtimeSnapshotStatus) {
+		query.Set("mode", string(promptModeTriage))
+	} else {
+		query.Set("mode", string(promptModeHealthy))
+	}
+	return "/api/workers/" + url.PathEscape(worker.ID) + "/prompt?" + query.Encode()
 }
 
 func (a *API) handleWorkerPage(w http.ResponseWriter, r *http.Request) {
@@ -1316,6 +1392,7 @@ const homeBodyTemplate = `{{define "home_body"}}
         {{end}}
         <div class="chip-row">
           <a class="btn btn-primary" href="{{.LatestRolloutURL}}">Latest rollout JSON</a>
+          {{if .LatestRolloutPromptURL}}<a class="btn" href="{{.LatestRolloutPromptURL}}">{{.LatestRolloutPromptLabel}}</a>{{end}}
           <a class="btn" href="/api/deployments">History</a>
         </div>
         {{else}}
@@ -1376,6 +1453,7 @@ const homeBodyTemplate = `{{define "home_body"}}
         {{end}}
         <div class="chip-row">
           <a class="btn btn-primary" href="{{.ComparisonJSONURL}}">Comparison JSON</a>
+          {{if .ComparisonPromptURL}}<a class="btn" href="{{.ComparisonPromptURL}}">{{.ComparisonPromptLabel}}</a>{{end}}
           <a class="btn" href="{{.LatestRolloutURL}}">Latest rollout JSON</a>
         </div>
         {{else}}
@@ -1437,7 +1515,7 @@ const homeBodyTemplate = `{{define "home_body"}}
       </div>
     </div>
     {{else}}
-    <div class="clear-banner">All workers passing verification</div>
+    <div class="clear-banner">All workers passing verification{{if .LatestRolloutPromptURL}} <a class="btn" href="{{.LatestRolloutPromptURL}}">{{.LatestRolloutPromptLabel}}</a>{{end}}</div>
     {{end}}
 
     <div class="section-head">
@@ -1482,7 +1560,7 @@ const homeBodyTemplate = `{{define "home_body"}}
               <span class="badge badge-good">healthy</span>
               {{end}}
             </td>
-            <td><a href="/api/workers/{{pathEscape .Worker.ID}}/prompt" onclick="event.stopPropagation();" class="btn" style="padding:2px 8px;">Prompt</a></td>
+            <td><a href="{{workerPromptURL .Worker .CurrentFailureSignature .RuntimeSnapshotStatus}}" onclick="event.stopPropagation();" class="btn" style="padding:2px 8px;">Prompt</a></td>
           </tr>
           {{end}}
         </tbody>
@@ -2200,7 +2278,10 @@ const helpPageTemplate = `{{define "help"}}
           <li><code>/api/worker-summaries</code></li>
           <li><code>/api/failures</code></li>
           <li><code>/api/workers/{id}/incident</code></li>
-          <li><code>/api/workers/{id}/prompt?mode=triage|litestream|harness</code></li>
+          <li><code>/api/workers/{id}/prompt?mode=healthy|triage|litestream|harness</code></li>
+          <li><code>/api/deployments/latest/prompt?source=&lt;source&gt;&amp;mode=healthy|triage</code></li>
+          <li><code>/api/deployments/compare/latest/prompt?base_source=&lt;base&gt;&amp;head_source=&lt;head&gt;&amp;mode=healthy|triage</code></li>
+          <li><code>/api/run-archives/{id}/prompt?mode=healthy|triage</code></li>
           <li><code>/api/workers/{id}/debug-snapshot</code></li>
         </ul>
       </div>
