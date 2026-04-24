@@ -55,6 +55,11 @@ func main() {
 	successTeardownInterval := durationEnvOrDefault("SOAK_SUCCESS_TEARDOWN_CHECK_INTERVAL", 10*time.Minute)
 	successTeardownHeartbeatStaleAfter := durationEnvOrDefault("SOAK_SUCCESS_TEARDOWN_HEARTBEAT_STALE_AFTER", 15*time.Minute)
 	successTeardownSources := listEnvOrDefault("SOAK_SUCCESS_TEARDOWN_SOURCES", []string{"pr-*"})
+	prMaxAgeEnabled := envOrDefault("SOAK_PR_MAX_AGE_ENABLED", "false") == "true"
+	prMaxAgeThreshold := durationEnvOrDefault("SOAK_PR_MAX_AGE_THRESHOLD", 24*time.Hour)
+	prMaxAgeInterval := durationEnvOrDefault("SOAK_PR_MAX_AGE_CHECK_INTERVAL", 10*time.Minute)
+	prMaxAgeSources := listEnvOrDefault("SOAK_PR_MAX_AGE_SOURCES", []string{"pr-*"})
+	prMaxAgeAction := orchestrator.PRMaxAgeAction(envOrDefault("SOAK_PR_MAX_AGE_ACTION", string(orchestrator.PRMaxAgeActionStop)))
 	platformLogMonitorEnabled := envOrDefault("SOAK_PLATFORM_LOG_MONITOR_ENABLED", "true") == "true"
 	platformLogPollInterval := durationEnvOrDefault("SOAK_PLATFORM_LOG_POLL_INTERVAL", time.Minute)
 	volumeInventoryPollInterval := durationEnvOrDefault("SOAK_VOLUME_INVENTORY_POLL_INTERVAL", 10*time.Minute)
@@ -133,6 +138,14 @@ func main() {
 			SourceAllowlist:     successTeardownSources,
 		})
 	}
+	if prMaxAgeEnabled {
+		go mgr.RunPRMaxAgeLoop(ctx, orchestrator.PRMaxAgePolicy{
+			Threshold:       prMaxAgeThreshold,
+			CheckInterval:   prMaxAgeInterval,
+			SourceAllowlist: prMaxAgeSources,
+			Action:          prMaxAgeAction,
+		})
+	}
 	if platformLogMonitorEnabled {
 		go mgr.RunPlatformLogMonitor(ctx, platformLogPollInterval)
 	}
@@ -156,6 +169,11 @@ func main() {
 		"success_teardown_check_interval", successTeardownInterval,
 		"success_teardown_heartbeat_stale_after", successTeardownHeartbeatStaleAfter,
 		"success_teardown_sources", strings.Join(successTeardownSources, ","),
+		"pr_max_age_enabled", prMaxAgeEnabled,
+		"pr_max_age_threshold", prMaxAgeThreshold,
+		"pr_max_age_check_interval", prMaxAgeInterval,
+		"pr_max_age_sources", strings.Join(prMaxAgeSources, ","),
+		"pr_max_age_action", string(prMaxAgeAction),
 		"platform_log_monitor_enabled", platformLogMonitorEnabled,
 		"platform_log_poll_interval", platformLogPollInterval,
 		"volume_inventory_poll_interval", volumeInventoryPollInterval,

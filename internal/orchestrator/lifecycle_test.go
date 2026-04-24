@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -65,6 +66,80 @@ func TestSuccessTeardownCandidateRejectsFailureInWindow(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("successTeardownCandidate() = true, want false after a failure in the deployment window")
+	}
+}
+
+func TestNormalizePRMaxAgePolicyDefaults(t *testing.T) {
+	t.Parallel()
+
+	policy := normalizePRMaxAgePolicy(PRMaxAgePolicy{})
+
+	if policy.Threshold != 24*time.Hour {
+		t.Fatalf("Threshold = %s, want 24h", policy.Threshold)
+	}
+	if policy.CheckInterval != 10*time.Minute {
+		t.Fatalf("CheckInterval = %s, want 10m", policy.CheckInterval)
+	}
+	if policy.Action != PRMaxAgeActionStop {
+		t.Fatalf("Action = %s, want %s", policy.Action, PRMaxAgeActionStop)
+	}
+	if len(policy.SourceAllowlist) != 1 || policy.SourceAllowlist[0] != "pr-*" {
+		t.Fatalf("SourceAllowlist = %#v, want [pr-*]", policy.SourceAllowlist)
+	}
+}
+
+func TestPRMaxAgeCandidateRequiresAllowedSource(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	deployment, worker := createCleanSuccessCandidate(t, db, "main", 0)
+
+	_, ok, err := prMaxAgeCandidate(db, deployment, PRMaxAgePolicy{}, worker.CreatedAt.Add(30*time.Hour))
+	if err != nil {
+		t.Fatalf("prMaxAgeCandidate() error = %v", err)
+	}
+	if ok {
+		t.Fatal("prMaxAgeCandidate() = true, want false for default main source")
+	}
+}
+
+func TestPRMaxAgeCandidateTriggersAfterThreshold(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	deployment, worker := createCleanSuccessCandidate(t, db, "pr-1228", 1228)
+
+	evaluation, ok, err := prMaxAgeCandidate(db, deployment, PRMaxAgePolicy{}, worker.CreatedAt.Add(30*time.Hour))
+	if err != nil {
+		t.Fatalf("prMaxAgeCandidate() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("prMaxAgeCandidate() = false, want true")
+	}
+	if evaluation.Action != PRMaxAgeActionStop {
+		t.Fatalf("Action = %s, want %s", evaluation.Action, PRMaxAgeActionStop)
+	}
+	if !strings.Contains(evaluation.Summary, "preserving volumes and replica data for debugging") {
+		t.Fatalf("Summary = %q, want preserve-data wording", evaluation.Summary)
+	}
+	if len(evaluation.Workers) != 1 || evaluation.Workers[0].ID != worker.ID {
+		t.Fatalf("Workers = %#v, want %s", evaluation.Workers, worker.ID)
+	}
+}
+
+func TestPRMaxAgeCandidateRejectsFreshDeployment(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	deployment, worker := createCleanSuccessCandidate(t, db, "pr-1228", 1228)
+	deployment.StartedAt = worker.CreatedAt.Add(-2 * time.Hour)
+
+	_, ok, err := prMaxAgeCandidate(db, deployment, PRMaxAgePolicy{}, worker.CreatedAt.Add(3*time.Hour))
+	if err != nil {
+		t.Fatalf("prMaxAgeCandidate() error = %v", err)
+	}
+	if ok {
+		t.Fatal("prMaxAgeCandidate() = true, want false for fresh deployment")
 	}
 }
 

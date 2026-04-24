@@ -17,6 +17,7 @@ import (
 const (
 	runArchiveTypeSuccess = "success"
 	runArchiveTypeFailure = "failure"
+	runArchiveTypeExpired = "expired"
 )
 
 type SuccessTeardownPolicy struct {
@@ -26,11 +27,33 @@ type SuccessTeardownPolicy struct {
 	SourceAllowlist     []string
 }
 
+type PRMaxAgeAction string
+
+const (
+	PRMaxAgeActionStop    PRMaxAgeAction = "stop"
+	PRMaxAgeActionDestroy PRMaxAgeAction = "destroy"
+)
+
+type PRMaxAgePolicy struct {
+	Threshold       time.Duration
+	CheckInterval   time.Duration
+	SourceAllowlist []string
+	Action          PRMaxAgeAction
+}
+
 type successTeardownEvaluation struct {
 	Deployment model.Deployment
 	Rollout    DeploymentRolloutResponse
 	Workers    []model.Worker
 	Summary    string
+}
+
+type prMaxAgeEvaluation struct {
+	Deployment model.Deployment
+	Rollout    DeploymentRolloutResponse
+	Workers    []model.Worker
+	Summary    string
+	Action     PRMaxAgeAction
 }
 
 type runArchivePayload struct {
@@ -92,6 +115,40 @@ func normalizeSuccessTeardownPolicy(policy SuccessTeardownPolicy) SuccessTeardow
 	return policy
 }
 
+func (m *Manager) RunPRMaxAgeLoop(ctx context.Context, policy PRMaxAgePolicy) {
+	policy = normalizePRMaxAgePolicy(policy)
+
+	m.evaluatePRMaxAge(ctx, policy)
+
+	ticker := time.NewTicker(policy.CheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.evaluatePRMaxAge(ctx, policy)
+		}
+	}
+}
+
+func normalizePRMaxAgePolicy(policy PRMaxAgePolicy) PRMaxAgePolicy {
+	if policy.CheckInterval <= 0 {
+		policy.CheckInterval = 10 * time.Minute
+	}
+	if policy.Threshold <= 0 {
+		policy.Threshold = 24 * time.Hour
+	}
+	if len(policy.SourceAllowlist) == 0 {
+		policy.SourceAllowlist = []string{"pr-*"}
+	}
+	if policy.Action != PRMaxAgeActionDestroy {
+		policy.Action = PRMaxAgeActionStop
+	}
+	return policy
+}
+
 func (m *Manager) evaluateSuccessTeardown(ctx context.Context, policy SuccessTeardownPolicy) {
 	sources, err := m.db.ListActiveWorkerSources()
 	if err != nil {
@@ -101,7 +158,7 @@ func (m *Manager) evaluateSuccessTeardown(ctx context.Context, policy SuccessTea
 
 	now := time.Now().UTC()
 	for _, source := range sources {
-		if !sourceAllowedForSuccessTeardown(source, policy.SourceAllowlist) {
+		if !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
 			continue
 		}
 
@@ -143,10 +200,75 @@ func (m *Manager) evaluateSuccessTeardown(ctx context.Context, policy SuccessTea
 	}
 }
 
+func (m *Manager) evaluatePRMaxAge(ctx context.Context, policy PRMaxAgePolicy) {
+	sources, err := m.db.ListActiveWorkerSources()
+	if err != nil {
+		slog.Error("Failed to list active worker sources for pr max age", "error", err)
+		return
+	}
+
+	now := time.Now().UTC()
+	for _, source := range sources {
+		if !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
+			continue
+		}
+
+		deployment, err := m.db.GetLatestDeployment(source)
+		if err != nil {
+			slog.Error("Failed to get latest deployment for pr max age", "source", source, "error", err)
+			continue
+		}
+		if deployment == nil {
+			continue
+		}
+
+		evaluation, ok, err := prMaxAgeCandidate(m.db, *deployment, policy, now)
+		if err != nil {
+			slog.Error("Failed to evaluate pr max age", "source", source, "deployment_id", deployment.ID, "error", err)
+			continue
+		}
+		if !ok {
+			continue
+		}
+
+		archive, created, err := m.archiveExpiredRun(evaluation, now)
+		if err != nil {
+			slog.Error("Failed to archive max-age soak run", "source", source, "deployment_id", deployment.ID, "error", err)
+			continue
+		}
+		if created {
+			_ = m.db.RecordEvent("", "run_expired_archived", evaluation.Summary, fmt.Sprintf("archive_id=%d source=%s", archive.ID, source))
+		}
+
+		for _, worker := range evaluation.Workers {
+			if !workerActiveForPRMaxAge(worker, evaluation.Deployment) {
+				continue
+			}
+
+			switch evaluation.Action {
+			case PRMaxAgeActionDestroy:
+				slog.Info("Destroying max-age soak worker", "worker_id", worker.ID, "source", worker.Source, "deployment_id", evaluation.Deployment.ID)
+				if err := m.DestroyWorker(ctx, worker.ID); err != nil {
+					slog.Error("Failed to destroy max-age soak worker", "worker_id", worker.ID, "error", err)
+					continue
+				}
+				_ = m.db.RecordEvent(worker.ID, "run_expired_worker_destroyed", "Destroyed worker after PR max-age enforcement", fmt.Sprintf("archive_id=%d", archive.ID))
+			default:
+				slog.Info("Stopping max-age soak worker", "worker_id", worker.ID, "source", worker.Source, "deployment_id", evaluation.Deployment.ID)
+				if err := m.StopWorker(ctx, worker.ID); err != nil {
+					slog.Error("Failed to stop max-age soak worker", "worker_id", worker.ID, "error", err)
+					continue
+				}
+				_ = m.db.RecordEvent(worker.ID, "run_expired_worker_stopped", "Stopped worker after PR max-age enforcement", fmt.Sprintf("archive_id=%d", archive.ID))
+			}
+		}
+	}
+}
+
 func successTeardownCandidate(db *model.DB, deployment model.Deployment, policy SuccessTeardownPolicy, now time.Time) (successTeardownEvaluation, bool, error) {
 	policy = normalizeSuccessTeardownPolicy(policy)
 	source := firstNonEmpty(strings.TrimSpace(deployment.Source), "main")
-	if !sourceAllowedForSuccessTeardown(source, policy.SourceAllowlist) {
+	if !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
 		return successTeardownEvaluation{}, false, nil
 	}
 	if deployment.StartedAt.IsZero() || now.Sub(deployment.StartedAt.UTC()) < policy.Threshold {
@@ -228,7 +350,46 @@ func workerPassedSuccessWindow(db *model.DB, worker model.Worker, deployment mod
 	return !latestPassAt.Before(deployment.StartedAt.UTC().Add(policy.Threshold)), nil
 }
 
-func sourceAllowedForSuccessTeardown(source string, allowlist []string) bool {
+func prMaxAgeCandidate(db *model.DB, deployment model.Deployment, policy PRMaxAgePolicy, now time.Time) (prMaxAgeEvaluation, bool, error) {
+	policy = normalizePRMaxAgePolicy(policy)
+	source := firstNonEmpty(strings.TrimSpace(deployment.Source), "main")
+	if !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
+		return prMaxAgeEvaluation{}, false, nil
+	}
+	if deployment.StartedAt.IsZero() || now.Sub(deployment.StartedAt.UTC()) < policy.Threshold {
+		return prMaxAgeEvaluation{}, false, nil
+	}
+
+	rollout, err := buildDeploymentRollout(db, deployment)
+	if err != nil {
+		return prMaxAgeEvaluation{}, false, err
+	}
+	workers, err := db.ListWorkersForSource(source)
+	if err != nil {
+		return prMaxAgeEvaluation{}, false, err
+	}
+
+	activeWorkers := make([]model.Worker, 0, len(workers))
+	for _, worker := range workers {
+		if workerActiveForPRMaxAge(worker, deployment) {
+			activeWorkers = append(activeWorkers, worker)
+		}
+	}
+	if len(activeWorkers) == 0 {
+		return prMaxAgeEvaluation{}, false, nil
+	}
+
+	summary := fmt.Sprintf("%s exceeded max soak age of %s; archiving current evidence and %s.", sourceHumanLabel(source), policy.Threshold, prMaxAgeActionSummary(policy.Action))
+	return prMaxAgeEvaluation{
+		Deployment: deployment,
+		Rollout:    rollout,
+		Workers:    activeWorkers,
+		Summary:    summary,
+		Action:     policy.Action,
+	}, true, nil
+}
+
+func sourceAllowedForPolicy(source string, allowlist []string) bool {
 	source = firstNonEmpty(strings.TrimSpace(source), "main")
 	if len(allowlist) == 0 {
 		allowlist = []string{"pr-*"}
@@ -249,18 +410,26 @@ func sourceAllowedForSuccessTeardown(source string, allowlist []string) bool {
 }
 
 func (m *Manager) archiveSuccessRun(evaluation successTeardownEvaluation, now time.Time) (*model.RunArchive, bool, error) {
+	return m.archiveDeploymentRun(runArchiveTypeSuccess, "success_teardown", evaluation.Deployment, &evaluation.Rollout, evaluation.Workers, evaluation.Summary, now)
+}
+
+func (m *Manager) archiveExpiredRun(evaluation prMaxAgeEvaluation, now time.Time) (*model.RunArchive, bool, error) {
+	return m.archiveDeploymentRun(runArchiveTypeExpired, "pr_max_age", evaluation.Deployment, &evaluation.Rollout, evaluation.Workers, evaluation.Summary, now)
+}
+
+func (m *Manager) archiveDeploymentRun(archiveType, reason string, deployment model.Deployment, rollout *DeploymentRolloutResponse, workers []model.Worker, summary string, now time.Time) (*model.RunArchive, bool, error) {
 	payload := runArchivePayload{
 		GeneratedAt: now,
-		Reason:      "success_teardown",
-		Deployment:  evaluation.Deployment,
-		Rollout:     &evaluation.Rollout,
-		Workers:     make([]workerRunEvidence, 0, len(evaluation.Workers)),
+		Reason:      reason,
+		Deployment:  deployment,
+		Rollout:     rollout,
+		Workers:     make([]workerRunEvidence, 0, len(workers)),
 	}
-	if comparison, err := buildLatestCrossSourceDeploymentComparison(m.db, "main", evaluation.Deployment.Source); err == nil {
+	if comparison, err := buildLatestCrossSourceDeploymentComparison(m.db, "main", deployment.Source); err == nil {
 		payload.Comparison = comparison
 	}
 
-	for _, worker := range evaluation.Workers {
+	for _, worker := range workers {
 		evidence, err := m.workerRunEvidence(worker)
 		if err != nil {
 			return nil, false, err
@@ -274,19 +443,26 @@ func (m *Manager) archiveSuccessRun(evaluation successTeardownEvaluation, now ti
 	}
 
 	archive := &model.RunArchive{
-		DeploymentID:  evaluation.Deployment.ID,
-		Source:        evaluation.Deployment.Source,
-		ArchiveType:   runArchiveTypeSuccess,
-		GitSHA:        evaluation.Deployment.GitSHA,
-		LitestreamSHA: evaluation.Deployment.LitestreamSHA,
-		ImageRef:      evaluation.Deployment.ImageRef,
-		Status:        evaluation.Rollout.Status,
-		Summary:       evaluation.Summary,
+		DeploymentID:  deployment.ID,
+		Source:        deployment.Source,
+		ArchiveType:   archiveType,
+		GitSHA:        deployment.GitSHA,
+		LitestreamSHA: deployment.LitestreamSHA,
+		ImageRef:      deployment.ImageRef,
+		Status:        archiveDeploymentStatus(deployment, rollout),
+		Summary:       summary,
 		Payload:       string(body),
 		ArchivedAt:    now,
 	}
 	created, err := m.db.RecordRunArchive(archive)
 	return archive, created, err
+}
+
+func archiveDeploymentStatus(deployment model.Deployment, rollout *DeploymentRolloutResponse) string {
+	if rollout != nil && strings.TrimSpace(rollout.Status) != "" {
+		return rollout.Status
+	}
+	return deployment.Status
 }
 
 func (m *Manager) archiveFailureWorker(worker model.Worker, candidate dormancyCandidate, reason string, now time.Time) (*model.RunArchive, bool, error) {
@@ -384,4 +560,23 @@ func (m *Manager) workerRunEvidence(worker model.Worker) (workerRunEvidence, err
 		evidence.CurrentProbableSubsystem = inferProbableSubsystem(evidence.CurrentFailureStage, evidence.CurrentFailureSignature)
 	}
 	return evidence, nil
+}
+
+func workerActiveForPRMaxAge(worker model.Worker, deployment model.Deployment) bool {
+	if !workerMatchesDeployment(worker, deployment) {
+		return false
+	}
+	switch worker.Status {
+	case model.WorkerRunning, model.WorkerDegraded, model.WorkerProbing:
+		return true
+	default:
+		return false
+	}
+}
+
+func prMaxAgeActionSummary(action PRMaxAgeAction) string {
+	if action == PRMaxAgeActionDestroy {
+		return "destroying worker compute, volumes, and replica prefix data"
+	}
+	return "stopping worker compute while preserving volumes and replica data for debugging"
 }
