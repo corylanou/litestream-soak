@@ -39,10 +39,14 @@ type homePageData struct {
 }
 
 type homeSummary struct {
-	TotalWorkers     int
-	HealthyWorkers   int
-	AttentionWorkers int
-	RecentFailures   int
+	TotalWorkers         int
+	HealthyWorkers       int
+	AttentionWorkers     int
+	RecentFailures       int
+	LatestHeartbeatAt    *time.Time
+	StalestHeartbeatAt   *time.Time
+	LatestRuntimeAt      *time.Time
+	LatestVerificationAt *time.Time
 }
 
 type homeWorker struct {
@@ -220,6 +224,18 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 			summary.AttentionWorkers++
 		} else {
 			summary.HealthyWorkers++
+		}
+		if workerSummary.Worker.LastHeartbeatAt != nil && !workerSummary.Worker.LastHeartbeatAt.IsZero() {
+			summary.LatestHeartbeatAt = maxTime(summary.LatestHeartbeatAt, *workerSummary.Worker.LastHeartbeatAt)
+			summary.StalestHeartbeatAt = minTime(summary.StalestHeartbeatAt, *workerSummary.Worker.LastHeartbeatAt)
+		}
+		if workerSummary.Worker.LastRuntimeAt != nil && !workerSummary.Worker.LastRuntimeAt.IsZero() {
+			summary.LatestRuntimeAt = maxTime(summary.LatestRuntimeAt, *workerSummary.Worker.LastRuntimeAt)
+		}
+		if workerSummary.LastVerification != nil {
+			if observedAt, ok := verificationObservedAt(*workerSummary.LastVerification); ok {
+				summary.LatestVerificationAt = maxTime(summary.LatestVerificationAt, observedAt)
+			}
 		}
 
 		workerCards = append(workerCards, card)
@@ -556,6 +572,22 @@ func formatTimeAgoPtr(value *time.Time) string {
 		return "never"
 	}
 	return formatTimeAgo(*value)
+}
+
+func maxTime(current *time.Time, candidate time.Time) *time.Time {
+	candidate = candidate.UTC()
+	if current == nil || candidate.After(current.UTC()) {
+		return &candidate
+	}
+	return current
+}
+
+func minTime(current *time.Time, candidate time.Time) *time.Time {
+	candidate = candidate.UTC()
+	if current == nil || candidate.Before(current.UTC()) {
+		return &candidate
+	}
+	return current
 }
 
 func trimSHA(value string) string {
@@ -981,6 +1013,15 @@ const homePageTemplate = `{{define "home"}}
     .ss-good { color: var(--green); }
     .ss-warn { color: var(--amber); }
     .ss-bad { color: var(--red); }
+    .freshness-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin: -6px 0 16px; }
+    .freshness-item { background: var(--surface); border: 1px solid var(--border-subtle); border-radius: var(--radius); padding: 8px 10px; min-width: 0; }
+    .freshness-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+    .freshness-value { display: block; margin-top: 2px; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .freshness-value.status-good { color: var(--green); }
+    .freshness-value.status-warn { color: var(--amber); }
+    .freshness-value.status-bad { color: var(--red); }
+    .freshness-value.status-neutral { color: var(--muted); }
+    .freshness-time { display: block; margin-top: 2px; color: var(--faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
     /* Incident spotlight */
     .incident-alert { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 16px; background: var(--red-dim); border: 1px solid rgba(248,81,73,0.3); border-radius: var(--radius-lg); margin-bottom: 16px; }
@@ -1083,12 +1124,14 @@ const homePageTemplate = `{{define "home"}}
     @media (max-width: 900px) {
       .guide-grid { grid-template-columns: 1fr; }
       .bottom-grid { grid-template-columns: 1fr; }
+      .freshness-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .status-strip { flex-wrap: wrap; gap: 10px 18px; }
       .incident-alert { flex-direction: column; }
     }
     @media (max-width: 640px) {
       .worker-table th:nth-child(n+5), .worker-table td:nth-child(n+5) { display: none; }
       .topbar { flex-direction: column; align-items: flex-start; gap: 6px; }
+      .freshness-strip { grid-template-columns: 1fr; }
     }
   </style>
   <script>
@@ -1229,6 +1272,33 @@ const homeBodyTemplate = `{{define "home_body"}}
       <span><span class="ss-label">Attention</span> <span class="ss-value{{if gt .Summary.AttentionWorkers 0}} ss-warn{{end}}">{{.Summary.AttentionWorkers}}</span></span>
       <span><span class="ss-label">Failures</span> <span class="ss-value{{if gt .Summary.RecentFailures 0}} ss-bad{{end}}">{{.Summary.RecentFailures}}</span></span>
     </div>
+    <div class="freshness-strip" aria-label="Data freshness">
+      <div class="freshness-item">
+        <span class="freshness-label">Page generated</span>
+        <span class="freshness-value status-good">{{timeAgoValue .GeneratedAt}}</span>
+        <span class="freshness-time">{{formatTime .GeneratedAt}}</span>
+      </div>
+      <div class="freshness-item">
+        <span class="freshness-label">Latest heartbeat</span>
+        <span class="freshness-value {{heartbeatClass .Summary.LatestHeartbeatAt}}">{{timeAgo .Summary.LatestHeartbeatAt}}</span>
+        <span class="freshness-time">{{formatTimePtr .Summary.LatestHeartbeatAt}}</span>
+      </div>
+      <div class="freshness-item">
+        <span class="freshness-label">Latest runtime</span>
+        <span class="freshness-value {{heartbeatClass .Summary.LatestRuntimeAt}}">{{timeAgo .Summary.LatestRuntimeAt}}</span>
+        <span class="freshness-time">{{formatTimePtr .Summary.LatestRuntimeAt}}</span>
+      </div>
+      <div class="freshness-item">
+        <span class="freshness-label">Stalest heartbeat</span>
+        <span class="freshness-value {{heartbeatClass .Summary.StalestHeartbeatAt}}">{{timeAgo .Summary.StalestHeartbeatAt}}</span>
+        <span class="freshness-time">{{formatTimePtr .Summary.StalestHeartbeatAt}}</span>
+      </div>
+      <div class="freshness-item">
+        <span class="freshness-label">Latest verification</span>
+        <span class="freshness-value status-neutral">{{timeAgo .Summary.LatestVerificationAt}}</span>
+        <span class="freshness-time">{{formatTimePtr .Summary.LatestVerificationAt}}</span>
+      </div>
+    </div>
 
     <div class="guide-grid">
       <div class="guide-card">
@@ -1357,6 +1427,13 @@ const homeBodyTemplate = `{{define "home_body"}}
                 <a class="badge badge-info badge-link" href="{{deploymentSourceURL .LatestDeployment.Deployment}}" target="_blank" rel="noreferrer">{{deploymentSourceLabel .LatestDeployment.Deployment}}</a>
               </div>
               <div class="detail-subtle">{{deploymentSourceSummary .LatestDeployment.Deployment}}</div>
+            </div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">Rollout Time</div>
+            <div class="detail-value">
+              <div class="detail-main">Started {{timeAgoValue .LatestDeployment.Deployment.StartedAt}}</div>
+              <div class="detail-subtle">{{formatTime .LatestDeployment.Deployment.StartedAt}}</div>
             </div>
           </div>
           <div class="detail-row">
@@ -1545,9 +1622,9 @@ const homeBodyTemplate = `{{define "home_body"}}
             <td><span class="dot dot-{{if or (eq (statusClass .Worker.Status) "status-bad") (eq (runtimeClass .RuntimeSnapshotStatus) "status-bad")}}bad{{else if or (eq (statusClass .Worker.Status) "status-warn") (eq (runtimeClass .RuntimeSnapshotStatus) "status-warn")}}warn{{else if eq (statusClass .Worker.Status) "status-good"}}good{{else}}neutral{{end}}"></span></td>
             <td><strong>{{.Worker.Name}}</strong></td>
             <td><span class="badge badge-{{if eq (statusClass .Worker.Status) "status-good"}}good{{else if eq (statusClass .Worker.Status) "status-warn"}}warn{{else if eq (statusClass .Worker.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Worker.Status}}</span></td>
-            <td><span class="{{heartbeatClass .Worker.LastHeartbeatAt}}">{{timeAgo .Worker.LastHeartbeatAt}}</span></td>
+            <td><span class="{{heartbeatClass .Worker.LastHeartbeatAt}}" title="{{formatTimePtr .Worker.LastHeartbeatAt}}">{{timeAgo .Worker.LastHeartbeatAt}}</span></td>
             <td>
-              {{if .LatestVerification}}<span class="badge badge-{{if eq (verificationClass .LatestVerification) "status-good"}}good{{else if eq (verificationClass .LatestVerification) "status-bad"}}bad{{else}}neutral{{end}}">{{verificationLabel .LatestVerification}}</span> <span style="color:var(--muted); font-size:12px;">{{timeAgoValue .LatestVerification.StartedAt}}</span>
+              {{if .LatestVerification}}<span class="badge badge-{{if eq (verificationClass .LatestVerification) "status-good"}}good{{else if eq (verificationClass .LatestVerification) "status-bad"}}bad{{else}}neutral{{end}}">{{verificationLabel .LatestVerification}}</span> <span style="color:var(--muted); font-size:12px;" title="{{formatTime .LatestVerification.StartedAt}}">{{timeAgoValue .LatestVerification.StartedAt}}</span>
               {{else}}<span style="color:var(--faint);">none</span>{{end}}
             </td>
             <td>{{.Worker.ProfileName}}</td>
