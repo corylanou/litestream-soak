@@ -89,22 +89,23 @@ type coverageSnapshot struct {
 }
 
 type promptEventSummary struct {
-	CreatedAt             time.Time                    `json:"created_at"`
-	EventType             string                       `json:"event_type"`
-	Message               string                       `json:"message"`
-	CollapsedCount        int                          `json:"collapsed_count,omitempty"`
-	CollapsedWindowStart  *time.Time                   `json:"collapsed_window_start,omitempty"`
-	CollapsedWindowEnd    *time.Time                   `json:"collapsed_window_end,omitempty"`
-	CheckType             string                       `json:"check_type,omitempty"`
-	VerificationStatus    string                       `json:"verification_status,omitempty"`
-	Passed                *bool                        `json:"passed,omitempty"`
-	FailureStage          string                       `json:"failure_stage,omitempty"`
-	FailureSignature      string                       `json:"failure_signature,omitempty"`
-	RuntimeSnapshotStatus string                       `json:"runtime_snapshot_status,omitempty"`
-	RuntimeSnapshotError  string                       `json:"runtime_snapshot_error,omitempty"`
-	RunID                 string                       `json:"run_id,omitempty"`
-	VerificationSteps     []reporting.VerificationStep `json:"verification_steps,omitempty"`
-	FailureDebugCaptured  bool                         `json:"failure_debug_captured,omitempty"`
+	CreatedAt             time.Time                        `json:"created_at"`
+	EventType             string                           `json:"event_type"`
+	Message               string                           `json:"message"`
+	CollapsedCount        int                              `json:"collapsed_count,omitempty"`
+	CollapsedWindowStart  *time.Time                       `json:"collapsed_window_start,omitempty"`
+	CollapsedWindowEnd    *time.Time                       `json:"collapsed_window_end,omitempty"`
+	CheckType             string                           `json:"check_type,omitempty"`
+	VerificationStatus    string                           `json:"verification_status,omitempty"`
+	Passed                *bool                            `json:"passed,omitempty"`
+	FailureStage          string                           `json:"failure_stage,omitempty"`
+	FailureSignature      string                           `json:"failure_signature,omitempty"`
+	FailureClassification *reporting.FailureClassification `json:"failure_classification,omitempty"`
+	RuntimeSnapshotStatus string                           `json:"runtime_snapshot_status,omitempty"`
+	RuntimeSnapshotError  string                           `json:"runtime_snapshot_error,omitempty"`
+	RunID                 string                           `json:"run_id,omitempty"`
+	VerificationSteps     []reporting.VerificationStep     `json:"verification_steps,omitempty"`
+	FailureDebugCaptured  bool                             `json:"failure_debug_captured,omitempty"`
 }
 
 func parsePromptMode(raw string, recommended string) promptMode {
@@ -720,6 +721,12 @@ func buildPromptEventSummaries(events []model.Event) []promptEventSummary {
 				}
 				summary.FailureStage = inferFailureStage(&verification)
 				summary.FailureSignature = inferFailureSignature(&verification)
+				if payload.FailureClassification != nil {
+					summary.FailureClassification = payload.FailureClassification
+				} else {
+					classification := reporting.ClassifyVerificationFailure(verification.CheckType, verification.ErrorMessage)
+					summary.FailureClassification = &classification
+				}
 			}
 		} else if event.EventType == "worker_failed" {
 			var payload reporting.WorkerEventPayload
@@ -1060,6 +1067,9 @@ func sortedCoverageCounts(values map[string]int) []coverageCount {
 
 func diagnosisClusterKey(summary WorkerSummaryResponse) string {
 	return strings.Join([]string{
+		summary.Worker.Source,
+		summary.Worker.GitSHA,
+		summary.Worker.LitestreamSHA,
 		summary.CurrentFailureStage,
 		summary.CurrentFailureSignature,
 		summary.CurrentProbableSubsystem,

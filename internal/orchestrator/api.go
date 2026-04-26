@@ -26,20 +26,21 @@ type API struct {
 }
 
 type WorkerDetailResponse struct {
-	Worker                model.Worker              `json:"worker"`
-	Workload              workload.Config           `json:"workload"`
-	LatestFailure         *model.Verification       `json:"latest_failure,omitempty"`
-	LatestPlatformEvent   *model.Event              `json:"latest_platform_event,omitempty"`
-	FailureStage          string                    `json:"failure_stage,omitempty"`
-	FailureSignature      string                    `json:"failure_signature,omitempty"`
-	ProbableSubsystem     string                    `json:"probable_subsystem,omitempty"`
-	RuntimeSnapshotStatus string                    `json:"runtime_snapshot_status,omitempty"`
-	ReportedRuntime       *reporting.RuntimePayload `json:"reported_runtime,omitempty"`
-	TriageCommands        []string                  `json:"triage_commands,omitempty"`
-	RecentVerifications   []model.Verification      `json:"recent_verifications"`
-	RecentEvents          []model.Event             `json:"recent_events"`
-	Machine               *flyapi.Machine           `json:"machine,omitempty"`
-	MachineError          string                    `json:"machine_error,omitempty"`
+	Worker                model.Worker                     `json:"worker"`
+	Workload              workload.Config                  `json:"workload"`
+	LatestFailure         *model.Verification              `json:"latest_failure,omitempty"`
+	LatestPlatformEvent   *model.Event                     `json:"latest_platform_event,omitempty"`
+	FailureStage          string                           `json:"failure_stage,omitempty"`
+	FailureSignature      string                           `json:"failure_signature,omitempty"`
+	FailureClassification *reporting.FailureClassification `json:"failure_classification,omitempty"`
+	ProbableSubsystem     string                           `json:"probable_subsystem,omitempty"`
+	RuntimeSnapshotStatus string                           `json:"runtime_snapshot_status,omitempty"`
+	ReportedRuntime       *reporting.RuntimePayload        `json:"reported_runtime,omitempty"`
+	TriageCommands        []string                         `json:"triage_commands,omitempty"`
+	RecentVerifications   []model.Verification             `json:"recent_verifications"`
+	RecentEvents          []model.Event                    `json:"recent_events"`
+	Machine               *flyapi.Machine                  `json:"machine,omitempty"`
+	MachineError          string                           `json:"machine_error,omitempty"`
 }
 
 type FailureResponse struct {
@@ -52,19 +53,28 @@ type FailureResponse struct {
 }
 
 type WorkerSummaryResponse struct {
-	Worker                   model.Worker        `json:"worker"`
-	Workload                 workload.Config     `json:"workload"`
-	RuntimeSnapshotStatus    string              `json:"runtime_snapshot_status,omitempty"`
-	LastVerification         *model.Verification `json:"last_verification,omitempty"`
-	LatestFailure            *model.Verification `json:"latest_failure,omitempty"`
-	LatestPlatformEvent      *model.Event        `json:"latest_platform_event,omitempty"`
-	CurrentFailureStage      string              `json:"current_failure_stage,omitempty"`
-	CurrentFailureSignature  string              `json:"current_failure_signature,omitempty"`
-	CurrentProbableSubsystem string              `json:"current_probable_subsystem,omitempty"`
-	LatestFailureStage       string              `json:"latest_failure_stage,omitempty"`
-	LatestFailureSignature   string              `json:"latest_failure_signature,omitempty"`
-	LatestProbableSubsystem  string              `json:"latest_probable_subsystem,omitempty"`
-	TriageCommands           []string            `json:"triage_commands,omitempty"`
+	Worker                       model.Worker                     `json:"worker"`
+	Workload                     workload.Config                  `json:"workload"`
+	RuntimeSnapshotStatus        string                           `json:"runtime_snapshot_status,omitempty"`
+	LastVerification             *model.Verification              `json:"last_verification,omitempty"`
+	LatestFailure                *model.Verification              `json:"latest_failure,omitempty"`
+	LatestPlatformEvent          *model.Event                     `json:"latest_platform_event,omitempty"`
+	CurrentFailureStage          string                           `json:"current_failure_stage,omitempty"`
+	CurrentFailureSignature      string                           `json:"current_failure_signature,omitempty"`
+	CurrentFailureClassification *reporting.FailureClassification `json:"current_failure_classification,omitempty"`
+	CurrentProbableSubsystem     string                           `json:"current_probable_subsystem,omitempty"`
+	LatestFailureStage           string                           `json:"latest_failure_stage,omitempty"`
+	LatestFailureSignature       string                           `json:"latest_failure_signature,omitempty"`
+	LatestFailureClassification  *reporting.FailureClassification `json:"latest_failure_classification,omitempty"`
+	LatestProbableSubsystem      string                           `json:"latest_probable_subsystem,omitempty"`
+	Recovery                     *FailureRecovery                 `json:"recovery,omitempty"`
+	TriageCommands               []string                         `json:"triage_commands,omitempty"`
+}
+
+type FailureRecovery struct {
+	FailedThenNextPassed   bool       `json:"failed_then_next_passed,omitempty"`
+	StillFailing           bool       `json:"still_failing,omitempty"`
+	LastPassAfterFailureAt *time.Time `json:"last_pass_after_failure_at,omitempty"`
 }
 
 type DeploymentWorkerProgress struct {
@@ -154,28 +164,29 @@ type DeploymentComparisonResponse struct {
 const rolloutAttentionGraceWindow = 45 * time.Minute
 
 type IncidentBundle struct {
-	GeneratedAt           time.Time                       `json:"generated_at"`
-	Worker                model.Worker                    `json:"worker"`
-	Workload              workload.Config                 `json:"workload"`
-	LatestFailure         *model.Verification             `json:"latest_failure,omitempty"`
-	LatestPlatformEvent   *model.Event                    `json:"latest_platform_event,omitempty"`
-	ActiveFailure         bool                            `json:"active_failure"`
-	FailureStage          string                          `json:"failure_stage,omitempty"`
-	FailureSignature      string                          `json:"failure_signature,omitempty"`
-	ProbableSubsystem     string                          `json:"probable_subsystem,omitempty"`
-	RuntimeSnapshotStatus string                          `json:"runtime_snapshot_status,omitempty"`
-	ReportedRuntime       *reporting.RuntimePayload       `json:"reported_runtime,omitempty"`
-	FailureDebug          *reporting.FailureDebugSnapshot `json:"failure_debug,omitempty"`
-	Guide                 incidentGuide                   `json:"guide"`
-	Diagnosis             diagnosisSnapshot               `json:"diagnosis"`
-	RelatedClusters       []diagnosisCluster              `json:"related_clusters,omitempty"`
-	PromptModes           []promptModeInfo                `json:"prompt_modes,omitempty"`
-	RecentVerifications   []model.Verification            `json:"recent_verifications"`
-	RecentEvents          []model.Event                   `json:"recent_events"`
-	Machine               *flyapi.Machine                 `json:"machine,omitempty"`
-	MachineError          string                          `json:"machine_error,omitempty"`
-	TriageCommands        []string                        `json:"triage_commands,omitempty"`
-	Prompt                string                          `json:"prompt"`
+	GeneratedAt           time.Time                        `json:"generated_at"`
+	Worker                model.Worker                     `json:"worker"`
+	Workload              workload.Config                  `json:"workload"`
+	LatestFailure         *model.Verification              `json:"latest_failure,omitempty"`
+	LatestPlatformEvent   *model.Event                     `json:"latest_platform_event,omitempty"`
+	ActiveFailure         bool                             `json:"active_failure"`
+	FailureStage          string                           `json:"failure_stage,omitempty"`
+	FailureSignature      string                           `json:"failure_signature,omitempty"`
+	FailureClassification *reporting.FailureClassification `json:"failure_classification,omitempty"`
+	ProbableSubsystem     string                           `json:"probable_subsystem,omitempty"`
+	RuntimeSnapshotStatus string                           `json:"runtime_snapshot_status,omitempty"`
+	ReportedRuntime       *reporting.RuntimePayload        `json:"reported_runtime,omitempty"`
+	FailureDebug          *reporting.FailureDebugSnapshot  `json:"failure_debug,omitempty"`
+	Guide                 incidentGuide                    `json:"guide"`
+	Diagnosis             diagnosisSnapshot                `json:"diagnosis"`
+	RelatedClusters       []diagnosisCluster               `json:"related_clusters,omitempty"`
+	PromptModes           []promptModeInfo                 `json:"prompt_modes,omitempty"`
+	RecentVerifications   []model.Verification             `json:"recent_verifications"`
+	RecentEvents          []model.Event                    `json:"recent_events"`
+	Machine               *flyapi.Machine                  `json:"machine,omitempty"`
+	MachineError          string                           `json:"machine_error,omitempty"`
+	TriageCommands        []string                         `json:"triage_commands,omitempty"`
+	Prompt                string                           `json:"prompt"`
 }
 
 func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *AlertDispatcher, manager *Manager, deployer *Deployer) *API {
@@ -911,7 +922,7 @@ func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, er
 		TriageCommands:        buildTriageCommands(worker, worker.FlyMachineID != ""),
 	}
 
-	verifications, err := a.db.ListVerifications(worker.ID, 1)
+	verifications, err := a.db.ListVerifications(worker.ID, 20)
 	if err != nil {
 		return summary, err
 	}
@@ -922,6 +933,8 @@ func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, er
 			if activeFailure(&verification) {
 				summary.CurrentFailureStage = inferFailureStage(&verification)
 				summary.CurrentFailureSignature = inferFailureSignature(&verification)
+				classification := reporting.ClassifyVerificationFailure(verification.CheckType, verification.ErrorMessage)
+				summary.CurrentFailureClassification = &classification
 				summary.CurrentProbableSubsystem = inferProbableSubsystem(summary.CurrentFailureStage, summary.CurrentFailureSignature)
 			}
 		}
@@ -935,7 +948,11 @@ func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, er
 		summary.LatestFailure = latestFailure
 		summary.LatestFailureStage = inferFailureStage(latestFailure)
 		summary.LatestFailureSignature = inferFailureSignature(latestFailure)
+		classification := reporting.ClassifyVerificationFailure(latestFailure.CheckType, latestFailure.ErrorMessage)
+		summary.LatestFailureClassification = &classification
 		summary.LatestProbableSubsystem = inferProbableSubsystem(summary.LatestFailureStage, summary.LatestFailureSignature)
+		recovery := failureRecovery(verifications, *latestFailure)
+		summary.Recovery = &recovery
 	}
 
 	events, err := a.db.ListWorkerEvents(worker.ID, 10)
@@ -1231,6 +1248,14 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		observedAt = time.Now().UTC()
 	}
 	payload.RuntimePayload = payload.RuntimePayload.Normalize(observedAt)
+	if !payload.Passed && payload.FailureClassification == nil {
+		classification := reporting.ClassifyVerificationFailure(payload.CheckType, payload.ErrorMessage)
+		payload.FailureClassification = &classification
+	}
+	if payload.FailureDebug != nil && payload.FailureDebug.FailureClassification == nil && payload.FailureClassification != nil {
+		classification := *payload.FailureClassification
+		payload.FailureDebug.FailureClassification = &classification
+	}
 
 	if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1412,6 +1437,8 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 		response.LatestFailure = &verificationCopy
 		response.FailureStage = inferFailureStage(&verificationCopy)
 		response.FailureSignature = inferFailureSignature(&verificationCopy)
+		classification := reporting.ClassifyVerificationFailure(verificationCopy.CheckType, verificationCopy.ErrorMessage)
+		response.FailureClassification = &classification
 		response.ProbableSubsystem = inferProbableSubsystem(response.FailureStage, response.FailureSignature)
 		break
 	}
@@ -1472,6 +1499,7 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 		ActiveFailure:         activeFailureDetected,
 		FailureStage:          inferFailureStage(latestFailure),
 		FailureSignature:      inferFailureSignature(latestFailure),
+		FailureClassification: failureClassification(latestFailure),
 		ProbableSubsystem:     probableSubsystem,
 		RuntimeSnapshotStatus: reporting.SnapshotStatus(reportedRuntime),
 		ReportedRuntime:       reportedRuntime,
@@ -1558,50 +1586,22 @@ func inferFailureStage(verification *model.Verification) string {
 	if verification == nil {
 		return ""
 	}
-
-	text := strings.ToLower(verification.ErrorMessage)
-	switch {
-	case strings.Contains(text, "wait for sync") || strings.Contains(text, "sync request") || strings.Contains(text, "litestream.sock"):
-		return "sync"
-	case strings.Contains(text, "restore failed") || strings.Contains(text, "check_type=restore"):
-		return "restore"
-	case strings.Contains(text, "integrity check") || strings.Contains(text, "check_type=integrity_check"):
-		return "integrity_check"
-	case strings.Contains(text, "validation failed"):
-		return "validation"
-	case verification.CheckType != "":
-		return verification.CheckType
-	default:
-		return ""
-	}
+	return reporting.ClassifyVerificationFailure(verification.CheckType, verification.ErrorMessage).Stage
 }
 
 func inferFailureSignature(verification *model.Verification) string {
 	if verification == nil {
 		return ""
 	}
+	return reporting.ClassifyVerificationFailure(verification.CheckType, verification.ErrorMessage).Signature
+}
 
-	text := strings.ToLower(verification.ErrorMessage)
-	switch {
-	case strings.Contains(text, "litestream.sock") && strings.Contains(text, "too many open files"):
-		return "litestream_sync_fd_exhausted"
-	case strings.Contains(text, "litestream.sock") && strings.Contains(text, "connect: connection refused"):
-		return "litestream_sync_socket_refused"
-	case strings.Contains(text, "wait for sync") && (strings.Contains(text, "context deadline exceeded") || strings.Contains(text, "client.timeout exceeded")):
-		return "litestream_sync_timeout"
-	case strings.Contains(text, "wrong # of entries in index"):
-		return "sqlite_index_mismatch"
-	case strings.Contains(text, "validation failed"):
-		return "validation_failed"
-	case strings.Contains(text, "open ltx file: file does not exist"):
-		return "replica_ltx_missing"
-	case strings.Contains(text, "listobjectsv2") || strings.Contains(text, "requestcanceled"):
-		return "replica_s3_timeout"
-	case strings.Contains(text, "ltx continuity"):
-		return "ltx_continuity"
-	default:
-		return firstMeaningfulLine(verification.ErrorMessage)
+func failureClassification(verification *model.Verification) *reporting.FailureClassification {
+	if verification == nil {
+		return nil
 	}
+	classification := reporting.ClassifyVerificationFailure(verification.CheckType, verification.ErrorMessage)
+	return &classification
 }
 
 func inferDeploymentRolloutStatus(rollout DeploymentRolloutResponse) string {
@@ -1892,6 +1892,34 @@ func workerNeedsPostDeployVerification(status model.WorkerStatus) bool {
 	default:
 		return false
 	}
+}
+
+func failureRecovery(verifications []model.Verification, latestFailure model.Verification) FailureRecovery {
+	recovery := FailureRecovery{}
+	failureAt, ok := verificationObservedAt(latestFailure)
+	if !ok {
+		return recovery
+	}
+	if len(verifications) > 0 {
+		recovery.StillFailing = activeFailure(&verifications[0])
+	}
+	for i, verification := range verifications {
+		if verification.ID == latestFailure.ID && i > 0 {
+			nextVerification := verifications[i-1]
+			recovery.FailedThenNextPassed = nextVerification.Passed && nextVerification.Status != "failed"
+		}
+		observedAt, ok := verificationObservedAt(verification)
+		if !ok || !observedAt.After(failureAt) {
+			continue
+		}
+		if verification.Passed && verification.Status != "failed" {
+			if recovery.LastPassAfterFailureAt == nil || observedAt.After(*recovery.LastPassAfterFailureAt) {
+				passAt := observedAt
+				recovery.LastPassAfterFailureAt = &passAt
+			}
+		}
+	}
+	return recovery
 }
 
 func latestVerificationInWindow(verifications []model.Verification, since time.Time, until *time.Time) *model.Verification {

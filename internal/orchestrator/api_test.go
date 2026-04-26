@@ -667,6 +667,48 @@ func TestBuildHomePageDataDefaultsPRSourceToMainComparison(t *testing.T) {
 	}
 }
 
+func TestFailureRecoveryMarksNextPass(t *testing.T) {
+	failedAt := timeMustParse("2026-04-26T15:00:00Z")
+	passedAt := failedAt.Add(15 * time.Minute)
+	olderFailedAt := failedAt.Add(-15 * time.Minute)
+	verifications := []model.Verification{
+		{
+			ID:          3,
+			WorkerID:    "worker-pr-1228-gharchive-mixed",
+			CompletedAt: &passedAt,
+			Status:      "passed",
+			Passed:      true,
+		},
+		{
+			ID:           2,
+			WorkerID:     "worker-pr-1228-gharchive-mixed",
+			CompletedAt:  &failedAt,
+			Status:       "failed",
+			Passed:       false,
+			ErrorMessage: `validation failed: restore failed: get LTX time bounds: operation error S3: ListObjectsV2, https response error StatusCode: 408, RequestID: 1777230002707552565, api error RequestCanceled: Request is canceled.`,
+		},
+		{
+			ID:           1,
+			WorkerID:     "worker-pr-1228-gharchive-mixed",
+			CompletedAt:  &olderFailedAt,
+			Status:       "failed",
+			Passed:       false,
+			ErrorMessage: "validation failed",
+		},
+	}
+
+	recovery := failureRecovery(verifications, verifications[1])
+	if !recovery.FailedThenNextPassed {
+		t.Fatal("FailedThenNextPassed = false, want true")
+	}
+	if recovery.StillFailing {
+		t.Fatal("StillFailing = true, want false")
+	}
+	if recovery.LastPassAfterFailureAt == nil || !recovery.LastPassAfterFailureAt.Equal(passedAt) {
+		t.Fatalf("LastPassAfterFailureAt = %v, want %v", recovery.LastPassAfterFailureAt, passedAt)
+	}
+}
+
 func TestBuildRequestedDeploymentComparisonCrossSource(t *testing.T) {
 	t.Parallel()
 

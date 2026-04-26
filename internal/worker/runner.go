@@ -655,20 +655,34 @@ func (r *Runner) sendVerification(ctx context.Context, result VerificationResult
 	defer cancel()
 
 	if err := r.reporter.SendVerification(reportCtx, reporting.VerificationPayload{
-		StartedAt:      result.StartedAt,
-		CompletedAt:    result.CompletedAt,
-		CheckType:      result.CheckType,
-		Status:         result.Status,
-		Passed:         result.Passed,
-		Summary:        result.Summary,
-		ErrorMessage:   result.ErrorMessage,
-		DurationMS:     result.DurationMS,
-		Steps:          result.Steps,
-		FailureDebug:   failureDebug,
-		RuntimePayload: snapshot.RuntimePayload,
+		StartedAt:             result.StartedAt,
+		CompletedAt:           result.CompletedAt,
+		CheckType:             result.CheckType,
+		Status:                result.Status,
+		Passed:                result.Passed,
+		Summary:               result.Summary,
+		ErrorMessage:          result.ErrorMessage,
+		DurationMS:            result.DurationMS,
+		Steps:                 result.Steps,
+		FailureClassification: r.failureClassification(result),
+		FailureDebug:          failureDebug,
+		RuntimePayload:        snapshot.RuntimePayload,
 	}); err != nil {
 		slog.Warn("Failed to send verification report", "error", err)
 	}
+}
+
+func (r *Runner) failureClassification(result VerificationResult) *reporting.FailureClassification {
+	if result.Passed {
+		return nil
+	}
+	classification := reporting.ClassifyVerificationFailure(result.CheckType, result.ErrorMessage)
+	if classification.ObjectStore != nil {
+		classification.ObjectStore.Bucket = firstNonEmpty(classification.ObjectStore.Bucket, r.cfg.S3Bucket)
+		classification.ObjectStore.Prefix = firstNonEmpty(classification.ObjectStore.Prefix, strings.Trim(strings.TrimPrefix(r.cfg.S3Path, "/"), "/"))
+		classification.ObjectStore.RedactedPrefix = reporting.RedactObjectPrefix(classification.ObjectStore.Prefix)
+	}
+	return &classification
 }
 
 func (r *Runner) captureFailureDebugSnapshotIfDue(result VerificationResult) *reporting.FailureDebugSnapshot {
@@ -683,10 +697,14 @@ func (r *Runner) captureFailureDebugSnapshotIfDue(result VerificationResult) *re
 	}
 	r.failureDebugKey = key
 	r.failureDebugAt = now
-	return r.captureFailureDebugSnapshot(reason, result.Steps)
+	return r.captureFailureDebugSnapshot(reason, result.Steps, r.failureClassification(result))
 }
 
 func failureDebugKey(result VerificationResult, reason string) string {
+	classification := reporting.ClassifyVerificationFailure(result.CheckType, result.ErrorMessage)
+	if classification.Signature != "" {
+		return classification.Signature
+	}
 	text := strings.ToLower(result.Status + " " + result.Summary + " " + result.ErrorMessage + " " + reason)
 	switch {
 	case strings.Contains(text, "too many open files"):
@@ -724,7 +742,7 @@ func (r *Runner) sendWorkerFailureEvent(err error) {
 
 	snapshot := r.currentSnapshot()
 	message := err.Error()
-	failureDebug := r.captureFailureDebugSnapshot(message, nil)
+	failureDebug := r.captureFailureDebugSnapshot(message, nil, nil)
 	reportCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if sendErr := r.reporter.SendEvent(reportCtx, reporting.WorkerEventPayload{

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -28,6 +29,25 @@ type VerificationResult struct {
 	DBSizeBytes  int64
 	WALSizeBytes int64
 	Steps        []reporting.VerificationStep
+}
+
+type verificationStepMetadataError struct {
+	err             error
+	command         []string
+	deadlineAt      *time.Time
+	exitCode        *int
+	signal          string
+	contextCanceled bool
+	contextError    string
+	outputTail      string
+}
+
+func (e *verificationStepMetadataError) Error() string {
+	return e.err.Error()
+}
+
+func (e *verificationStepMetadataError) Unwrap() error {
+	return e.err
 }
 
 type Verifier struct {
@@ -232,13 +252,41 @@ func (v *Verifier) validate(ctx context.Context) (bool, error) {
 	slog.Info("Validate output", "output", string(output))
 
 	if err != nil {
+		metadata := validationStepMetadata(ctx, cmd, output, err)
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return false, fmt.Errorf("validation failed (exit %d): %s", exitErr.ExitCode(), string(output))
+			metadata.err = fmt.Errorf("validation failed (exit %d): %s", exitErr.ExitCode(), string(output))
+			return false, metadata
 		}
-		return false, fmt.Errorf("run validate: %w: %s", err, string(output))
+		metadata.err = fmt.Errorf("run validate: %w: %s", err, string(output))
+		return false, metadata
 	}
 
 	return true, nil
+}
+
+func validationStepMetadata(ctx context.Context, cmd *exec.Cmd, output []byte, err error) *verificationStepMetadataError {
+	metadata := &verificationStepMetadataError{
+		err:        err,
+		command:    append([]string{cmd.Path}, cmd.Args[1:]...),
+		outputTail: tailString(string(output), 8192),
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		deadline = deadline.UTC()
+		metadata.deadlineAt = &deadline
+	}
+	if ctx.Err() != nil {
+		metadata.contextCanceled = true
+		metadata.contextError = ctx.Err().Error()
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code := exitErr.ExitCode()
+		metadata.exitCode = &code
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			metadata.signal = status.Signal().String()
+		}
+	}
+	return metadata
 }
 
 func (v *Verifier) finalizeResult(result *VerificationResult) {
@@ -262,6 +310,16 @@ func recordVerificationStep(result *VerificationResult, name string, fn func() e
 	if err != nil {
 		step.Status = "error"
 		step.Error = err.Error()
+		var metadata *verificationStepMetadataError
+		if errors.As(err, &metadata) {
+			step.Command = metadata.command
+			step.DeadlineAt = metadata.deadlineAt
+			step.ExitCode = metadata.exitCode
+			step.Signal = metadata.signal
+			step.ContextCanceled = metadata.contextCanceled
+			step.ContextError = metadata.contextError
+			step.OutputTail = metadata.outputTail
+		}
 	}
 	result.Steps = append(result.Steps, step)
 	return err
@@ -287,4 +345,11 @@ func summarizeVerificationMessage(msg string) string {
 		return line
 	}
 	return ""
+}
+
+func tailString(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[len(value)-limit:]
 }

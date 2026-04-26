@@ -20,24 +20,27 @@ import (
 )
 
 const (
-	debugCommandTimeout = 5 * time.Second
-	debugOutputLimit    = 64 * 1024
-	debugLineLimit      = 80
+	debugCommandTimeout     = 5 * time.Second
+	debugObjectLevelTimeout = 2 * time.Second
+	debugOutputLimit        = 64 * 1024
+	debugLineLimit          = 80
+	debugObjectCountCap     = 5000
 )
 
-func (r *Runner) captureFailureDebugSnapshot(reason string, steps []reporting.VerificationStep) *reporting.FailureDebugSnapshot {
+func (r *Runner) captureFailureDebugSnapshot(reason string, steps []reporting.VerificationStep, classification *reporting.FailureClassification) *reporting.FailureDebugSnapshot {
 	snapshot := &reporting.FailureDebugSnapshot{
-		CapturedAt:        time.Now().UTC(),
-		Reason:            reason,
-		Run:               r.debugIdentity(),
-		ProcessTable:      collectProcessTable(),
-		SocketSummary:     collectSocketSummary(r.cfg.SocketPath),
-		Disk:              collectDiskSnapshot(r.cfg),
-		Cgroup:            collectCgroupSnapshot(),
-		LitestreamExit:    r.litestreamExitSnapshot(),
-		VerificationSteps: append([]reporting.VerificationStep(nil), steps...),
-		LitestreamLogTail: r.litestreamLog.Lines(),
-		LoadLogTail:       r.loadLog.Lines(),
+		CapturedAt:            time.Now().UTC(),
+		Reason:                reason,
+		Run:                   r.debugIdentity(),
+		FailureClassification: classification,
+		ProcessTable:          collectProcessTable(),
+		SocketSummary:         collectSocketSummary(r.cfg.SocketPath),
+		Disk:                  collectDiskSnapshot(r.cfg),
+		Cgroup:                collectCgroupSnapshot(),
+		LitestreamExit:        r.litestreamExitSnapshot(),
+		VerificationSteps:     append([]reporting.VerificationStep(nil), steps...),
+		LitestreamLogTail:     r.litestreamLog.Lines(),
+		LoadLogTail:           r.loadLog.Lines(),
 	}
 	snapshot.FDCounts = collectFDCounts(snapshot.ProcessTable, r.cfg)
 	snapshot.CommandOutputs = []reporting.CommandOutput{
@@ -252,44 +255,73 @@ func collectObjectStoragePrefix(cfg Config) *reporting.ObjectStoragePrefixSnapsh
 		LevelCounts: make(map[string]int),
 	}
 	host := endpointHost(cfg.S3Endpoint)
+	for level := 9; level >= 0; level-- {
+		levelName := fmt.Sprintf("%04d", level)
+		levelURL := prefixURL + levelName + "/"
+		listing := collectObjectStorageLevel(host, levelName, levelURL)
+		snapshot.LevelListings = append(snapshot.LevelListings, listing)
+		if listing.Truncated {
+			snapshot.CommandTruncated = true
+		}
+		if listing.Error != "" && snapshot.Error == "" {
+			snapshot.Error = fmt.Sprintf("%s: %s", listing.Level, listing.Error)
+		}
+		snapshot.ObjectCount += listing.ObjectCount
+		snapshot.TotalBytes += listing.TotalBytes
+		snapshot.LevelCounts[listing.Level] = listing.ObjectCount
+		snapshot.LatestObjects = append(snapshot.LatestObjects, listing.LatestObjects...)
+		snapshot.LatestObjects = tailLines(snapshot.LatestObjects, 20)
+	}
+	return snapshot
+}
+
+func collectObjectStorageLevel(host, level, levelURL string) reporting.ObjectStorageLevelSnapshot {
 	command := fmt.Sprintf(
 		`s3cmd --access_key="$AWS_ACCESS_KEY_ID" --secret_key="$AWS_SECRET_ACCESS_KEY" --host=%s --host-bucket='%%(bucket)s.%s' --region="$AWS_REGION" ls --recursive %s`,
 		shellQuote(host),
 		host,
-		shellQuote(prefixURL),
+		shellQuote(levelURL),
 	)
-	output := runDebugCommand("object_storage_prefix", "sh", "-c", command)
-	if output.Truncated {
-		snapshot.CommandTruncated = true
-	}
-	if output.Error != "" {
-		snapshot.Error = output.Error
-		if output.Output != "" {
-			snapshot.LatestObjects = tailLines(nonEmptyLines(output.Output), 20)
-		}
-		return snapshot
+	start := time.Now()
+	output := runDebugCommandWithTimeout("object_storage_level_"+level, debugObjectLevelTimeout, "sh", "-c", command)
+	listing := reporting.ObjectStorageLevelSnapshot{
+		Level:      level,
+		URL:        levelURL,
+		DurationMS: int(time.Since(start).Milliseconds()),
+		TimedOut:   output.Error == "command timed out",
+		Truncated:  output.Truncated,
+		Error:      output.Error,
 	}
 	for _, line := range nonEmptyLines(output.Output) {
 		fields := strings.Fields(line)
 		if len(fields) < 4 {
 			continue
 		}
-		size, _ := strconv.ParseInt(fields[2], 10, 64)
-		objectPath := fields[3]
-		snapshot.ObjectCount++
-		snapshot.TotalBytes += size
-		level := objectLevel(objectPath)
-		snapshot.LevelCounts[level]++
-		snapshot.LatestObjects = append(snapshot.LatestObjects, line)
-		if len(snapshot.LatestObjects) > 20 {
-			snapshot.LatestObjects = snapshot.LatestObjects[len(snapshot.LatestObjects)-20:]
+		if listing.ObjectCount >= debugObjectCountCap {
+			listing.ObjectCountCapped = true
+			continue
 		}
+		size, _ := strconv.ParseInt(fields[2], 10, 64)
+		listing.ObjectCount++
+		listing.TotalBytes += size
+		listing.LatestObjects = append(listing.LatestObjects, line)
+		listing.LatestObjects = tailLines(listing.LatestObjects, 10)
 	}
-	return snapshot
+	if listing.ObjectCount > 0 {
+		listing.PageCount = (listing.ObjectCount + 999) / 1000
+	}
+	if output.Truncated {
+		listing.ObjectCountCapped = true
+	}
+	return listing
 }
 
 func runDebugCommand(name string, command string, args ...string) reporting.CommandOutput {
-	ctx, cancel := context.WithTimeout(context.Background(), debugCommandTimeout)
+	return runDebugCommandWithTimeout(name, debugCommandTimeout, command, args...)
+}
+
+func runDebugCommandWithTimeout(name string, timeout time.Duration, command string, args ...string) reporting.CommandOutput {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, command, args...)
@@ -445,6 +477,11 @@ func objectLevel(objectPath string) string {
 	for _, part := range strings.Split(objectPath, "/") {
 		if strings.HasPrefix(part, "L") || strings.HasPrefix(part, "level") {
 			return part
+		}
+		if len(part) == 4 {
+			if _, err := strconv.Atoi(part); err == nil {
+				return part
+			}
 		}
 	}
 	return "unknown"

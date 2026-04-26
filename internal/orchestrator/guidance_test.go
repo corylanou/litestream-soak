@@ -55,6 +55,20 @@ func TestInferFailureSignatureValidationFailed(t *testing.T) {
 	}
 }
 
+func TestInferFailureSignatureRestoreS3ListRequestCanceled(t *testing.T) {
+	verification := &model.Verification{
+		CheckType:    "restore",
+		ErrorMessage: `validation failed (exit 1): error="restore failed: get LTX time bounds: operation error S3: ListObjectsV2, https response error StatusCode: 408, RequestID: 1777230002707552565, HostID: , api error RequestCanceled: Request is canceled."`,
+	}
+
+	if got := inferFailureStage(verification); got != "restore" {
+		t.Fatalf("inferFailureStage()=%q want %q", got, "restore")
+	}
+	if got := inferFailureSignature(verification); got != "restore_s3_list_request_canceled" {
+		t.Fatalf("inferFailureSignature()=%q want %q", got, "restore_s3_list_request_canceled")
+	}
+}
+
 func TestBuildIncidentGuideSync(t *testing.T) {
 	bundle := &IncidentBundle{
 		Worker: model.Worker{

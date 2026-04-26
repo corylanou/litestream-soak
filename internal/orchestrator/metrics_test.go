@@ -187,7 +187,7 @@ func TestControlMetricsExposeLatestDeploymentComparison(t *testing.T) {
 		"comparison_role":   "resolved",
 		"git_sha":           "sha-base-metrics",
 		"litestream_sha":    "litestream-base-metrics",
-		"failure_stage":     "integrity",
+		"failure_stage":     "integrity_check",
 		"failure_signature": "sqlite_index_mismatch",
 	}, 1)
 }
