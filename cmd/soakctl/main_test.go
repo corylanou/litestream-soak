@@ -41,7 +41,7 @@ func TestSkipBasicAuthAllowsWorkerReportsAndWebhook(t *testing.T) {
 }
 
 func TestAdminRoutesRejectBasicAuth(t *testing.T) {
-	handler := newAuthMiddleware("soak", "ui-password", "admin-token")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := newAuthMiddleware("soak", "ui-password", "admin-token", false)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -56,8 +56,8 @@ func TestAdminRoutesRejectBasicAuth(t *testing.T) {
 	}
 }
 
-func TestAdminRoutesAllowBasicAuthWhenAdminTokenUnset(t *testing.T) {
-	handler := newAuthMiddleware("soak", "ui-password", "")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestAdminRoutesAllowBasicAuthWithFallbackEnabled(t *testing.T) {
+	handler := newAuthMiddleware("soak", "ui-password", "admin-token", true)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -73,7 +73,7 @@ func TestAdminRoutesAllowBasicAuthWhenAdminTokenUnset(t *testing.T) {
 }
 
 func TestNonAdminRoutesStillAllowBasicAuth(t *testing.T) {
-	handler := newAuthMiddleware("soak", "ui-password", "admin-token")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := newAuthMiddleware("soak", "ui-password", "admin-token", false)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 

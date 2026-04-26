@@ -30,6 +30,7 @@ primary_region = "ord"
   SOAK_PLATFORM_LOG_MONITOR_ENABLED = "true"
   SOAK_PLATFORM_LOG_POLL_INTERVAL = "1m"
   GITHUB_WEBHOOK_DEPLOY_ENABLED = "false"
+  SOAK_ADMIN_BASIC_FALLBACK_ENABLED = "true"
 
 [http_service]
   internal_port = 8080

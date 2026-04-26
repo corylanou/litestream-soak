@@ -43,6 +43,7 @@ func main() {
 	alertWebhookURL := os.Getenv("SOAK_ALERT_WEBHOOK_URL")
 	alertWebhookToken := os.Getenv("SOAK_ALERT_WEBHOOK_BEARER_TOKEN")
 	adminBearerToken := os.Getenv("SOAK_ADMIN_BEARER_TOKEN")
+	adminBasicFallbackEnabled := envOrDefault("SOAK_ADMIN_BASIC_FALLBACK_ENABLED", "false") == "true"
 	basicAuthUsername := os.Getenv("SOAK_BASIC_AUTH_USERNAME")
 	basicAuthPassword := os.Getenv("SOAK_BASIC_AUTH_PASSWORD")
 	fleetEnabled := envOrDefault("SOAK_MAIN_FLEET_ENABLED", "false") == "true"
@@ -107,7 +108,7 @@ func main() {
 
 	handler := http.Handler(mux)
 	if (basicAuthUsername != "" && basicAuthPassword != "") || adminBearerToken != "" {
-		handler = newAuthMiddleware(basicAuthUsername, basicAuthPassword, adminBearerToken)(handler)
+		handler = newAuthMiddleware(basicAuthUsername, basicAuthPassword, adminBearerToken, adminBasicFallbackEnabled)(handler)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -168,6 +169,7 @@ func main() {
 		"alerts_enabled", alerts.Enabled(),
 		"basic_auth_enabled", basicAuthUsername != "" && basicAuthPassword != "",
 		"admin_bearer_enabled", adminBearerToken != "",
+		"admin_basic_fallback_enabled", adminBasicFallbackEnabled,
 		"fleet_enabled", fleetEnabled,
 		"dormancy_enabled", dormancyEnabled,
 		"dormancy_threshold", dormancyThreshold,
@@ -258,7 +260,7 @@ func listEnvOrDefault(key string, def []string) []string {
 	return values
 }
 
-func newAuthMiddleware(username, password, adminBearerToken string) func(http.Handler) http.Handler {
+func newAuthMiddleware(username, password, adminBearerToken string, adminBasicFallbackEnabled bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if skipBasicAuth(r) {
@@ -271,7 +273,7 @@ func newAuthMiddleware(username, password, adminBearerToken string) func(http.Ha
 					next.ServeHTTP(w, r)
 					return
 				}
-				if adminBearerToken == "" && isBasicAuthorized(r, username, password) {
+				if adminBasicFallbackEnabled && isBasicAuthorized(r, username, password) {
 					next.ServeHTTP(w, r)
 					return
 				}
