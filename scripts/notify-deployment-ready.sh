@@ -15,8 +15,10 @@ fi
 
 if [ -n "${SOAK_ADMIN_BEARER_TOKEN:-}" ]; then
   auth_args=(-H "Authorization: Bearer ${SOAK_ADMIN_BEARER_TOKEN}")
+elif [ -n "${SOAK_BASIC_AUTH_USERNAME:-}" ] && [ -n "${SOAK_BASIC_AUTH_PASSWORD:-}" ]; then
+  auth_args=(-u "${SOAK_BASIC_AUTH_USERNAME}:${SOAK_BASIC_AUTH_PASSWORD}")
 else
-  echo "set SOAK_ADMIN_BEARER_TOKEN" >&2
+  echo "set SOAK_ADMIN_BEARER_TOKEN or SOAK_BASIC_AUTH_USERNAME/SOAK_BASIC_AUTH_PASSWORD" >&2
   exit 1
 fi
 
