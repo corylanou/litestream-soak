@@ -225,6 +225,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/run-archives/{id}/prompt", a.handleGetRunArchivePrompt)
 	mux.HandleFunc("POST /api/admin/deployments/ready", a.handleDeploymentReady)
 	mux.HandleFunc("POST /api/admin/resume-dormant", a.handleResumeDormantWorkers)
+	mux.HandleFunc("POST /api/admin/pause-source", a.handlePauseSourceWorkers)
 	mux.HandleFunc("GET /api/workers/{id}", a.handleGetWorker)
 	mux.HandleFunc("GET /api/workers/{id}/incident", a.handleGetIncident)
 	mux.HandleFunc("GET /api/workers/{id}/prompt", a.handleGetPrompt)
@@ -1141,6 +1142,48 @@ func (a *API) handleResumeDormantWorkers(w http.ResponseWriter, r *http.Request)
 		"git_sha":         sha,
 		"litestream_sha":  litestreamSHA,
 		"trigger":         trigger,
+	})
+}
+
+func (a *API) handlePauseSourceWorkers(w http.ResponseWriter, r *http.Request) {
+	if a.manager == nil {
+		http.Error(w, "pause manager unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	if source == "" {
+		source = "main"
+	}
+	reason := strings.TrimSpace(r.URL.Query().Get("reason"))
+	if reason == "" {
+		reason = fmt.Sprintf("%s manually paused until the next deployment", sourceHumanLabel(source))
+	}
+	signature := strings.TrimSpace(r.URL.Query().Get("signature"))
+	if signature == "" {
+		signature = "manual_source_pause"
+	}
+	trigger := strings.TrimSpace(r.URL.Query().Get("trigger"))
+	if trigger == "" {
+		trigger = "manual_pause"
+	}
+
+	pausedWorkerIDs, err := a.manager.PauseSourceWorkers(r.Context(), source, reason, signature, trigger)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = a.db.RecordEvent("", "manual_source_pause_requested", fmt.Sprintf("Paused %d active %s worker(s) until next deploy", len(pausedWorkerIDs), source), strings.Join(pausedWorkerIDs, ","))
+	a.observeLatestDeploymentState(source)
+
+	writeAPIJSON(w, map[string]any{
+		"paused_workers": len(pausedWorkerIDs),
+		"worker_ids":     pausedWorkerIDs,
+		"source":         source,
+		"reason":         reason,
+		"signature":      signature,
+		"trigger":        trigger,
 	})
 }
 

@@ -60,6 +60,9 @@ func main() {
 	prMaxAgeInterval := durationEnvOrDefault("SOAK_PR_MAX_AGE_CHECK_INTERVAL", 10*time.Minute)
 	prMaxAgeSources := listEnvOrDefault("SOAK_PR_MAX_AGE_SOURCES", []string{"pr-*"})
 	prMaxAgeAction := orchestrator.PRMaxAgeAction(envOrDefault("SOAK_PR_MAX_AGE_ACTION", string(orchestrator.PRMaxAgeActionStop)))
+	failedSourcePauseEnabled := envOrDefault("SOAK_FAILED_SOURCE_PAUSE_ENABLED", "false") == "true"
+	failedSourcePauseInterval := durationEnvOrDefault("SOAK_FAILED_SOURCE_PAUSE_CHECK_INTERVAL", 10*time.Minute)
+	failedSourcePauseSources := listEnvOrDefault("SOAK_FAILED_SOURCE_PAUSE_SOURCES", []string{"main"})
 	platformLogMonitorEnabled := envOrDefault("SOAK_PLATFORM_LOG_MONITOR_ENABLED", "true") == "true"
 	platformLogPollInterval := durationEnvOrDefault("SOAK_PLATFORM_LOG_POLL_INTERVAL", time.Minute)
 	volumeInventoryPollInterval := durationEnvOrDefault("SOAK_VOLUME_INVENTORY_POLL_INTERVAL", 10*time.Minute)
@@ -146,6 +149,12 @@ func main() {
 			Action:          prMaxAgeAction,
 		})
 	}
+	if failedSourcePauseEnabled {
+		go mgr.RunFailedSourcePauseLoop(ctx, orchestrator.FailedSourcePausePolicy{
+			CheckInterval:   failedSourcePauseInterval,
+			SourceAllowlist: failedSourcePauseSources,
+		})
+	}
 	if platformLogMonitorEnabled {
 		go mgr.RunPlatformLogMonitor(ctx, platformLogPollInterval)
 	}
@@ -174,6 +183,9 @@ func main() {
 		"pr_max_age_check_interval", prMaxAgeInterval,
 		"pr_max_age_sources", strings.Join(prMaxAgeSources, ","),
 		"pr_max_age_action", string(prMaxAgeAction),
+		"failed_source_pause_enabled", failedSourcePauseEnabled,
+		"failed_source_pause_check_interval", failedSourcePauseInterval,
+		"failed_source_pause_sources", strings.Join(failedSourcePauseSources, ","),
 		"platform_log_monitor_enabled", platformLogMonitorEnabled,
 		"platform_log_poll_interval", platformLogPollInterval,
 		"volume_inventory_poll_interval", volumeInventoryPollInterval,

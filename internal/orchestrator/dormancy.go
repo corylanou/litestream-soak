@@ -350,6 +350,32 @@ func (m *Manager) DormantWorker(ctx context.Context, workerID, reason, signature
 	return nil
 }
 
+func (m *Manager) PauseSourceWorkers(ctx context.Context, source, reason, signature, resumeTrigger string) ([]string, error) {
+	source = firstNonEmpty(strings.TrimSpace(source), "main")
+	reason = firstNonEmpty(strings.TrimSpace(reason), fmt.Sprintf("%s paused until the next deployment", sourceHumanLabel(source)))
+	signature = firstNonEmpty(strings.TrimSpace(signature), "source_paused")
+	resumeTrigger = firstNonEmpty(strings.TrimSpace(resumeTrigger), "next_deploy")
+
+	workers, err := m.db.ListWorkersForSource(source)
+	if err != nil {
+		return nil, fmt.Errorf("list %s workers: %w", source, err)
+	}
+
+	paused := make([]string, 0, len(workers))
+	var pauseErrors []error
+	for _, worker := range workers {
+		if !workerActiveForSourcePause(worker, model.Deployment{}) {
+			continue
+		}
+		if err := m.DormantWorker(ctx, worker.ID, reason, signature, resumeTrigger); err != nil {
+			pauseErrors = append(pauseErrors, fmt.Errorf("%s: %w", worker.ID, err))
+			continue
+		}
+		paused = append(paused, worker.ID)
+	}
+	return paused, errors.Join(pauseErrors...)
+}
+
 func (m *Manager) ResumeDormantWorkers(ctx context.Context, source, imageRef, gitSHA, litestreamSHA, resumeTrigger string) error {
 	workers, err := m.db.ListDormantWorkers(source)
 	if err != nil {

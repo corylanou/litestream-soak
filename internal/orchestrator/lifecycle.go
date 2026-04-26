@@ -41,6 +41,11 @@ type PRMaxAgePolicy struct {
 	Action          PRMaxAgeAction
 }
 
+type FailedSourcePausePolicy struct {
+	CheckInterval   time.Duration
+	SourceAllowlist []string
+}
+
 type successTeardownEvaluation struct {
 	Deployment model.Deployment
 	Rollout    DeploymentRolloutResponse
@@ -54,6 +59,14 @@ type prMaxAgeEvaluation struct {
 	Workers    []model.Worker
 	Summary    string
 	Action     PRMaxAgeAction
+}
+
+type failedSourcePauseEvaluation struct {
+	Deployment model.Deployment
+	Rollout    DeploymentRolloutResponse
+	Workers    []model.Worker
+	Summary    string
+	Signature  string
 }
 
 type runArchivePayload struct {
@@ -133,6 +146,34 @@ func (m *Manager) RunPRMaxAgeLoop(ctx context.Context, policy PRMaxAgePolicy) {
 	}
 }
 
+func (m *Manager) RunFailedSourcePauseLoop(ctx context.Context, policy FailedSourcePausePolicy) {
+	policy = normalizeFailedSourcePausePolicy(policy)
+
+	m.evaluateFailedSourcePause(ctx, policy)
+
+	ticker := time.NewTicker(policy.CheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.evaluateFailedSourcePause(ctx, policy)
+		}
+	}
+}
+
+func normalizeFailedSourcePausePolicy(policy FailedSourcePausePolicy) FailedSourcePausePolicy {
+	if policy.CheckInterval <= 0 {
+		policy.CheckInterval = 10 * time.Minute
+	}
+	if len(policy.SourceAllowlist) == 0 {
+		policy.SourceAllowlist = []string{"main"}
+	}
+	return policy
+}
+
 func normalizePRMaxAgePolicy(policy PRMaxAgePolicy) PRMaxAgePolicy {
 	if policy.CheckInterval <= 0 {
 		policy.CheckInterval = 10 * time.Minute
@@ -196,6 +237,52 @@ func (m *Manager) evaluateSuccessTeardown(ctx context.Context, policy SuccessTea
 				continue
 			}
 			_ = m.db.RecordEvent(worker.ID, "run_success_worker_destroyed", "Destroyed worker after archived successful soak run", fmt.Sprintf("archive_id=%d", archive.ID))
+		}
+	}
+}
+
+func (m *Manager) evaluateFailedSourcePause(ctx context.Context, policy FailedSourcePausePolicy) {
+	sources, err := m.db.ListActiveWorkerSources()
+	if err != nil {
+		slog.Error("Failed to list active worker sources for failed-source pause", "error", err)
+		return
+	}
+
+	for _, source := range sources {
+		if !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
+			continue
+		}
+
+		deployment, err := m.db.GetLatestDeployment(source)
+		if err != nil {
+			slog.Error("Failed to get latest deployment for failed-source pause", "source", source, "error", err)
+			continue
+		}
+		if deployment == nil {
+			continue
+		}
+
+		evaluation, ok, err := failedSourcePauseCandidate(m.db, *deployment, policy)
+		if err != nil {
+			slog.Error("Failed to evaluate failed-source pause", "source", source, "deployment_id", deployment.ID, "error", err)
+			continue
+		}
+		if !ok {
+			continue
+		}
+
+		archive, created, err := m.archiveFailedSourceRun(evaluation, time.Now().UTC())
+		if err != nil {
+			slog.Warn("Failed to archive failed-source pause evidence", "source", source, "deployment_id", deployment.ID, "error", err)
+		} else if created {
+			_ = m.db.RecordEvent("", "run_failed_source_archived", evaluation.Summary, fmt.Sprintf("archive_id=%d source=%s", archive.ID, source))
+		}
+
+		for _, worker := range evaluation.Workers {
+			slog.Info("Pausing known-bad source worker", "worker_id", worker.ID, "source", source, "deployment_id", deployment.ID)
+			if err := m.DormantWorker(ctx, worker.ID, evaluation.Summary, evaluation.Signature, "known_bad_source"); err != nil {
+				slog.Error("Failed to pause known-bad source worker", "worker_id", worker.ID, "error", err)
+			}
 		}
 	}
 }
@@ -350,6 +437,52 @@ func workerPassedSuccessWindow(db *model.DB, worker model.Worker, deployment mod
 	return !latestPassAt.Before(deployment.StartedAt.UTC().Add(policy.Threshold)), nil
 }
 
+func failedSourcePauseCandidate(db *model.DB, deployment model.Deployment, policy FailedSourcePausePolicy) (failedSourcePauseEvaluation, bool, error) {
+	policy = normalizeFailedSourcePausePolicy(policy)
+	source := firstNonEmpty(strings.TrimSpace(deployment.Source), "main")
+	if !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
+		return failedSourcePauseEvaluation{}, false, nil
+	}
+
+	rollout, err := buildDeploymentRollout(db, deployment)
+	if err != nil {
+		return failedSourcePauseEvaluation{}, false, err
+	}
+	if rollout.TotalWorkers == 0 ||
+		rollout.Status != "needs_attention" ||
+		rollout.OutdatedWorkers > 0 ||
+		rollout.ProbingWorkers > 0 ||
+		rollout.AwaitingVerification > 0 ||
+		rollout.UpdatedWorkers != rollout.TotalWorkers ||
+		rollout.AttentionWorkers == 0 {
+		return failedSourcePauseEvaluation{}, false, nil
+	}
+
+	workers, err := db.ListWorkersForSource(source)
+	if err != nil {
+		return failedSourcePauseEvaluation{}, false, err
+	}
+	activeWorkers := make([]model.Worker, 0, len(workers))
+	for _, worker := range workers {
+		if workerActiveForSourcePause(worker, deployment) {
+			activeWorkers = append(activeWorkers, worker)
+		}
+	}
+	if len(activeWorkers) == 0 {
+		return failedSourcePauseEvaluation{}, false, nil
+	}
+
+	signature := dominantRolloutFailureSignature(rollout)
+	summary := fmt.Sprintf("%s is known-bad for soak %s / litestream %s; pausing active worker compute until the next deployment.", sourceHumanLabel(source), shortVersionValue(deployment.GitSHA), shortVersionValue(deployment.LitestreamSHA))
+	return failedSourcePauseEvaluation{
+		Deployment: deployment,
+		Rollout:    rollout,
+		Workers:    activeWorkers,
+		Summary:    summary,
+		Signature:  signature,
+	}, true, nil
+}
+
 func prMaxAgeCandidate(db *model.DB, deployment model.Deployment, policy PRMaxAgePolicy, now time.Time) (prMaxAgeEvaluation, bool, error) {
 	policy = normalizePRMaxAgePolicy(policy)
 	source := firstNonEmpty(strings.TrimSpace(deployment.Source), "main")
@@ -415,6 +548,10 @@ func (m *Manager) archiveSuccessRun(evaluation successTeardownEvaluation, now ti
 
 func (m *Manager) archiveExpiredRun(evaluation prMaxAgeEvaluation, now time.Time) (*model.RunArchive, bool, error) {
 	return m.archiveDeploymentRun(runArchiveTypeExpired, "pr_max_age", evaluation.Deployment, &evaluation.Rollout, evaluation.Workers, evaluation.Summary, now)
+}
+
+func (m *Manager) archiveFailedSourceRun(evaluation failedSourcePauseEvaluation, now time.Time) (*model.RunArchive, bool, error) {
+	return m.archiveDeploymentRun(runArchiveTypeFailure, "failed_source_pause", evaluation.Deployment, &evaluation.Rollout, evaluation.Workers, evaluation.Summary, now)
 }
 
 func (m *Manager) archiveDeploymentRun(archiveType, reason string, deployment model.Deployment, rollout *DeploymentRolloutResponse, workers []model.Worker, summary string, now time.Time) (*model.RunArchive, bool, error) {
@@ -572,6 +709,38 @@ func workerActiveForPRMaxAge(worker model.Worker, deployment model.Deployment) b
 	default:
 		return false
 	}
+}
+
+func workerActiveForSourcePause(worker model.Worker, deployment model.Deployment) bool {
+	if strings.TrimSpace(deployment.GitSHA) != "" && !workerMatchesDeployment(worker, deployment) {
+		return false
+	}
+	switch worker.Status {
+	case model.WorkerRunning, model.WorkerDegraded, model.WorkerProbing:
+		return true
+	default:
+		return false
+	}
+}
+
+func dominantRolloutFailureSignature(rollout DeploymentRolloutResponse) string {
+	counts := make(map[string]int)
+	for _, worker := range rollout.Workers {
+		if strings.TrimSpace(worker.CurrentFailureSignature) == "" {
+			continue
+		}
+		counts[worker.CurrentFailureSignature]++
+	}
+
+	signature := ""
+	count := 0
+	for candidate, candidateCount := range counts {
+		if candidateCount > count || (candidateCount == count && (signature == "" || candidate < signature)) {
+			signature = candidate
+			count = candidateCount
+		}
+	}
+	return firstNonEmpty(signature, "known_bad_rollout")
 }
 
 func prMaxAgeActionSummary(action PRMaxAgeAction) string {

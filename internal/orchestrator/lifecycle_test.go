@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -140,6 +141,117 @@ func TestPRMaxAgeCandidateRejectsFreshDeployment(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("prMaxAgeCandidate() = true, want false for fresh deployment")
+	}
+}
+
+func TestFailedSourcePauseCandidatePausesKnownBadMain(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "soak-sha",
+		LitestreamSHA: "litestream-sha",
+		ImageRef:      "registry.fly.io/litestream-soak:soak-sha",
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+	deployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment() error = %v", err)
+	}
+
+	for _, worker := range []model.Worker{
+		{
+			ID:            "worker-main-low-vol",
+			Name:          "worker-main-low-vol",
+			Status:        model.WorkerDegraded,
+			Source:        "main",
+			GitSHA:        deployment.GitSHA,
+			LitestreamSHA: deployment.LitestreamSHA,
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		},
+		{
+			ID:            "worker-main-read-heavy",
+			Name:          "worker-main-read-heavy",
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        deployment.GitSHA,
+			LitestreamSHA: deployment.LitestreamSHA,
+			ProfileName:   "read-heavy",
+			ProfileConfig: "{}",
+		},
+	} {
+		createTestWorker(t, db, worker)
+	}
+
+	verifiedAt := time.Now().UTC().Add(time.Minute)
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:     "worker-main-low-vol",
+		StartedAt:    verifiedAt.Add(-15 * time.Second),
+		CompletedAt:  &verifiedAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		Passed:       false,
+		ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": context deadline exceeded`,
+	})
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-main-read-heavy",
+		StartedAt:   verifiedAt.Add(-10 * time.Second),
+		CompletedAt: &verifiedAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+	})
+
+	evaluation, ok, err := failedSourcePauseCandidate(db, *deployment, FailedSourcePausePolicy{})
+	if err != nil {
+		t.Fatalf("failedSourcePauseCandidate() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("failedSourcePauseCandidate() = false, want true")
+	}
+	if evaluation.Signature != "litestream_sync_timeout" {
+		t.Fatalf("Signature = %q, want litestream_sync_timeout", evaluation.Signature)
+	}
+	if len(evaluation.Workers) != 2 {
+		t.Fatalf("len(Workers) = %d, want 2", len(evaluation.Workers))
+	}
+}
+
+func TestPauseSourceWorkersMarksActiveWorkersDormant(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	for _, worker := range []model.Worker{
+		{ID: "worker-main-low-vol", Name: "worker-main-low-vol", Status: model.WorkerRunning, Source: "main", GitSHA: "soak-sha", ProfileName: "low-volume", ProfileConfig: "{}"},
+		{ID: "worker-main-high-vol", Name: "worker-main-high-vol", Status: model.WorkerDegraded, Source: "main", GitSHA: "soak-sha", ProfileName: "high-volume", ProfileConfig: "{}"},
+		{ID: "worker-main-burst-vol", Name: "worker-main-burst-vol", Status: model.WorkerDormant, Source: "main", GitSHA: "soak-sha", ProfileName: "burst-volume", ProfileConfig: "{}"},
+	} {
+		createTestWorker(t, db, worker)
+	}
+
+	manager := &Manager{db: db, appName: "litestream-soak"}
+	paused, err := manager.PauseSourceWorkers(context.Background(), "main", "known bad", "test_signature", "test")
+	if err != nil {
+		t.Fatalf("PauseSourceWorkers() error = %v", err)
+	}
+	if len(paused) != 2 {
+		t.Fatalf("len(paused) = %d, want 2", len(paused))
+	}
+	for _, workerID := range paused {
+		worker, err := db.GetWorker(workerID)
+		if err != nil {
+			t.Fatalf("GetWorker(%s) error = %v", workerID, err)
+		}
+		if worker.Status != model.WorkerDormant {
+			t.Fatalf("%s status = %s, want dormant", workerID, worker.Status)
+		}
+		if worker.ResumeTrigger != "test" {
+			t.Fatalf("%s ResumeTrigger = %q, want test", workerID, worker.ResumeTrigger)
+		}
 	}
 }
 
