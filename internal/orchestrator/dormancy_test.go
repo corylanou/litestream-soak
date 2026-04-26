@@ -1,6 +1,9 @@
 package orchestrator
 
 import (
+	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,6 +174,59 @@ func TestSummarizeDeploymentComparisonUsesPlainEnglish(t *testing.T) {
 	summary := summarizeDeploymentComparison(comparison)
 	if summary != "The PR #1228 rollout looks better than the main branch rollout so far: 9 workers passed versus 4, and 0 failed versus 4." {
 		t.Fatalf("summary=%q", summary)
+	}
+}
+
+func TestResumeDormantWorkersReturnsWorkerFailures(t *testing.T) {
+	t.Parallel()
+
+	db, err := model.Open(filepath.Join(t.TempDir(), "soak.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	worker := &model.Worker{
+		ID:            "worker-pr-1228-taxi-mixed",
+		Name:          "worker-pr-1228-taxi-mixed",
+		Status:        model.WorkerRunning,
+		Source:        "pr-1228",
+		GitSHA:        "old-soak",
+		LitestreamSHA: "old-litestream",
+		ProfileName:   "taxi-mixed",
+		ProfileConfig: "{}",
+	}
+	if err := db.CreateWorker(worker); err != nil {
+		t.Fatalf("CreateWorker() error = %v", err)
+	}
+	if err := db.MarkWorkerDormant(worker.ID, "stale failure", "sqlite_index_mismatch", "test"); err != nil {
+		t.Fatalf("MarkWorkerDormant() error = %v", err)
+	}
+
+	manager := &Manager{db: db, appName: "litestream-soak"}
+	err = manager.ResumeDormantWorkers(context.Background(), "pr-1228", "image", "new-soak", "new-litestream", "test")
+	if err == nil {
+		t.Fatal("ResumeDormantWorkers() error = nil, want worker failure")
+	}
+	if !strings.Contains(err.Error(), worker.ID) {
+		t.Fatalf("ResumeDormantWorkers() error = %q, want worker id", err)
+	}
+
+	events, err := db.ListWorkerEvents(worker.ID, 5)
+	if err != nil {
+		t.Fatalf("ListWorkerEvents() error = %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if event.EventType == "worker_probe_start_failed" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("worker_probe_start_failed event not recorded: %+v", events)
 	}
 }
 

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -355,13 +356,15 @@ func (m *Manager) ResumeDormantWorkers(ctx context.Context, source, imageRef, gi
 		return fmt.Errorf("list dormant workers: %w", err)
 	}
 
+	var resumeErrors []error
 	for _, worker := range workers {
 		if err := m.resumeDormantWorker(ctx, worker, imageRef, gitSHA, litestreamSHA, resumeTrigger); err != nil {
 			slog.Error("Failed to resume dormant worker", "worker_id", worker.ID, "error", err)
 			_ = m.db.RecordEvent(worker.ID, "worker_probe_start_failed", err.Error(), imageRef)
+			resumeErrors = append(resumeErrors, fmt.Errorf("%s: %w", worker.ID, err))
 		}
 	}
-	return nil
+	return errors.Join(resumeErrors...)
 }
 
 func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, imageRef, gitSHA, litestreamSHA, resumeTrigger string) error {
@@ -391,7 +394,11 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	resumeWorker.LitestreamSHA = resumeLitestreamSHA
 	machine, err := m.createWorkerMachine(ctx, resumeWorker, imageRef, volumeID, workloadCfg)
 	if err != nil {
-		return fmt.Errorf("create probe machine: %w", err)
+		resumeErr := fmt.Errorf("create probe machine: %w", err)
+		if recreateErr := m.recreateDormantWorkerForProbe(ctx, worker, imageRef, resumeSHA, resumeLitestreamSHA, resumeTrigger, resumeErr); recreateErr != nil {
+			return fmt.Errorf("%w; recreate dormant worker: %v", resumeErr, recreateErr)
+		}
+		return nil
 	}
 
 	if err := m.db.UpdateWorkerMachine(worker.ID, machine.ID, volumeID); err != nil {
@@ -406,6 +413,54 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	m.observeWorkerByID(worker.ID)
 
 	message := fmt.Sprintf("Worker resumed for probe on soak %s / litestream %s (%s)", shortVersionValue(resumeSHA), shortVersionValue(resumeLitestreamSHA), resumeTrigger)
+	if err := m.db.RecordEvent(worker.ID, "worker_probe_started", message, imageRef); err != nil {
+		return fmt.Errorf("record probe event: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) recreateDormantWorkerForProbe(ctx context.Context, worker model.Worker, imageRef, gitSHA, litestreamSHA, resumeTrigger string, resumeErr error) error {
+	fly := m.flyClientForWorker(worker)
+	if worker.FlyMachineID != "" {
+		if err := fly.DestroyMachine(ctx, worker.FlyMachineID, true); err != nil && !flyapi.IsNotFound(err) {
+			return fmt.Errorf("destroy stale dormant machine %s: %w", worker.FlyMachineID, err)
+		}
+	}
+	if worker.FlyVolumeID != "" {
+		if err := fly.DestroyVolume(ctx, worker.FlyVolumeID); err != nil && !flyapi.IsNotFound(err) {
+			return fmt.Errorf("destroy stale dormant volume %s: %w", worker.FlyVolumeID, err)
+		}
+	}
+
+	workloadCfg := normalizeWorkloadConfig(resolveWorkerWorkload(worker))
+	volumeSizeGB := resolveWorkerVolumeSize(worker, workloadCfg)
+	message := fmt.Sprintf("Recreating dormant worker with a fresh volume after resume failed: %v", resumeErr)
+	if err := m.db.RecordEvent(worker.ID, "worker_probe_recreate", message, imageRef); err != nil {
+		return fmt.Errorf("record recreate event: %w", err)
+	}
+
+	if _, err := m.CreateWorker(ctx, WorkerRequest{
+		WorkerID:      worker.ID,
+		Name:          worker.Name,
+		Source:        worker.Source,
+		GitSHA:        gitSHA,
+		LitestreamSHA: litestreamSHA,
+		PRNumber:      worker.PRNumber,
+		ProfileName:   worker.ProfileName,
+		ImageRef:      imageRef,
+		Region:        worker.Region,
+		VolumeSizeGB:  volumeSizeGB,
+		Workload:      workloadCfg,
+	}); err != nil {
+		return err
+	}
+
+	if err := m.db.MarkWorkerProbing(worker.ID, resumeTrigger); err != nil {
+		return fmt.Errorf("mark recreated worker probing: %w", err)
+	}
+	m.observeWorkerByID(worker.ID)
+
+	message = fmt.Sprintf("Worker recreated for probe on soak %s / litestream %s (%s)", shortVersionValue(gitSHA), shortVersionValue(litestreamSHA), resumeTrigger)
 	if err := m.db.RecordEvent(worker.ID, "worker_probe_started", message, imageRef); err != nil {
 		return fmt.Errorf("record probe event: %w", err)
 	}
