@@ -56,6 +56,22 @@ func TestAdminRoutesRejectBasicAuth(t *testing.T) {
 	}
 }
 
+func TestAdminRoutesAllowBasicAuthWhenAdminTokenUnset(t *testing.T) {
+	handler := newAuthMiddleware("soak", "ui-password", "")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	request := httptest.NewRequest("POST", "/api/admin/pause-source", nil)
+	request.SetBasicAuth("soak", "ui-password")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("admin route with basic auth returned %d, want %d", response.Code, http.StatusNoContent)
+	}
+}
+
 func TestNonAdminRoutesStillAllowBasicAuth(t *testing.T) {
 	handler := newAuthMiddleware("soak", "ui-password", "admin-token")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

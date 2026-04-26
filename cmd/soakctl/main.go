@@ -271,6 +271,10 @@ func newAuthMiddleware(username, password, adminBearerToken string) func(http.Ha
 					next.ServeHTTP(w, r)
 					return
 				}
+				if adminBearerToken == "" && isBasicAuthorized(r, username, password) {
+					next.ServeHTTP(w, r)
+					return
+				}
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -285,10 +289,7 @@ func newAuthMiddleware(username, password, adminBearerToken string) func(http.Ha
 				return
 			}
 
-			providedUser, providedPassword, ok := r.BasicAuth()
-			if ok &&
-				subtle.ConstantTimeCompare([]byte(providedUser), []byte(username)) == 1 &&
-				subtle.ConstantTimeCompare([]byte(providedPassword), []byte(password)) == 1 {
+			if isBasicAuthorized(r, username, password) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -297,6 +298,16 @@ func newAuthMiddleware(username, password, adminBearerToken string) func(http.Ha
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 		})
 	}
+}
+
+func isBasicAuthorized(r *http.Request, username, password string) bool {
+	if username == "" || password == "" {
+		return false
+	}
+	providedUser, providedPassword, ok := r.BasicAuth()
+	return ok &&
+		subtle.ConstantTimeCompare([]byte(providedUser), []byte(username)) == 1 &&
+		subtle.ConstantTimeCompare([]byte(providedPassword), []byte(password)) == 1
 }
 
 func isAdminBearerAuthorized(r *http.Request, adminBearerToken string) bool {
