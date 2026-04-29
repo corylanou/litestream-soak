@@ -299,7 +299,13 @@ func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
 				name = excluded.name,
 				status = CASE
 					WHEN workers.status IN ('pending', 'building', 'starting', 'stopped', 'failed') THEN 'running'
+					WHEN workers.status = 'degraded' AND workers.error_message = 'worker missed heartbeat deadline' THEN 'running'
 					ELSE workers.status
+				END,
+				error_message = CASE
+					WHEN workers.status IN ('pending', 'building', 'starting', 'stopped', 'failed') THEN ''
+					WHEN workers.status = 'degraded' AND workers.error_message = 'worker missed heartbeat deadline' THEN ''
+					ELSE workers.error_message
 				END,
 				source = excluded.source,
 				git_sha = excluded.git_sha,

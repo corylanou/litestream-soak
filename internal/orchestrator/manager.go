@@ -279,9 +279,6 @@ func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, 
 	slog.Info("Starting rolling update", "source", source, "workers", len(workers), "sha", newSHA, "image", newImageRef)
 
 	for _, w := range workers {
-		if w.Status == model.WorkerDormant {
-			continue
-		}
 		if workerMatchesDeployment(w, model.Deployment{GitSHA: newSHA, LitestreamSHA: newLitestreamSHA}) {
 			continue
 		}

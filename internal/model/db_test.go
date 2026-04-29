@@ -206,6 +206,112 @@ func TestCreateWorkerResetsRuntimeStateOnReuse(t *testing.T) {
 	}
 }
 
+func TestUpsertReportedWorkerClearsStaleHeartbeatDegradation(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	worker := &Worker{
+		ID:            "worker-pr-1228-high-vol",
+		Name:          "worker-pr-1228-high-vol",
+		Status:        WorkerRunning,
+		Source:        "pr-1228",
+		GitSHA:        "soak-sha",
+		LitestreamSHA: "litestream-sha",
+		ProfileName:   "high-volume",
+		ProfileConfig: "{}",
+	}
+	if err := db.CreateWorker(worker); err != nil {
+		t.Fatalf("CreateWorker() error = %v", err)
+	}
+	if err := db.UpdateWorkerStatus(worker.ID, WorkerDegraded, "worker missed heartbeat deadline"); err != nil {
+		t.Fatalf("UpdateWorkerStatus() error = %v", err)
+	}
+
+	if err := db.UpsertReportedWorker(reporting.WorkerIdentity{
+		WorkerID:      worker.ID,
+		Name:          worker.Name,
+		Source:        worker.Source,
+		GitSHA:        worker.GitSHA,
+		LitestreamSHA: worker.LitestreamSHA,
+		ProfileName:   worker.ProfileName,
+		ProfileConfig: worker.ProfileConfig,
+	}); err != nil {
+		t.Fatalf("UpsertReportedWorker() error = %v", err)
+	}
+
+	storedWorker, err := db.GetWorker(worker.ID)
+	if err != nil {
+		t.Fatalf("GetWorker() error = %v", err)
+	}
+	if storedWorker.Status != WorkerRunning {
+		t.Fatalf("Status = %s, want %s", storedWorker.Status, WorkerRunning)
+	}
+	if storedWorker.ErrorMessage != "" {
+		t.Fatalf("ErrorMessage = %q, want empty", storedWorker.ErrorMessage)
+	}
+}
+
+func TestUpsertReportedWorkerPreservesVerificationDegradation(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	worker := &Worker{
+		ID:            "worker-pr-1228-taxi-mixed",
+		Name:          "worker-pr-1228-taxi-mixed",
+		Status:        WorkerRunning,
+		Source:        "pr-1228",
+		GitSHA:        "soak-sha",
+		LitestreamSHA: "litestream-sha",
+		ProfileName:   "taxi-mixed",
+		ProfileConfig: "{}",
+	}
+	if err := db.CreateWorker(worker); err != nil {
+		t.Fatalf("CreateWorker() error = %v", err)
+	}
+	if err := db.UpdateWorkerStatus(worker.ID, WorkerDegraded, "validation failed"); err != nil {
+		t.Fatalf("UpdateWorkerStatus() error = %v", err)
+	}
+
+	if err := db.UpsertReportedWorker(reporting.WorkerIdentity{
+		WorkerID:      worker.ID,
+		Name:          worker.Name,
+		Source:        worker.Source,
+		GitSHA:        worker.GitSHA,
+		LitestreamSHA: worker.LitestreamSHA,
+		ProfileName:   worker.ProfileName,
+		ProfileConfig: worker.ProfileConfig,
+	}); err != nil {
+		t.Fatalf("UpsertReportedWorker() error = %v", err)
+	}
+
+	storedWorker, err := db.GetWorker(worker.ID)
+	if err != nil {
+		t.Fatalf("GetWorker() error = %v", err)
+	}
+	if storedWorker.Status != WorkerDegraded {
+		t.Fatalf("Status = %s, want %s", storedWorker.Status, WorkerDegraded)
+	}
+	if storedWorker.ErrorMessage != "validation failed" {
+		t.Fatalf("ErrorMessage = %q, want validation failed", storedWorker.ErrorMessage)
+	}
+}
+
 func TestRecordRunArchiveIsIdempotent(t *testing.T) {
 	t.Parallel()
 
