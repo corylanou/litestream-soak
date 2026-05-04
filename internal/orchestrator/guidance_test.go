@@ -44,6 +44,20 @@ func TestInferFailureSignatureSyncFDExhausted(t *testing.T) {
 	}
 }
 
+func TestInferFailureSignatureDBSyncExecutor(t *testing.T) {
+	verification := &model.Verification{
+		CheckType:    "integrity",
+		ErrorMessage: `wait for sync: sync returned 500: sync database: db sync: wait for db sync executor: context deadline exceeded`,
+	}
+
+	if got := inferFailureSignature(verification); got != "litestream_db_sync_executor_timeout" {
+		t.Fatalf("inferFailureSignature()=%q want %q", got, "litestream_db_sync_executor_timeout")
+	}
+	if got := inferProbableSubsystem("sync", inferFailureSignature(verification)); got != "Litestream DB sync executor" {
+		t.Fatalf("inferProbableSubsystem()=%q want Litestream DB sync executor", got)
+	}
+}
+
 func TestInferFailureSignatureValidationFailed(t *testing.T) {
 	verification := &model.Verification{
 		CheckType:    "restore",

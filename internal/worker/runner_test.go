@@ -137,22 +137,142 @@ func TestVerifierWaitForSyncClosesIPCConnection(t *testing.T) {
 	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("litestream-soak-sync-%d.sock", time.Now().UnixNano()))
 
 	tracker := startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/sync" {
+		switch r.URL.Path {
+		case "/debug/sync-status":
+			_, _ = w.Write([]byte(`{"active":false}`))
+		case "/sync":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 
 	verifier := NewVerifier(cfg, nil)
-	if err := verifier.waitForSync(context.Background()); err != nil {
+	result := VerificationResult{}
+	if err := verifier.waitForSync(context.Background(), &result); err != nil {
 		t.Fatalf("waitForSync() error = %v", err)
+	}
+	if result.SyncStatusBeforeSync == nil {
+		t.Fatal("expected sync status before sync")
 	}
 
 	if !waitUntil(2*time.Second, 10*time.Millisecond, func() bool {
 		return tracker.Active() == 0
 	}) {
 		t.Fatalf("active IPC connections=%d want 0", tracker.Active())
+	}
+}
+
+func TestVerifierWaitForSyncCapturesSyncFailureDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("litestream-soak-sync-fail-%d.sock", time.Now().UnixNano()))
+	cfg.WorkerID = "worker-test"
+	cfg.WorkerName = "worker-test"
+	cfg.ProfileName = "high-volume"
+	if err := os.WriteFile(cfg.DBPath, []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.ConfigPath, []byte("dbs: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	paths := make([]string, 0, 4)
+	syncStatusCalls := 0
+	startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var syncStatusCall int
+		mu.Lock()
+		paths = append(paths, r.URL.RequestURI())
+		if r.URL.Path == "/debug/sync-status" {
+			syncStatusCalls++
+			syncStatusCall = syncStatusCalls
+		}
+		mu.Unlock()
+
+		switch r.URL.Path {
+		case "/debug/sync-status":
+			if syncStatusCall == 1 {
+				_, _ = w.Write([]byte(`{"active":true,"operation":"replica_sync","phase":"upload","elapsed_seconds":12.5,"executor_waiter_count":0}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"active":true,"operation":"db_sync","phase":"checkpoint","elapsed_seconds":72.25,"executor_waiter_count":1,"executor_wait_started_at":"2026-05-04T12:00:00Z","executor_wait_seconds":61.5}`))
+		case "/sync":
+			http.Error(w, "sync database: db sync: wait for db sync executor: context deadline exceeded", http.StatusInternalServerError)
+		case "/debug/pprof/goroutine":
+			_, _ = w.Write([]byte("goroutine 42 [sync.Mutex.Lock]:\ngithub.com/benbjohnson/litestream.(*DB).Sync\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	verifier := NewVerifier(cfg, nil)
+	result := VerificationResult{}
+	err := verifier.waitForSync(context.Background(), &result)
+	if err == nil {
+		t.Fatal("expected sync error")
+	}
+	if !strings.Contains(err.Error(), "wait for db sync executor") {
+		t.Fatalf("sync error=%q want db sync executor", err.Error())
+	}
+
+	if result.SyncStatusBeforeSync == nil {
+		t.Fatal("expected sync status before sync")
+	}
+	if active := result.SyncStatusBeforeSync.Active; active == nil || !*active {
+		t.Fatalf("before active=%v want true", active)
+	}
+	if result.SyncStatusBeforeSync.Operation != "replica_sync" {
+		t.Fatalf("before operation=%q want replica_sync", result.SyncStatusBeforeSync.Operation)
+	}
+	if result.SyncStatusAfterSyncFailure == nil {
+		t.Fatal("expected sync status after sync failure")
+	}
+	if result.SyncStatusAfterSyncFailure.Phase != "checkpoint" {
+		t.Fatalf("after phase=%q want checkpoint", result.SyncStatusAfterSyncFailure.Phase)
+	}
+	if result.SyncStatusAfterSyncFailure.ExecutorWaiterCount == nil || *result.SyncStatusAfterSyncFailure.ExecutorWaiterCount != 1 {
+		t.Fatalf("after executor_waiter_count=%v want 1", result.SyncStatusAfterSyncFailure.ExecutorWaiterCount)
+	}
+	if result.LitestreamGoroutinesOnSyncFailure == nil {
+		t.Fatal("expected goroutine snapshot on sync timeout")
+	}
+	if !strings.Contains(result.LitestreamGoroutinesOnSyncFailure.Output, "litestream.(*DB).Sync") {
+		t.Fatalf("goroutine output=%q want DB sync stack", result.LitestreamGoroutinesOnSyncFailure.Output)
+	}
+
+	mu.Lock()
+	gotPaths := append([]string(nil), paths...)
+	mu.Unlock()
+	wantPrefix := []string{"/debug/sync-status", "/sync", "/debug/sync-status", "/debug/pprof/goroutine?debug=2"}
+	if len(gotPaths) < len(wantPrefix) {
+		t.Fatalf("paths=%v want prefix %v", gotPaths, wantPrefix)
+	}
+	for i, want := range wantPrefix {
+		if gotPaths[i] != want {
+			t.Fatalf("paths=%v want prefix %v", gotPaths, wantPrefix)
+		}
+	}
+
+	runner := NewRunner(cfg)
+	result.Status = "failed"
+	result.Summary = summarizeVerificationMessage("wait for sync: " + err.Error())
+	result.ErrorMessage = "wait for sync: " + err.Error()
+	snapshot := runner.captureFailureDebugSnapshotIfDue(result)
+	if snapshot == nil {
+		t.Fatal("expected failure debug snapshot")
+	}
+	if snapshot.SyncStatusBeforeSync == nil {
+		t.Fatal("expected snapshot sync_status_before_sync")
+	}
+	if snapshot.SyncStatusAfterSyncFailure == nil {
+		t.Fatal("expected snapshot sync_status_after_sync_failure")
+	}
+	if snapshot.LitestreamGoroutinesOnSyncFailure == nil {
+		t.Fatal("expected snapshot litestream_goroutines_on_sync_failure")
 	}
 }
 

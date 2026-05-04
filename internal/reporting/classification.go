@@ -142,6 +142,8 @@ func firstRegexMatch(pattern *regexp.Regexp, text string) string {
 
 func inferFailureSignature(text, original string) string {
 	switch {
+	case strings.Contains(text, "wait for db sync executor"):
+		return "litestream_db_sync_executor_timeout"
 	case strings.Contains(text, "litestream.sock") && strings.Contains(text, "too many open files"):
 		return "litestream_sync_fd_exhausted"
 	case strings.Contains(text, "litestream.sock") && strings.Contains(text, "connect: connection refused"):

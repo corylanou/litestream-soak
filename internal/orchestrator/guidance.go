@@ -803,6 +803,8 @@ func promptReturnFormat(mode promptMode) string {
 func inferProbableSubsystem(stage, signature string) string {
 	text := strings.ToLower(stage + " " + signature)
 	switch {
+	case strings.Contains(text, "db_sync_executor") || strings.Contains(text, "db sync executor"):
+		return "Litestream DB sync executor"
 	case strings.Contains(text, "sync") || strings.Contains(text, "litestream_sync_socket_refused") || strings.Contains(text, "litestream_sync_timeout") || strings.Contains(text, "litestream_sync_fd_exhausted"):
 		return "Litestream sync/control socket"
 	case strings.Contains(text, "restore") || strings.Contains(text, "replica_") || strings.Contains(text, "ltx"):
@@ -820,7 +822,7 @@ func recommendedPromptModeForSubsystem(subsystem string) promptMode {
 	switch subsystem {
 	case "Healthy baseline":
 		return promptModeHealthy
-	case "Litestream sync/control socket", "Replication or restore path", "Restore correctness / integrity validation":
+	case "Litestream DB sync executor", "Litestream sync/control socket", "Replication or restore path", "Restore correctness / integrity validation":
 		return promptModeLitestream
 	case "Soak harness or worker runtime":
 		return promptModeHarness
@@ -869,6 +871,12 @@ func incidentNextSteps(subsystem string, bundle *IncidentBundle) []string {
 		)
 	}
 	switch subsystem {
+	case "Litestream DB sync executor":
+		steps = append(steps,
+			"Start with failure_debug_snapshot.sync_status_before_sync and sync_status_after_sync_failure to identify the active Litestream sync operation and phase.",
+			"Inspect failure_debug_snapshot.litestream_goroutines_on_sync_failure for the goroutine holding or waiting on DB sync, checkpoint, or replica sync paths.",
+			"Compare executor_waiter_count and executor_wait_seconds across related workers before treating this as a socket or process-liveness problem.",
+		)
 	case "Litestream sync/control socket":
 		steps = append(steps,
 			"Check whether the Litestream process is running and whether /data/litestream.sock exists on the worker.",
@@ -1036,6 +1044,8 @@ func diagnosisNextSteps(subsystem string, example WorkerSummaryResponse) []strin
 		"Compare the failing workers against Grafana Fleet Workload Shapes and Fleet Last Failure Classes.",
 	}
 	switch subsystem {
+	case "Litestream DB sync executor":
+		steps = append(steps, "Inspect sync-status and pprof evidence before treating this as a socket liveness issue.")
 	case "Litestream sync/control socket":
 		steps = append(steps, "Inspect Litestream process and socket health before assuming the replay dataset is bad.")
 	case "Replication or restore path":

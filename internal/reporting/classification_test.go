@@ -42,6 +42,16 @@ func TestClassifyVerificationFailureRestoreDecodeError(t *testing.T) {
 	}
 }
 
+func TestClassifyVerificationFailureDBSyncExecutor(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", `wait for sync: sync returned 500: sync database: db sync: wait for db sync executor: context deadline exceeded`)
+	if got.Stage != "sync" {
+		t.Fatalf("Stage = %q, want sync", got.Stage)
+	}
+	if got.Signature != "litestream_db_sync_executor_timeout" {
+		t.Fatalf("Signature = %q, want litestream_db_sync_executor_timeout", got.Signature)
+	}
+}
+
 func TestParseObjectStoreFailureStructuredFields(t *testing.T) {
 	got := ParseObjectStoreFailure(`restore failed operation=ListObjectsV2 http_status=408 api_code=RequestCanceled request_id=req-123 bucket=litestream-soak prefix=pr-1228/worker/0001 phase=CalcRestorePlan`)
 	if got == nil {

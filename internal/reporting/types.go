@@ -142,21 +142,50 @@ type VerificationStep struct {
 }
 
 type FailureDebugSnapshot struct {
-	CapturedAt            time.Time                    `json:"captured_at"`
-	Reason                string                       `json:"reason,omitempty"`
-	Run                   WorkerIdentity               `json:"run"`
-	FailureClassification *FailureClassification       `json:"failure_classification,omitempty"`
-	ProcessTable          []ProcessSnapshot            `json:"process_table,omitempty"`
-	FDCounts              []ProcessFDCounts            `json:"fd_counts,omitempty"`
-	SocketSummary         SocketSummary                `json:"socket_summary,omitempty"`
-	Disk                  DiskSnapshot                 `json:"disk,omitempty"`
-	Cgroup                CgroupSnapshot               `json:"cgroup,omitempty"`
-	LitestreamExit        *ProcessExitSnapshot         `json:"litestream_exit,omitempty"`
-	VerificationSteps     []VerificationStep           `json:"verification_steps,omitempty"`
-	ObjectStoragePrefix   *ObjectStoragePrefixSnapshot `json:"object_storage_prefix,omitempty"`
-	CommandOutputs        []CommandOutput              `json:"command_outputs,omitempty"`
-	LitestreamLogTail     []string                     `json:"litestream_log_tail,omitempty"`
-	LoadLogTail           []string                     `json:"load_log_tail,omitempty"`
+	CapturedAt                        time.Time                    `json:"captured_at"`
+	Reason                            string                       `json:"reason,omitempty"`
+	Run                               WorkerIdentity               `json:"run"`
+	FailureClassification             *FailureClassification       `json:"failure_classification,omitempty"`
+	SyncStatusBeforeSync              *LitestreamSyncStatus        `json:"sync_status_before_sync,omitempty"`
+	SyncStatusAfterSyncFailure        *LitestreamSyncStatus        `json:"sync_status_after_sync_failure,omitempty"`
+	LitestreamGoroutinesOnSyncFailure *LitestreamGoroutineSnapshot `json:"litestream_goroutines_on_sync_failure,omitempty"`
+	ProcessTable                      []ProcessSnapshot            `json:"process_table,omitempty"`
+	FDCounts                          []ProcessFDCounts            `json:"fd_counts,omitempty"`
+	SocketSummary                     SocketSummary                `json:"socket_summary,omitempty"`
+	Disk                              DiskSnapshot                 `json:"disk,omitempty"`
+	Cgroup                            CgroupSnapshot               `json:"cgroup,omitempty"`
+	LitestreamExit                    *ProcessExitSnapshot         `json:"litestream_exit,omitempty"`
+	VerificationSteps                 []VerificationStep           `json:"verification_steps,omitempty"`
+	ObjectStoragePrefix               *ObjectStoragePrefixSnapshot `json:"object_storage_prefix,omitempty"`
+	CommandOutputs                    []CommandOutput              `json:"command_outputs,omitempty"`
+	LitestreamLogTail                 []string                     `json:"litestream_log_tail,omitempty"`
+	LoadLogTail                       []string                     `json:"load_log_tail,omitempty"`
+}
+
+type LitestreamSyncStatus struct {
+	CapturedAt            time.Time      `json:"captured_at"`
+	DurationMS            int            `json:"duration_ms,omitempty"`
+	StatusCode            int            `json:"status_code,omitempty"`
+	Active                *bool          `json:"active,omitempty"`
+	Operation             string         `json:"operation,omitempty"`
+	Phase                 string         `json:"phase,omitempty"`
+	ElapsedSeconds        *float64       `json:"elapsed_seconds,omitempty"`
+	ExecutorWaiterCount   *int           `json:"executor_waiter_count,omitempty"`
+	ExecutorWaitStartedAt string         `json:"executor_wait_started_at,omitempty"`
+	ExecutorWaitSeconds   *float64       `json:"executor_wait_seconds,omitempty"`
+	Raw                   map[string]any `json:"raw,omitempty"`
+	Output                string         `json:"output,omitempty"`
+	Error                 string         `json:"error,omitempty"`
+	Truncated             bool           `json:"truncated,omitempty"`
+}
+
+type LitestreamGoroutineSnapshot struct {
+	CapturedAt time.Time `json:"captured_at"`
+	DurationMS int       `json:"duration_ms,omitempty"`
+	StatusCode int       `json:"status_code,omitempty"`
+	Output     string    `json:"output,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	Truncated  bool      `json:"truncated,omitempty"`
 }
 
 type ProcessSnapshot struct {

@@ -697,7 +697,13 @@ func (r *Runner) captureFailureDebugSnapshotIfDue(result VerificationResult) *re
 	}
 	r.failureDebugKey = key
 	r.failureDebugAt = now
-	return r.captureFailureDebugSnapshot(reason, result.Steps, r.failureClassification(result))
+	snapshot := r.captureFailureDebugSnapshot(reason, result.Steps, r.failureClassification(result))
+	if snapshot != nil {
+		snapshot.SyncStatusBeforeSync = result.SyncStatusBeforeSync
+		snapshot.SyncStatusAfterSyncFailure = result.SyncStatusAfterSyncFailure
+		snapshot.LitestreamGoroutinesOnSyncFailure = result.LitestreamGoroutinesOnSyncFailure
+	}
+	return snapshot
 }
 
 func failureDebugKey(result VerificationResult, reason string) string {
