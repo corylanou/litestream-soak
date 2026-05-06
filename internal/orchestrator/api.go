@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -162,6 +163,7 @@ type DeploymentComparisonResponse struct {
 }
 
 const rolloutAttentionGraceWindow = 45 * time.Minute
+const deploymentReadyRolloutTimeout = 2 * time.Hour
 
 type IncidentBundle struct {
 	GeneratedAt           time.Time                        `json:"generated_at"`
@@ -1074,19 +1076,28 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 		trigger = "deploy_ready"
 	}
 
-	imageRef, err := a.deployer.NotifyDeploymentReady(r.Context(), source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	a.observeLatestDeploymentState(source)
+	rolloutCtx, cancel := context.WithTimeout(context.Background(), deploymentReadyRolloutTimeout)
+	go func(request deploymentReadyRequest, source, trigger string) {
+		defer cancel()
 
+		imageRef, err := a.deployer.NotifyDeploymentReady(rolloutCtx, source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger)
+		if err != nil {
+			slog.Error("Deployment ready rollout failed", "source", source, "sha", request.SHA, "litestream_sha", request.LitestreamSHA, "error", err)
+			_ = a.db.RecordEvent("", "deploy_ready_failed", fmt.Sprintf("Rollout failed for %s / litestream %s: %v", shortVersionValue(request.SHA), shortVersionValue(request.LitestreamSHA), err), imageRef)
+			return
+		}
+		a.observeLatestDeploymentState(source)
+		slog.Info("Deployment ready rollout complete", "source", source, "sha", request.SHA, "litestream_sha", request.LitestreamSHA, "image", imageRef, "trigger", trigger)
+	}(request, source, trigger)
+
+	w.WriteHeader(http.StatusAccepted)
 	writeAPIJSON(w, map[string]any{
 		"sha":            request.SHA,
 		"litestream_sha": request.LitestreamSHA,
 		"source":         source,
-		"image_ref":      imageRef,
+		"image_ref":      request.ImageRef,
 		"trigger":        trigger,
+		"accepted":       true,
 	})
 }
 
