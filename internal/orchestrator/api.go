@@ -1280,7 +1280,6 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		if events, err := a.db.ListWorkerEvents(workerID, 20); err == nil {
 			a.metrics.observePlatformEvent(*worker, latestPlatformEvent(coalesceEventFeed(events)))
 		}
-		a.observeLatestDeploymentState(worker.Source)
 	}
 
 	w.WriteHeader(http.StatusAccepted)
