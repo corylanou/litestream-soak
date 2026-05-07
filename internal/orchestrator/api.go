@@ -226,6 +226,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/run-archives/{id}", a.handleGetRunArchive)
 	mux.HandleFunc("GET /api/run-archives/{id}/prompt", a.handleGetRunArchivePrompt)
 	mux.HandleFunc("POST /api/admin/deployments/ready", a.handleDeploymentReady)
+	mux.HandleFunc("POST /api/admin/workers/{id}/roll", a.handleRollWorker)
 	mux.HandleFunc("POST /api/admin/resume-dormant", a.handleResumeDormantWorkers)
 	mux.HandleFunc("POST /api/admin/pause-source", a.handlePauseSourceWorkers)
 	mux.HandleFunc("GET /api/workers/{id}", a.handleGetWorker)
@@ -1096,6 +1097,101 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 		"litestream_sha": request.LitestreamSHA,
 		"source":         source,
 		"image_ref":      request.ImageRef,
+		"trigger":        trigger,
+		"accepted":       true,
+	})
+}
+
+func (a *API) handleRollWorker(w http.ResponseWriter, r *http.Request) {
+	if a.manager == nil {
+		http.Error(w, "roll manager unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	workerID := strings.TrimSpace(r.PathValue("id"))
+	if workerID == "" {
+		http.Error(w, "worker id is required", http.StatusBadRequest)
+		return
+	}
+
+	request, err := readDeploymentReadyRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(request.SHA) == "" {
+		http.Error(w, "sha is required", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(request.LitestreamSHA) == "" {
+		http.Error(w, "litestream_sha is required", http.StatusBadRequest)
+		return
+	}
+
+	worker, err := a.db.GetWorker(workerID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	source := strings.TrimSpace(request.Source)
+	if source == "" {
+		source = worker.Source
+	}
+	if source == "" {
+		source = "main"
+	}
+	if worker.Source != "" && source != worker.Source {
+		http.Error(w, fmt.Sprintf("worker %s belongs to source %s, not %s", workerID, worker.Source, source), http.StatusBadRequest)
+		return
+	}
+
+	trigger := strings.TrimSpace(request.Trigger)
+	if trigger == "" {
+		trigger = "manual_worker_roll"
+	}
+	imageRef := strings.TrimSpace(request.ImageRef)
+	if imageRef == "" {
+		imageRef, err = a.manager.currentWorkerImage(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := a.db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        strings.TrimSpace(request.SHA),
+		LitestreamSHA: strings.TrimSpace(request.LitestreamSHA),
+		ImageRef:      imageRef,
+		Source:        source,
+		PRNumber:      sourcePRNumber(source),
+		Status:        "ready",
+	}); err != nil {
+		http.Error(w, fmt.Sprintf("record ready deployment: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	message := fmt.Sprintf("Targeted rollout for %s to soak %s / litestream %s via %s", workerID, shortVersionValue(request.SHA), shortVersionValue(request.LitestreamSHA), trigger)
+	_ = a.db.RecordEvent(workerID, "targeted_rollout_requested", message, imageRef)
+
+	rolloutCtx, cancel := context.WithTimeout(context.Background(), deploymentReadyRolloutTimeout)
+	go func(request deploymentReadyRequest, imageRef, source, workerID string) {
+		defer cancel()
+		if _, err := a.manager.RollWorker(rolloutCtx, workerID, imageRef, request.SHA, request.LitestreamSHA); err != nil {
+			slog.Error("Targeted worker rollout failed", "worker_id", workerID, "sha", request.SHA, "litestream_sha", request.LitestreamSHA, "error", err)
+			_ = a.db.RecordEvent(workerID, "targeted_rollout_failed", fmt.Sprintf("Targeted rollout failed for %s / litestream %s: %v", shortVersionValue(request.SHA), shortVersionValue(request.LitestreamSHA), err), imageRef)
+			return
+		}
+		a.observeLatestDeploymentState(source)
+		slog.Info("Targeted worker rollout complete", "worker_id", workerID, "source", source, "sha", request.SHA, "litestream_sha", request.LitestreamSHA, "image", imageRef)
+	}(request, imageRef, source, workerID)
+
+	w.WriteHeader(http.StatusAccepted)
+	writeAPIJSON(w, map[string]any{
+		"worker_id":      workerID,
+		"sha":            request.SHA,
+		"litestream_sha": request.LitestreamSHA,
+		"source":         source,
+		"image_ref":      imageRef,
 		"trigger":        trigger,
 		"accepted":       true,
 	})

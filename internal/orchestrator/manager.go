@@ -282,53 +282,7 @@ func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, 
 		if workerMatchesDeployment(w, model.Deployment{GitSHA: newSHA, LitestreamSHA: newLitestreamSHA}) {
 			continue
 		}
-		slog.Info("Updating worker", "name", w.Name, "old_sha", w.GitSHA, "new_sha", newSHA, "old_litestream_sha", w.LitestreamSHA, "new_litestream_sha", newLitestreamSHA)
-		m.db.RecordEvent(w.ID, "rolling_update", fmt.Sprintf("Updating %s from soak %s / litestream %s to soak %s / litestream %s", w.Name, shortVersionValue(w.GitSHA), shortVersionValue(w.LitestreamSHA), shortVersionValue(newSHA), shortVersionValue(newLitestreamSHA)), "")
-
-		if w.FlyMachineID != "" {
-			if err := m.fly.StopMachine(ctx, w.FlyMachineID); err != nil {
-				if flyapi.IsNotFound(err) {
-					slog.Warn("Old worker machine already gone during update", "machine_id", w.FlyMachineID, "worker_id", w.ID)
-				} else {
-					slog.Error("Failed to stop machine for update", "machine_id", w.FlyMachineID, "error", err)
-					continue
-				}
-			} else if err := m.fly.DestroyMachine(ctx, w.FlyMachineID, true); err != nil {
-				if flyapi.IsNotFound(err) {
-					slog.Warn("Old worker machine already destroyed during update", "machine_id", w.FlyMachineID, "worker_id", w.ID)
-				} else {
-					slog.Error("Failed to destroy old machine", "machine_id", w.FlyMachineID, "error", err)
-					continue
-				}
-			}
-		}
-		if w.FlyVolumeID != "" {
-			if err := m.flyClientForWorker(w).DestroyVolume(ctx, w.FlyVolumeID); err != nil {
-				if flyapi.IsNotFound(err) {
-					slog.Warn("Old worker volume already gone during update", "volume_id", w.FlyVolumeID, "worker_id", w.ID)
-				} else {
-					slog.Error("Failed to destroy old worker volume", "volume_id", w.FlyVolumeID, "error", err)
-					continue
-				}
-			}
-		}
-
-		workloadCfg := resolveWorkerWorkload(w)
-		volumeSizeGB := resolveWorkerVolumeSize(w, workloadCfg)
-
-		newWorker, err := m.CreateWorker(ctx, WorkerRequest{
-			WorkerID:      w.Name,
-			Name:          w.Name,
-			Source:        w.Source,
-			GitSHA:        newSHA,
-			LitestreamSHA: newLitestreamSHA,
-			PRNumber:      w.PRNumber,
-			ProfileName:   w.ProfileName,
-			ImageRef:      newImageRef,
-			Region:        w.Region,
-			VolumeSizeGB:  volumeSizeGB,
-			Workload:      workloadCfg,
-		})
+		newWorker, err := m.replaceWorker(ctx, w, newImageRef, newSHA, newLitestreamSHA)
 		if err != nil {
 			slog.Error("Failed to create updated worker", "name", w.Name, "error", err)
 			continue
@@ -337,6 +291,64 @@ func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, 
 	}
 
 	return nil
+}
+
+func (m *Manager) RollWorker(ctx context.Context, workerID, newImageRef, newSHA, newLitestreamSHA string) (*model.Worker, error) {
+	worker, err := m.db.GetWorker(workerID)
+	if err != nil {
+		return nil, fmt.Errorf("get worker: %w", err)
+	}
+	if workerMatchesDeployment(*worker, model.Deployment{GitSHA: newSHA, LitestreamSHA: newLitestreamSHA}) {
+		return worker, nil
+	}
+	return m.replaceWorker(ctx, *worker, newImageRef, newSHA, newLitestreamSHA)
+}
+
+func (m *Manager) replaceWorker(ctx context.Context, w model.Worker, newImageRef, newSHA, newLitestreamSHA string) (*model.Worker, error) {
+	slog.Info("Updating worker", "name", w.Name, "old_sha", w.GitSHA, "new_sha", newSHA, "old_litestream_sha", w.LitestreamSHA, "new_litestream_sha", newLitestreamSHA)
+	m.db.RecordEvent(w.ID, "rolling_update", fmt.Sprintf("Updating %s from soak %s / litestream %s to soak %s / litestream %s", w.Name, shortVersionValue(w.GitSHA), shortVersionValue(w.LitestreamSHA), shortVersionValue(newSHA), shortVersionValue(newLitestreamSHA)), "")
+
+	if w.FlyMachineID != "" {
+		if err := m.fly.StopMachine(ctx, w.FlyMachineID); err != nil {
+			if flyapi.IsNotFound(err) {
+				slog.Warn("Old worker machine already gone during update", "machine_id", w.FlyMachineID, "worker_id", w.ID)
+			} else {
+				return nil, fmt.Errorf("stop machine for update: %w", err)
+			}
+		} else if err := m.fly.DestroyMachine(ctx, w.FlyMachineID, true); err != nil {
+			if flyapi.IsNotFound(err) {
+				slog.Warn("Old worker machine already destroyed during update", "machine_id", w.FlyMachineID, "worker_id", w.ID)
+			} else {
+				return nil, fmt.Errorf("destroy old machine: %w", err)
+			}
+		}
+	}
+	if w.FlyVolumeID != "" {
+		if err := m.flyClientForWorker(w).DestroyVolume(ctx, w.FlyVolumeID); err != nil {
+			if flyapi.IsNotFound(err) {
+				slog.Warn("Old worker volume already gone during update", "volume_id", w.FlyVolumeID, "worker_id", w.ID)
+			} else {
+				return nil, fmt.Errorf("destroy old worker volume: %w", err)
+			}
+		}
+	}
+
+	workloadCfg := resolveWorkerWorkload(w)
+	volumeSizeGB := resolveWorkerVolumeSize(w, workloadCfg)
+
+	return m.CreateWorker(ctx, WorkerRequest{
+		WorkerID:      w.Name,
+		Name:          w.Name,
+		Source:        w.Source,
+		GitSHA:        newSHA,
+		LitestreamSHA: newLitestreamSHA,
+		PRNumber:      w.PRNumber,
+		ProfileName:   w.ProfileName,
+		ImageRef:      newImageRef,
+		Region:        w.Region,
+		VolumeSizeGB:  volumeSizeGB,
+		Workload:      workloadCfg,
+	})
 }
 
 func (m *Manager) observeWorkerByID(workerID string) {
