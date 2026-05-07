@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -104,6 +105,7 @@ func main() {
 		fmt.Fprintln(w, "ok")
 	})
 	mux.Handle("GET /metrics", promhttp.Handler())
+	mux.Handle("GET /debug/pprof/", http.DefaultServeMux)
 	api.RegisterRoutes(mux)
 
 	handler := http.Handler(mux)
@@ -197,7 +199,14 @@ func main() {
 		"webhook_deploy_enabled", webhookDeployEnabled,
 	)
 
-	server := &http.Server{Addr: listenAddr, Handler: handler}
+	server := &http.Server{
+		Addr:              listenAddr,
+		Handler:           http.TimeoutHandler(handler, 2*time.Minute, "request timed out\n"),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       30 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		server.Shutdown(context.Background())
