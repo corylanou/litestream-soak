@@ -2,12 +2,14 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -141,7 +143,7 @@ func TestVerifierWaitForSyncClosesIPCConnection(t *testing.T) {
 		case "/debug/sync-status":
 			_, _ = w.Write([]byte(`{"active":false}`))
 		case "/sync":
-			_, _ = w.Write([]byte(`{"ok":true}`))
+			_, _ = w.Write([]byte(`{"status":"synced","txid":11,"replicated_txid":10}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -155,11 +157,156 @@ func TestVerifierWaitForSyncClosesIPCConnection(t *testing.T) {
 	if result.SyncStatusBeforeSync == nil {
 		t.Fatal("expected sync status before sync")
 	}
+	if result.SyncTXID != 11 {
+		t.Fatalf("sync txid=%d want 11", result.SyncTXID)
+	}
+	if result.SyncReplicatedTXID != 10 {
+		t.Fatalf("sync replicated txid=%d want 10", result.SyncReplicatedTXID)
+	}
 
 	if !waitUntil(2*time.Second, 10*time.Millisecond, func() bool {
 		return tracker.Active() == 0
 	}) {
 		t.Fatalf("active IPC connections=%d want 0", tracker.Active())
+	}
+}
+
+func TestVerifierWaitForSyncUsesConfiguredTimeout(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("litestream-soak-sync-timeout-%d.sock", time.Now().UnixNano()))
+	cfg.VerifySyncTimeout = 7*time.Minute + 500*time.Millisecond
+
+	var timeoutValue float64
+	startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/debug/sync-status":
+			_, _ = w.Write([]byte(`{"active":false}`))
+		case "/sync":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode request: %v", err)
+			}
+			if value, ok := body["timeout"].(float64); ok {
+				timeoutValue = value
+			}
+			_, _ = w.Write([]byte(`{"status":"synced","txid":1,"replicated_txid":1}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	verifier := NewVerifier(cfg, nil)
+	if err := verifier.waitForSync(context.Background(), &VerificationResult{}); err != nil {
+		t.Fatalf("waitForSync() error = %v", err)
+	}
+	if timeoutValue != 421 {
+		t.Fatalf("sync timeout=%v want 421", timeoutValue)
+	}
+}
+
+func TestVerifierValidatePassesPinnedTXID(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires Unix")
+	}
+
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	restorePath := filepath.Join(dir, "test.db.restored")
+	writeFakeLitestreamTest(t, dir, `
+if [ "$1" = "validate" ]; then
+  shift
+fi
+printf '%s\n' "$@" > "$LITESTREAM_TEST_ARGS"
+exit 0
+`)
+	t.Setenv("LITESTREAM_TEST_ARGS", argsPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	if err := os.WriteFile(cfg.DBPath, []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.ConfigPath, []byte("dbs: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	verifier := NewVerifier(cfg, nil)
+	passed, err := verifier.validate(context.Background(), 0x224b6)
+	if err != nil {
+		t.Fatalf("validate() error = %v", err)
+	}
+	if !passed {
+		t.Fatal("validate() passed=false")
+	}
+	args := readLines(t, argsPath)
+	assertContains(t, args, "-txid")
+	assertContains(t, args, "00000000000224b6")
+	assertContains(t, args, "-restored-db")
+	assertContains(t, args, restorePath)
+}
+
+func TestVerifierValidateRetriesWithoutPinnedTXIDWhenUnsupported(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires Unix")
+	}
+
+	dir := t.TempDir()
+	countPath := filepath.Join(dir, "count")
+	argsPath := filepath.Join(dir, "args")
+	writeFakeLitestreamTest(t, dir, `
+count=0
+if [ -f "$LITESTREAM_TEST_COUNT" ]; then
+  count=$(cat "$LITESTREAM_TEST_COUNT")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$LITESTREAM_TEST_COUNT"
+if [ "$count" = "1" ]; then
+  echo "flag provided but not defined: -txid" >&2
+  exit 2
+fi
+if [ "$1" = "validate" ]; then
+  shift
+fi
+printf '%s\n' "$@" > "$LITESTREAM_TEST_ARGS"
+exit 0
+`)
+	t.Setenv("LITESTREAM_TEST_COUNT", countPath)
+	t.Setenv("LITESTREAM_TEST_ARGS", argsPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	if err := os.WriteFile(cfg.DBPath, []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.ConfigPath, []byte("dbs: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	verifier := NewVerifier(cfg, nil)
+	passed, err := verifier.validate(context.Background(), 0x224b6)
+	if err != nil {
+		t.Fatalf("validate() error = %v", err)
+	}
+	if !passed {
+		t.Fatal("validate() passed=false")
+	}
+	if got := strings.TrimSpace(readFile(t, countPath)); got != "2" {
+		t.Fatalf("validate executions=%q want 2", got)
+	}
+	args := readLines(t, argsPath)
+	for _, arg := range args {
+		if arg == "-txid" {
+			t.Fatalf("fallback args unexpectedly include -txid: %v", args)
+		}
 	}
 }
 
@@ -579,4 +726,45 @@ func waitUntil(timeout, interval time.Duration, condition func() bool) bool {
 		case <-ticker.C:
 		}
 	}
+}
+
+func writeFakeLitestreamTest(t *testing.T, dir, body string) {
+	t.Helper()
+
+	path := filepath.Join(dir, "litestream-test")
+	script := "#!/bin/sh\n" + body
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+func readLines(t *testing.T, path string) []string {
+	t.Helper()
+
+	text := strings.TrimSpace(readFile(t, path))
+	if text == "" {
+		return nil
+	}
+	return strings.Split(text, "\n")
+}
+
+func assertContains(t *testing.T, values []string, want string) {
+	t.Helper()
+
+	for _, value := range values {
+		if value == want {
+			return
+		}
+	}
+	t.Fatalf("values=%v want %q", values, want)
 }

@@ -42,8 +42,9 @@ type Config struct {
 	LoadDuration time.Duration
 
 	// Verification
-	VerifyInterval time.Duration
-	VerifyType     string // quick, integrity, checksum, full
+	VerifyInterval    time.Duration
+	VerifyType        string // quick, integrity, checksum, full
+	VerifySyncTimeout time.Duration
 
 	// Replica config
 	ReplicaType string // "file" or "s3"
@@ -100,8 +101,9 @@ func DefaultConfig() Config {
 		ReplaySpeed: 10.0,
 		ReplayLoop:  true,
 
-		VerifyInterval: 30 * time.Minute,
-		VerifyType:     "integrity",
+		VerifyInterval:    30 * time.Minute,
+		VerifyType:        "integrity",
+		VerifySyncTimeout: 5 * time.Minute,
 
 		ReplicaType: "file",
 		ReplicaPath: "/data/replicas",
@@ -227,6 +229,13 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if v := os.Getenv("VERIFY_TYPE"); v != "" {
 		c.VerifyType = v
+	}
+	if v := os.Getenv("VERIFY_SYNC_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid VERIFY_SYNC_TIMEOUT: %w", err)
+		}
+		c.VerifySyncTimeout = d
 	}
 
 	if v := os.Getenv("REPLICA_TYPE"); v != "" {

@@ -34,6 +34,8 @@ type VerificationResult struct {
 	SyncStatusBeforeSync              *reporting.LitestreamSyncStatus
 	SyncStatusAfterSyncFailure        *reporting.LitestreamSyncStatus
 	LitestreamGoroutinesOnSyncFailure *reporting.LitestreamGoroutineSnapshot
+	SyncTXID                          uint64
+	SyncReplicatedTXID                uint64
 }
 
 type verificationStepMetadataError struct {
@@ -61,6 +63,12 @@ type Verifier struct {
 	httpClient *http.Client
 }
 
+type syncResponse struct {
+	Status         string `json:"status"`
+	TXID           uint64 `json:"txid"`
+	ReplicatedTXID uint64 `json:"replicated_txid"`
+}
+
 const (
 	syncDiagnosticTimeout     = 2 * time.Second
 	syncDiagnosticOutputLimit = 64 * 1024
@@ -70,7 +78,7 @@ func NewVerifier(cfg Config, loadCmd *exec.Cmd) *Verifier {
 	return &Verifier{
 		cfg:        cfg,
 		loadCmd:    loadCmd,
-		httpClient: newIPCClient(cfg.SocketPath, 90*time.Second),
+		httpClient: newIPCClient(cfg.SocketPath, cfg.verifySyncTimeout()+30*time.Second),
 	}
 }
 
@@ -120,7 +128,7 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 	var passed bool
 	var err error
 	validateErr := recordVerificationStep(&result, "restore_validate", func() error {
-		passed, err = v.validate(ctx)
+		passed, err = v.validate(ctx, result.restoreTXID())
 		return err
 	})
 	duration := time.Since(start).Seconds()
@@ -218,16 +226,16 @@ func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) 
 		result.SyncStatusBeforeSync = v.collectSyncStatus()
 	}
 
-	body, err := json.Marshal(map[string]interface{}{
+	requestBody, err := json.Marshal(map[string]interface{}{
 		"path":    v.cfg.DBPath,
 		"wait":    true,
-		"timeout": 60,
+		"timeout": v.syncTimeoutSeconds(),
 	})
 	if err != nil {
 		return fmt.Errorf("marshal sync request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", "http://localhost/sync", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", "http://localhost/sync", bytes.NewReader(requestBody))
 	if err != nil {
 		return fmt.Errorf("create sync request: %w", err)
 	}
@@ -261,7 +269,35 @@ func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) 
 		return syncErr
 	}
 
-	slog.Info("Litestream sync complete")
+	body, truncated, readErr := readLimited(resp.Body, syncDiagnosticOutputLimit)
+	if readErr != nil {
+		syncErr := fmt.Errorf("read sync response: %w", readErr)
+		v.captureSyncFailureDiagnostics(result, syncErr)
+		return syncErr
+	}
+	if truncated {
+		syncErr := fmt.Errorf("sync response exceeded %d bytes", syncDiagnosticOutputLimit)
+		v.captureSyncFailureDiagnostics(result, syncErr)
+		return syncErr
+	}
+	body = strings.TrimSpace(body)
+	var syncResp syncResponse
+	if body != "" {
+		if err := json.Unmarshal([]byte(body), &syncResp); err != nil {
+			syncErr := fmt.Errorf("decode sync response: %w", err)
+			v.captureSyncFailureDiagnostics(result, syncErr)
+			return syncErr
+		}
+		if result != nil {
+			result.SyncTXID = syncResp.TXID
+			result.SyncReplicatedTXID = syncResp.ReplicatedTXID
+		}
+	}
+
+	slog.Info("Litestream sync complete",
+		"status", syncResp.Status,
+		"txid", formatTXID(syncResp.TXID),
+		"replicated_txid", formatTXID(syncResp.ReplicatedTXID))
 	return nil
 }
 
@@ -365,7 +401,7 @@ func isSyncTimeout(err error) bool {
 		strings.Contains(text, "timeout")
 }
 
-func (v *Verifier) validate(ctx context.Context) (bool, error) {
+func (v *Verifier) validate(ctx context.Context, txid uint64) (bool, error) {
 	args := []string{
 		"validate",
 		"-source-db", v.cfg.DBPath,
@@ -373,9 +409,16 @@ func (v *Verifier) validate(ctx context.Context) (bool, error) {
 		"-restored-db", v.cfg.DBPath + ".restored",
 		"-check-type", v.cfg.VerifyType,
 	}
+	if txid > 0 {
+		args = append(args, "-txid", formatTXID(txid))
+	}
 
 	cmd := exec.CommandContext(ctx, "litestream-test", args...)
 	output, err := cmd.CombinedOutput()
+	if err != nil && txid > 0 && validateUnsupportedTXID(output) {
+		slog.Warn("litestream-test validate does not support -txid; retrying validation without pinned restore txid")
+		return v.validate(ctx, 0)
+	}
 
 	slog.Info("Validate output", "output", string(output))
 
@@ -390,6 +433,43 @@ func (v *Verifier) validate(ctx context.Context) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func (r VerificationResult) restoreTXID() uint64 {
+	if r.SyncReplicatedTXID > 0 {
+		return r.SyncReplicatedTXID
+	}
+	return r.SyncTXID
+}
+
+func (c Config) verifySyncTimeout() time.Duration {
+	if c.VerifySyncTimeout > 0 {
+		return c.VerifySyncTimeout
+	}
+	return DefaultConfig().VerifySyncTimeout
+}
+
+func (v *Verifier) syncTimeoutSeconds() int {
+	timeout := v.cfg.verifySyncTimeout()
+	seconds := int(timeout / time.Second)
+	if timeout%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		return 1
+	}
+	return seconds
+}
+
+func formatTXID(txid uint64) string {
+	if txid == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%016x", txid)
+}
+
+func validateUnsupportedTXID(output []byte) bool {
+	return strings.Contains(string(output), "flag provided but not defined: -txid")
 }
 
 func validationStepMetadata(ctx context.Context, cmd *exec.Cmd, output []byte, err error) *verificationStepMetadataError {
