@@ -42,6 +42,7 @@ type homeSummary struct {
 	TotalWorkers         int
 	HealthyWorkers       int
 	AttentionWorkers     int
+	ActiveVerifications  int
 	RecentFailures       int
 	LatestHeartbeatAt    *time.Time
 	StalestHeartbeatAt   *time.Time
@@ -52,6 +53,7 @@ type homeSummary struct {
 type homeWorker struct {
 	Worker                   model.Worker
 	LatestVerification       *model.Verification
+	ActiveVerification       *reporting.ActiveVerification
 	Workload                 workload.Config
 	RuntimeSnapshotStatus    string
 	CurrentFailureStage      string
@@ -213,6 +215,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		card := homeWorker{
 			Worker:                   workerSummary.Worker,
 			LatestVerification:       workerSummary.LastVerification,
+			ActiveVerification:       workerSummary.ActiveVerification,
 			Workload:                 workerSummary.Workload,
 			RuntimeSnapshotStatus:    workerSummary.RuntimeSnapshotStatus,
 			CurrentFailureStage:      workerSummary.CurrentFailureStage,
@@ -224,6 +227,9 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 			summary.AttentionWorkers++
 		} else {
 			summary.HealthyWorkers++
+		}
+		if workerSummary.ActiveVerification != nil {
+			summary.ActiveVerifications++
 		}
 		if workerSummary.Worker.LastHeartbeatAt != nil && !workerSummary.Worker.LastHeartbeatAt.IsZero() {
 			summary.LatestHeartbeatAt = maxTime(summary.LatestHeartbeatAt, *workerSummary.Worker.LastHeartbeatAt)
@@ -1270,6 +1276,7 @@ const homeBodyTemplate = `{{define "home_body"}}
       <span><span class="ss-label">Workers</span> <span class="ss-value">{{.Summary.TotalWorkers}}</span></span>
       <span><span class="ss-label">Healthy</span> <span class="ss-value ss-good">{{.Summary.HealthyWorkers}}</span></span>
       <span><span class="ss-label">Attention</span> <span class="ss-value{{if gt .Summary.AttentionWorkers 0}} ss-warn{{end}}">{{.Summary.AttentionWorkers}}</span></span>
+      <span><span class="ss-label">Running Checks</span> <span class="ss-value{{if gt .Summary.ActiveVerifications 0}} ss-warn{{end}}">{{.Summary.ActiveVerifications}}</span></span>
       <span><span class="ss-label">Failures</span> <span class="ss-value{{if gt .Summary.RecentFailures 0}} ss-bad{{end}}">{{.Summary.RecentFailures}}</span></span>
     </div>
     <div class="freshness-strip" aria-label="Data freshness">
@@ -1592,7 +1599,11 @@ const homeBodyTemplate = `{{define "home_body"}}
       </div>
     </div>
     {{else}}
+    {{if gt .Summary.ActiveVerifications 0}}
+    <div class="clear-banner">No failures recorded; {{.Summary.ActiveVerifications}} verification check(s) still running{{if .LatestRolloutPromptURL}} <a class="btn" href="{{.LatestRolloutPromptURL}}">{{.LatestRolloutPromptLabel}}</a>{{end}}</div>
+    {{else}}
     <div class="clear-banner">All workers passing verification{{if .LatestRolloutPromptURL}} <a class="btn" href="{{.LatestRolloutPromptURL}}">{{.LatestRolloutPromptLabel}}</a>{{end}}</div>
+    {{end}}
     {{end}}
 
     <div class="section-head">
@@ -1624,7 +1635,8 @@ const homeBodyTemplate = `{{define "home_body"}}
             <td><span class="badge badge-{{if eq (statusClass .Worker.Status) "status-good"}}good{{else if eq (statusClass .Worker.Status) "status-warn"}}warn{{else if eq (statusClass .Worker.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Worker.Status}}</span></td>
             <td><span class="{{heartbeatClass .Worker.LastHeartbeatAt}}" title="{{formatTimePtr .Worker.LastHeartbeatAt}}">{{timeAgo .Worker.LastHeartbeatAt}}</span></td>
             <td>
-              {{if .LatestVerification}}<span class="badge badge-{{if eq (verificationClass .LatestVerification) "status-good"}}good{{else if eq (verificationClass .LatestVerification) "status-bad"}}bad{{else}}neutral{{end}}">{{verificationLabel .LatestVerification}}</span> <span style="color:var(--muted); font-size:12px;" title="{{formatTime .LatestVerification.StartedAt}}">{{timeAgoValue .LatestVerification.StartedAt}}</span>
+              {{if .ActiveVerification}}<span class="badge badge-info">{{if .ActiveVerification.Stale}}stale check{{else}}running{{end}}</span> <span style="color:var(--muted); font-size:12px;" title="{{formatTime .ActiveVerification.StartedAt}}">{{timeAgoValue .ActiveVerification.StartedAt}}</span>
+              {{else if .LatestVerification}}<span class="badge badge-{{if eq (verificationClass .LatestVerification) "status-good"}}good{{else if eq (verificationClass .LatestVerification) "status-bad"}}bad{{else}}neutral{{end}}">{{verificationLabel .LatestVerification}}</span> <span style="color:var(--muted); font-size:12px;" title="{{formatTime .LatestVerification.StartedAt}}">{{timeAgoValue .LatestVerification.StartedAt}}</span>
               {{else}}<span style="color:var(--faint);">none</span>{{end}}
             </td>
             <td>{{.Worker.ProfileName}}</td>
@@ -1633,6 +1645,8 @@ const homeBodyTemplate = `{{define "home_body"}}
             <td>
               {{if .CurrentFailureSignature}}
               <span class="badge badge-bad">{{shorten .CurrentFailureSignature 48}}</span>
+              {{else if .ActiveVerification}}
+              <span class="badge badge-info">verification running</span>
               {{else}}
               <span class="badge badge-good">healthy</span>
               {{end}}
@@ -1921,6 +1935,16 @@ const workerPageTemplate = `{{define "worker"}}
       <button class="btn btn-copy" type="button" onclick="copyPrompt(this)">Copy AI Prompt</button>
     </div>
 
+    {{if .Incident.ActiveVerification}}
+    <div class="incident-alert">
+      <div class="incident-alert-body">
+        <div class="incident-alert-title">{{if .Incident.ActiveVerification.Stale}}Verification start signal is stale{{else}}Verification currently running{{end}}</div>
+        <div class="incident-alert-meta">{{formatTime .Incident.ActiveVerification.StartedAt}} · {{.Incident.ActiveVerification.CheckType}} · {{.Incident.ActiveVerification.Status}}</div>
+      </div>
+      <span class="badge badge-info">{{if .Incident.ActiveVerification.Stale}}stale{{else}}running{{end}}</span>
+    </div>
+    {{end}}
+
     {{if .Incident.LatestFailure}}
     <div class="incident-alert">
       <div class="incident-alert-body">
@@ -1953,6 +1977,7 @@ const workerPageTemplate = `{{define "worker"}}
           {{if .Incident.FailureStage}}<span class="badge badge-neutral">stage: {{.Incident.FailureStage}}</span>{{end}}
           {{if .Incident.FailureSignature}}<span class="badge badge-bad">{{shorten .Incident.FailureSignature 96}}</span>{{end}}
           {{if .Incident.LatestPlatformEvent}}<span class="badge badge-{{if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-good"}}good{{else if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-warn"}}warn{{else if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-bad"}}bad{{else}}neutral{{end}}">{{.Incident.LatestPlatformEvent.EventType}}</span>{{end}}
+          {{if .Incident.ActiveVerification}}<span class="badge badge-info">verification running</span>{{end}}
           <span class="badge badge-{{if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-good"}}good{{else if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-warn"}}warn{{else if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-bad"}}bad{{else}}neutral{{end}}">{{runtimeLabel .Incident.RuntimeSnapshotStatus}}</span>
         </div>
         {{if .Incident.Guide.WhyLikely}}
@@ -1987,6 +2012,22 @@ const workerPageTemplate = `{{define "worker"}}
             <span class="panel-title">Verification Timeline</span>
             <span style="color:var(--faint); font-size:12px;">{{len .Incident.RecentVerifications}} recent</span>
           </div>
+          {{if .Incident.ActiveVerification}}
+          <div class="tl-item">
+            <div class="tl-head">
+              <div class="tl-left">
+                <span class="dot dot-warn"></span>
+                <span class="badge badge-info">{{if .Incident.ActiveVerification.Stale}}stale{{else}}running{{end}}</span>
+                <span style="font-size:13px;">{{.Incident.ActiveVerification.CheckType}}</span>
+              </div>
+              <span class="tl-time">{{timeAgoValue .Incident.ActiveVerification.StartedAt}}</span>
+            </div>
+            <div class="tl-facts">
+              <span><span class="tl-fact-label">Started</span> {{formatTime .Incident.ActiveVerification.StartedAt}}</span>
+              <span><span class="tl-fact-label">Status</span> {{.Incident.ActiveVerification.Status}}</span>
+            </div>
+          </div>
+          {{end}}
           {{if .Incident.RecentVerifications}}
           {{range .Incident.RecentVerifications}}
           <div class="tl-item">
@@ -2334,7 +2375,7 @@ const helpPageTemplate = `{{define "help"}}
           {{end}}
         </ul>
         <p>Ask the model to rank hypotheses, cite evidence from the incident bundle, and give exact next commands before proposing code changes.</p>
-        <p>When a failed worker has a <code>failure_debug_snapshot</code>, use that first. It includes verifier substep timing, process and FD evidence, socket state, disk and cgroup snapshots, child exit evidence, and the worker tools available for live follow-up.</p>
+        <p>When a failed worker has a <code>failure_debug_snapshot</code>, use that first. It includes verifier substep timing, restore-plan metadata, process and FD evidence, socket state, disk and cgroup snapshots, child exit evidence, and the worker tools available for live follow-up.</p>
       </div>
 
       <div class="panel">

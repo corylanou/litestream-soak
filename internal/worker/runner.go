@@ -120,6 +120,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	r.verifier = NewVerifier(r.cfg, r.loadCmd)
+	r.verifier.SetStartHook(r.sendVerificationStarted)
 
 	if err := r.runVerifyLoop(runCtx); err != nil {
 		r.sendWorkerFailureEvent(err)
@@ -639,6 +640,34 @@ func (r *Runner) sendHeartbeat(ctx context.Context) {
 	}
 }
 
+func (r *Runner) sendVerificationStarted(ctx context.Context, result VerificationResult) {
+	if r.reporter == nil || !r.reporter.Enabled() {
+		return
+	}
+
+	startedAt := result.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now().UTC()
+	}
+	snapshot := r.currentSnapshot()
+	reportCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := r.reporter.SendEvent(reportCtx, reporting.WorkerEventPayload{
+		EventType: "verification_started",
+		Message:   "verification started",
+		SentAt:    startedAt,
+		ActiveVerification: &reporting.ActiveVerification{
+			StartedAt: startedAt,
+			CheckType: result.CheckType,
+			Status:    result.Status,
+		},
+		RuntimePayload: snapshot.RuntimePayload,
+	}); err != nil {
+		slog.Warn("Failed to send verification start event", "error", err)
+	}
+}
+
 func (r *Runner) sendVerification(ctx context.Context, result VerificationResult) {
 	if r.reporter == nil || !r.reporter.Enabled() {
 		return
@@ -697,7 +726,7 @@ func (r *Runner) captureFailureDebugSnapshotIfDue(result VerificationResult) *re
 	}
 	r.failureDebugKey = key
 	r.failureDebugAt = now
-	snapshot := r.captureFailureDebugSnapshot(reason, result.Steps, r.failureClassification(result))
+	snapshot := r.captureFailureDebugSnapshot(reason, result.Steps, r.failureClassification(result), result.restoreTXID())
 	if snapshot != nil {
 		snapshot.SyncStatusBeforeSync = result.SyncStatusBeforeSync
 		snapshot.SyncStatusAfterSyncFailure = result.SyncStatusAfterSyncFailure
@@ -748,7 +777,7 @@ func (r *Runner) sendWorkerFailureEvent(err error) {
 
 	snapshot := r.currentSnapshot()
 	message := err.Error()
-	failureDebug := r.captureFailureDebugSnapshot(message, nil, nil)
+	failureDebug := r.captureFailureDebugSnapshot(message, nil, nil, 0)
 	reportCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if sendErr := r.reporter.SendEvent(reportCtx, reporting.WorkerEventPayload{

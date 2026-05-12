@@ -61,19 +61,21 @@ type diagnosisCluster struct {
 }
 
 type diagnosisSnapshot struct {
-	Headline          string             `json:"headline,omitempty"`
-	Summary           string             `json:"summary,omitempty"`
-	ProbableSubsystem string             `json:"probable_subsystem,omitempty"`
-	Confidence        string             `json:"confidence,omitempty"`
-	AffectedWorkers   int                `json:"affected_workers,omitempty"`
-	DominantStage     string             `json:"dominant_stage,omitempty"`
-	DominantSignature string             `json:"dominant_signature,omitempty"`
-	AffectedProfiles  []string           `json:"affected_profiles,omitempty"`
-	AffectedDatasets  []string           `json:"affected_datasets,omitempty"`
-	AffectedLoadModes []string           `json:"affected_load_modes,omitempty"`
-	WhyLikely         []string           `json:"why_likely,omitempty"`
-	NextSteps         []string           `json:"next_steps,omitempty"`
-	Clusters          []diagnosisCluster `json:"clusters,omitempty"`
+	Headline                  string               `json:"headline,omitempty"`
+	Summary                   string               `json:"summary,omitempty"`
+	ProbableSubsystem         string               `json:"probable_subsystem,omitempty"`
+	Confidence                string               `json:"confidence,omitempty"`
+	AffectedWorkers           int                  `json:"affected_workers,omitempty"`
+	ActiveVerifications       int                  `json:"active_verifications,omitempty"`
+	ActiveVerificationWorkers []diagnosisWorkerRef `json:"active_verification_workers,omitempty"`
+	DominantStage             string               `json:"dominant_stage,omitempty"`
+	DominantSignature         string               `json:"dominant_signature,omitempty"`
+	AffectedProfiles          []string             `json:"affected_profiles,omitempty"`
+	AffectedDatasets          []string             `json:"affected_datasets,omitempty"`
+	AffectedLoadModes         []string             `json:"affected_load_modes,omitempty"`
+	WhyLikely                 []string             `json:"why_likely,omitempty"`
+	NextSteps                 []string             `json:"next_steps,omitempty"`
+	Clusters                  []diagnosisCluster   `json:"clusters,omitempty"`
 }
 
 type coverageCount struct {
@@ -105,6 +107,7 @@ type promptEventSummary struct {
 	RuntimeSnapshotError  string                           `json:"runtime_snapshot_error,omitempty"`
 	RunID                 string                           `json:"run_id,omitempty"`
 	VerificationSteps     []reporting.VerificationStep     `json:"verification_steps,omitempty"`
+	ActiveVerification    *reporting.ActiveVerification    `json:"active_verification,omitempty"`
 	FailureDebugCaptured  bool                             `json:"failure_debug_captured,omitempty"`
 }
 
@@ -163,6 +166,11 @@ func buildIncidentGuide(bundle *IncidentBundle) incidentGuide {
 	if bundle.ActiveFailure {
 		headline = fmt.Sprintf("Active incident likely in %s", subsystem)
 		summary = fmt.Sprintf("The latest verification is failing during %s with signature %s.", valueOrUnknown(stage), valueOrUnknown(signature))
+	} else if bundle.ActiveVerification != nil {
+		headline = "Verification currently running"
+		summary = "This worker has no active recorded failure, but the latest verification has not completed yet."
+		recommendedMode = promptModeTriage
+		subsystem = "Pending verification"
 	} else if bundle.LatestFailure != nil {
 		headline = fmt.Sprintf("Worker recovered; use this as the current healthy baseline")
 		summary = fmt.Sprintf("This worker is running now, but its latest recorded failure happened during %s with signature %s.", valueOrUnknown(stage), valueOrUnknown(signature))
@@ -176,6 +184,8 @@ func buildIncidentGuide(bundle *IncidentBundle) incidentGuide {
 	why := make([]string, 0, 4)
 	if bundle.ActiveFailure {
 		why = append(why, fmt.Sprintf("The latest verification is still failing, and the worker status is %s.", bundle.Worker.Status))
+	} else if bundle.ActiveVerification != nil {
+		why = append(why, fmt.Sprintf("A %s verification started at %s and is still marked %s.", valueOrUnknown(bundle.ActiveVerification.CheckType), bundle.ActiveVerification.StartedAt.Format(timeFormatRFC3339), valueOrUnknown(bundle.ActiveVerification.Status)))
 	} else {
 		why = append(why, fmt.Sprintf("The worker status is %s and the latest verification is not actively failing.", bundle.Worker.Status))
 	}
@@ -217,7 +227,22 @@ func buildIncidentGuide(bundle *IncidentBundle) incidentGuide {
 
 func buildDiagnosisSnapshot(summaries []WorkerSummaryResponse) diagnosisSnapshot {
 	clusters := buildDiagnosisClusters(summaries)
+	activeWorkers := activeVerificationWorkers(summaries)
 	if len(clusters) == 0 {
+		if len(activeWorkers) > 0 {
+			return diagnosisSnapshot{
+				Headline:                  fmt.Sprintf("%d worker(s) currently running verification", len(activeWorkers)),
+				Summary:                   "No active failure is recorded, but verification is in progress. Treat the rollout as pending until these checks finish.",
+				ProbableSubsystem:         "Pending verification",
+				ActiveVerifications:       len(activeWorkers),
+				ActiveVerificationWorkers: activeWorkers,
+				NextSteps: []string{
+					"Wait for the in-progress verification to complete before calling the rollout clear.",
+					"Open the active worker prompt if the check runs unusually long or becomes stale.",
+					"Compare the completed result against Fleet Last Failure Classes before changing code.",
+				},
+			}
+		}
 		return diagnosisSnapshot{
 			Headline:          "All workers are currently passing verification",
 			Summary:           "Use Grafana to inspect last-failure history and workload shape, or open the control-plane help page to onboard a new operator.",
@@ -264,6 +289,9 @@ func buildDiagnosisSnapshot(summaries []WorkerSummaryResponse) diagnosisSnapshot
 	if len(clusters) > 1 {
 		why = append(why, fmt.Sprintf("%d additional cluster(s) are active, so the fleet currently has more than one failure family.", len(clusters)-1))
 	}
+	if len(activeWorkers) > 0 {
+		why = append(why, fmt.Sprintf("%d worker(s) also have verification in progress; wait for those checks before treating the live diagnosis as complete.", len(activeWorkers)))
+	}
 	if legacyCount := runtimeStates[reporting.RuntimeSnapshotStatusLegacy]; legacyCount > 0 {
 		why = append(why, fmt.Sprintf("%d worker(s) are still reporting legacy runtime telemetry, so their runtime fields should be treated as advisory until the fleet is refreshed.", legacyCount))
 	}
@@ -276,19 +304,21 @@ func buildDiagnosisSnapshot(summaries []WorkerSummaryResponse) diagnosisSnapshot
 	}
 
 	return diagnosisSnapshot{
-		Headline:          headline,
-		Summary:           summary,
-		ProbableSubsystem: topCluster.ProbableSubsystem,
-		Confidence:        topCluster.Confidence,
-		AffectedWorkers:   totalAffectedWorkers,
-		DominantStage:     topCluster.Stage,
-		DominantSignature: topCluster.Signature,
-		AffectedProfiles:  uniqueSortedStrings(profiles),
-		AffectedDatasets:  uniqueSortedStrings(datasets),
-		AffectedLoadModes: uniqueSortedStrings(loadModes),
-		WhyLikely:         why,
-		NextSteps:         nextSteps,
-		Clusters:          clusters,
+		Headline:                  headline,
+		Summary:                   summary,
+		ProbableSubsystem:         topCluster.ProbableSubsystem,
+		Confidence:                topCluster.Confidence,
+		AffectedWorkers:           totalAffectedWorkers,
+		ActiveVerifications:       len(activeWorkers),
+		ActiveVerificationWorkers: activeWorkers,
+		DominantStage:             topCluster.Stage,
+		DominantSignature:         topCluster.Signature,
+		AffectedProfiles:          uniqueSortedStrings(profiles),
+		AffectedDatasets:          uniqueSortedStrings(datasets),
+		AffectedLoadModes:         uniqueSortedStrings(loadModes),
+		WhyLikely:                 why,
+		NextSteps:                 nextSteps,
+		Clusters:                  clusters,
 	}
 }
 
@@ -443,6 +473,21 @@ func buildDiagnosisClusters(summaries []WorkerSummaryResponse) []diagnosisCluste
 	return clusters
 }
 
+func activeVerificationWorkers(summaries []WorkerSummaryResponse) []diagnosisWorkerRef {
+	workers := make([]diagnosisWorkerRef, 0)
+	for _, summary := range summaries {
+		if summary.ActiveVerification == nil {
+			continue
+		}
+		workers = append(workers, diagnosisWorkerRef{
+			ID:          summary.Worker.ID,
+			Name:        workerName(&summary.Worker, summary.Worker.ID),
+			ProfileName: summary.Worker.ProfileName,
+		})
+	}
+	return sortDiagnosisWorkers(workers)
+}
+
 func buildCoverageSnapshot(summaries []WorkerSummaryResponse) coverageSnapshot {
 	loadModes := make(map[string]int)
 	datasets := make(map[string]int)
@@ -536,6 +581,7 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 			fmt.Sprintf("probable_subsystem: %s", valueOrUnknown(bundle.Diagnosis.ProbableSubsystem)),
 			fmt.Sprintf("confidence: %s", valueOrUnknown(bundle.Diagnosis.Confidence)),
 			fmt.Sprintf("affected_workers: %d", bundle.Diagnosis.AffectedWorkers),
+			fmt.Sprintf("active_verifications: %d", bundle.Diagnosis.ActiveVerifications),
 			fmt.Sprintf("dominant_stage: %s", valueOrUnknown(bundle.Diagnosis.DominantStage)),
 			fmt.Sprintf("dominant_signature: %s", valueOrUnknown(bundle.Diagnosis.DominantSignature)),
 			"why_likely:",
@@ -553,6 +599,17 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 			"<related_clusters>",
 			mustJSON(bundle.RelatedClusters),
 			"</related_clusters>",
+		)
+	}
+
+	if bundle.ActiveVerification != nil {
+		sections = append(
+			sections,
+			"",
+			"<active_verification>",
+			"A verification cycle is currently in progress for this worker. Treat a green live diagnosis as pending until this check completes.",
+			mustJSON(bundle.ActiveVerification),
+			"</active_verification>",
 		)
 	}
 
@@ -590,7 +647,7 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 			"",
 			"<failure_debug_snapshot>",
 			"This worker captured a bounded failure-time snapshot automatically. Prefer this over ad-hoc SSH when ranking hypotheses.",
-			"It includes process table, per-process FD counts and FD type breakdowns, Litestream socket summary, disk/cgroup state, verification substep timings, run identity, recent process log tails, and object storage prefix summary when available.",
+			"It includes process table, per-process FD counts and FD type breakdowns, Litestream socket summary, disk/cgroup state, verification substep timings, run identity, restore-plan metadata, recent process log tails, and object storage prefix summary when available.",
 			mustJSON(bundle.FailureDebug),
 			"</failure_debug_snapshot>",
 		)
@@ -696,7 +753,16 @@ func buildPromptEventSummaries(events []model.Event) []promptEventSummary {
 			CollapsedWindowEnd:   event.CollapsedWindowEnd,
 		}
 
-		if strings.HasPrefix(event.EventType, "verification_") || event.EventType == "first_failure" {
+		if event.EventType == "verification_started" {
+			var payload reporting.WorkerEventPayload
+			if err := json.Unmarshal([]byte(event.Details), &payload); err == nil {
+				summary.RunID = payload.RunID
+				summary.ActiveVerification = payload.ActiveVerification
+				runtime := payload.RuntimePayload.Normalize(event.CreatedAt.UTC())
+				summary.RuntimeSnapshotStatus = reporting.SnapshotStatus(&runtime)
+				summary.RuntimeSnapshotError = runtime.LitestreamSnapshotError
+			}
+		} else if strings.HasPrefix(event.EventType, "verification_") || event.EventType == "first_failure" {
 			var payload reporting.VerificationPayload
 			if err := json.Unmarshal([]byte(event.Details), &payload); err == nil {
 				summary.CheckType = payload.CheckType
@@ -841,6 +907,17 @@ func incidentNextSteps(subsystem string, bundle *IncidentBundle) []string {
 		)
 		if len(bundle.TriageCommands) > 0 {
 			steps = append(steps, fmt.Sprintf("If you want a live follow-up snapshot, start with %s.", bundle.TriageCommands[0]))
+		}
+		return steps
+	}
+	if subsystem == "Pending verification" {
+		steps = append(steps,
+			"Wait for the in-progress verification to finish before treating this worker as clear.",
+			"If the active verification becomes stale, open the worker incident bundle and inspect the live machine logs.",
+			"Do not make Litestream or harness code changes from an all-green dashboard while this check is still running.",
+		)
+		if len(bundle.TriageCommands) > 0 {
+			steps = append(steps, fmt.Sprintf("If the check is still running unexpectedly, start with %s.", bundle.TriageCommands[0]))
 		}
 		return steps
 	}

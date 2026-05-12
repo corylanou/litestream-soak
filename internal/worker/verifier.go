@@ -61,6 +61,7 @@ type Verifier struct {
 	cfg        Config
 	loadCmd    *exec.Cmd
 	httpClient *http.Client
+	onStart    func(context.Context, VerificationResult)
 }
 
 type syncResponse struct {
@@ -82,6 +83,10 @@ func NewVerifier(cfg Config, loadCmd *exec.Cmd) *Verifier {
 	}
 }
 
+func (v *Verifier) SetStartHook(fn func(context.Context, VerificationResult)) {
+	v.onStart = fn
+}
+
 func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, retErr error) {
 	start := time.Now()
 	result = VerificationResult{
@@ -90,6 +95,9 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 		Status:    "running",
 	}
 	slog.Info("Starting verification cycle")
+	if v.onStart != nil {
+		v.onStart(ctx, result)
+	}
 
 	if err := recordVerificationStep(&result, "pause_load", v.pauseLoad); err != nil {
 		result.Status = "failed"

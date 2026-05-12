@@ -27,7 +27,7 @@ const (
 	debugObjectCountCap     = 5000
 )
 
-func (r *Runner) captureFailureDebugSnapshot(reason string, steps []reporting.VerificationStep, classification *reporting.FailureClassification) *reporting.FailureDebugSnapshot {
+func (r *Runner) captureFailureDebugSnapshot(reason string, steps []reporting.VerificationStep, classification *reporting.FailureClassification, restoreTXID uint64) *reporting.FailureDebugSnapshot {
 	snapshot := &reporting.FailureDebugSnapshot{
 		CapturedAt:            time.Now().UTC(),
 		Reason:                reason,
@@ -46,6 +46,9 @@ func (r *Runner) captureFailureDebugSnapshot(reason string, steps []reporting.Ve
 	snapshot.CommandOutputs = []reporting.CommandOutput{
 		runDebugCommand("verification_log_tail", "tail", "-n", strconv.Itoa(debugLineLimit), filepath.Join(r.cfg.DataDir, "verification.log")),
 		runDebugCommand("litestream_config", "sh", "-c", "sed -n '1,220p' "+shellQuote(r.cfg.ConfigPath)),
+	}
+	if restoreTXID > 0 {
+		snapshot.RestorePlan = collectRestorePlanSnapshot(r.cfg, restoreTXID)
 	}
 	if r.cfg.ReplicaType == "s3" {
 		snapshot.ObjectStoragePrefix = collectObjectStoragePrefix(r.cfg)
@@ -314,6 +317,161 @@ func collectObjectStorageLevel(host, level, levelURL string) reporting.ObjectSto
 		listing.ObjectCountCapped = true
 	}
 	return listing
+}
+
+type restorePlanCandidate struct {
+	level     int
+	minTXID   uint64
+	maxTXID   uint64
+	sizeBytes int64
+	createdAt string
+}
+
+func collectRestorePlanSnapshot(cfg Config, targetTXID uint64) *reporting.RestorePlanSnapshot {
+	command := []string{"litestream", "ltx", "-config", cfg.ConfigPath, "-level", "all", cfg.DBPath}
+	output := runDebugCommand("restore_plan_ltx_listing", command[0], command[1:]...)
+	snapshot := &reporting.RestorePlanSnapshot{
+		CapturedAt:        time.Now().UTC(),
+		Command:           command,
+		TargetTXID:        formatTXID(targetTXID),
+		TargetTXIDDecimal: targetTXID,
+		Truncated:         output.Truncated,
+	}
+	candidates := parseRestorePlanCandidates(output.Output)
+	snapshot.CandidateCount = len(candidates)
+	if output.Error != "" {
+		snapshot.Error = output.Error
+		snapshot.OutputTail = tailString(output.Output, 8192)
+	}
+	if len(candidates) == 0 {
+		if snapshot.Error == "" {
+			snapshot.Error = "no ltx entries parsed"
+			snapshot.OutputTail = tailString(output.Output, 8192)
+		}
+		return snapshot
+	}
+
+	selected := selectRestorePlanCandidates(candidates, targetTXID)
+	snapshot.Entries = restorePlanEntries(selected)
+	snapshot.Complete = restorePlanComplete(selected, targetTXID)
+	if !snapshot.Complete && snapshot.Error == "" {
+		snapshot.Error = "restore plan did not cover target txid"
+	}
+	return snapshot
+}
+
+func parseRestorePlanCandidates(output string) []restorePlanCandidate {
+	candidates := make([]restorePlanCandidate, 0)
+	for _, line := range nonEmptyLines(output) {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		level, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+		minTXID, err := strconv.ParseUint(fields[1], 16, 64)
+		if err != nil {
+			continue
+		}
+		maxTXID, err := strconv.ParseUint(fields[2], 16, 64)
+		if err != nil {
+			continue
+		}
+		sizeBytes, _ := strconv.ParseInt(fields[3], 10, 64)
+		candidates = append(candidates, restorePlanCandidate{
+			level:     level,
+			minTXID:   minTXID,
+			maxTXID:   maxTXID,
+			sizeBytes: sizeBytes,
+			createdAt: fields[4],
+		})
+	}
+	return candidates
+}
+
+func selectRestorePlanCandidates(candidates []restorePlanCandidate, targetTXID uint64) []restorePlanCandidate {
+	if targetTXID == 0 {
+		return nil
+	}
+
+	selected := make([]restorePlanCandidate, 0)
+	currentTXID := uint64(0)
+	if snapshot, ok := latestBaseSnapshot(candidates, targetTXID); ok {
+		selected = append(selected, snapshot)
+		currentTXID = snapshot.maxTXID
+	}
+
+	for currentTXID < targetTXID {
+		next, ok := bestRestorePlanNextCandidate(candidates, currentTXID, targetTXID)
+		if !ok {
+			break
+		}
+		selected = append(selected, next)
+		currentTXID = next.maxTXID
+	}
+	return selected
+}
+
+func latestBaseSnapshot(candidates []restorePlanCandidate, targetTXID uint64) (restorePlanCandidate, bool) {
+	var best restorePlanCandidate
+	ok := false
+	for _, candidate := range candidates {
+		if candidate.level != 9 || candidate.minTXID > 1 || candidate.maxTXID > targetTXID {
+			continue
+		}
+		if !ok || candidate.maxTXID > best.maxTXID {
+			best = candidate
+			ok = true
+		}
+	}
+	return best, ok
+}
+
+func bestRestorePlanNextCandidate(candidates []restorePlanCandidate, currentTXID, targetTXID uint64) (restorePlanCandidate, bool) {
+	nextTXID := currentTXID + 1
+	var best restorePlanCandidate
+	ok := false
+	for _, candidate := range candidates {
+		if candidate.minTXID > nextTXID || candidate.maxTXID <= currentTXID || candidate.maxTXID > targetTXID {
+			continue
+		}
+		if !ok ||
+			candidate.maxTXID > best.maxTXID ||
+			(candidate.maxTXID == best.maxTXID && candidate.level > best.level) ||
+			(candidate.maxTXID == best.maxTXID && candidate.level == best.level && candidate.minTXID < best.minTXID) {
+			best = candidate
+			ok = true
+		}
+	}
+	return best, ok
+}
+
+func restorePlanComplete(selected []restorePlanCandidate, targetTXID uint64) bool {
+	if len(selected) == 0 || targetTXID == 0 {
+		return false
+	}
+	return selected[len(selected)-1].maxTXID >= targetTXID
+}
+
+func restorePlanEntries(candidates []restorePlanCandidate) []reporting.RestorePlanEntry {
+	entries := make([]reporting.RestorePlanEntry, 0, len(candidates))
+	for _, candidate := range candidates {
+		minTXID := formatTXID(candidate.minTXID)
+		maxTXID := formatTXID(candidate.maxTXID)
+		levelName := fmt.Sprintf("%04d", candidate.level)
+		entries = append(entries, reporting.RestorePlanEntry{
+			Level:      candidate.level,
+			LevelName:  levelName,
+			MinTXID:    minTXID,
+			MaxTXID:    maxTXID,
+			SizeBytes:  candidate.sizeBytes,
+			CreatedAt:  candidate.createdAt,
+			ObjectPath: fmt.Sprintf("%s/%s-%s.ltx", levelName, minTXID, maxTXID),
+		})
+	}
+	return entries
 }
 
 func runDebugCommand(name string, command string, args ...string) reporting.CommandOutput {

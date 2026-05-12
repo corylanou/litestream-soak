@@ -31,6 +31,7 @@ type WorkerDetailResponse struct {
 	Workload              workload.Config                  `json:"workload"`
 	LatestFailure         *model.Verification              `json:"latest_failure,omitempty"`
 	LatestPlatformEvent   *model.Event                     `json:"latest_platform_event,omitempty"`
+	ActiveVerification    *reporting.ActiveVerification    `json:"active_verification,omitempty"`
 	FailureStage          string                           `json:"failure_stage,omitempty"`
 	FailureSignature      string                           `json:"failure_signature,omitempty"`
 	FailureClassification *reporting.FailureClassification `json:"failure_classification,omitempty"`
@@ -60,6 +61,7 @@ type WorkerSummaryResponse struct {
 	LastVerification             *model.Verification              `json:"last_verification,omitempty"`
 	LatestFailure                *model.Verification              `json:"latest_failure,omitempty"`
 	LatestPlatformEvent          *model.Event                     `json:"latest_platform_event,omitempty"`
+	ActiveVerification           *reporting.ActiveVerification    `json:"active_verification,omitempty"`
 	CurrentFailureStage          string                           `json:"current_failure_stage,omitempty"`
 	CurrentFailureSignature      string                           `json:"current_failure_signature,omitempty"`
 	CurrentFailureClassification *reporting.FailureClassification `json:"current_failure_classification,omitempty"`
@@ -171,6 +173,7 @@ type IncidentBundle struct {
 	Workload              workload.Config                  `json:"workload"`
 	LatestFailure         *model.Verification              `json:"latest_failure,omitempty"`
 	LatestPlatformEvent   *model.Event                     `json:"latest_platform_event,omitempty"`
+	ActiveVerification    *reporting.ActiveVerification    `json:"active_verification,omitempty"`
 	ActiveFailure         bool                             `json:"active_failure"`
 	FailureStage          string                           `json:"failure_stage,omitempty"`
 	FailureSignature      string                           `json:"failure_signature,omitempty"`
@@ -959,9 +962,11 @@ func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, er
 		summary.Recovery = &recovery
 	}
 
-	events, err := a.db.ListWorkerEvents(worker.ID, 10)
+	events, err := a.db.ListWorkerEvents(worker.ID, 40)
 	if err == nil {
-		summary.LatestPlatformEvent = latestPlatformEvent(coalesceEventFeed(events))
+		events = coalesceEventFeed(events)
+		summary.LatestPlatformEvent = latestPlatformEvent(events)
+		summary.ActiveVerification = activeVerificationFromEvents(events, verifications)
 	}
 
 	return summary, nil
@@ -1038,9 +1043,10 @@ func (a *API) handleGetDiagnosis(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAPIJSON(w, map[string]any{
-		"generated_at": time.Now().UTC(),
-		"diagnosis":    buildDiagnosisSnapshot(summaries),
-		"coverage":     buildCoverageSnapshot(summaries),
+		"generated_at":         time.Now().UTC(),
+		"diagnosis":            buildDiagnosisSnapshot(summaries),
+		"coverage":             buildCoverageSnapshot(summaries),
+		"active_verifications": activeVerificationWorkers(summaries),
 	})
 }
 
@@ -1561,7 +1567,7 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 		return nil, http.StatusInternalServerError, err
 	}
 
-	events, err := a.db.ListWorkerEvents(workerID, 20)
+	events, err := a.db.ListWorkerEvents(workerID, 40)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
@@ -1572,6 +1578,7 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 		Workload:            resolveWorkerWorkload(*worker),
 		ReportedRuntime:     extractReportedRuntime(*worker, events),
 		LatestPlatformEvent: latestPlatformEvent(events),
+		ActiveVerification:  activeVerificationFromEvents(events, verifications),
 		RecentVerifications: verifications,
 		RecentEvents:        events,
 		TriageCommands:      buildTriageCommands(*worker, false),
@@ -1645,6 +1652,7 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 		Workload:              detail.Workload,
 		LatestFailure:         latestFailure,
 		LatestPlatformEvent:   detail.LatestPlatformEvent,
+		ActiveVerification:    detail.ActiveVerification,
 		ActiveFailure:         activeFailureDetected,
 		FailureStage:          inferFailureStage(latestFailure),
 		FailureSignature:      inferFailureSignature(latestFailure),
@@ -1680,6 +1688,44 @@ func latestFailureDebugSnapshot(events []model.Event) *reporting.FailureDebugSna
 		if err := json.Unmarshal([]byte(event.Details), &eventPayload); err == nil && eventPayload.FailureDebug != nil {
 			return eventPayload.FailureDebug
 		}
+	}
+	return nil
+}
+
+func activeVerificationFromEvents(events []model.Event, verifications []model.Verification) *reporting.ActiveVerification {
+	for _, event := range events {
+		if event.EventType != "verification_started" {
+			continue
+		}
+		var payload reporting.WorkerEventPayload
+		if err := json.Unmarshal([]byte(event.Details), &payload); err != nil || payload.ActiveVerification == nil {
+			continue
+		}
+
+		active := *payload.ActiveVerification
+		if active.StartedAt.IsZero() {
+			active.StartedAt = event.CreatedAt.UTC()
+		}
+		if active.ObservedAt.IsZero() {
+			active.ObservedAt = event.CreatedAt.UTC()
+		}
+		if active.Status == "" {
+			active.Status = "running"
+		}
+		for _, verification := range verifications {
+			if verification.StartedAt.Before(active.StartedAt) {
+				continue
+			}
+			if verification.CompletedAt != nil || verification.Status != "running" {
+				return nil
+			}
+		}
+
+		if !active.StartedAt.IsZero() {
+			active.AgeSeconds = time.Since(active.StartedAt).Seconds()
+			active.Stale = active.AgeSeconds > (2 * time.Hour).Seconds()
+		}
+		return &active
 	}
 	return nil
 }

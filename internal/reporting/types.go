@@ -118,11 +118,21 @@ type VerificationPayload struct {
 
 type WorkerEventPayload struct {
 	WorkerIdentity
-	EventType    string                `json:"event_type"`
-	Message      string                `json:"message,omitempty"`
-	SentAt       time.Time             `json:"sent_at"`
-	FailureDebug *FailureDebugSnapshot `json:"failure_debug,omitempty"`
+	EventType          string                `json:"event_type"`
+	Message            string                `json:"message,omitempty"`
+	SentAt             time.Time             `json:"sent_at"`
+	ActiveVerification *ActiveVerification   `json:"active_verification,omitempty"`
+	FailureDebug       *FailureDebugSnapshot `json:"failure_debug,omitempty"`
 	RuntimePayload
+}
+
+type ActiveVerification struct {
+	StartedAt  time.Time `json:"started_at"`
+	ObservedAt time.Time `json:"observed_at,omitempty"`
+	CheckType  string    `json:"check_type,omitempty"`
+	Status     string    `json:"status,omitempty"`
+	AgeSeconds float64   `json:"age_seconds,omitempty"`
+	Stale      bool      `json:"stale,omitempty"`
 }
 
 type VerificationStep struct {
@@ -156,10 +166,34 @@ type FailureDebugSnapshot struct {
 	Cgroup                            CgroupSnapshot               `json:"cgroup,omitempty"`
 	LitestreamExit                    *ProcessExitSnapshot         `json:"litestream_exit,omitempty"`
 	VerificationSteps                 []VerificationStep           `json:"verification_steps,omitempty"`
+	RestorePlan                       *RestorePlanSnapshot         `json:"restore_plan,omitempty"`
 	ObjectStoragePrefix               *ObjectStoragePrefixSnapshot `json:"object_storage_prefix,omitempty"`
 	CommandOutputs                    []CommandOutput              `json:"command_outputs,omitempty"`
 	LitestreamLogTail                 []string                     `json:"litestream_log_tail,omitempty"`
 	LoadLogTail                       []string                     `json:"load_log_tail,omitempty"`
+}
+
+type RestorePlanSnapshot struct {
+	CapturedAt        time.Time          `json:"captured_at"`
+	Command           []string           `json:"command,omitempty"`
+	TargetTXID        string             `json:"target_txid,omitempty"`
+	TargetTXIDDecimal uint64             `json:"target_txid_decimal,omitempty"`
+	CandidateCount    int                `json:"candidate_count,omitempty"`
+	Entries           []RestorePlanEntry `json:"entries,omitempty"`
+	Complete          bool               `json:"complete"`
+	OutputTail        string             `json:"output_tail,omitempty"`
+	Error             string             `json:"error,omitempty"`
+	Truncated         bool               `json:"truncated,omitempty"`
+}
+
+type RestorePlanEntry struct {
+	Level      int    `json:"level"`
+	LevelName  string `json:"level_name,omitempty"`
+	MinTXID    string `json:"min_txid,omitempty"`
+	MaxTXID    string `json:"max_txid,omitempty"`
+	SizeBytes  int64  `json:"size_bytes,omitempty"`
+	CreatedAt  string `json:"created_at,omitempty"`
+	ObjectPath string `json:"object_path,omitempty"`
 }
 
 type LitestreamSyncStatus struct {

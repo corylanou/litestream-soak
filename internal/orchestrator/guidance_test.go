@@ -224,6 +224,75 @@ func TestBuildDiagnosisSnapshotUsesCurrentFailures(t *testing.T) {
 	}
 }
 
+func TestBuildDiagnosisSnapshotTracksActiveVerification(t *testing.T) {
+	summaries := []WorkerSummaryResponse{
+		{
+			Worker: model.Worker{ID: "w1", Name: "worker-pr-1265-high-vol", ProfileName: "high-volume", Status: model.WorkerRunning},
+			Workload: workload.Config{
+				LoadMode: "synthetic",
+			},
+			RuntimeSnapshotStatus: reporting.RuntimeSnapshotStatusHealthy,
+			ActiveVerification: &reporting.ActiveVerification{
+				StartedAt: timeMustParse("2026-05-11T13:34:50Z"),
+				CheckType: "integrity",
+				Status:    "running",
+			},
+		},
+	}
+
+	diagnosis := buildDiagnosisSnapshot(summaries)
+	if diagnosis.ProbableSubsystem != "Pending verification" {
+		t.Fatalf("probable subsystem=%q", diagnosis.ProbableSubsystem)
+	}
+	if diagnosis.ActiveVerifications != 1 {
+		t.Fatalf("active verifications=%d want 1", diagnosis.ActiveVerifications)
+	}
+	if len(diagnosis.ActiveVerificationWorkers) != 1 || diagnosis.ActiveVerificationWorkers[0].ID != "w1" {
+		t.Fatalf("active verification workers=%+v", diagnosis.ActiveVerificationWorkers)
+	}
+	if strings.Contains(diagnosis.Headline, "passing") {
+		t.Fatalf("headline should not claim passing while verification is active: %q", diagnosis.Headline)
+	}
+}
+
+func TestActiveVerificationFromEventsClearsAfterCompletion(t *testing.T) {
+	startedAt := timeMustParse("2026-05-11T13:34:50Z")
+	details, err := json.Marshal(reporting.WorkerEventPayload{
+		ActiveVerification: &reporting.ActiveVerification{
+			StartedAt: startedAt,
+			CheckType: "integrity",
+			Status:    "running",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal event details: %v", err)
+	}
+
+	events := []model.Event{
+		{
+			EventType: "verification_started",
+			Details:   string(details),
+			CreatedAt: startedAt,
+		},
+	}
+	if active := activeVerificationFromEvents(events, nil); active == nil {
+		t.Fatal("expected active verification before completion")
+	}
+
+	completedAt := startedAt.Add(2 * time.Minute)
+	verifications := []model.Verification{
+		{
+			StartedAt:   startedAt,
+			CompletedAt: &completedAt,
+			Status:      "passed",
+			Passed:      true,
+		},
+	}
+	if active := activeVerificationFromEvents(events, verifications); active != nil {
+		t.Fatalf("active verification should clear after completion: %+v", active)
+	}
+}
+
 func TestBuildDiagnosisSnapshotClustersMultipleFailureFamilies(t *testing.T) {
 	summaries := []WorkerSummaryResponse{
 		{
@@ -517,6 +586,48 @@ func TestBuildPromptHealthyBaseline(t *testing.T) {
 		"future regressions should be compared against",
 		"<reported_runtime>",
 		"current_runtime_snapshot_status: healthy",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q", want)
+		}
+	}
+}
+
+func TestBuildPromptIncludesActiveVerification(t *testing.T) {
+	bundle := &IncidentBundle{
+		GeneratedAt: timeMustParse("2026-05-11T13:36:00Z"),
+		Worker: model.Worker{
+			ID:     "worker-pr-1265-high-vol",
+			Status: model.WorkerRunning,
+		},
+		Workload: workload.Config{LoadMode: "synthetic"},
+		ActiveVerification: &reporting.ActiveVerification{
+			StartedAt: timeMustParse("2026-05-11T13:34:50Z"),
+			CheckType: "integrity",
+			Status:    "running",
+		},
+		Guide: incidentGuide{
+			Summary:               "Verification is currently running.",
+			ProbableSubsystem:     "Pending verification",
+			RecommendedPromptMode: "triage",
+			WhyLikely:             []string{"A verification is in progress."},
+			NextSteps:             []string{"Wait for completion."},
+		},
+		Diagnosis: diagnosisSnapshot{
+			Headline:            "1 worker currently running verification",
+			Summary:             "No active failure is recorded, but verification is in progress.",
+			ProbableSubsystem:   "Pending verification",
+			ActiveVerifications: 1,
+		},
+		RuntimeSnapshotStatus: reporting.RuntimeSnapshotStatusHealthy,
+	}
+
+	prompt := buildPrompt(bundle, promptModeTriage)
+	for _, want := range []string{
+		"<active_verification>",
+		`"check_type": "integrity"`,
+		"active_verifications: 1",
+		"green live diagnosis as pending",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q", want)
