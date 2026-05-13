@@ -95,12 +95,6 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 
 	m.db.RecordEvent(workerID, "worker_creating", fmt.Sprintf("Creating worker %s with profile %s", req.Name, req.ProfileName), "")
 
-	if err := m.clearWorkerReplicaPrefix(ctx, *worker); err != nil {
-		m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error())
-		m.observeWorkerByID(workerID)
-		return nil, fmt.Errorf("clear replica prefix: %w", err)
-	}
-
 	volSize := req.VolumeSizeGB
 	if volSize == 0 {
 		volSize = 10
@@ -116,6 +110,16 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 		m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error())
 		m.observeWorkerByID(workerID)
 		return nil, fmt.Errorf("create volume: %w", err)
+	}
+	worker.FlyVolumeID = vol.ID
+
+	if err := m.clearWorkerReplicaPrefix(ctx, *worker); err != nil {
+		if destroyErr := m.fly.DestroyVolume(ctx, vol.ID); destroyErr != nil && !flyapi.IsNotFound(destroyErr) {
+			slog.Warn("Failed to destroy worker volume after replica prefix clear failure", "worker_id", workerID, "volume_id", vol.ID, "error", destroyErr)
+		}
+		m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error())
+		m.observeWorkerByID(workerID)
+		return nil, fmt.Errorf("clear replica prefix: %w", err)
 	}
 
 	machine, err := m.createWorkerMachine(ctx, *worker, req.ImageRef, vol.ID, workloadCfg)
@@ -145,7 +149,11 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 }
 
 func workerReplicaPath(worker model.Worker) string {
-	return fmt.Sprintf("soak/%s", worker.Name)
+	base := fmt.Sprintf("soak/%s", worker.Name)
+	if volumeID := strings.Trim(strings.TrimSpace(worker.FlyVolumeID), "/"); volumeID != "" {
+		return fmt.Sprintf("%s/%s", base, volumeID)
+	}
+	return base
 }
 
 func (m *Manager) clearWorkerReplicaPrefix(ctx context.Context, worker model.Worker) error {

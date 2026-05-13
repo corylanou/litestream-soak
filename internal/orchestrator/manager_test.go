@@ -24,6 +24,7 @@ func TestManagerWorkerEnvIncludesReplicaConfig(t *testing.T) {
 	env := mgr.workerEnv(model.Worker{
 		ID:            "worker-main-gharchive",
 		Name:          "worker-main-gharchive",
+		FlyVolumeID:   "vol_test123",
 		LitestreamSHA: "abc123",
 	}, workload.Config{
 		InitialSize:      "10MB",
@@ -43,7 +44,7 @@ func TestManagerWorkerEnvIncludesReplicaConfig(t *testing.T) {
 	if got, want := env["S3_ENDPOINT"], "https://fly.storage.tigris.dev"; got != want {
 		t.Fatalf("S3_ENDPOINT=%q, want %q", got, want)
 	}
-	if got, want := env["S3_PATH"], "soak/worker-main-gharchive"; got != want {
+	if got, want := env["S3_PATH"], "soak/worker-main-gharchive/vol_test123"; got != want {
 		t.Fatalf("S3_PATH=%q, want %q", got, want)
 	}
 	if got, want := env["AWS_ENDPOINT_URL_S3"], "https://fly.storage.tigris.dev"; got != want {
@@ -83,6 +84,9 @@ func TestManagerWorkerEnvOmitsEmptyReplicaCredentials(t *testing.T) {
 		LoadMode:         "synthetic",
 	})
 
+	if got, want := env["S3_PATH"], "soak/worker-main-low-vol"; got != want {
+		t.Fatalf("S3_PATH=%q, want %q", got, want)
+	}
 	if _, ok := env["AWS_ACCESS_KEY_ID"]; ok {
 		t.Fatal("AWS_ACCESS_KEY_ID should be omitted when unset")
 	}

@@ -130,6 +130,9 @@ func (m *Manager) flyClientForWorker(worker model.Worker) *flyapi.Client {
 
 func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, imageRef string, volumeID string, workloadCfg workload.Config) (*flyapi.Machine, error) {
 	workloadCfg = normalizeWorkloadConfig(workloadCfg)
+	if strings.TrimSpace(worker.FlyVolumeID) == "" {
+		worker.FlyVolumeID = volumeID
+	}
 	env := m.workerEnv(worker, workloadCfg)
 	env["SOAK_RUN_ID"] = uuid.NewString()
 	env["SOAK_IMAGE_REF"] = imageRef
