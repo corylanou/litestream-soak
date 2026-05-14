@@ -52,6 +52,19 @@ func TestClassifyVerificationFailureDBSyncExecutor(t *testing.T) {
 	}
 }
 
+func TestClassifyVerificationFailureDiskCapacity(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", `checkpoint failed: database or disk is full (13); sync failed: write /data/.test.db-litestream/ltx/0/000000000001.ltx.tmp: no space left on device`)
+	if got.Stage != "disk_capacity" {
+		t.Fatalf("Stage = %q, want disk_capacity", got.Stage)
+	}
+	if got.Signature != "disk_capacity_full" {
+		t.Fatalf("Signature = %q, want disk_capacity_full", got.Signature)
+	}
+	if got.ObjectStore != nil {
+		t.Fatalf("ObjectStore = %#v, want nil", got.ObjectStore)
+	}
+}
+
 func TestParseObjectStoreFailureStructuredFields(t *testing.T) {
 	got := ParseObjectStoreFailure(`restore failed operation=ListObjectsV2 http_status=408 api_code=RequestCanceled request_id=req-123 bucket=litestream-soak prefix=pr-1228/worker/0001 phase=CalcRestorePlan`)
 	if got == nil {

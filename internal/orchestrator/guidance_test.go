@@ -58,6 +58,23 @@ func TestInferFailureSignatureDBSyncExecutor(t *testing.T) {
 	}
 }
 
+func TestInferProbableSubsystemDiskCapacity(t *testing.T) {
+	verification := &model.Verification{
+		CheckType:    "integrity",
+		ErrorMessage: `checkpoint failed: database or disk is full (13); sync failed: write /data/.test.db-litestream/ltx/0/000000000001.ltx.tmp: no space left on device`,
+	}
+
+	if got := inferFailureStage(verification); got != "disk_capacity" {
+		t.Fatalf("inferFailureStage()=%q want disk_capacity", got)
+	}
+	if got := inferFailureSignature(verification); got != "disk_capacity_full" {
+		t.Fatalf("inferFailureSignature()=%q want disk_capacity_full", got)
+	}
+	if got := inferProbableSubsystem(inferFailureStage(verification), inferFailureSignature(verification)); got != "Disk capacity / restore scratch headroom" {
+		t.Fatalf("inferProbableSubsystem()=%q want disk capacity", got)
+	}
+}
+
 func TestInferFailureSignatureValidationFailed(t *testing.T) {
 	verification := &model.Verification{
 		CheckType:    "restore",

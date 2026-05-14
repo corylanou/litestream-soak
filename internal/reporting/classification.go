@@ -21,6 +21,11 @@ func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassifi
 		Stage:     InferFailureStage(checkType, errorMessage),
 		Signature: inferFailureSignature(text, errorMessage),
 	}
+	if isDiskCapacityFailure(text) {
+		classification.Stage = "disk_capacity"
+		classification.Signature = "disk_capacity_full"
+		return classification
+	}
 	if objectStore := ParseObjectStoreFailure(errorMessage); objectStore != nil {
 		objectStore.Phase = firstNonEmpty(objectStore.Phase, inferRestorePhase(text))
 		classification.ObjectStore = objectStore
@@ -40,6 +45,8 @@ func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassifi
 func InferFailureStage(checkType, errorMessage string) string {
 	text := strings.ToLower(errorMessage)
 	switch {
+	case isDiskCapacityFailure(text):
+		return "disk_capacity"
 	case strings.Contains(text, "wait for sync") || strings.Contains(text, "sync request") || strings.Contains(text, "litestream.sock"):
 		return "sync"
 	case strings.Contains(text, "restore failed") || strings.Contains(text, "check_type=restore") || strings.Contains(text, "get ltx time bounds") || strings.Contains(text, "restore plan"):
@@ -142,6 +149,8 @@ func firstRegexMatch(pattern *regexp.Regexp, text string) string {
 
 func inferFailureSignature(text, original string) string {
 	switch {
+	case isDiskCapacityFailure(text):
+		return "disk_capacity_full"
 	case strings.Contains(text, "wait for db sync executor"):
 		return "litestream_db_sync_executor_timeout"
 	case strings.Contains(text, "litestream.sock") && strings.Contains(text, "too many open files"):
@@ -165,6 +174,14 @@ func inferFailureSignature(text, original string) string {
 	default:
 		return firstMeaningfulLine(original)
 	}
+}
+
+func isDiskCapacityFailure(text string) bool {
+	return strings.Contains(text, "no space left on device") ||
+		strings.Contains(text, "database or disk is full") ||
+		strings.Contains(text, "disk is full") ||
+		strings.Contains(text, "enospc") ||
+		strings.Contains(text, "sqlite_full")
 }
 
 func objectStoreSignature(failure ObjectStoreFailure) string {

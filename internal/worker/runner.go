@@ -746,10 +746,10 @@ func failureDebugKey(result VerificationResult, reason string) string {
 		return "sync_fd_exhausted"
 	case strings.Contains(text, "litestream.sock") && strings.Contains(text, "connection refused"):
 		return "sync_socket_refused"
+	case strings.Contains(text, "no space left on device") || strings.Contains(text, "database or disk is full") || strings.Contains(text, "disk is full"):
+		return "disk_full"
 	case strings.Contains(text, "wait for sync") || strings.Contains(text, "sync request"):
 		return "sync_failure"
-	case strings.Contains(text, "no space left on device"):
-		return "disk_full"
 	case strings.Contains(text, "accessdenied") || strings.Contains(text, "403"):
 		return "object_storage_access_denied"
 	case strings.Contains(text, "408") || strings.Contains(text, "timeout"):

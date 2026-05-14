@@ -78,6 +78,12 @@ func TestDefaultFleetForSource(t *testing.T) {
 	if got := volumeSizes["burst-volume"]; got != 100 {
 		t.Fatalf("burst-volume VolumeSizeGB = %d, want 100", got)
 	}
+	if got := volumeSizes["gharchive-replay"]; got != 50 {
+		t.Fatalf("gharchive-replay VolumeSizeGB = %d, want 50", got)
+	}
+	if got := volumeSizes["gharchive-mixed"]; got != 50 {
+		t.Fatalf("gharchive-mixed VolumeSizeGB = %d, want 50", got)
+	}
 	if desired, ok := defaultFleetDesiredWorker("pr-1221", "worker-pr-1221-high-vol", "worker-pr-1221-high-vol"); !ok {
 		t.Fatal("defaultFleetDesiredWorker() missing PR high-volume worker")
 	} else if desired.Name != "worker-pr-1221-high-vol" {

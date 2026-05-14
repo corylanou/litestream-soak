@@ -869,6 +869,8 @@ func promptReturnFormat(mode promptMode) string {
 func inferProbableSubsystem(stage, signature string) string {
 	text := strings.ToLower(stage + " " + signature)
 	switch {
+	case strings.Contains(text, "disk_capacity") || strings.Contains(text, "disk_full"):
+		return "Disk capacity / restore scratch headroom"
 	case strings.Contains(text, "db_sync_executor") || strings.Contains(text, "db sync executor"):
 		return "Litestream DB sync executor"
 	case strings.Contains(text, "sync") || strings.Contains(text, "litestream_sync_socket_refused") || strings.Contains(text, "litestream_sync_timeout") || strings.Contains(text, "litestream_sync_fd_exhausted"):
@@ -890,7 +892,7 @@ func recommendedPromptModeForSubsystem(subsystem string) promptMode {
 		return promptModeHealthy
 	case "Litestream DB sync executor", "Litestream sync/control socket", "Replication or restore path", "Restore correctness / integrity validation":
 		return promptModeLitestream
-	case "Soak harness or worker runtime":
+	case "Soak harness or worker runtime", "Disk capacity / restore scratch headroom":
 		return promptModeHarness
 	default:
 		return promptModeTriage
@@ -948,6 +950,12 @@ func incidentNextSteps(subsystem string, bundle *IncidentBundle) []string {
 		)
 	}
 	switch subsystem {
+	case "Disk capacity / restore scratch headroom":
+		steps = append(steps,
+			"Treat disk pressure as the current blocker. Check /data usage, restore temp files, and source DB size before investigating Litestream sync internals.",
+			"Compare this worker against other profiles to see whether the failure is tied to dataset growth or restore scratch headroom.",
+			"Recreate the worker with a fresh volume and fresh replica prefix after increasing disk headroom; do not reuse a full volume as a correctness signal.",
+		)
 	case "Litestream DB sync executor":
 		steps = append(steps,
 			"Start with failure_debug_snapshot.sync_status_before_sync and sync_status_after_sync_failure to identify the active Litestream sync operation and phase.",
