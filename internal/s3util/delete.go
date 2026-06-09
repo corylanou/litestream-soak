@@ -75,6 +75,7 @@ func (c *Client) DeletePrefix(ctx context.Context, prefix string) (int, error) {
 	if prefix == "" {
 		return 0, fmt.Errorf("prefix is required")
 	}
+	prefix = prefix + "/"
 
 	deleted := 0
 	continuationToken := ""
