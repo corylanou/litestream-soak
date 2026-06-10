@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/reporting"
+	_ "modernc.org/sqlite"
 )
 
 type VerificationResult struct {
@@ -57,11 +59,21 @@ func (e *verificationStepMetadataError) Unwrap() error {
 	return e.err
 }
 
+type loadPauser interface {
+	Pause(ctx context.Context) error
+	Resume()
+}
+
 type Verifier struct {
 	cfg        Config
-	loadCmd    *exec.Cmd
+	pausers    []loadPauser
 	httpClient *http.Client
 	onStart    func(context.Context, VerificationResult)
+
+	checkpointAttempts    int
+	checkpointRetryDelay  time.Duration
+	checkpointBusyTimeout time.Duration
+	syncRetryDelay        time.Duration
 }
 
 type syncResponse struct {
@@ -71,15 +83,20 @@ type syncResponse struct {
 }
 
 const (
+	checkpointMode            = "TRUNCATE"
 	syncDiagnosticTimeout     = 2 * time.Second
 	syncDiagnosticOutputLimit = 64 * 1024
 )
 
-func NewVerifier(cfg Config, loadCmd *exec.Cmd) *Verifier {
+func NewVerifier(cfg Config, pausers ...loadPauser) *Verifier {
 	return &Verifier{
-		cfg:        cfg,
-		loadCmd:    loadCmd,
-		httpClient: newIPCClient(cfg.SocketPath, cfg.verifySyncTimeout()+30*time.Second),
+		cfg:                   cfg,
+		pausers:               pausers,
+		httpClient:            newIPCClient(cfg.SocketPath, cfg.verifySyncTimeout()+30*time.Second),
+		checkpointAttempts:    3,
+		checkpointRetryDelay:  2 * time.Second,
+		checkpointBusyTimeout: 5 * time.Second,
+		syncRetryDelay:        2 * time.Second,
 	}
 }
 
@@ -94,16 +111,32 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 		CheckType: v.cfg.VerifyType,
 		Status:    "running",
 	}
+	defer func() {
+		RecordVerificationOutcome(result.Status, time.Since(start).Seconds())
+	}()
 	slog.Info("Starting verification cycle")
 	if v.onStart != nil {
 		v.onStart(ctx, result)
 	}
 
-	if err := recordVerificationStep(&result, "pause_load", v.pauseLoad); err != nil {
-		result.Status = "failed"
-		result.ErrorMessage = fmt.Sprintf("pause load: %v", err)
-		result.Summary = summarizeVerificationMessage(result.ErrorMessage)
-		v.finalizeResult(&result)
+	restoredPath := v.cfg.DBPath + ".restored"
+	if err := recordVerificationStep(&result, "clean_restored", func() error {
+		return removeRestoredArtifacts(restoredPath)
+	}); err != nil {
+		v.failResult(ctx, &result, fmt.Sprintf("clean restored artifacts: %v", err))
+		v.logResult(start, false, result.ErrorMessage)
+		return result, fmt.Errorf("clean restored artifacts: %w", err)
+	}
+	defer func() {
+		if err := removeRestoredArtifacts(restoredPath); err != nil {
+			slog.Warn("Failed to remove restored artifacts", "error", err)
+		}
+	}()
+
+	if err := recordVerificationStep(&result, "pause_load", func() error {
+		return v.pauseLoad(ctx)
+	}); err != nil {
+		v.failResult(ctx, &result, fmt.Sprintf("pause load: %v", err))
 		v.logResult(start, false, result.ErrorMessage)
 		return result, fmt.Errorf("pause load: %w", err)
 	}
@@ -119,16 +152,15 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 	if err := recordVerificationStep(&result, "checkpoint", func() error {
 		return v.checkpoint(ctx)
 	}); err != nil {
-		slog.Warn("Checkpoint failed (non-fatal)", "error", err)
+		v.failResult(ctx, &result, fmt.Sprintf("checkpoint: %v", err))
+		v.logResult(start, false, result.ErrorMessage)
+		return result, fmt.Errorf("checkpoint: %w", err)
 	}
 
 	if err := recordVerificationStep(&result, "sync", func() error {
 		return v.waitForSync(ctx, &result)
 	}); err != nil {
-		result.Status = "failed"
-		result.ErrorMessage = fmt.Sprintf("wait for sync: %v", err)
-		result.Summary = summarizeVerificationMessage(result.ErrorMessage)
-		v.finalizeResult(&result)
+		v.failResult(ctx, &result, fmt.Sprintf("wait for sync: %v", err))
 		v.logResult(start, false, result.ErrorMessage)
 		return result, fmt.Errorf("wait for sync: %w", err)
 	}
@@ -139,14 +171,9 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 		passed, err = v.validate(ctx, result.restoreTXID())
 		return err
 	})
-	duration := time.Since(start).Seconds()
-	RecordVerification(passed, duration)
 
 	if validateErr != nil {
-		result.Status = "failed"
-		result.ErrorMessage = validateErr.Error()
-		result.Summary = summarizeVerificationMessage(result.ErrorMessage)
-		v.finalizeResult(&result)
+		v.failResult(ctx, &result, validateErr.Error())
 		slog.Error("Verification failed", "error", validateErr, "duration", time.Since(start))
 		v.logResult(start, false, result.ErrorMessage)
 		return result, validateErr
@@ -160,17 +187,40 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 		slog.Info("Verification passed", "duration", time.Since(start))
 		v.logResult(start, true, "")
 	} else {
-		result.Status = "failed"
-		result.ErrorMessage = "validation returned false"
-		result.Summary = summarizeVerificationMessage(result.ErrorMessage)
-		v.finalizeResult(&result)
+		v.failResult(ctx, &result, "validation returned false")
 		slog.Error("Verification FAILED", "duration", time.Since(start))
 		v.logResult(start, false, "validation returned false")
 	}
 
-	os.Remove(v.cfg.DBPath + ".restored")
-
 	return result, nil
+}
+
+func failureStatus(ctx context.Context) string {
+	if ctx.Err() != nil {
+		return "aborted"
+	}
+	return "failed"
+}
+
+func (v *Verifier) failResult(ctx context.Context, result *VerificationResult, message string) {
+	result.Status = failureStatus(ctx)
+	result.ErrorMessage = message
+	summary := summarizeVerificationMessage(message)
+	if result.Status == "aborted" {
+		summary = "verification aborted: " + summary
+	}
+	result.Summary = summary
+	v.finalizeResult(result)
+}
+
+func removeRestoredArtifacts(restoredPath string) error {
+	var errs []error
+	for _, path := range []string{restoredPath, restoredPath + "-wal", restoredPath + "-shm"} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (v *Verifier) logResult(start time.Time, passed bool, errMsg string) {
@@ -197,35 +247,84 @@ func (v *Verifier) logResult(start time.Time, passed bool, errMsg string) {
 	f.WriteString(entry)
 }
 
-func (v *Verifier) pauseLoad() error {
-	if v.loadCmd == nil || v.loadCmd.Process == nil {
+func (v *Verifier) pauseLoad(ctx context.Context) error {
+	if len(v.pausers) == 0 {
 		return nil
 	}
-	SetLoadRunning(false)
-	slog.Info("Pausing load generator")
-	return v.loadCmd.Process.Signal(syscall.SIGSTOP)
+	slog.Info("Pausing load generators", "count", len(v.pausers))
+	for i, pauser := range v.pausers {
+		pauseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := pauser.Pause(pauseCtx)
+		cancel()
+		if err != nil {
+			// Resume the failing pauser too: Pause may mark internal paused
+			// state (e.g. a quiesce wait that timed out) before returning.
+			for j := i; j >= 0; j-- {
+				v.pausers[j].Resume()
+			}
+			return fmt.Errorf("pause load generator %d of %d: %w", i+1, len(v.pausers), err)
+		}
+	}
+	return nil
 }
 
 func (v *Verifier) resumeLoad() {
-	if v.loadCmd == nil || v.loadCmd.Process == nil {
+	if len(v.pausers) == 0 {
 		return
 	}
-	if err := v.loadCmd.Process.Signal(syscall.SIGCONT); err != nil {
-		slog.Error("Failed to resume load generator", "error", err)
-		return
+	for _, pauser := range v.pausers {
+		pauser.Resume()
 	}
-	SetLoadRunning(true)
-	slog.Info("Resumed load generator")
+	slog.Info("Resumed load generators", "count", len(v.pausers))
 }
 
 func (v *Verifier) checkpoint(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "sqlite3", v.cfg.DBPath, "PRAGMA wal_checkpoint(PASSIVE);")
-	output, err := cmd.CombinedOutput()
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)",
+		v.cfg.DBPath, v.checkpointBusyTimeout.Milliseconds())
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return fmt.Errorf("checkpoint: %w: %s", err, output)
+		return fmt.Errorf("open database: %w", err)
 	}
-	slog.Info("WAL checkpoint complete")
-	return nil
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+
+	var busy, logFrames, checkpointed int
+	var lastErr error
+	for attempt := 1; attempt <= v.checkpointAttempts; attempt++ {
+		if attempt > 1 {
+			// SIGSTOP can freeze a load process mid-transaction, making the
+			// busy state permanent for the cycle; briefly resuming the
+			// writers lets the lock holder finish before the retry.
+			if len(v.pausers) > 0 {
+				v.resumeLoad()
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(v.checkpointRetryDelay):
+			}
+			if len(v.pausers) > 0 {
+				if err := v.pauseLoad(ctx); err != nil {
+					return fmt.Errorf("re-pause load during checkpoint retry: %w", err)
+				}
+			}
+		}
+		lastErr = db.QueryRowContext(ctx, "PRAGMA wal_checkpoint("+checkpointMode+");").
+			Scan(&busy, &logFrames, &checkpointed)
+		if lastErr != nil {
+			continue
+		}
+		if busy == 0 {
+			slog.Info("WAL checkpoint complete",
+				"mode", checkpointMode, "busy", busy, "log_frames", logFrames, "checkpointed", checkpointed)
+			return nil
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("checkpoint after %d attempts: %w", v.checkpointAttempts, lastErr)
+	}
+	return fmt.Errorf("checkpoint busy after %d attempts: busy=%d log=%d checkpointed=%d",
+		v.checkpointAttempts, busy, logFrames, checkpointed)
 }
 
 func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) error {
@@ -234,26 +333,72 @@ func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) 
 		result.SyncStatusBeforeSync = v.collectSyncStatus()
 	}
 
-	requestBody, err := json.Marshal(map[string]interface{}{
+	deadline := time.Now().Add(v.cfg.verifySyncTimeout())
+	for {
+		syncResp, err := v.syncOnce(ctx, time.Until(deadline))
+		if err != nil {
+			v.captureSyncFailureDiagnostics(result, err)
+			return err
+		}
+		if result != nil {
+			result.SyncTXID = syncResp.TXID
+			result.SyncReplicatedTXID = syncResp.ReplicatedTXID
+		}
+		lag := uint64(0)
+		if syncResp.TXID > syncResp.ReplicatedTXID {
+			lag = syncResp.TXID - syncResp.ReplicatedTXID
+		}
+		SetReplicatedTXID(float64(syncResp.ReplicatedTXID))
+		SetReplicationLag(float64(lag))
+
+		if syncResp.ReplicatedTXID >= syncResp.TXID {
+			slog.Info("Litestream sync complete",
+				"status", syncResp.Status,
+				"txid", formatTXID(syncResp.TXID),
+				"replicated_txid", formatTXID(syncResp.ReplicatedTXID))
+			return nil
+		}
+
+		if time.Now().Add(v.syncRetryDelay).After(deadline) {
+			syncErr := fmt.Errorf("sync lag not resolved: txid=%016x replicated=%016x",
+				syncResp.TXID, syncResp.ReplicatedTXID)
+			v.captureSyncFailureDiagnostics(result, syncErr)
+			return syncErr
+		}
+
+		slog.Warn("Litestream sync lagging; retrying",
+			"txid", formatTXID(syncResp.TXID),
+			"replicated_txid", formatTXID(syncResp.ReplicatedTXID),
+			"lag", lag)
+		select {
+		case <-ctx.Done():
+			syncErr := fmt.Errorf("sync retry wait: %w", ctx.Err())
+			v.captureSyncFailureDiagnostics(result, syncErr)
+			return syncErr
+		case <-time.After(v.syncRetryDelay):
+		}
+	}
+}
+
+func (v *Verifier) syncOnce(ctx context.Context, budget time.Duration) (syncResponse, error) {
+	requestBody, err := json.Marshal(map[string]any{
 		"path":    v.cfg.DBPath,
 		"wait":    true,
-		"timeout": v.syncTimeoutSeconds(),
+		"timeout": timeoutSeconds(budget),
 	})
 	if err != nil {
-		return fmt.Errorf("marshal sync request: %w", err)
+		return syncResponse{}, fmt.Errorf("marshal sync request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", "http://localhost/sync", bytes.NewReader(requestBody))
 	if err != nil {
-		return fmt.Errorf("create sync request: %w", err)
+		return syncResponse{}, fmt.Errorf("create sync request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := v.httpClient.Do(req)
 	if err != nil {
-		syncErr := fmt.Errorf("sync request: %w", err)
-		v.captureSyncFailureDiagnostics(result, syncErr)
-		return syncErr
+		return syncResponse{}, fmt.Errorf("sync request: %w", err)
 	}
 	defer v.httpClient.CloseIdleConnections()
 	defer resp.Body.Close()
@@ -261,9 +406,7 @@ func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) 
 	if resp.StatusCode != http.StatusOK {
 		body, truncated, readErr := readLimited(resp.Body, syncDiagnosticOutputLimit)
 		if readErr != nil {
-			syncErr := fmt.Errorf("sync returned %d: read response: %w", resp.StatusCode, readErr)
-			v.captureSyncFailureDiagnostics(result, syncErr)
-			return syncErr
+			return syncResponse{}, fmt.Errorf("sync returned %d: read response: %w", resp.StatusCode, readErr)
 		}
 		message := strings.TrimSpace(body)
 		if truncated {
@@ -272,41 +415,36 @@ func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) 
 		if message == "" {
 			message = resp.Status
 		}
-		syncErr := fmt.Errorf("sync returned %d: %s", resp.StatusCode, message)
-		v.captureSyncFailureDiagnostics(result, syncErr)
-		return syncErr
+		return syncResponse{}, fmt.Errorf("sync returned %d: %s", resp.StatusCode, message)
 	}
 
 	body, truncated, readErr := readLimited(resp.Body, syncDiagnosticOutputLimit)
 	if readErr != nil {
-		syncErr := fmt.Errorf("read sync response: %w", readErr)
-		v.captureSyncFailureDiagnostics(result, syncErr)
-		return syncErr
+		return syncResponse{}, fmt.Errorf("read sync response: %w", readErr)
 	}
 	if truncated {
-		syncErr := fmt.Errorf("sync response exceeded %d bytes", syncDiagnosticOutputLimit)
-		v.captureSyncFailureDiagnostics(result, syncErr)
-		return syncErr
+		return syncResponse{}, fmt.Errorf("sync response exceeded %d bytes", syncDiagnosticOutputLimit)
 	}
 	body = strings.TrimSpace(body)
-	var syncResp syncResponse
-	if body != "" {
-		if err := json.Unmarshal([]byte(body), &syncResp); err != nil {
-			syncErr := fmt.Errorf("decode sync response: %w", err)
-			v.captureSyncFailureDiagnostics(result, syncErr)
-			return syncErr
-		}
-		if result != nil {
-			result.SyncTXID = syncResp.TXID
-			result.SyncReplicatedTXID = syncResp.ReplicatedTXID
-		}
+	if body == "" {
+		return syncResponse{}, errors.New("sync response was empty")
 	}
-
-	slog.Info("Litestream sync complete",
-		"status", syncResp.Status,
-		"txid", formatTXID(syncResp.TXID),
-		"replicated_txid", formatTXID(syncResp.ReplicatedTXID))
-	return nil
+	var raw struct {
+		Status         string  `json:"status"`
+		TXID           *uint64 `json:"txid"`
+		ReplicatedTXID *uint64 `json:"replicated_txid"`
+	}
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		return syncResponse{}, fmt.Errorf("decode sync response: %w", err)
+	}
+	if raw.TXID == nil || raw.ReplicatedTXID == nil {
+		return syncResponse{}, errors.New("sync response missing txid fields")
+	}
+	return syncResponse{
+		Status:         raw.Status,
+		TXID:           *raw.TXID,
+		ReplicatedTXID: *raw.ReplicatedTXID,
+	}, nil
 }
 
 func (v *Verifier) captureSyncFailureDiagnostics(result *VerificationResult, syncErr error) {
@@ -457,10 +595,9 @@ func (c Config) verifySyncTimeout() time.Duration {
 	return DefaultConfig().VerifySyncTimeout
 }
 
-func (v *Verifier) syncTimeoutSeconds() int {
-	timeout := v.cfg.verifySyncTimeout()
-	seconds := int(timeout / time.Second)
-	if timeout%time.Second != 0 {
+func timeoutSeconds(budget time.Duration) int {
+	seconds := int(budget / time.Second)
+	if budget%time.Second != 0 {
 		seconds++
 	}
 	if seconds < 1 {

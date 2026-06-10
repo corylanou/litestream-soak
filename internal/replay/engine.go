@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -23,6 +24,11 @@ var (
 	replayErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "soak_replay_errors_total",
 		Help: "Total replay errors by dataset.",
+	}, []string{"dataset", "worker_id", "profile", "source"})
+
+	replayDroppedRowsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_replay_dropped_rows_total",
+		Help: "Total rows dropped after insert retries were exhausted.",
 	}, []string{"dataset", "worker_id", "profile", "source"})
 
 	replayLagSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
@@ -65,15 +71,100 @@ type Engine struct {
 	cfg     Config
 	adapter Adapter
 	db      *sql.DB
+
+	mu        sync.Mutex
+	running   bool
+	paused    bool
+	resumeCh  chan struct{}
+	ackCh     chan struct{}
+	ackClosed bool
 }
 
 func NewEngine(cfg Config, adapter Adapter) *Engine {
 	return &Engine{cfg: cfg, adapter: adapter}
 }
 
+// Pause blocks new inserts and waits until the engine is quiesced
+// (parked between inserts) or ctx is done.
+func (e *Engine) Pause(ctx context.Context) error {
+	e.mu.Lock()
+	if !e.paused {
+		e.paused = true
+		e.resumeCh = make(chan struct{})
+		e.ackCh = make(chan struct{})
+		e.ackClosed = false
+	}
+	if !e.running {
+		e.closeAckLocked()
+	}
+	ack := e.ackCh
+	e.mu.Unlock()
+
+	select {
+	case <-ack:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Resume releases a paused engine. Idempotent.
+func (e *Engine) Resume() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.paused {
+		return
+	}
+	e.paused = false
+	close(e.resumeCh)
+	e.resumeCh = nil
+	e.ackCh = nil
+	e.ackClosed = false
+}
+
+func (e *Engine) closeAckLocked() {
+	if !e.ackClosed {
+		close(e.ackCh)
+		e.ackClosed = true
+	}
+}
+
+func (e *Engine) waitIfPaused(ctx context.Context) error {
+	e.mu.Lock()
+	if !e.paused {
+		e.mu.Unlock()
+		return ctx.Err()
+	}
+	e.closeAckLocked()
+	resume := e.resumeCh
+	e.mu.Unlock()
+
+	select {
+	case <-resume:
+	case <-ctx.Done():
+	}
+	return ctx.Err()
+}
+
+func replayDSN(dbPath string) string {
+	return dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+}
+
 func (e *Engine) Run(ctx context.Context) error {
+	e.mu.Lock()
+	e.running = true
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.running = false
+		if e.paused {
+			e.closeAckLocked()
+		}
+		e.mu.Unlock()
+	}()
+
 	var err error
-	e.db, err = sql.Open("sqlite", e.cfg.DBPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	e.db, err = sql.Open("sqlite", replayDSN(e.cfg.DBPath))
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
@@ -109,6 +200,12 @@ func (e *Engine) Run(ctx context.Context) error {
 }
 
 func (e *Engine) replayOnce(ctx context.Context) error {
+	// Loop mode can cycle passes without ever reaching the per-row gate
+	// (e.g. an empty dataset), so a pending Pause must be acknowledged here.
+	if err := e.waitIfPaused(ctx); err != nil {
+		return err
+	}
+
 	name := e.adapter.Name()
 	labels := e.metricLabels(name)
 	iter, err := e.adapter.Rows()
@@ -119,12 +216,11 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 
 	var prevTS time.Time
 	var count int64
+	var dropped int64
 
 	for iter.Next() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if err := e.waitIfPaused(ctx); err != nil {
+			return err
 		}
 
 		ts := iter.Timestamp()
@@ -144,10 +240,19 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 		}
 		prevTS = ts
 
+		if err := e.waitIfPaused(ctx); err != nil {
+			return err
+		}
+
 		start := time.Now()
 		if err := e.insertWithRetry(ctx, func() error { return iter.Insert(e.db) }); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			replayErrorsTotal.WithLabelValues(labels...).Inc()
-			slog.Error("Replay insert failed", "dataset", name, "error", err)
+			replayDroppedRowsTotal.WithLabelValues(labels...).Inc()
+			dropped++
+			slog.Error("Replay insert failed, row dropped", "dataset", name, "error", err, "dropped_total", dropped)
 			continue
 		}
 
