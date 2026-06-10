@@ -1,4 +1,4 @@
-package soak_test
+package litestreamsoak
 
 import (
 	"os"
