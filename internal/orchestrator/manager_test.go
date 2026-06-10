@@ -385,9 +385,6 @@ func TestRollingUpdateSourceSkipsUpToDateWorkers(t *testing.T) {
 		t.Fatalf("create worker: %v", err)
 	}
 
-	// The worker already matches the target deployment, so the re-read-under-lock
-	// loop must skip it. If it instead called replaceWorker it would panic on the
-	// nil fly client.
 	done := make(chan error, 1)
 	go func() {
 		done <- mgr.RollingUpdateSource(context.Background(), "main", "registry/img:new", "newsha", "newls")
@@ -412,4 +409,51 @@ func TestRollingUpdateSourceSkipsUpToDateWorkers(t *testing.T) {
 
 	unlock := mgr.lockSource("main")
 	unlock()
+}
+
+func TestRollingUpdateSourceSkipsSupersededTarget(t *testing.T) {
+	t.Parallel()
+
+	db, err := model.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	mgr := &Manager{db: db, appName: "litestream-soak"}
+
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "newsha",
+		LitestreamSHA: "newls",
+		ImageRef:      "registry/img:new",
+		Source:        "main",
+	}); err != nil {
+		t.Fatalf("upsert ready deployment: %v", err)
+	}
+
+	if err := db.CreateWorker(&model.Worker{
+		ID:            "w1",
+		AppName:       "litestream-soak",
+		Name:          "worker-main-x",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "oldsha",
+		LitestreamSHA: "oldls",
+		FlyMachineID:  "m1",
+		FlyVolumeID:   "v1",
+	}); err != nil {
+		t.Fatalf("create worker: %v", err)
+	}
+
+	if err := mgr.RollingUpdateSource(context.Background(), "main", "registry/img:stale", "stalesha", "stalels"); err != nil {
+		t.Fatalf("RollingUpdateSource returned error: %v", err)
+	}
+
+	worker, err := db.GetWorker("w1")
+	if err != nil {
+		t.Fatalf("get worker: %v", err)
+	}
+	if worker.GitSHA != "oldsha" || worker.FlyMachineID != "m1" {
+		t.Fatalf("worker was modified: sha=%q machine=%q", worker.GitSHA, worker.FlyMachineID)
+	}
 }
