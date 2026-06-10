@@ -3,7 +3,7 @@ LITESTREAM_REPO ?= ../../../benbjohnson/litestream
 WORKER_IMAGE ?= registry.fly.io/litestream-soak:worker-$(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 LOCAL_DATA_DIR ?= /tmp/litestream-soak
 
-.PHONY: build build-worker build-deps test vet clean run-local clean-local docker-worker refresh-worker-fleet
+.PHONY: build build-worker build-deps test vet clean run-local clean-local docker-worker compose-build refresh-worker-fleet
 
 build:
 	go build -o bin/soakworker ./cmd/soakworker
@@ -63,15 +63,12 @@ test-replay: build-worker
 	./bin/soakworker
 
 docker-worker:
-	@litestream_ref="$(LITESTREAM_SHA)"; \
-	if echo "$$litestream_ref" | grep -qE '^[0-9a-fA-F]{40}$$'; then \
-		litestream_sha="$$litestream_ref"; \
-	else \
-		if [ "$$litestream_ref" = "main" ]; then litestream_ref="refs/heads/main"; fi; \
-		litestream_sha="$$(git ls-remote https://github.com/benbjohnson/litestream.git "$$litestream_ref" | awk 'NR==1{print $$1}')"; \
-		if [ -z "$$litestream_sha" ]; then echo "failed to resolve Litestream ref $$litestream_ref" >&2; exit 1; fi; \
-	fi; \
+	@litestream_sha="$$(./scripts/resolve-litestream-sha.sh "$(LITESTREAM_SHA)")"; \
 	docker build -f Dockerfile.worker --build-arg LITESTREAM_SHA="$$litestream_sha" -t $(WORKER_IMAGE) .
+
+compose-build:
+	@litestream_sha="$$(./scripts/resolve-litestream-sha.sh "$(LITESTREAM_SHA)")"; \
+	LITESTREAM_SHA="$$litestream_sha" docker compose build
 
 refresh-worker-fleet:
 	./scripts/refresh-worker-fleet.sh
