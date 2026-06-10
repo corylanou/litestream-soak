@@ -49,5 +49,5 @@ COPY --from=soakworker-builder /usr/local/bin/soakworker /usr/local/bin/soakwork
 COPY --from=soakworker-builder /src/soak/datasets /opt/soak/datasets
 ENV LITESTREAM_SHA_FILE=/opt/soak/litestream.sha
 VOLUME /data
-EXPOSE 9090 9091
+EXPOSE 9091
 ENTRYPOINT ["/usr/local/bin/soakworker"]

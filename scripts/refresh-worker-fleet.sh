@@ -15,7 +15,7 @@ if [[ -z "$target_image" ]]; then
       | last
       | .config.image
     ) // (
-      map(select((.config.image // "") != ""))
+      map(select((.config.image // "") != "" and ((.name // "") | test("^pr-") | not) and ((.config.image // "") | test("-pr-") | not)))
       | sort_by(.updated_at)
       | last
       | .config.image
@@ -28,7 +28,10 @@ if [[ -z "$target_image" ]]; then
   exit 1
 fi
 
-mapfile -t machines < <(printf '%s' "$machine_json" | jq -r --arg img "$target_image" '
+machines=()
+while IFS= read -r line; do
+  machines+=("$line")
+done < <(printf '%s' "$machine_json" | jq -r --arg img "$target_image" '
   map(
     select(
       (.state == "started") and
@@ -52,7 +55,7 @@ fi
 
 echo
 echo "Machines to refresh:"
-for entry in "${machines[@]}"; do
+for entry in ${machines[@]+"${machines[@]}"}; do
   IFS=$'\t' read -r machine_id machine_name current_image <<<"$entry"
   printf '  %s\t%s\t%s\n' "$machine_id" "$machine_name" "$current_image"
 done
@@ -65,7 +68,7 @@ if [[ "$run_updates" != "1" ]]; then
   exit 0
 fi
 
-for entry in "${machines[@]}"; do
+for entry in ${machines[@]+"${machines[@]}"}; do
   IFS=$'\t' read -r machine_id machine_name current_image <<<"$entry"
   echo "Updating $machine_name ($machine_id)"
   fly machine update "$machine_id" -a "$app" --image "$target_image" --yes

@@ -6,11 +6,14 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
 )
+
+var validSHARe = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 
 type Deployer struct {
 	manager           *Manager
@@ -29,6 +32,11 @@ func NewDeployer(manager *Manager, db *model.DB, appName string, allowRuntimeBui
 }
 
 func (d *Deployer) DeployNewSHA(sha string) error {
+	sha = strings.TrimSpace(sha)
+	if !validSHARe.MatchString(sha) {
+		return fmt.Errorf("invalid deploy sha %q: must be 7-40 hex characters", sha)
+	}
+
 	if !d.allowRuntimeBuild {
 		return fmt.Errorf("runtime builds are disabled; build in CI and notify /api/admin/deployments/ready")
 	}
@@ -59,12 +67,12 @@ func (d *Deployer) DeployNewSHA(sha string) error {
 		return fmt.Errorf("create deployment record: %w", err)
 	}
 
-	d.db.RecordEvent("", "deploy_started", fmt.Sprintf("Building image for %s", sha[:12]), "")
+	d.db.RecordEvent("", "deploy_started", fmt.Sprintf("Building image for %s", trimSHA(sha)), "")
 
 	imageRef, err := d.buildImage(sha)
 	if err != nil {
 		d.db.UpdateDeployment(depID, "failed", "", err.Error())
-		d.db.RecordEvent("", "deploy_failed", fmt.Sprintf("Build failed for %s: %v", sha[:12], err), "")
+		d.db.RecordEvent("", "deploy_failed", fmt.Sprintf("Build failed for %s: %v", trimSHA(sha), err), "")
 		return fmt.Errorf("build image: %w", err)
 	}
 
@@ -79,8 +87,8 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 		source = "main"
 	}
 	sha = strings.TrimSpace(sha)
-	if sha == "" {
-		return "", fmt.Errorf("deployment sha is required")
+	if !validSHARe.MatchString(sha) {
+		return "", fmt.Errorf("invalid deployment sha %q: must be 7-40 hex characters", sha)
 	}
 	litestreamSHA = strings.TrimSpace(litestreamSHA)
 	trigger = strings.TrimSpace(trigger)
@@ -107,11 +115,7 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 		return "", fmt.Errorf("record ready deployment: %w", err)
 	}
 
-	shortSHA := sha
-	if len(shortSHA) > 12 {
-		shortSHA = shortSHA[:12]
-	}
-	message := fmt.Sprintf("Image ready for soak %s / litestream %s via %s", shortSHA, shortVersionValue(litestreamSHA), trigger)
+	message := fmt.Sprintf("Image ready for soak %s / litestream %s via %s", trimSHA(sha), shortVersionValue(litestreamSHA), trigger)
 	if err := d.db.RecordEvent("", "deploy_ready_received", message, imageRef); err != nil {
 		return "", fmt.Errorf("record deploy event: %w", err)
 	}
@@ -134,12 +138,12 @@ func (d *Deployer) buildImage(sha string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	imageTag := fmt.Sprintf("registry.fly.io/%s:sha-%s", d.appName, sha[:12])
+	imageTag := fmt.Sprintf("registry.fly.io/%s:sha-%s", d.appName, trimSHA(sha))
 
 	args := []string{
 		"deploy",
 		"--app", d.appName,
-		"--image-label", fmt.Sprintf("sha-%s", sha[:12]),
+		"--image-label", fmt.Sprintf("sha-%s", trimSHA(sha)),
 		"--build-only",
 		"--push",
 	}

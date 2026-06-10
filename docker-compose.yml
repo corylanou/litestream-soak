@@ -33,7 +33,7 @@ services:
       context: .
       dockerfile: Dockerfile.worker
       args:
-        LITESTREAM_SHA: main
+        LITESTREAM_SHA: ${LITESTREAM_SHA:-main}
     depends_on:
       minio-init:
         condition: service_completed_successfully

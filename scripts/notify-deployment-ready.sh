@@ -36,7 +36,7 @@ payload="$(jq -n \
   + (if $image_ref == "" then {} else {image_ref: $image_ref} end)
   + (if $litestream_sha == "" then {} else {litestream_sha: $litestream_sha} end)')"
 
-curl -sS -X POST \
+curl -sS --fail-with-body --max-time 180 -X POST \
   "${auth_args[@]}" \
   -H "Content-Type: application/json" \
   "${base_url}/api/admin/deployments/ready" \
