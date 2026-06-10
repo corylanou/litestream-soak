@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -141,6 +140,21 @@ func TestReplacementRequestUsesWorkerID(t *testing.T) {
 	}
 }
 
+func TestReplacementRequestPreservesExpiresAt(t *testing.T) {
+	t.Parallel()
+
+	expires := time.Now().Add(3 * time.Hour).UTC()
+	withExpiry := replacementRequest(model.Worker{ID: "w1", Name: "w1", ExpiresAt: &expires}, "img", "sha", "ls")
+	if withExpiry.ExpiresAt == nil || !withExpiry.ExpiresAt.Equal(expires) {
+		t.Fatalf("ExpiresAt=%v, want %v", withExpiry.ExpiresAt, expires)
+	}
+
+	withoutExpiry := replacementRequest(model.Worker{ID: "w2", Name: "w2"}, "img", "sha", "ls")
+	if withoutExpiry.ExpiresAt != nil {
+		t.Fatalf("ExpiresAt=%v, want nil", withoutExpiry.ExpiresAt)
+	}
+}
+
 func TestNewWorkerRecordCopiesExpiresAt(t *testing.T) {
 	t.Parallel()
 
@@ -203,7 +217,6 @@ func TestClearOldWorkerReplicaPrefix(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -251,22 +264,51 @@ func TestClearOldWorkerReplicaPrefix(t *testing.T) {
 	}
 }
 
-func TestBeginSourceRolloutRejectsConcurrent(t *testing.T) {
+func TestLockSourceSerializesSameSource(t *testing.T) {
 	t.Parallel()
 
 	mgr := &Manager{}
-	if !mgr.beginSourceRollout("main") {
-		t.Fatal("first beginSourceRollout(main)=false, want true")
+	unlock := mgr.lockSource("main")
+
+	acquired := make(chan struct{})
+	go func() {
+		unlock2 := mgr.lockSource("main")
+		close(acquired)
+		unlock2()
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("second lockSource(main) acquired while first held")
+	case <-time.After(50 * time.Millisecond):
 	}
-	if mgr.beginSourceRollout("main") {
-		t.Fatal("second beginSourceRollout(main)=true, want false")
+
+	unlock()
+	select {
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("second lockSource(main) did not acquire after unlock")
 	}
-	if !mgr.beginSourceRollout("other") {
-		t.Fatal("beginSourceRollout(other)=false, want true (distinct source)")
-	}
-	mgr.endSourceRollout("main")
-	if !mgr.beginSourceRollout("main") {
-		t.Fatal("beginSourceRollout(main) after end=false, want true")
+}
+
+func TestLockSourceDistinctSourcesDoNotBlock(t *testing.T) {
+	t.Parallel()
+
+	mgr := &Manager{}
+	unlock := mgr.lockSource("main")
+	defer unlock()
+
+	acquired := make(chan struct{})
+	go func() {
+		unlock2 := mgr.lockSource("pr-123")
+		unlock2()
+		close(acquired)
+	}()
+
+	select {
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("lockSource(pr-123) blocked behind lockSource(main)")
 	}
 }
 
@@ -318,7 +360,7 @@ func TestLockWorkerDistinctIDsDoNotBlock(t *testing.T) {
 	}
 }
 
-func TestRollingUpdateSourceSkipsWhenInFlight(t *testing.T) {
+func TestRollingUpdateSourceSkipsUpToDateWorkers(t *testing.T) {
 	t.Parallel()
 
 	db, err := model.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -335,33 +377,39 @@ func TestRollingUpdateSourceSkipsWhenInFlight(t *testing.T) {
 		Name:          "worker-main-x",
 		Status:        model.WorkerRunning,
 		Source:        "main",
-		GitSHA:        "oldsha",
-		LitestreamSHA: "oldls",
+		GitSHA:        "newsha",
+		LitestreamSHA: "newls",
 		FlyMachineID:  "m1",
 		FlyVolumeID:   "v1",
 	}); err != nil {
 		t.Fatalf("create worker: %v", err)
 	}
 
-	if !mgr.beginSourceRollout("main") {
-		t.Fatal("failed to pre-acquire source gate")
-	}
-
-	// With the gate held, the call must skip the loop entirely. If it proceeded it
-	// would call replaceWorker on a non-matching worker and panic on the nil fly client.
-	if err := mgr.RollingUpdateSource(context.Background(), "main", "registry/img:new", "newsha", "newls"); err != nil {
-		t.Fatalf("RollingUpdateSource returned error: %v", err)
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(1)
+	// The worker already matches the target deployment, so the re-read-under-lock
+	// loop must skip it. If it instead called replaceWorker it would panic on the
+	// nil fly client.
+	done := make(chan error, 1)
 	go func() {
-		defer wg.Done()
-		mgr.endSourceRollout("main")
+		done <- mgr.RollingUpdateSource(context.Background(), "main", "registry/img:new", "newsha", "newls")
 	}()
-	wg.Wait()
 
-	if !mgr.beginSourceRollout("main") {
-		t.Fatal("source gate not released after endSourceRollout")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RollingUpdateSource returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RollingUpdateSource did not return")
 	}
+
+	worker, err := db.GetWorker("w1")
+	if err != nil {
+		t.Fatalf("get worker: %v", err)
+	}
+	if worker.FlyMachineID != "m1" || worker.FlyVolumeID != "v1" {
+		t.Fatalf("worker was modified: machine=%q volume=%q", worker.FlyMachineID, worker.FlyVolumeID)
+	}
+
+	unlock := mgr.lockSource("main")
+	unlock()
 }

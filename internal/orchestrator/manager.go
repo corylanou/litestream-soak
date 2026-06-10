@@ -49,20 +49,20 @@ type Manager struct {
 	controlBaseURL   string
 	platformLogToken string
 
-	locks          sync.Mutex
-	workerLocks    map[string]*sync.Mutex
-	sourceRollouts map[string]bool
+	locks       sync.Mutex
+	workerLocks map[string]*sync.Mutex
+	sourceLocks map[string]*sync.Mutex
 }
 
-func (m *Manager) lockWorker(id string) func() {
+func (m *Manager) keyedLock(table *map[string]*sync.Mutex, key string) func() {
 	m.locks.Lock()
-	if m.workerLocks == nil {
-		m.workerLocks = make(map[string]*sync.Mutex)
+	if *table == nil {
+		*table = make(map[string]*sync.Mutex)
 	}
-	mu, ok := m.workerLocks[id]
+	mu, ok := (*table)[key]
 	if !ok {
 		mu = &sync.Mutex{}
-		m.workerLocks[id] = mu
+		(*table)[key] = mu
 	}
 	m.locks.Unlock()
 
@@ -70,23 +70,12 @@ func (m *Manager) lockWorker(id string) func() {
 	return mu.Unlock
 }
 
-func (m *Manager) beginSourceRollout(source string) bool {
-	m.locks.Lock()
-	defer m.locks.Unlock()
-	if m.sourceRollouts == nil {
-		m.sourceRollouts = make(map[string]bool)
-	}
-	if m.sourceRollouts[source] {
-		return false
-	}
-	m.sourceRollouts[source] = true
-	return true
+func (m *Manager) lockWorker(id string) func() {
+	return m.keyedLock(&m.workerLocks, id)
 }
 
-func (m *Manager) endSourceRollout(source string) {
-	m.locks.Lock()
-	defer m.locks.Unlock()
-	delete(m.sourceRollouts, source)
+func (m *Manager) lockSource(source string) func() {
+	return m.keyedLock(&m.sourceLocks, source)
 }
 
 func NewManager(fly *flyapi.Client, db *model.DB, metrics *controlMetrics, alerts *AlertDispatcher, appName string, replica ReplicaConfig, controlBaseURL, platformLogToken string) *Manager {
@@ -354,33 +343,42 @@ func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA, newLit
 
 func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, newSHA, newLitestreamSHA string) error {
 	source = firstNonEmpty(strings.TrimSpace(source), "main")
-	if !m.beginSourceRollout(source) {
-		slog.Info("Rolling update already in progress for source, skipping", "source", source, "sha", newSHA)
-		return nil
-	}
-	defer m.endSourceRollout(source)
+
+	unlockSource := m.lockSource(source)
+	defer unlockSource()
 
 	workers, err := m.db.ListWorkersForSource(source)
 	if err != nil {
 		return fmt.Errorf("list %s workers: %w", source, err)
 	}
 
+	deployment := model.Deployment{GitSHA: newSHA, LitestreamSHA: newLitestreamSHA}
 	slog.Info("Starting rolling update", "source", source, "workers", len(workers), "sha", newSHA, "image", newImageRef)
 
-	for _, w := range workers {
-		if workerMatchesDeployment(w, model.Deployment{GitSHA: newSHA, LitestreamSHA: newLitestreamSHA}) {
-			continue
-		}
+	for _, listed := range workers {
 		newWorker, err := func() (*model.Worker, error) {
-			unlock := m.lockWorker(w.ID)
+			unlock := m.lockWorker(listed.ID)
 			defer unlock()
-			return m.replaceWorker(ctx, w, newImageRef, newSHA, newLitestreamSHA)
+
+			w, err := m.db.GetWorker(listed.ID)
+			if err != nil {
+				return nil, fmt.Errorf("reload worker: %w", err)
+			}
+			if w.Status == model.WorkerStopped || w.Status == model.WorkerFailed {
+				return nil, nil
+			}
+			if workerMatchesDeployment(*w, deployment) {
+				return nil, nil
+			}
+			return m.replaceWorker(ctx, *w, newImageRef, newSHA, newLitestreamSHA)
 		}()
 		if err != nil {
-			slog.Error("Failed to create updated worker", "name", w.Name, "error", err)
+			slog.Error("Failed to create updated worker", "name", listed.Name, "error", err)
 			continue
 		}
-		slog.Info("Worker updated", "name", w.Name, "new_id", newWorker.ID)
+		if newWorker != nil {
+			slog.Info("Worker updated", "name", listed.Name, "new_id", newWorker.ID)
+		}
 	}
 
 	return nil
@@ -447,6 +445,7 @@ func replacementRequest(w model.Worker, newImageRef, newSHA, newLitestreamSHA st
 		ImageRef:      newImageRef,
 		Region:        w.Region,
 		VolumeSizeGB:  resolveWorkerVolumeSize(w, workloadCfg),
+		ExpiresAt:     w.ExpiresAt,
 		Workload:      workloadCfg,
 	}
 }
