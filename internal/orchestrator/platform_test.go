@@ -109,6 +109,34 @@ func TestClassifyPlatformLog(t *testing.T) {
 			wantOK:    true,
 		},
 		{
+			name: "crash without restart policy",
+			entry: flyapi.AppLogEntry{
+				Attributes: flyapi.AppLogAttributes{
+					Message: "machine crashed, not restarting",
+					Meta: flyapi.AppLogMeta{
+						Event: flyapi.AppLogMetaEvent{Provider: "vm"},
+					},
+				},
+			},
+			wantType:  "platform_restart",
+			wantMatch: "platform event",
+			wantOK:    true,
+		},
+		{
+			name: "unclean exit without restart policy",
+			entry: flyapi.AppLogEntry{
+				Attributes: flyapi.AppLogAttributes{
+					Message: "unclean exit, not restarting",
+					Meta: flyapi.AppLogMeta{
+						Event: flyapi.AppLogMetaEvent{Provider: "vm"},
+					},
+				},
+			},
+			wantType:  "platform_restart",
+			wantMatch: "platform event",
+			wantOK:    true,
+		},
+		{
 			name: "routine boot starting init",
 			entry: flyapi.AppLogEntry{
 				Attributes: flyapi.AppLogAttributes{

@@ -50,7 +50,7 @@ func InferFailureStage(checkType, errorMessage string) string {
 		return "disk_capacity"
 	case strings.Contains(text, "wait for sync") || strings.Contains(text, "sync request") || strings.Contains(text, "decode sync response") || strings.Contains(text, "litestream.sock"):
 		return "sync"
-	case strings.Contains(text, "restore failed") || strings.Contains(text, "check_type=restore") || strings.Contains(text, "get ltx time bounds") || strings.Contains(text, "restore plan"):
+	case strings.Contains(text, "restore failed") || strings.Contains(text, "check_type=restore") || strings.Contains(text, "get ltx time bounds") || strings.Contains(text, "restore plan") || strings.Contains(text, "read page header"):
 		return "restore"
 	case strings.Contains(text, "integrity check") || strings.Contains(text, "check_type=integrity_check") || strings.Contains(text, "wrong # of entries in index"):
 		return "integrity_check"

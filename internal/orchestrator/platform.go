@@ -186,14 +186,16 @@ func isUnexpectedPlatformRestart(lower string) bool {
 	if match := exitCodePattern.FindStringSubmatch(lower); len(match) == 2 {
 		return match[1] != "0"
 	}
+	if strings.Contains(lower, "crashed") ||
+		strings.Contains(lower, "unclean exit") ||
+		strings.Contains(lower, "restart count") {
+		return true
+	}
 	if strings.Contains(lower, "not restarting") {
 		return false
 	}
 	return strings.Contains(lower, "restarting machine") ||
-		strings.Contains(lower, "machine restarted") ||
-		strings.Contains(lower, "restart count") ||
-		strings.Contains(lower, "unclean exit") ||
-		strings.Contains(lower, "crashed")
+		strings.Contains(lower, "machine restarted")
 }
 
 func normalizePlatformMessage(lower, raw string) string {

@@ -80,6 +80,22 @@ func TestClassifyVerificationFailureRestoreAttachesRestoreFailure(t *testing.T) 
 	}
 }
 
+func TestClassifyVerificationFailureIntegrityCheckTypeDecodeError(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", "read page header: unexpected EOF")
+	if got.Stage != "restore" {
+		t.Fatalf("Stage = %q, want restore", got.Stage)
+	}
+	if got.Signature != "restore_decode_error" {
+		t.Fatalf("Signature = %q, want restore_decode_error", got.Signature)
+	}
+	if got.Restore == nil {
+		t.Fatal("Restore = nil, want attached RestoreFailure")
+	}
+	if got.Restore.Phase != "Decode" {
+		t.Fatalf("Restore.Phase = %q, want Decode", got.Restore.Phase)
+	}
+}
+
 func TestClassifyVerificationFailureRestoreDecodeError(t *testing.T) {
 	got := ClassifyVerificationFailure("restore", "validation failed: restore failed: read page header: unexpected EOF")
 	if got.Stage != "restore" {
