@@ -1495,7 +1495,7 @@ func TestHandleDeploymentReady(t *testing.T) {
 		}
 	})
 
-	t.Run("success returns 202 with echoed fields", func(t *testing.T) {
+	t.Run("valid request accepted with echoed fields", func(t *testing.T) {
 		t.Parallel()
 
 		db := openTestDB(t)
