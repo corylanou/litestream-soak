@@ -83,9 +83,11 @@ jobs:
     outputs:
       image_ref: ${{ steps.build.outputs.image_ref }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
+        with:
+          version: 0.4.59
 
       - id: build
         shell: bash
@@ -93,6 +95,29 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
           set -euo pipefail
+
+          parse_flyctl_image_ref() {
+            local log_file="$1"
+            local image_label="$2"
+            local image_ref
+
+            image_ref="$(awk '$1 == "image:" && $2 ~ "^registry[.]fly[.]io/litestream-soak:" {print $2}' "${log_file}" | tail -n 1 || true)"
+            if [ -z "${image_ref}" ]; then
+              echo "failed to parse image ref from flyctl output" >&2
+              echo "expected a line matching: image: registry.fly.io/litestream-soak:${image_label}" >&2
+              echo "last 40 lines of flyctl output:" >&2
+              tail -n 40 "${log_file}" >&2
+              return 1
+            fi
+            if [[ "${image_ref}" != "registry.fly.io/litestream-soak:${image_label}"* ]]; then
+              echo "parsed flyctl image ref ${image_ref} does not match expected label ${image_label}" >&2
+              echo "last 40 lines of flyctl output:" >&2
+              tail -n 40 "${log_file}" >&2
+              return 1
+            fi
+
+            printf '%s\n' "${image_ref}"
+          }
 
           short_sha="${GITHUB_SHA::12}"
           litestream_sha="${{ needs.resolve-upstream.outputs.litestream_sha }}"
@@ -108,9 +133,7 @@ jobs:
             --build-only \
             --push 2>&1 | tee "${log_file}"
 
-          image_ref="$(awk '/^image:/{print $2}' "${log_file}" | tail -n 1)"
-          if [ -z "${image_ref}" ]; then
-            echo "failed to parse image ref from flyctl output" >&2
+          if ! image_ref="$(parse_flyctl_image_ref "${log_file}" "${image_label}")"; then
             exit 1
           fi
 
@@ -123,7 +146,7 @@ jobs:
     if: needs.resolve-upstream.outputs.should_build == 'true' && needs.build-worker-image.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - shell: bash
         env:

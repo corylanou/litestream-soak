@@ -24,7 +24,7 @@ jobs:
       control_changed: ${{ steps.detect.outputs.control_changed }}
       worker_changed: ${{ steps.detect.outputs.worker_changed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 2
 
@@ -62,9 +62,9 @@ jobs:
     needs: changes
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -78,9 +78,11 @@ jobs:
     if: needs.changes.outputs.control_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
+        with:
+          version: 0.4.59
 
       - env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
@@ -96,9 +98,11 @@ jobs:
       image_ref: ${{ steps.build.outputs.image_ref }}
       litestream_sha: ${{ steps.build.outputs.litestream_sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
+        with:
+          version: 0.4.59
 
       - id: build
         shell: bash
@@ -107,6 +111,29 @@ jobs:
           SOAK_LITESTREAM_SHA: ${{ vars.SOAK_LITESTREAM_SHA }}
         run: |
           set -euo pipefail
+
+          parse_flyctl_image_ref() {
+            local log_file="$1"
+            local image_label="$2"
+            local image_ref
+
+            image_ref="$(awk '$1 == "image:" && $2 ~ "^registry[.]fly[.]io/litestream-soak:" {print $2}' "${log_file}" | tail -n 1 || true)"
+            if [ -z "${image_ref}" ]; then
+              echo "failed to parse image ref from flyctl output" >&2
+              echo "expected a line matching: image: registry.fly.io/litestream-soak:${image_label}" >&2
+              echo "last 40 lines of flyctl output:" >&2
+              tail -n 40 "${log_file}" >&2
+              return 1
+            fi
+            if [[ "${image_ref}" != "registry.fly.io/litestream-soak:${image_label}"* ]]; then
+              echo "parsed flyctl image ref ${image_ref} does not match expected label ${image_label}" >&2
+              echo "last 40 lines of flyctl output:" >&2
+              tail -n 40 "${log_file}" >&2
+              return 1
+            fi
+
+            printf '%s\n' "${image_ref}"
+          }
 
           short_sha="${GITHUB_SHA::12}"
           log_file="$(mktemp)"
@@ -138,9 +165,7 @@ jobs:
             --build-only \
             --push 2>&1 | tee "${log_file}"
 
-          image_ref="$(awk '/^image:/{print $2}' "${log_file}" | tail -n 1)"
-          if [ -z "${image_ref}" ]; then
-            echo "failed to parse image ref from flyctl output" >&2
+          if ! image_ref="$(parse_flyctl_image_ref "${log_file}" "${image_label}")"; then
             exit 1
           fi
 
@@ -155,7 +180,7 @@ jobs:
     if: needs.changes.outputs.worker_changed == 'true' && needs.build-worker-image.result == 'success' && (needs.deploy-control-plane.result == 'success' || needs.deploy-control-plane.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - shell: bash
         env:
