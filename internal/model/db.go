@@ -131,7 +131,7 @@ type DB struct {
 }
 
 func Open(path string) (*DB, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)")
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_time_format=sqlite&_timezone=UTC")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -221,7 +221,7 @@ func (d *DB) CreateWorker(w *Worker) error {
 			resume_trigger = '',
 			last_probe_at = NULL,
 			updated_at = datetime('now')`,
-		w.ID, w.AppName, w.Region, nullIntString(w.FlyMachineID), nullIntString(w.FlyVolumeID), w.Name, w.Status, w.Source, w.GitSHA, w.LitestreamSHA, w.PRNumber, w.ProfileName, w.ProfileConfig, w.ExpiresAt,
+		w.ID, w.AppName, w.Region, nullIntString(w.FlyMachineID), nullIntString(w.FlyVolumeID), w.Name, w.Status, w.Source, w.GitSHA, w.LitestreamSHA, w.PRNumber, w.ProfileName, w.ProfileConfig, utcTimePtr(w.ExpiresAt),
 	)
 	return err
 }
@@ -276,7 +276,7 @@ func (d *DB) UpdateWorkerRuntimeSnapshot(id string, payload reporting.RuntimePay
 	_, err = d.db.Exec(`
 		UPDATE workers SET last_runtime_json = ?, last_runtime_at = ?, updated_at = datetime('now')
 		WHERE id = ?`,
-		string(body), reportedAt, id,
+		string(body), reportedAt.UTC(), id,
 	)
 	return err
 }
@@ -1400,16 +1400,23 @@ func scanWorker(scanner workerScanner, w *Worker) error {
 	return nil
 }
 
-func nullInt(value int) interface{} {
+func nullInt(value int) any {
 	if value == 0 {
 		return nil
 	}
 	return value
 }
 
-func nullIntString(value string) interface{} {
+func nullIntString(value string) any {
 	if value == "" {
 		return nil
 	}
 	return value
+}
+
+func utcTimePtr(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t.UTC()
 }
