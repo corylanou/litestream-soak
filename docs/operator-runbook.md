@@ -37,8 +37,10 @@ fly secrets set SOAK_WORKER_TOKEN=<random secret> -a litestream-soak-ctl
 ```
 
 The orchestrator injects the token into every worker machine's environment
-automatically, so workers need no manual configuration. Rotating the token
-requires restarting workers so they pick up the new value.
+automatically, so workers need no manual configuration. The env is fixed at
+machine creation, so rotating the token requires recreating worker machines
+(for example via a fleet rollout) — restarting an existing machine keeps the
+old value and its reports will be rejected with `401`.
 
 Grafana:
 

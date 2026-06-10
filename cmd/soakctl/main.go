@@ -32,7 +32,7 @@ func main() {
 		slog.Error("FLY_API_TOKEN is required")
 		os.Exit(1)
 	}
-	workerToken := os.Getenv("SOAK_WORKER_TOKEN")
+	workerToken := strings.TrimSpace(os.Getenv("SOAK_WORKER_TOKEN"))
 	if workerToken == "" {
 		slog.Error("SOAK_WORKER_TOKEN is required")
 		os.Exit(1)

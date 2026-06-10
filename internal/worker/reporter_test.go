@@ -58,6 +58,36 @@ func TestReporterSendsWorkerTokenBearerHeader(t *testing.T) {
 	}
 }
 
+func TestReporterTrimsWorkerToken(t *testing.T) {
+	t.Setenv("SOAK_WORKER_TOKEN", "  padded-token \n")
+
+	var mu sync.Mutex
+	var authorization string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		authorization = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	reporter := NewReporter(Config{
+		ControlBaseURL: server.URL,
+		WorkerID:       "w1",
+	})
+
+	if err := reporter.SendHeartbeat(context.Background(), reporting.HeartbeatPayload{}); err != nil {
+		t.Fatalf("SendHeartbeat: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := authorization, "Bearer padded-token"; got != want {
+		t.Fatalf("Authorization=%q, want %q", got, want)
+	}
+}
+
 func TestReporterOmitsAuthorizationWhenTokenUnset(t *testing.T) {
 	t.Setenv("SOAK_WORKER_TOKEN", "")
 

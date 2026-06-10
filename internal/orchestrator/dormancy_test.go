@@ -276,6 +276,24 @@ func TestWorkerEnvOmitsWorkerTokenWhenUnset(t *testing.T) {
 	}
 }
 
+func TestWorkerEnvTrimsWorkerToken(t *testing.T) {
+	t.Setenv("SOAK_WORKER_TOKEN", "  padded-token \n")
+
+	mgr := &Manager{
+		replica:        ReplicaConfig{Bucket: "bucket", Endpoint: "endpoint"},
+		controlBaseURL: "https://litestream-soak-ctl.fly.dev",
+	}
+
+	env := mgr.workerEnv(model.Worker{
+		ID:   "worker-main-low-vol",
+		Name: "worker-main-low-vol",
+	}, workload.Config{})
+
+	if got, want := env["SOAK_WORKER_TOKEN"], "padded-token"; got != want {
+		t.Fatalf("SOAK_WORKER_TOKEN=%q, want %q", got, want)
+	}
+}
+
 func TestWorkerEnvIncludesOptionalWorkloadFields(t *testing.T) {
 	t.Parallel()
 

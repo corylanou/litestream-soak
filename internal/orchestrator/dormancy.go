@@ -74,7 +74,7 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 		"AWS_ENDPOINT_URL_S3": m.replica.Endpoint,
 		"CONTROL_BASE_URL":    m.controlBaseURL,
 	}
-	if token := os.Getenv("SOAK_WORKER_TOKEN"); token != "" {
+	if token := strings.TrimSpace(os.Getenv("SOAK_WORKER_TOKEN")); token != "" {
 		env["SOAK_WORKER_TOKEN"] = token
 	}
 	if m.replica.AccessKey != "" {

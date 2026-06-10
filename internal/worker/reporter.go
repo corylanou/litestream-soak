@@ -31,7 +31,7 @@ func NewReporter(cfg Config) *Reporter {
 	profileConfig := cfg.WorkloadConfig().JSON()
 	return &Reporter{
 		baseURL: baseURL,
-		token:   os.Getenv("SOAK_WORKER_TOKEN"),
+		token:   strings.TrimSpace(os.Getenv("SOAK_WORKER_TOKEN")),
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},
