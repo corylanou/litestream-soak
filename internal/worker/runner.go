@@ -40,7 +40,8 @@ type Runner struct {
 	failureDebugMu  sync.Mutex
 	failureDebugKey string
 	failureDebugAt  time.Time
-	loadCmd         *exec.Cmd
+	loadSup         *loadSupervisor
+	replayEngine    *replay.Engine
 	loadLog         *lineBuffer
 	verifier        *Verifier
 	reporter        *Reporter
@@ -119,7 +120,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 
-	r.verifier = NewVerifier(r.cfg, r.loadCmd)
+	var pausers []loadPauser
+	if r.loadSup != nil {
+		pausers = append(pausers, r.loadSup)
+	}
+	if r.replayEngine != nil {
+		pausers = append(pausers, r.replayEngine)
+	}
+	r.verifier = NewVerifier(r.cfg, pausers...)
 	r.verifier.SetStartHook(r.sendVerificationStarted)
 
 	if err := r.runVerifyLoop(runCtx); err != nil {
@@ -320,23 +328,29 @@ func (r *Runner) startLoad(ctx context.Context) error {
 		"pattern", r.cfg.Pattern,
 	)
 
-	r.loadCmd = exec.CommandContext(ctx, "litestream-test", "load",
-		"-db", r.cfg.DBPath,
-		"-write-rate", strconv.Itoa(r.cfg.WriteRate),
-		"-duration", r.cfg.LoadDuration.String(),
-		"-pattern", r.cfg.Pattern,
-		"-payload-size", strconv.Itoa(r.cfg.PayloadSize),
-		"-read-ratio", fmt.Sprintf("%.2f", r.cfg.ReadRatio),
-		"-workers", strconv.Itoa(r.cfg.Workers),
-	)
-	r.loadCmd.Stdout = io.MultiWriter(os.Stdout, r.loadLog)
-	r.loadCmd.Stderr = io.MultiWriter(os.Stderr, r.loadLog)
+	r.loadSup = newLoadSupervisor(func(ctx context.Context) (*exec.Cmd, error) {
+		cmd := exec.CommandContext(ctx, "litestream-test", "load",
+			"-db", r.cfg.DBPath,
+			"-write-rate", strconv.Itoa(r.cfg.WriteRate),
+			"-duration", r.cfg.LoadDuration.String(),
+			"-pattern", r.cfg.Pattern,
+			"-payload-size", strconv.Itoa(r.cfg.PayloadSize),
+			"-read-ratio", fmt.Sprintf("%.2f", r.cfg.ReadRatio),
+			"-workers", strconv.Itoa(r.cfg.Workers),
+		)
+		cmd.Stdout = io.MultiWriter(os.Stdout, r.loadLog)
+		cmd.Stderr = io.MultiWriter(os.Stderr, r.loadLog)
 
-	if err := r.loadCmd.Start(); err != nil {
-		return fmt.Errorf("start load: %w", err)
+		if err := cmd.Start(); err != nil {
+			return nil, fmt.Errorf("start load: %w", err)
+		}
+		return cmd, nil
+	})
+
+	if err := r.loadSup.start(ctx); err != nil {
+		return err
 	}
 
-	SetLoadRunning(true)
 	r.sendHeartbeat(ctx)
 	return nil
 }
@@ -375,9 +389,42 @@ func (r *Runner) startReplay(ctx context.Context) error {
 		Source:          r.cfg.Source,
 	}, adapter)
 
+	r.replayEngine = engine
+
 	go func() {
-		if err := engine.Run(ctx); err != nil {
-			slog.Error("Replay engine failed", "dataset", r.cfg.ReplayDataset, "error", err)
+		const (
+			initialBackoff = 5 * time.Second
+			maxBackoff     = 2 * time.Minute
+			healthyReset   = 5 * time.Minute
+		)
+		backoff := initialBackoff
+		for {
+			started := time.Now()
+			err := engine.Run(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				slog.Error("Replay engine failed", "dataset", r.cfg.ReplayDataset, "error", err)
+			} else {
+				slog.Warn("Replay engine exited unexpectedly", "dataset", r.cfg.ReplayDataset)
+			}
+			if time.Since(started) >= healthyReset {
+				backoff = initialBackoff
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < maxBackoff {
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+			IncLoadRestart("replay")
+			slog.Info("Restarting replay engine", "dataset", r.cfg.ReplayDataset)
 		}
 	}()
 
@@ -461,13 +508,11 @@ func (r *Runner) prepareReplayData(ctx context.Context) error {
 }
 
 func (r *Runner) stopLoad() {
-	if r.loadCmd == nil || r.loadCmd.Process == nil {
+	if r.loadSup == nil {
 		return
 	}
 	slog.Info("Stopping load generator")
-	r.loadCmd.Process.Signal(os.Interrupt)
-	r.loadCmd.Wait()
-	SetLoadRunning(false)
+	r.loadSup.Stop()
 }
 
 func (r *Runner) pollDBStats() {
@@ -577,8 +622,10 @@ func (r *Runner) pollList(client *http.Client) (string, float64, error) {
 
 	var result struct {
 		Databases []struct {
-			Status     string     `json:"status"`
-			LastSyncAt *time.Time `json:"last_sync_at,omitempty"`
+			Status         string     `json:"status"`
+			TXID           uint64     `json:"txid"`
+			ReplicatedTXID uint64     `json:"replicated_txid"`
+			LastSyncAt     *time.Time `json:"last_sync_at,omitempty"`
 		} `json:"databases"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -589,6 +636,14 @@ func (r *Runner) pollList(client *http.Client) (string, float64, error) {
 	}
 
 	db := result.Databases[0]
+	if db.TXID != 0 || db.ReplicatedTXID != 0 {
+		lag := uint64(0)
+		if db.TXID > db.ReplicatedTXID {
+			lag = db.TXID - db.ReplicatedTXID
+		}
+		SetReplicatedTXID(float64(db.ReplicatedTXID))
+		SetReplicationLag(float64(lag))
+	}
 	age := 0.0
 	if db.LastSyncAt != nil {
 		age = time.Since(*db.LastSyncAt).Seconds()
@@ -612,12 +667,15 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			result, err := r.verifier.RunCycle(ctx)
-			r.sendVerification(ctx, result)
+			r.sendVerification(context.WithoutCancel(ctx), result)
 			if err != nil {
 				slog.Error("Verification cycle error", "error", err)
 			}
-			if !result.Passed {
+			switch result.Status {
+			case "failed":
 				slog.Error("VERIFICATION FAILED — replication integrity compromised")
+			case "aborted":
+				slog.Warn("Verification aborted", "cause", context.Cause(ctx))
 			}
 		}
 	}
@@ -675,9 +733,11 @@ func (r *Runner) sendVerification(ctx context.Context, result VerificationResult
 
 	snapshot := r.currentSnapshot()
 	var failureDebug *reporting.FailureDebugSnapshot
-	if !result.Passed {
+	switch {
+	case result.Status == "aborted":
+	case !result.Passed:
 		failureDebug = r.captureFailureDebugSnapshotIfDue(result)
-	} else {
+	default:
 		r.resetFailureDebugState()
 	}
 	reportCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -702,7 +762,7 @@ func (r *Runner) sendVerification(ctx context.Context, result VerificationResult
 }
 
 func (r *Runner) failureClassification(result VerificationResult) *reporting.FailureClassification {
-	if result.Passed {
+	if result.Passed || result.Status == "aborted" {
 		return nil
 	}
 	classification := reporting.ClassifyVerificationFailure(result.CheckType, result.ErrorMessage)

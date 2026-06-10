@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -143,13 +144,13 @@ func TestVerifierWaitForSyncClosesIPCConnection(t *testing.T) {
 		case "/debug/sync-status":
 			_, _ = w.Write([]byte(`{"active":false}`))
 		case "/sync":
-			_, _ = w.Write([]byte(`{"status":"synced","txid":11,"replicated_txid":10}`))
+			_, _ = w.Write([]byte(`{"status":"synced","txid":11,"replicated_txid":11}`))
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 
-	verifier := NewVerifier(cfg, nil)
+	verifier := NewVerifier(cfg)
 	result := VerificationResult{}
 	if err := verifier.waitForSync(context.Background(), &result); err != nil {
 		t.Fatalf("waitForSync() error = %v", err)
@@ -160,8 +161,8 @@ func TestVerifierWaitForSyncClosesIPCConnection(t *testing.T) {
 	if result.SyncTXID != 11 {
 		t.Fatalf("sync txid=%d want 11", result.SyncTXID)
 	}
-	if result.SyncReplicatedTXID != 10 {
-		t.Fatalf("sync replicated txid=%d want 10", result.SyncReplicatedTXID)
+	if result.SyncReplicatedTXID != 11 {
+		t.Fatalf("sync replicated txid=%d want 11", result.SyncReplicatedTXID)
 	}
 
 	if !waitUntil(2*time.Second, 10*time.Millisecond, func() bool {
@@ -198,7 +199,7 @@ func TestVerifierWaitForSyncUsesConfiguredTimeout(t *testing.T) {
 		}
 	}))
 
-	verifier := NewVerifier(cfg, nil)
+	verifier := NewVerifier(cfg)
 	if err := verifier.waitForSync(context.Background(), &VerificationResult{}); err != nil {
 		t.Fatalf("waitForSync() error = %v", err)
 	}
@@ -236,7 +237,7 @@ exit 0
 		t.Fatal(err)
 	}
 
-	verifier := NewVerifier(cfg, nil)
+	verifier := NewVerifier(cfg)
 	passed, err := verifier.validate(context.Background(), 0x224b6)
 	if err != nil {
 		t.Fatalf("validate() error = %v", err)
@@ -291,7 +292,7 @@ exit 0
 		t.Fatal(err)
 	}
 
-	verifier := NewVerifier(cfg, nil)
+	verifier := NewVerifier(cfg)
 	passed, err := verifier.validate(context.Background(), 0x224b6)
 	if err != nil {
 		t.Fatalf("validate() error = %v", err)
@@ -356,7 +357,7 @@ func TestVerifierWaitForSyncCapturesSyncFailureDiagnostics(t *testing.T) {
 		}
 	}))
 
-	verifier := NewVerifier(cfg, nil)
+	verifier := NewVerifier(cfg)
 	result := VerificationResult{}
 	err := verifier.waitForSync(context.Background(), &result)
 	if err == nil {
@@ -761,10 +762,7 @@ func readLines(t *testing.T, path string) []string {
 func assertContains(t *testing.T, values []string, want string) {
 	t.Helper()
 
-	for _, value := range values {
-		if value == want {
-			return
-		}
+	if !slices.Contains(values, want) {
+		t.Fatalf("values=%v want %q", values, want)
 	}
-	t.Fatalf("values=%v want %q", values, want)
 }

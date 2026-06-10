@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"time"
 )
@@ -146,10 +147,17 @@ func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 	}
 	defer tx.Rollback()
 
-	_, err = tx.Exec(`INSERT OR IGNORE INTO gh_events (id, type, actor_login, repo_name, created_at, payload) VALUES (?, ?, ?, ?, ?, ?)`,
+	res, err := tx.Exec(`INSERT OR IGNORE INTO gh_events (id, type, actor_login, repo_name, created_at, payload) VALUES (?, ?, ?, ?, ?, ?)`,
 		e.ID, e.Type, e.Actor.Login, e.Repo.Name, ts, string(e.Payload))
 	if err != nil {
 		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if affected == 0 {
+		return tx.Commit()
 	}
 
 	switch e.Type {
@@ -158,7 +166,10 @@ func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 			Ref     string `json:"ref"`
 			Commits []any  `json:"commits"`
 		}
-		json.Unmarshal(e.Payload, &p)
+		if uerr := json.Unmarshal(e.Payload, &p); uerr != nil {
+			slog.Warn("gharchive payload parse failed", "event_id", e.ID, "type", e.Type, "error", uerr)
+			break
+		}
 		_, err = tx.Exec(`INSERT INTO gh_push_events (event_id, repo_name, actor_login, ref, commit_count, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 			e.ID, e.Repo.Name, e.Actor.Login, p.Ref, len(p.Commits), ts)
 
@@ -170,7 +181,10 @@ func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 				Title  string `json:"title"`
 			} `json:"issue"`
 		}
-		json.Unmarshal(e.Payload, &p)
+		if uerr := json.Unmarshal(e.Payload, &p); uerr != nil {
+			slog.Warn("gharchive payload parse failed", "event_id", e.ID, "type", e.Type, "error", uerr)
+			break
+		}
 		_, err = tx.Exec(`INSERT INTO gh_issue_events (event_id, repo_name, actor_login, action, issue_number, title, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			e.ID, e.Repo.Name, e.Actor.Login, p.Action, p.Issue.Number, p.Issue.Title, ts)
 
@@ -182,7 +196,10 @@ func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 				Title  string `json:"title"`
 			} `json:"pull_request"`
 		}
-		json.Unmarshal(e.Payload, &p)
+		if uerr := json.Unmarshal(e.Payload, &p); uerr != nil {
+			slog.Warn("gharchive payload parse failed", "event_id", e.ID, "type", e.Type, "error", uerr)
+			break
+		}
 		_, err = tx.Exec(`INSERT INTO gh_pr_events (event_id, repo_name, actor_login, action, pr_number, title, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			e.ID, e.Repo.Name, e.Actor.Login, p.Action, p.PullRequest.Number, p.PullRequest.Title, ts)
 

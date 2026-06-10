@@ -48,6 +48,11 @@ var (
 		Help: "Whether the load generator is currently running (1=yes, 0=paused).",
 	}, []string{"worker_id", "profile", "source"})
 
+	loadRestarts = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_load_restarts_total",
+		Help: "Total number of load generator restarts by kind.",
+	}, []string{"worker_id", "profile", "source", "kind"})
+
 	dbSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_db_size_bytes",
 		Help: "Current database file size in bytes.",
@@ -140,13 +145,13 @@ func SetUptime(seconds float64) {
 	workerUptime.WithLabelValues(currentMetricLabels()...).Set(seconds)
 }
 
-func RecordVerification(passed bool, durationSec float64) {
+func RecordVerificationOutcome(status string, durationSec float64) {
 	labels := currentMetricLabels()
-	if passed {
-		verificationTotal.WithLabelValues(append(labels, "passed")...).Inc()
+	verificationTotal.WithLabelValues(append(labels, status)...).Inc()
+	switch status {
+	case "passed":
 		verificationLastResult.WithLabelValues(labels...).Set(1)
-	} else {
-		verificationTotal.WithLabelValues(append(labels, "failed")...).Inc()
+	case "failed":
 		verificationLastResult.WithLabelValues(labels...).Set(0)
 	}
 	verificationDuration.WithLabelValues(labels...).Observe(durationSec)
@@ -158,6 +163,10 @@ func SetLoadRunning(running bool) {
 		value = 1
 	}
 	loadRunning.WithLabelValues(currentMetricLabels()...).Set(value)
+}
+
+func IncLoadRestart(kind string) {
+	loadRestarts.WithLabelValues(append(currentMetricLabels(), kind)...).Inc()
 }
 
 func SetDBSize(bytes int64) {
