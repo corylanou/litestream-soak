@@ -2,6 +2,7 @@ package workload
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -35,17 +36,17 @@ func (c Config) JSON() string {
 	return string(body)
 }
 
-func ParseConfig(raw string) Config {
+func ParseConfig(raw string) (Config, error) {
 	if strings.TrimSpace(raw) == "" {
-		return Config{}
+		return Config{}, nil
 	}
 
 	var cfg Config
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-		return Config{}
+		return Config{}, fmt.Errorf("parse workload config: %w", err)
 	}
 
-	return cfg
+	return cfg, nil
 }
 
 func (c Config) MetricLoadMode() string {
