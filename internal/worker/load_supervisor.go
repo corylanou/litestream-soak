@@ -196,6 +196,9 @@ func (s *loadSupervisor) Stop() {
 	s.mu.Unlock()
 
 	if cmd != nil && cmd.Process != nil && !exited {
+		// A SIGSTOPped child that traps SIGINT cannot handle it until it
+		// is continued, so resume it before interrupting.
+		_ = cmd.Process.Signal(syscall.SIGCONT)
 		if err := cmd.Process.Signal(os.Interrupt); err != nil && !isProcessGoneError(err) {
 			slog.Warn("Failed to interrupt load generator", "error", err)
 		}

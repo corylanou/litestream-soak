@@ -211,3 +211,41 @@ func TestLoadSupervisorPauseStopsProcess(t *testing.T) {
 		t.Fatal("file did not grow after resume")
 	}
 }
+
+func TestLoadSupervisorStopWhilePausedReturns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("signal handling requires Unix")
+	}
+
+	sup := newLoadSupervisor(func(ctx context.Context) (*exec.Cmd, error) {
+		cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "trap 'exit 0' INT; while true; do sleep 0.05; done")
+		if err := cmd.Start(); err != nil {
+			return nil, err
+		}
+		return cmd, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := sup.start(ctx); err != nil {
+		t.Fatalf("start() error = %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	if err := sup.Pause(context.Background()); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		sup.Stop()
+		close(stopDone)
+	}()
+
+	select {
+	case <-stopDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Stop() did not return while process was paused")
+	}
+}

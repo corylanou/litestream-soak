@@ -667,8 +667,8 @@ func TestVerifierPausesAllPausersAndResumesOnFailure(t *testing.T) {
 	if first.resumeCalls != 1 {
 		t.Fatalf("first pauser resume calls = %d, want 1 (rollback)", first.resumeCalls)
 	}
-	if second.resumeCalls != 0 {
-		t.Fatalf("second pauser resume calls = %d, want 0", second.resumeCalls)
+	if second.resumeCalls != 1 {
+		t.Fatalf("second pauser resume calls = %d, want 1 (failing pauser must be unparked)", second.resumeCalls)
 	}
 }
 
@@ -688,5 +688,119 @@ func TestVerifierResumeLoadResumesAllPausers(t *testing.T) {
 	}
 	if second.resumeCalls != 1 {
 		t.Fatalf("second pauser resume calls = %d, want 1", second.resumeCalls)
+	}
+}
+
+func TestWaitForSyncRejectsMissingTXIDFields(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("litestream-soak-notxid-%d.sock", time.Now().UnixNano()))
+
+	startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/debug/sync-status":
+			_, _ = w.Write([]byte(`{"active":false}`))
+		case "/sync":
+			_, _ = w.Write([]byte(`{"status":"synced"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	verifier := NewVerifier(cfg)
+	err := verifier.waitForSync(context.Background(), &VerificationResult{})
+	if err == nil {
+		t.Fatal("waitForSync() error = nil, want missing-txid error")
+	}
+	if !strings.Contains(err.Error(), "missing txid") {
+		t.Fatalf("waitForSync() error = %q, want missing txid error", err.Error())
+	}
+}
+
+func TestRunCycleFailsWhenStaleRestoredArtifactCannotBeRemoved(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("litestream-soak-dirty-%d.sock", time.Now().UnixNano()))
+
+	restoredPath := cfg.DBPath + ".restored"
+	if err := os.MkdirAll(filepath.Join(restoredPath, "blocker"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var syncRequests atomic.Int32
+	startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sync" {
+			syncRequests.Add(1)
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+
+	verifier := NewVerifier(cfg)
+	result, err := verifier.RunCycle(context.Background())
+	if err == nil {
+		t.Fatal("RunCycle() error = nil, want clean-restored error")
+	}
+	if result.Status != "failed" {
+		t.Fatalf("result status = %q, want failed", result.Status)
+	}
+	if syncRequests.Load() != 0 {
+		t.Fatalf("sync requests = %d, want 0 after clean-restored failure", syncRequests.Load())
+	}
+}
+
+func TestPollDBStatsZeroTXIDsResetReplicationMetrics(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkerID = "test-worker-poll-zero"
+	cfg.ProfileName = "test-profile"
+	cfg.Source = "test"
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("litestream-soak-pollzero-%d.sock", time.Now().UnixNano()))
+
+	if err := os.WriteFile(cfg.DBPath, []byte("1234567890"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	SetWorkerInfo(cfg)
+	var listBody atomic.Value
+	listBody.Store(`{"databases":[{"status":"replicating","txid":42,"replicated_txid":40}]}`)
+	startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/txid":
+			_, _ = w.Write([]byte(`{"txid":42}`))
+		case "/info":
+			_, _ = w.Write([]byte(`{"uptime_seconds":99}`))
+		case "/list":
+			_, _ = w.Write([]byte(listBody.Load().(string)))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	runner := NewRunner(cfg)
+	runner.pollDBStats()
+
+	labels := []string{cfg.WorkerID, cfg.ProfileName, cfg.Source}
+	if got := testutil.ToFloat64(replicatedTXID.WithLabelValues(labels...)); got != 40 {
+		t.Fatalf("soak_replicated_txid = %v, want 40", got)
+	}
+
+	listBody.Store(`{"databases":[{"status":"replicating","txid":0,"replicated_txid":0}]}`)
+	runner.pollDBStats()
+	if got := testutil.ToFloat64(replicatedTXID.WithLabelValues(labels...)); got != 0 {
+		t.Fatalf("soak_replicated_txid after zero report = %v, want 0", got)
+	}
+	if got := testutil.ToFloat64(replicationLag.WithLabelValues(labels...)); got != 0 {
+		t.Fatalf("soak_replication_lag_txids after zero report = %v, want 0", got)
+	}
+
+	listBody.Store(`{"databases":[{"status":"replicating"}]}`)
+	if got := testutil.ToFloat64(replicatedTXID.WithLabelValues(labels...)); got != 0 {
+		t.Fatalf("soak_replicated_txid = %v, want unchanged 0", got)
 	}
 }

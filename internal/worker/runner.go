@@ -391,45 +391,47 @@ func (r *Runner) startReplay(ctx context.Context) error {
 
 	r.replayEngine = engine
 
-	go func() {
-		const (
-			initialBackoff = 5 * time.Second
-			maxBackoff     = 2 * time.Minute
-			healthyReset   = 5 * time.Minute
-		)
-		backoff := initialBackoff
-		for {
-			started := time.Now()
-			err := engine.Run(ctx)
-			if ctx.Err() != nil {
-				return
-			}
-			if err != nil {
-				slog.Error("Replay engine failed", "dataset", r.cfg.ReplayDataset, "error", err)
-			} else {
-				slog.Warn("Replay engine exited unexpectedly", "dataset", r.cfg.ReplayDataset)
-			}
-			if time.Since(started) >= healthyReset {
-				backoff = initialBackoff
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(backoff):
-			}
-			if backoff < maxBackoff {
-				backoff *= 2
-				if backoff > maxBackoff {
-					backoff = maxBackoff
-				}
-			}
-			IncLoadRestart("replay")
-			slog.Info("Restarting replay engine", "dataset", r.cfg.ReplayDataset)
-		}
-	}()
+	go superviseReplay(ctx, r.cfg.ReplayDataset, r.cfg.ReplayLoop,
+		5*time.Second, 2*time.Minute, 5*time.Minute, engine.Run)
 
 	slog.Info("Replay engine started", "dataset", r.cfg.ReplayDataset, "speed", r.cfg.ReplaySpeed)
 	return nil
+}
+
+func superviseReplay(ctx context.Context, dataset string, loop bool, initialBackoff, maxBackoff, healthyReset time.Duration, run func(context.Context) error) {
+	backoff := initialBackoff
+	for {
+		started := time.Now()
+		err := run(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil && !loop {
+			slog.Info("Replay complete", "dataset", dataset)
+			return
+		}
+		if err != nil {
+			slog.Error("Replay engine failed", "dataset", dataset, "error", err)
+		} else {
+			slog.Warn("Replay engine exited unexpectedly", "dataset", dataset)
+		}
+		if time.Since(started) >= healthyReset {
+			backoff = initialBackoff
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+		IncLoadRestart("replay")
+		slog.Info("Restarting replay engine", "dataset", dataset)
+	}
 }
 
 func (r *Runner) prepareReplayData(ctx context.Context) error {
@@ -623,8 +625,8 @@ func (r *Runner) pollList(client *http.Client) (string, float64, error) {
 	var result struct {
 		Databases []struct {
 			Status         string     `json:"status"`
-			TXID           uint64     `json:"txid"`
-			ReplicatedTXID uint64     `json:"replicated_txid"`
+			TXID           *uint64    `json:"txid"`
+			ReplicatedTXID *uint64    `json:"replicated_txid"`
 			LastSyncAt     *time.Time `json:"last_sync_at,omitempty"`
 		} `json:"databases"`
 	}
@@ -636,12 +638,19 @@ func (r *Runner) pollList(client *http.Client) (string, float64, error) {
 	}
 
 	db := result.Databases[0]
-	if db.TXID != 0 || db.ReplicatedTXID != 0 {
-		lag := uint64(0)
-		if db.TXID > db.ReplicatedTXID {
-			lag = db.TXID - db.ReplicatedTXID
+	if db.TXID != nil || db.ReplicatedTXID != nil {
+		txid, replicated := uint64(0), uint64(0)
+		if db.TXID != nil {
+			txid = *db.TXID
 		}
-		SetReplicatedTXID(float64(db.ReplicatedTXID))
+		if db.ReplicatedTXID != nil {
+			replicated = *db.ReplicatedTXID
+		}
+		lag := uint64(0)
+		if txid > replicated {
+			lag = txid - replicated
+		}
+		SetReplicatedTXID(float64(replicated))
 		SetReplicationLag(float64(lag))
 	}
 	age := 0.0

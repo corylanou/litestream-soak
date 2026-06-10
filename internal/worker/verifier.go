@@ -120,8 +120,18 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 	}
 
 	restoredPath := v.cfg.DBPath + ".restored"
-	removeRestoredArtifacts(restoredPath)
-	defer removeRestoredArtifacts(restoredPath)
+	if err := recordVerificationStep(&result, "clean_restored", func() error {
+		return removeRestoredArtifacts(restoredPath)
+	}); err != nil {
+		v.failResult(ctx, &result, fmt.Sprintf("clean restored artifacts: %v", err))
+		v.logResult(start, false, result.ErrorMessage)
+		return result, fmt.Errorf("clean restored artifacts: %w", err)
+	}
+	defer func() {
+		if err := removeRestoredArtifacts(restoredPath); err != nil {
+			slog.Warn("Failed to remove restored artifacts", "error", err)
+		}
+	}()
 
 	if err := recordVerificationStep(&result, "pause_load", func() error {
 		return v.pauseLoad(ctx)
@@ -203,10 +213,14 @@ func (v *Verifier) failResult(ctx context.Context, result *VerificationResult, m
 	v.finalizeResult(result)
 }
 
-func removeRestoredArtifacts(restoredPath string) {
-	_ = os.Remove(restoredPath)
-	_ = os.Remove(restoredPath + "-wal")
-	_ = os.Remove(restoredPath + "-shm")
+func removeRestoredArtifacts(restoredPath string) error {
+	var errs []error
+	for _, path := range []string{restoredPath, restoredPath + "-wal", restoredPath + "-shm"} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (v *Verifier) logResult(start time.Time, passed bool, errMsg string) {
@@ -243,7 +257,9 @@ func (v *Verifier) pauseLoad(ctx context.Context) error {
 		err := pauser.Pause(pauseCtx)
 		cancel()
 		if err != nil {
-			for j := i - 1; j >= 0; j-- {
+			// Resume the failing pauser too: Pause may mark internal paused
+			// state (e.g. a quiesce wait that timed out) before returning.
+			for j := i; j >= 0; j-- {
 				v.pausers[j].Resume()
 			}
 			return fmt.Errorf("pause load generator %d of %d: %w", i+1, len(v.pausers), err)
@@ -402,11 +418,22 @@ func (v *Verifier) syncOnce(ctx context.Context, budget time.Duration) (syncResp
 	if body == "" {
 		return syncResponse{}, errors.New("sync response was empty")
 	}
-	var syncResp syncResponse
-	if err := json.Unmarshal([]byte(body), &syncResp); err != nil {
+	var raw struct {
+		Status         string  `json:"status"`
+		TXID           *uint64 `json:"txid"`
+		ReplicatedTXID *uint64 `json:"replicated_txid"`
+	}
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
 		return syncResponse{}, fmt.Errorf("decode sync response: %w", err)
 	}
-	return syncResp, nil
+	if raw.TXID == nil || raw.ReplicatedTXID == nil {
+		return syncResponse{}, errors.New("sync response missing txid fields")
+	}
+	return syncResponse{
+		Status:         raw.Status,
+		TXID:           *raw.TXID,
+		ReplicatedTXID: *raw.ReplicatedTXID,
+	}, nil
 }
 
 func (v *Verifier) captureSyncFailureDiagnostics(result *VerificationResult, syncErr error) {

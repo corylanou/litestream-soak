@@ -766,3 +766,51 @@ func assertContains(t *testing.T, values []string, want string) {
 		t.Fatalf("values=%v want %q", values, want)
 	}
 }
+
+func TestSuperviseReplayDoesNotRestartAfterCleanNonLoopExit(t *testing.T) {
+	var runs atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		superviseReplay(context.Background(), "test", false,
+			time.Millisecond, time.Millisecond, time.Minute,
+			func(context.Context) error {
+				runs.Add(1)
+				return nil
+			})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("superviseReplay did not return after clean non-loop exit")
+	}
+	if got := runs.Load(); got != 1 {
+		t.Fatalf("replay runs = %d, want 1", got)
+	}
+}
+
+func TestSuperviseReplayRestartsAfterError(t *testing.T) {
+	var runs atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	block := make(chan struct{})
+	defer close(block)
+
+	go superviseReplay(ctx, "test", false,
+		time.Millisecond, time.Millisecond, time.Minute,
+		func(c context.Context) error {
+			if runs.Add(1) == 1 {
+				return errors.New("replay exploded")
+			}
+			select {
+			case <-block:
+			case <-c.Done():
+			}
+			return nil
+		})
+
+	if !waitUntil(2*time.Second, 5*time.Millisecond, func() bool { return runs.Load() >= 2 }) {
+		t.Fatalf("replay runs = %d, want >= 2 after error", runs.Load())
+	}
+}
