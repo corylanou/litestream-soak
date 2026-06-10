@@ -38,6 +38,7 @@ type VerificationResult struct {
 	LitestreamGoroutinesOnSyncFailure *reporting.LitestreamGoroutineSnapshot
 	SyncTXID                          uint64
 	SyncReplicatedTXID                uint64
+	CheckpointResidualBusy            bool
 }
 
 type verificationStepMetadataError struct {
@@ -150,7 +151,9 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 	time.Sleep(2 * time.Second)
 
 	if err := recordVerificationStep(&result, "checkpoint", func() error {
-		return v.checkpoint(ctx)
+		residualBusy, cpErr := v.checkpoint(ctx)
+		result.CheckpointResidualBusy = residualBusy
+		return cpErr
 	}); err != nil {
 		v.failResult(ctx, &result, fmt.Sprintf("checkpoint: %v", err))
 		v.logResult(start, false, result.ErrorMessage)
@@ -278,12 +281,12 @@ func (v *Verifier) resumeLoad() {
 	slog.Info("Resumed load generators", "count", len(v.pausers))
 }
 
-func (v *Verifier) checkpoint(ctx context.Context) error {
+func (v *Verifier) checkpoint(ctx context.Context) (residualBusy bool, _ error) {
 	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)",
 		v.cfg.DBPath, v.checkpointBusyTimeout.Milliseconds())
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return false, fmt.Errorf("open database: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(1)
@@ -300,12 +303,12 @@ func (v *Verifier) checkpoint(ctx context.Context) error {
 			}
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return false, ctx.Err()
 			case <-time.After(v.checkpointRetryDelay):
 			}
 			if len(v.pausers) > 0 {
 				if err := v.pauseLoad(ctx); err != nil {
-					return fmt.Errorf("re-pause load during checkpoint retry: %w", err)
+					return false, fmt.Errorf("re-pause load during checkpoint retry: %w", err)
 				}
 			}
 		}
@@ -317,14 +320,21 @@ func (v *Verifier) checkpoint(ctx context.Context) error {
 		if busy == 0 {
 			slog.Info("WAL checkpoint complete",
 				"mode", checkpointMode, "busy", busy, "log_frames", logFrames, "checkpointed", checkpointed)
-			return nil
+			return false, nil
 		}
 	}
 	if lastErr != nil {
-		return fmt.Errorf("checkpoint after %d attempts: %w", v.checkpointAttempts, lastErr)
+		return false, fmt.Errorf("checkpoint after %d attempts: %w", v.checkpointAttempts, lastErr)
 	}
-	return fmt.Errorf("checkpoint busy after %d attempts: busy=%d log=%d checkpointed=%d",
-		v.checkpointAttempts, busy, logFrames, checkpointed)
+	// Litestream holds a long-lived WAL read transaction by design, so a
+	// second-process TRUNCATE checkpoint can stay busy indefinitely. The
+	// un-checkpointed tail is still replicated from the WAL, and the sync
+	// step's ReplicatedTXID >= TXID gate is the stale-restore guard, so a
+	// residual-busy checkpoint must not fail the cycle.
+	slog.Warn("WAL checkpoint left residual frames; relying on sync TXID gate",
+		"mode", checkpointMode, "attempts", v.checkpointAttempts,
+		"busy", busy, "log_frames", logFrames, "checkpointed", checkpointed)
+	return true, nil
 }
 
 func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) error {
