@@ -160,6 +160,79 @@ func TestBuildDeploymentRolloutIgnoresAbortedForVerifiedSinceDeploy(t *testing.T
 	}
 }
 
+func TestBuildDeploymentScorecardExcludesRegionalWorkers(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	startedAt := timeMustParse("2026-04-26T15:00:00Z")
+	deployment := model.Deployment{
+		GitSHA:        "sha-new",
+		LitestreamSHA: "litestream-new",
+		Source:        "main",
+		StartedAt:     startedAt,
+	}
+
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-low-vol",
+		Name:          "worker-main-low-vol",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        deployment.GitSHA,
+		LitestreamSHA: deployment.LitestreamSHA,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+		Region:        "ord",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-low-vol-syd",
+		Name:          "worker-main-low-vol-syd",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        deployment.GitSHA,
+		LitestreamSHA: deployment.LitestreamSHA,
+		ProfileName:   "low-vol-syd",
+		ProfileConfig: "{}",
+		Region:        "syd",
+	})
+
+	passedAt := startedAt.Add(time.Minute)
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-main-low-vol",
+		StartedAt:   passedAt.Add(-15 * time.Second),
+		CompletedAt: &passedAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+	})
+	failedAt := startedAt.Add(2 * time.Minute)
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:     "worker-main-low-vol-syd",
+		StartedAt:    failedAt.Add(-15 * time.Second),
+		CompletedAt:  &failedAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		Passed:       false,
+		ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": context deadline exceeded`,
+	})
+
+	scorecard, err := buildDeploymentScorecard(db, deployment, nil)
+	if err != nil {
+		t.Fatalf("buildDeploymentScorecard() error = %v", err)
+	}
+	if scorecard.TotalWorkers != 1 {
+		t.Fatalf("TotalWorkers = %d, want 1", scorecard.TotalWorkers)
+	}
+	if scorecard.PassedWorkers != 1 {
+		t.Fatalf("PassedWorkers = %d, want 1", scorecard.PassedWorkers)
+	}
+	if scorecard.FailedWorkers != 0 {
+		t.Fatalf("FailedWorkers = %d, want 0", scorecard.FailedWorkers)
+	}
+	if len(scorecard.Outcomes) != 1 || scorecard.Outcomes[0].WorkerID != "worker-main-low-vol" {
+		t.Fatalf("Outcomes = %+v, want only worker-main-low-vol", scorecard.Outcomes)
+	}
+}
+
 func TestCountDeploymentScorecardOutcomeCountsFailuresBySignature(t *testing.T) {
 	t.Parallel()
 

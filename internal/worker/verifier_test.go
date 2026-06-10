@@ -376,7 +376,7 @@ func TestWaitForSyncSetsReplicationMetrics(t *testing.T) {
 		t.Fatalf("waitForSync() error = %v", err)
 	}
 
-	labels := []string{cfg.WorkerID, cfg.ProfileName, cfg.Source}
+	labels := []string{cfg.WorkerID, cfg.ProfileName, cfg.Source, metricRegion(cfg.Region)}
 	if got := testutil.ToFloat64(replicatedTXID.WithLabelValues(labels...)); got != 42 {
 		t.Fatalf("soak_replicated_txid = %v, want 42", got)
 	}
@@ -417,7 +417,7 @@ func TestPollDBStatsSetsReplicationMetrics(t *testing.T) {
 	runner := NewRunner(cfg)
 	runner.pollDBStats()
 
-	labels := []string{cfg.WorkerID, cfg.ProfileName, cfg.Source}
+	labels := []string{cfg.WorkerID, cfg.ProfileName, cfg.Source, metricRegion(cfg.Region)}
 	if got := testutil.ToFloat64(replicatedTXID.WithLabelValues(labels...)); got != 40 {
 		t.Fatalf("soak_replicated_txid = %v, want 40", got)
 	}
@@ -523,7 +523,7 @@ func TestRecordVerificationOutcomeAborted(t *testing.T) {
 	cfg.Source = "test"
 	SetWorkerInfo(cfg)
 
-	labels := []string{cfg.WorkerID, cfg.ProfileName, cfg.Source}
+	labels := []string{cfg.WorkerID, cfg.ProfileName, cfg.Source, metricRegion(cfg.Region)}
 	RecordVerificationOutcome("passed", 0)
 	if got := testutil.ToFloat64(verificationLastResult.WithLabelValues(labels...)); got != 1 {
 		t.Fatalf("last result after passed = %v, want 1", got)
@@ -550,7 +550,7 @@ func TestRunCycleRecordsFailedMetricOnEarlyFailure(t *testing.T) {
 	cfg.DBPath = filepath.Join(dir, "test.db")
 	SetWorkerInfo(cfg)
 
-	labels := []string{cfg.WorkerID, cfg.ProfileName, cfg.Source}
+	labels := []string{cfg.WorkerID, cfg.ProfileName, cfg.Source, metricRegion(cfg.Region)}
 	before := testutil.ToFloat64(verificationTotal.WithLabelValues(append(labels, "failed")...))
 
 	verifier := NewVerifier(cfg, &fakePauser{pauseErr: errors.New("pause exploded")})
@@ -578,7 +578,7 @@ func TestRunCycleMarksAbortedOnContextCancellation(t *testing.T) {
 	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("litestream-soak-abort-%d.sock", time.Now().UnixNano()))
 	SetWorkerInfo(cfg)
 
-	labels := []string{cfg.WorkerID, cfg.ProfileName, cfg.Source}
+	labels := []string{cfg.WorkerID, cfg.ProfileName, cfg.Source, metricRegion(cfg.Region)}
 	RecordVerificationOutcome("passed", 0)
 	abortedBefore := testutil.ToFloat64(verificationTotal.WithLabelValues(append(labels, "aborted")...))
 
@@ -818,7 +818,7 @@ func TestPollDBStatsZeroTXIDsResetReplicationMetrics(t *testing.T) {
 	runner := NewRunner(cfg)
 	runner.pollDBStats()
 
-	labels := []string{cfg.WorkerID, cfg.ProfileName, cfg.Source}
+	labels := []string{cfg.WorkerID, cfg.ProfileName, cfg.Source, metricRegion(cfg.Region)}
 	if got := testutil.ToFloat64(replicatedTXID.WithLabelValues(labels...)); got != 40 {
 		t.Fatalf("soak_replicated_txid = %v, want 40", got)
 	}

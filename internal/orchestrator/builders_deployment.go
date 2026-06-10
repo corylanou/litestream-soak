@@ -253,7 +253,32 @@ func deploymentScorecardSource(deployment model.Deployment) string {
 }
 
 func deploymentScorecardWorkers(db *model.DB, deployment model.Deployment) ([]model.Worker, error) {
-	return db.ListWorkersForSource(deploymentScorecardSource(deployment))
+	workers, err := db.ListWorkersForSource(deploymentScorecardSource(deployment))
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := make([]model.Worker, 0, len(workers))
+	for _, worker := range workers {
+		if workerIncludedInReleaseQuality(worker) {
+			filtered = append(filtered, worker)
+		}
+	}
+	return filtered, nil
+}
+
+func workerIncludedInReleaseQuality(worker model.Worker) bool {
+	region := strings.TrimSpace(worker.Region)
+	if region != "" && region != "ord" {
+		return false
+	}
+
+	switch strings.TrimSpace(worker.ProfileName) {
+	case "low-vol-syd", "high-vol-ams":
+		return false
+	default:
+		return true
+	}
 }
 
 func scoreDeploymentWorker(worker model.Worker, deployment model.Deployment, verifications []model.Verification, windowEnd *time.Time) (DeploymentWorkerOutcome, bool) {
