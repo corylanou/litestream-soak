@@ -292,10 +292,21 @@ func (v *Verifier) checkpoint(ctx context.Context) error {
 	var lastErr error
 	for attempt := 1; attempt <= v.checkpointAttempts; attempt++ {
 		if attempt > 1 {
+			// SIGSTOP can freeze a load process mid-transaction, making the
+			// busy state permanent for the cycle; briefly resuming the
+			// writers lets the lock holder finish before the retry.
+			if len(v.pausers) > 0 {
+				v.resumeLoad()
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(v.checkpointRetryDelay):
+			}
+			if len(v.pausers) > 0 {
+				if err := v.pauseLoad(ctx); err != nil {
+					return fmt.Errorf("re-pause load during checkpoint retry: %w", err)
+				}
 			}
 		}
 		lastErr = db.QueryRowContext(ctx, "PRAGMA wal_checkpoint("+checkpointMode+");").

@@ -215,3 +215,37 @@ func TestEnginePauseRespectsContext(t *testing.T) {
 	cancelRun()
 	<-runDone
 }
+
+func TestEnginePauseAcksDuringEmptyLoop(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	var inserted atomic.Int64
+	engine := NewEngine(Config{
+		DBPath: filepath.Join(dir, "replay.db"),
+		Loop:   true,
+	}, countingAdapter{rowsPerPass: 0, inserted: &inserted})
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		_ = engine.Run(runCtx)
+	}()
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		engine.mu.Lock()
+		defer engine.mu.Unlock()
+		return engine.running
+	})
+
+	pauseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := engine.Pause(pauseCtx); err != nil {
+		t.Fatalf("Pause() error = %v, want ack while looping over empty dataset", err)
+	}
+	engine.Resume()
+	cancelRun()
+	<-runDone
+}

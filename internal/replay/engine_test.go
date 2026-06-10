@@ -207,3 +207,60 @@ func TestEngineRunWaitsForTransientWriterLock(t *testing.T) {
 		t.Fatalf("row count=%d, want 1", count)
 	}
 }
+
+type busyInsertAdapter struct{}
+
+func (busyInsertAdapter) Name() string { return "busy-cancel" }
+
+func (busyInsertAdapter) CreateTables(db *sql.DB) error { return nil }
+
+func (busyInsertAdapter) Rows() (RowIterator, error) { return &busyInsertIterator{remaining: 1}, nil }
+
+type busyInsertIterator struct{ remaining int }
+
+func (it *busyInsertIterator) Next() bool {
+	if it.remaining == 0 {
+		return false
+	}
+	it.remaining--
+	return true
+}
+
+func (it *busyInsertIterator) Timestamp() time.Time { return time.Unix(0, 0) }
+
+func (it *busyInsertIterator) Insert(db *sql.DB) error { return errors.New("database is locked") }
+
+func (it *busyInsertIterator) Err() error   { return nil }
+func (it *busyInsertIterator) Close() error { return nil }
+
+func TestEngineCancellationNotCountedAsDrop(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := Config{
+		DBPath:      filepath.Join(dir, "replay.db"),
+		WorkerID:    "worker-cancel",
+		ProfileName: "profile-cancel",
+		Source:      "source-cancel",
+	}
+
+	engine := NewEngine(cfg, busyInsertAdapter{})
+
+	labels := []string{"busy-cancel", cfg.WorkerID, cfg.ProfileName, cfg.Source}
+	before := testutil.ToFloat64(replayDroppedRowsTotal.WithLabelValues(labels...))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+
+	if err := engine.Run(ctx); err != nil {
+		t.Fatalf("engine run: %v", err)
+	}
+
+	after := testutil.ToFloat64(replayDroppedRowsTotal.WithLabelValues(labels...))
+	if after != before {
+		t.Fatalf("dropped rows %v -> %v, want unchanged when canceled mid-retry", before, after)
+	}
+}

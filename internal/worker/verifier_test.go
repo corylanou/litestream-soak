@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -808,5 +809,83 @@ func TestPollDBStatsZeroTXIDsResetReplicationMetrics(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(replicationLag.WithLabelValues(labels...)); got != 3 {
 		t.Fatalf("soak_replication_lag_txids = %v, want unchanged 3 when fields absent", got)
+	}
+}
+
+type releasingPauser struct {
+	pauseCalls  atomic.Int32
+	resumeCalls atomic.Int32
+	onResume    func()
+}
+
+func (p *releasingPauser) Pause(ctx context.Context) error {
+	p.pauseCalls.Add(1)
+	return nil
+}
+
+func (p *releasingPauser) Resume() {
+	if p.resumeCalls.Add(1) == 1 && p.onResume != nil {
+		p.onResume()
+	}
+}
+
+func TestCheckpointCyclesPausersWhenBusy(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	createWALDatabaseWithPendingFrames(t, dbPath)
+
+	lockDB, err := sql.Open("sqlite", walDSN(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := lockDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(context.Background(), "INSERT INTO t (body) VALUES ('frozen')"); err != nil {
+		t.Fatal(err)
+	}
+
+	release := make(chan struct{})
+	released := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseLock := func() { releaseOnce.Do(func() { close(release) }) }
+	go func() {
+		<-release
+		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		_ = conn.Close()
+		close(released)
+	}()
+	t.Cleanup(func() {
+		releaseLock()
+		<-released
+		_ = lockDB.Close()
+	})
+
+	pauser := &releasingPauser{onResume: func() {
+		releaseLock()
+		<-released
+	}}
+
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = dbPath
+
+	verifier := NewVerifier(cfg, pauser)
+	verifier.checkpointAttempts = 2
+	verifier.checkpointRetryDelay = 20 * time.Millisecond
+	verifier.checkpointBusyTimeout = 50 * time.Millisecond
+
+	if err := verifier.checkpoint(context.Background()); err != nil {
+		t.Fatalf("checkpoint() error = %v, want success after pauser cycle releases the writer", err)
+	}
+	if pauser.resumeCalls.Load() == 0 {
+		t.Fatal("expected checkpoint to resume pausers between busy attempts")
+	}
+	if pauser.pauseCalls.Load() == 0 {
+		t.Fatal("expected checkpoint to re-pause pausers before retrying")
 	}
 }

@@ -200,6 +200,12 @@ func (e *Engine) Run(ctx context.Context) error {
 }
 
 func (e *Engine) replayOnce(ctx context.Context) error {
+	// Loop mode can cycle passes without ever reaching the per-row gate
+	// (e.g. an empty dataset), so a pending Pause must be acknowledged here.
+	if err := e.waitIfPaused(ctx); err != nil {
+		return err
+	}
+
 	name := e.adapter.Name()
 	labels := e.metricLabels(name)
 	iter, err := e.adapter.Rows()
@@ -240,6 +246,9 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 
 		start := time.Now()
 		if err := e.insertWithRetry(ctx, func() error { return iter.Insert(e.db) }); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			replayErrorsTotal.WithLabelValues(labels...).Inc()
 			replayDroppedRowsTotal.WithLabelValues(labels...).Inc()
 			dropped++
