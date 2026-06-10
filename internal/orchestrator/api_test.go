@@ -1442,3 +1442,677 @@ func TestBuildHomePageDataStalestRuntimeAt(t *testing.T) {
 		t.Fatalf("StalestRuntimeAt = %v, want %v (oldest timestamp)", data.Summary.StalestRuntimeAt, olderAt)
 	}
 }
+
+func TestHandleDeploymentReady(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil deployer returns 500", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		api := NewAPI(db, nil, nil, nil, nil, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?sha=abc1234&litestream_sha=ls123", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleDeploymentReady(recorder, request)
+
+		if recorder.Code != http.StatusInternalServerError {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusInternalServerError)
+		}
+	})
+
+	t.Run("missing sha returns 400", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		deployer := &Deployer{db: db}
+		api := NewAPI(db, nil, nil, nil, nil, deployer)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleDeploymentReady(recorder, request)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("malformed JSON body returns 400", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		deployer := &Deployer{db: db}
+		api := NewAPI(db, nil, nil, nil, nil, deployer)
+		body := bytes.NewBufferString(`{"sha": not-valid-json}`)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready", body)
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+
+		api.handleDeploymentReady(recorder, request)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("valid request accepted with echoed fields", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		deployer := &Deployer{db: db}
+		api := NewAPI(db, nil, nil, nil, nil, deployer)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?sha=not-hex-sha&litestream_sha=ls-abc123&image=registry.fly.io%2Fapp%3Anot-hex-sha", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleDeploymentReady(recorder, request)
+
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+		}
+
+		var resp map[string]any
+		if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp["sha"] != "not-hex-sha" {
+			t.Fatalf("sha = %v, want not-hex-sha", resp["sha"])
+		}
+		if resp["source"] != "main" {
+			t.Fatalf("source = %v, want main", resp["source"])
+		}
+		if resp["trigger"] != "deploy_ready" {
+			t.Fatalf("trigger = %v, want deploy_ready", resp["trigger"])
+		}
+		if resp["image_ref"] != "registry.fly.io/app:not-hex-sha" {
+			t.Fatalf("image_ref = %v, want registry.fly.io/app:not-hex-sha", resp["image_ref"])
+		}
+		if resp["accepted"] != true {
+			t.Fatalf("accepted = %v, want true", resp["accepted"])
+		}
+	})
+}
+
+func TestHandleRollWorker(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil manager returns 500", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		api := NewAPI(db, nil, nil, nil, nil, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/workers/worker-main-low/roll?sha=abc1234&litestream_sha=ls123&image=reg%2Fimg%3Atag", nil)
+		request.SetPathValue("id", "worker-main-low")
+		recorder := httptest.NewRecorder()
+
+		api.handleRollWorker(recorder, request)
+
+		if recorder.Code != http.StatusInternalServerError {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusInternalServerError)
+		}
+	})
+
+	t.Run("empty worker id returns 400", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		manager := &Manager{db: db, appName: "litestream-soak"}
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/workers//roll?sha=abc1234&litestream_sha=ls123&image=reg%2Fimg%3Atag", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleRollWorker(recorder, request)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("missing sha returns 400", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		manager := &Manager{db: db, appName: "litestream-soak"}
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		workerID := "worker-roll-no-sha"
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "abc1234",
+			LitestreamSHA: "ls123",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/workers/"+workerID+"/roll?litestream_sha=ls123&image=reg%2Fimg%3Atag", nil)
+		request.SetPathValue("id", workerID)
+		recorder := httptest.NewRecorder()
+
+		api.handleRollWorker(recorder, request)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("missing litestream_sha returns 400", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		manager := &Manager{db: db, appName: "litestream-soak"}
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		workerID := "worker-roll-no-lsha"
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "abc1234",
+			LitestreamSHA: "ls123",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/workers/"+workerID+"/roll?sha=abc1234&image=reg%2Fimg%3Atag", nil)
+		request.SetPathValue("id", workerID)
+		recorder := httptest.NewRecorder()
+
+		api.handleRollWorker(recorder, request)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("unknown worker id returns 404", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		manager := &Manager{db: db, appName: "litestream-soak"}
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/workers/does-not-exist/roll?sha=abc1234&litestream_sha=ls123&image=reg%2Fimg%3Atag", nil)
+		request.SetPathValue("id", "does-not-exist")
+		recorder := httptest.NewRecorder()
+
+		api.handleRollWorker(recorder, request)
+
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("source mismatch returns 400 and no deployment created", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		manager := &Manager{db: db, appName: "litestream-soak"}
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		workerID := "worker-roll-mismatch"
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "abc1234",
+			LitestreamSHA: "ls123",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/workers/"+workerID+"/roll?sha=abc1234&litestream_sha=ls123&source=pr-123&image=reg%2Fimg%3Atag", nil)
+		request.SetPathValue("id", workerID)
+		recorder := httptest.NewRecorder()
+
+		api.handleRollWorker(recorder, request)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+		if _, err := db.GetDeploymentByVersion("pr-123", "abc1234", "ls123"); err == nil {
+			t.Fatalf("GetDeploymentByVersion() returned nil error — no deployment should have been created on mismatch")
+		}
+	})
+
+	t.Run("success returns 202 and records state", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		manager := &Manager{db: db, appName: "litestream-soak"}
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		workerID := "worker-roll-success"
+		const sha = "abc1234def56789"
+		const litestreamSHA = "ls123abc456def7"
+		const imageRef = "registry.fly.io/litestream-soak:abc1234"
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        sha,
+			LitestreamSHA: litestreamSHA,
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/workers/"+workerID+"/roll?sha="+sha+"&litestream_sha="+litestreamSHA+"&image="+imageRef, nil)
+		request.SetPathValue("id", workerID)
+		recorder := httptest.NewRecorder()
+
+		api.handleRollWorker(recorder, request)
+
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+		}
+
+		dep, err := db.GetDeploymentByVersion("main", sha, litestreamSHA)
+		if err != nil {
+			t.Fatalf("GetDeploymentByVersion() error = %v", err)
+		}
+		if dep.Status != "ready" {
+			t.Fatalf("deployment Status = %q, want ready", dep.Status)
+		}
+		if dep.ImageRef != imageRef {
+			t.Fatalf("deployment ImageRef = %q, want %q", dep.ImageRef, imageRef)
+		}
+
+		events, err := db.ListWorkerEvents(workerID, 10)
+		if err != nil {
+			t.Fatalf("ListWorkerEvents() error = %v", err)
+		}
+		found := false
+		for _, e := range events {
+			if e.EventType == "targeted_rollout_requested" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("targeted_rollout_requested event not recorded; got: %+v", events)
+		}
+	})
+}
+
+func TestHandleResumeDormantWorkers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil manager returns 500", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		api := NewAPI(db, nil, nil, nil, nil, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/resume-dormant?image=reg%2Fimg%3Atag", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleResumeDormantWorkers(recorder, request)
+
+		if recorder.Code != http.StatusInternalServerError {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusInternalServerError)
+		}
+	})
+
+	t.Run("no dormant workers returns 200 with zero count and event", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		manager := &Manager{db: db, appName: "litestream-soak"}
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/resume-dormant?image=reg%2Fimg%3Atag", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleResumeDormantWorkers(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+
+		var resp map[string]any
+		if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp["resumed_workers"] != float64(0) {
+			t.Fatalf("resumed_workers = %v, want 0", resp["resumed_workers"])
+		}
+
+		events, err := db.ListEvents(10)
+		if err != nil {
+			t.Fatalf("ListEvents() error = %v", err)
+		}
+		found := false
+		for _, e := range events {
+			if e.EventType == "manual_resume_requested" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("manual_resume_requested event not recorded; got: %+v", events)
+		}
+	})
+
+	t.Run("dormant worker with no machine or volume returns 500 and worker stays dormant", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		manager := &Manager{db: db, appName: "litestream-soak"}
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		workerID := "worker-resume-no-vol"
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "abc1234",
+			LitestreamSHA: "ls123",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+		if err := db.MarkWorkerDormant(workerID, "probe window expired", "probe_expired", "probe"); err != nil {
+			t.Fatalf("MarkWorkerDormant() error = %v", err)
+		}
+
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/resume-dormant?image=reg%2Fimg%3Atag", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleResumeDormantWorkers(recorder, request)
+
+		if recorder.Code != http.StatusInternalServerError {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
+		}
+
+		worker, err := db.GetWorker(workerID)
+		if err != nil {
+			t.Fatalf("GetWorker() error = %v", err)
+		}
+		if worker.Status != model.WorkerDormant {
+			t.Fatalf("Status = %q, want %q (worker must remain dormant)", worker.Status, model.WorkerDormant)
+		}
+
+		events, err := db.ListWorkerEvents(workerID, 10)
+		if err != nil {
+			t.Fatalf("ListWorkerEvents() error = %v", err)
+		}
+		found := false
+		for _, e := range events {
+			if e.EventType == "worker_probe_start_failed" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("worker_probe_start_failed event not recorded; got: %+v", events)
+		}
+	})
+
+	t.Run("dormant worker on different source leaves it dormant", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		manager := &Manager{db: db, appName: "litestream-soak"}
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		workerID := "worker-pr7-dormant"
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "pr-7",
+			GitSHA:        "abc1234",
+			LitestreamSHA: "ls123",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+			PRNumber:      7,
+		})
+		if err := db.MarkWorkerDormant(workerID, "probe window expired", "probe_expired", "probe"); err != nil {
+			t.Fatalf("MarkWorkerDormant() error = %v", err)
+		}
+
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/resume-dormant?source=main&image=reg%2Fimg%3Atag", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleResumeDormantWorkers(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+
+		var resp map[string]any
+		if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp["resumed_workers"] != float64(0) {
+			t.Fatalf("resumed_workers = %v, want 0", resp["resumed_workers"])
+		}
+
+		worker, err := db.GetWorker(workerID)
+		if err != nil {
+			t.Fatalf("GetWorker() error = %v", err)
+		}
+		if worker.Status != model.WorkerDormant {
+			t.Fatalf("Status = %q, want %q (pr-7 worker must remain dormant)", worker.Status, model.WorkerDormant)
+		}
+	})
+}
+
+func TestHandlePauseSourceWorkers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil manager returns 500", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		api := NewAPI(db, nil, nil, nil, nil, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/pause-source", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handlePauseSourceWorkers(recorder, request)
+
+		if recorder.Code != http.StatusInternalServerError {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusInternalServerError)
+		}
+	})
+
+	t.Run("only stopped and dormant workers returns 200 with zero paused", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		manager := &Manager{db: db, appName: "litestream-soak"}
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+
+		createTestWorker(t, db, model.Worker{
+			ID:            "worker-pause-stopped",
+			Name:          "worker-pause-stopped",
+			Status:        model.WorkerStopped,
+			Source:        "main",
+			GitSHA:        "abc1234",
+			LitestreamSHA: "ls123",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+		createTestWorker(t, db, model.Worker{
+			ID:            "worker-pause-dormant",
+			Name:          "worker-pause-dormant",
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "abc1234",
+			LitestreamSHA: "ls123",
+			ProfileName:   "high-volume",
+			ProfileConfig: "{}",
+		})
+		if err := db.MarkWorkerDormant("worker-pause-dormant", "probe expired", "probe_expired", "probe"); err != nil {
+			t.Fatalf("MarkWorkerDormant() error = %v", err)
+		}
+
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/pause-source?source=main", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handlePauseSourceWorkers(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+
+		var resp map[string]any
+		if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp["paused_workers"] != float64(0) {
+			t.Fatalf("paused_workers = %v, want 0", resp["paused_workers"])
+		}
+	})
+
+	t.Run("running worker gets dormanted with correct fields", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		manager := &Manager{db: db, appName: "litestream-soak"}
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		workerID := "worker-pause-running"
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "abc1234",
+			LitestreamSHA: "ls123",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/pause-source?source=main&reason=manual+pause+test&signature=manual_pause_test", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handlePauseSourceWorkers(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+
+		worker, err := db.GetWorker(workerID)
+		if err != nil {
+			t.Fatalf("GetWorker() error = %v", err)
+		}
+		if worker.Status != model.WorkerDormant {
+			t.Fatalf("Status = %q, want %q", worker.Status, model.WorkerDormant)
+		}
+		if worker.DormantAt == nil {
+			t.Fatalf("DormantAt = nil, want non-nil")
+		}
+		if worker.DormantReason != "manual pause test" {
+			t.Fatalf("DormantReason = %q, want %q", worker.DormantReason, "manual pause test")
+		}
+		if worker.DormantSignature != "manual_pause_test" {
+			t.Fatalf("DormantSignature = %q, want %q", worker.DormantSignature, "manual_pause_test")
+		}
+
+		events, err := db.ListWorkerEvents(workerID, 10)
+		if err != nil {
+			t.Fatalf("ListWorkerEvents() error = %v", err)
+		}
+		workerDormantFound := false
+		for _, e := range events {
+			if e.EventType == "worker_dormant" {
+				workerDormantFound = true
+				break
+			}
+		}
+		if !workerDormantFound {
+			t.Fatalf("worker_dormant event not recorded; got: %+v", events)
+		}
+
+		globalEvents, err := db.ListEvents(10)
+		if err != nil {
+			t.Fatalf("ListEvents() error = %v", err)
+		}
+		pauseEventFound := false
+		for _, e := range globalEvents {
+			if e.EventType == "manual_source_pause_requested" {
+				pauseEventFound = true
+				break
+			}
+		}
+		if !pauseEventFound {
+			t.Fatalf("manual_source_pause_requested event not recorded; got: %+v", globalEvents)
+		}
+	})
+
+	t.Run("mixed statuses pauses only running worker", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		manager := &Manager{db: db, appName: "litestream-soak"}
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+
+		createTestWorker(t, db, model.Worker{
+			ID:            "worker-mixed-running",
+			Name:          "worker-mixed-running",
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "abc1234",
+			LitestreamSHA: "ls123",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+		createTestWorker(t, db, model.Worker{
+			ID:            "worker-mixed-dormant",
+			Name:          "worker-mixed-dormant",
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "abc1234",
+			LitestreamSHA: "ls123",
+			ProfileName:   "high-volume",
+			ProfileConfig: "{}",
+		})
+		if err := db.MarkWorkerDormant("worker-mixed-dormant", "probe expired", "probe_expired", "probe"); err != nil {
+			t.Fatalf("MarkWorkerDormant() error = %v", err)
+		}
+		createTestWorker(t, db, model.Worker{
+			ID:            "worker-mixed-stopped",
+			Name:          "worker-mixed-stopped",
+			Status:        model.WorkerStopped,
+			Source:        "main",
+			GitSHA:        "abc1234",
+			LitestreamSHA: "ls123",
+			ProfileName:   "burst-volume",
+			ProfileConfig: "{}",
+		})
+
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/pause-source?source=main", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handlePauseSourceWorkers(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+
+		var resp map[string]any
+		if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp["paused_workers"] != float64(1) {
+			t.Fatalf("paused_workers = %v, want 1", resp["paused_workers"])
+		}
+
+		workerIDs, ok := resp["worker_ids"].([]any)
+		if !ok || len(workerIDs) != 1 {
+			t.Fatalf("worker_ids = %v, want slice of 1", resp["worker_ids"])
+		}
+		if workerIDs[0] != "worker-mixed-running" {
+			t.Fatalf("worker_ids[0] = %v, want worker-mixed-running", workerIDs[0])
+		}
+
+		dormantWorker, err := db.GetWorker("worker-mixed-dormant")
+		if err != nil {
+			t.Fatalf("GetWorker(dormant) error = %v", err)
+		}
+		if dormantWorker.Status != model.WorkerDormant {
+			t.Fatalf("dormant worker Status = %q, want %q", dormantWorker.Status, model.WorkerDormant)
+		}
+
+		stoppedWorker, err := db.GetWorker("worker-mixed-stopped")
+		if err != nil {
+			t.Fatalf("GetWorker(stopped) error = %v", err)
+		}
+		if stoppedWorker.Status != model.WorkerStopped {
+			t.Fatalf("stopped worker Status = %q, want %q", stoppedWorker.Status, model.WorkerStopped)
+		}
+	})
+}
