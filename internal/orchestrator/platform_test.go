@@ -95,6 +95,20 @@ func TestClassifyPlatformLog(t *testing.T) {
 			wantOK:    true,
 		},
 		{
+			name: "nonzero exit not restarting",
+			entry: flyapi.AppLogEntry{
+				Attributes: flyapi.AppLogAttributes{
+					Message: "machine exited with exit code 1, not restarting",
+					Meta: flyapi.AppLogMeta{
+						Event: flyapi.AppLogMetaEvent{Provider: "vm"},
+					},
+				},
+			},
+			wantType:  "platform_restart",
+			wantMatch: "platform event",
+			wantOK:    true,
+		},
+		{
 			name: "routine boot starting init",
 			entry: flyapi.AppLogEntry{
 				Attributes: flyapi.AppLogAttributes{

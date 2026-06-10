@@ -183,20 +183,17 @@ func classifyPlatformLog(entry flyapi.AppLogEntry) (string, string, bool) {
 var exitCodePattern = regexp.MustCompile(`exit code:?\s*([0-9]+)`)
 
 func isUnexpectedPlatformRestart(lower string) bool {
+	if match := exitCodePattern.FindStringSubmatch(lower); len(match) == 2 {
+		return match[1] != "0"
+	}
 	if strings.Contains(lower, "not restarting") {
 		return false
 	}
-	if strings.Contains(lower, "restarting machine") ||
+	return strings.Contains(lower, "restarting machine") ||
 		strings.Contains(lower, "machine restarted") ||
 		strings.Contains(lower, "restart count") ||
 		strings.Contains(lower, "unclean exit") ||
-		strings.Contains(lower, "crashed") {
-		return true
-	}
-	if match := exitCodePattern.FindStringSubmatch(lower); len(match) == 2 && match[1] != "0" {
-		return true
-	}
-	return false
+		strings.Contains(lower, "crashed")
 }
 
 func normalizePlatformMessage(lower, raw string) string {
