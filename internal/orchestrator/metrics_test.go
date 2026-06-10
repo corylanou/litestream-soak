@@ -192,6 +192,82 @@ func TestControlMetricsExposeLatestDeploymentComparison(t *testing.T) {
 	}, 1)
 }
 
+func TestControlMetricsObserveWorkerZeroesStaleInfoSeries(t *testing.T) {
+	db := openTestDB(t)
+	metrics := NewControlMetrics(db)
+
+	worker := model.Worker{
+		ID:            "worker-info-stale-series",
+		Name:          "worker-info-stale-series",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "sha-info-old",
+		LitestreamSHA: "litestream-info-old",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+		AppName:       "metrics-info-app",
+		Region:        "ord",
+	}
+	metrics.observeWorker(worker)
+
+	assertGatheredGaugeValue(t, "soak_control_worker_info", map[string]string{
+		"worker_id": "worker-info-stale-series",
+		"git_sha":   "sha-info-old",
+		"profile":   "low-volume",
+		"source":    "main",
+		"app_name":  "metrics-info-app",
+		"region":    "ord",
+	}, 1)
+	assertGatheredGaugeValue(t, "soak_control_worker_version_info", map[string]string{
+		"worker_id":      "worker-info-stale-series",
+		"git_sha":        "sha-info-old",
+		"litestream_sha": "litestream-info-old",
+		"profile":        "low-volume",
+		"source":         "main",
+		"app_name":       "metrics-info-app",
+		"region":         "ord",
+	}, 1)
+
+	worker.GitSHA = "sha-info-new"
+	worker.LitestreamSHA = "litestream-info-new"
+	metrics.observeWorker(worker)
+
+	assertGatheredGaugeValue(t, "soak_control_worker_info", map[string]string{
+		"worker_id": "worker-info-stale-series",
+		"git_sha":   "sha-info-old",
+		"profile":   "low-volume",
+		"source":    "main",
+		"app_name":  "metrics-info-app",
+		"region":    "ord",
+	}, 0)
+	assertGatheredGaugeValue(t, "soak_control_worker_version_info", map[string]string{
+		"worker_id":      "worker-info-stale-series",
+		"git_sha":        "sha-info-old",
+		"litestream_sha": "litestream-info-old",
+		"profile":        "low-volume",
+		"source":         "main",
+		"app_name":       "metrics-info-app",
+		"region":         "ord",
+	}, 0)
+	assertGatheredGaugeValue(t, "soak_control_worker_info", map[string]string{
+		"worker_id": "worker-info-stale-series",
+		"git_sha":   "sha-info-new",
+		"profile":   "low-volume",
+		"source":    "main",
+		"app_name":  "metrics-info-app",
+		"region":    "ord",
+	}, 1)
+	assertGatheredGaugeValue(t, "soak_control_worker_version_info", map[string]string{
+		"worker_id":      "worker-info-stale-series",
+		"git_sha":        "sha-info-new",
+		"litestream_sha": "litestream-info-new",
+		"profile":        "low-volume",
+		"source":         "main",
+		"app_name":       "metrics-info-app",
+		"region":         "ord",
+	}, 1)
+}
+
 func TestControlMetricsExposeVolumeInventory(t *testing.T) {
 	db := openTestDB(t)
 	metrics := NewControlMetrics(db)

@@ -17,7 +17,7 @@ import (
 type controlMetrics struct {
 	mu                      sync.Mutex
 	statusByWorker          map[string]string
-	infoByWorker            map[string]labelMetricState
+	infoByWorker            map[string]workerInfoMetricState
 	workloadByWorker        map[string]labelMetricState
 	runtimeByWorker         map[string]labelMetricState
 	platformByWorker        map[string]labelMetricState
@@ -39,6 +39,11 @@ type controlMetrics struct {
 
 type labelMetricState struct {
 	labels []string
+}
+
+type workerInfoMetricState struct {
+	infoLabels    []string
+	versionLabels []string
 }
 
 type failureMetricState struct {
@@ -246,7 +251,7 @@ var (
 func NewControlMetrics(db *model.DB) *controlMetrics {
 	m := &controlMetrics{
 		statusByWorker:          make(map[string]string),
-		infoByWorker:            make(map[string]labelMetricState),
+		infoByWorker:            make(map[string]workerInfoMetricState),
 		workloadByWorker:        make(map[string]labelMetricState),
 		runtimeByWorker:         make(map[string]labelMetricState),
 		platformByWorker:        make(map[string]labelMetricState),
@@ -345,21 +350,18 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 	previousStatus := m.statusByWorker[worker.ID]
 	m.statusByWorker[worker.ID] = string(worker.Status)
 	previousInfo := m.infoByWorker[worker.ID]
-	m.infoByWorker[worker.ID] = labelMetricState{labels: versionLabels}
+	m.infoByWorker[worker.ID] = workerInfoMetricState{infoLabels: infoLabels, versionLabels: versionLabels}
 	previousWorkload := m.workloadByWorker[worker.ID]
 	m.workloadByWorker[worker.ID] = labelMetricState{labels: workloadLabels}
 	previousRuntime := m.runtimeByWorker[worker.ID]
 	m.runtimeByWorker[worker.ID] = labelMetricState{labels: runtimeLabels}
 	m.mu.Unlock()
 
-	if len(previousInfo.labels) > 0 {
-		previousInfoLabels := []string{previousInfo.labels[0], previousInfo.labels[1], previousInfo.labels[3], previousInfo.labels[4], previousInfo.labels[5], previousInfo.labels[6]}
-		if !sameMetricLabels(previousInfoLabels, infoLabels) {
-			controlWorkerInfo.WithLabelValues(previousInfoLabels...).Set(0)
-		}
-		if !sameMetricLabels(previousInfo.labels, versionLabels) {
-			controlWorkerVersionInfo.WithLabelValues(previousInfo.labels...).Set(0)
-		}
+	if len(previousInfo.infoLabels) > 0 && !sameMetricLabels(previousInfo.infoLabels, infoLabels) {
+		controlWorkerInfo.WithLabelValues(previousInfo.infoLabels...).Set(0)
+	}
+	if len(previousInfo.versionLabels) > 0 && !sameMetricLabels(previousInfo.versionLabels, versionLabels) {
+		controlWorkerVersionInfo.WithLabelValues(previousInfo.versionLabels...).Set(0)
 	}
 	controlWorkerInfo.WithLabelValues(infoLabels...).Set(1)
 	controlWorkerVersionInfo.WithLabelValues(versionLabels...).Set(1)
