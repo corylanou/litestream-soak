@@ -233,7 +233,7 @@ func (v *Verifier) logResult(start time.Time, passed bool, errMsg string) {
 		slog.Error("Failed to open verification log", "error", err)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	result := "PASS"
 	if !passed {
@@ -413,7 +413,7 @@ func (v *Verifier) syncOnce(ctx context.Context, budget time.Duration) (syncResp
 		return syncResponse{}, fmt.Errorf("sync request: %w", err)
 	}
 	defer v.httpClient.CloseIdleConnections()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, truncated, readErr := readLimited(resp.Body, syncDiagnosticOutputLimit)
@@ -537,7 +537,7 @@ func (v *Verifier) getLitestreamDebug(url string) (string, int, bool, error) {
 	if err != nil {
 		return "", 0, false, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, truncated, err := readLimited(resp.Body, syncDiagnosticOutputLimit)
 	if err != nil {

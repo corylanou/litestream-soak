@@ -118,7 +118,7 @@ func (r *Reporter) postJSON(ctx context.Context, path string, payload any) error
 	if err != nil {
 		return fmt.Errorf("send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= http.StatusBadRequest {
 		return fmt.Errorf("request failed with status %d", resp.StatusCode)

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -13,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/reporting"
@@ -75,38 +73,6 @@ func (r *Runner) debugIdentity() reporting.WorkerIdentity {
 		MachineID:     r.cfg.MachineID,
 		Region:        r.cfg.Region,
 	}
-}
-
-func (r *Runner) litestreamExitSnapshot() *reporting.ProcessExitSnapshot {
-	r.litestreamMu.Lock()
-	defer r.litestreamMu.Unlock()
-	if r.litestreamExit == nil {
-		return nil
-	}
-	exit := *r.litestreamExit
-	return &exit
-}
-
-func processExitSnapshot(process string, exitedAt time.Time, err error) *reporting.ProcessExitSnapshot {
-	snapshot := &reporting.ProcessExitSnapshot{
-		Process:  process,
-		ExitedAt: exitedAt,
-	}
-	if err == nil {
-		code := 0
-		snapshot.ExitCode = &code
-		return snapshot
-	}
-	snapshot.Error = err.Error()
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		code := exitErr.ExitCode()
-		snapshot.ExitCode = &code
-		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-			snapshot.Signal = status.Signal().String()
-		}
-	}
-	return snapshot
 }
 
 func collectProcessTable() []reporting.ProcessSnapshot {
@@ -535,7 +501,7 @@ func parseKeyValueFile(path string) map[string]string {
 	if err != nil {
 		return nil
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	values := make(map[string]string)
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -629,20 +595,6 @@ func endpointHost(endpoint string) string {
 		return parsed.Host
 	}
 	return strings.TrimPrefix(strings.TrimPrefix(endpoint, "https://"), "http://")
-}
-
-func objectLevel(objectPath string) string {
-	for _, part := range strings.Split(objectPath, "/") {
-		if strings.HasPrefix(part, "L") || strings.HasPrefix(part, "level") {
-			return part
-		}
-		if len(part) == 4 {
-			if _, err := strconv.Atoi(part); err == nil {
-				return part
-			}
-		}
-	}
-	return "unknown"
 }
 
 func shellQuote(value string) string {
