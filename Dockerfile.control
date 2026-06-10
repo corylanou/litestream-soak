@@ -27,7 +27,7 @@ RUN set -eux; \
 
 FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates curl iproute2 jq lsof procps sqlite3 && \
+    apt-get install -y --no-install-recommends ca-certificates curl iproute2 jq lsof procps sqlite3 util-linux && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd --system --gid 10001 soak && \
     useradd --system --uid 10001 --gid soak --home-dir /data --shell /usr/sbin/nologin soak && \
@@ -35,7 +35,10 @@ RUN apt-get update && \
     chown soak:soak /data
 COPY --from=flyctl /usr/local/bin/flyctl /usr/local/bin/flyctl
 COPY --from=builder /usr/local/bin/soakctl /usr/local/bin/soakctl
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint
+RUN chmod 0755 /usr/local/bin/docker-entrypoint
+ENV SOAK_DATA_DB=/data/soakctl.db
 VOLUME /data
-USER soak:soak
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/soakctl"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint"]
+CMD ["/usr/local/bin/soakctl"]
