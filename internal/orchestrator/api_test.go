@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -1130,5 +1131,82 @@ func mustRecordVerification(t *testing.T, db *model.DB, verification *model.Veri
 
 	if err := db.RecordVerification(verification); err != nil {
 		t.Fatalf("RecordVerification(%s) error = %v", verification.WorkerID, err)
+	}
+}
+
+func TestHandleVerificationDormantWorkerIgnored(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	workerID := "worker-dormant-verify"
+
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		Name:          workerID,
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "abc123",
+		LitestreamSHA: "ls123",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	if err := db.MarkWorkerDormant(workerID, "probe window expired", "probe_expired", "probe"); err != nil {
+		t.Fatalf("MarkWorkerDormant() error = %v", err)
+	}
+
+	dormantBefore, err := db.GetWorker(workerID)
+	if err != nil {
+		t.Fatalf("GetWorker() before: %v", err)
+	}
+
+	payload := reporting.VerificationPayload{
+		WorkerIdentity: reporting.WorkerIdentity{
+			WorkerID:      workerID,
+			Name:          workerID,
+			Source:        "main",
+			GitSHA:        "abc123",
+			LitestreamSHA: "ls123",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		},
+		CheckType: "integrity",
+		Status:    "passed",
+		Passed:    true,
+		Summary:   "all checks passed",
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/workers/"+workerID+"/verifications", bytes.NewReader(body))
+	request.SetPathValue("id", workerID)
+	recorder := httptest.NewRecorder()
+
+	api.handleVerification(recorder, request)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+	}
+
+	dormantAfter, err := db.GetWorker(workerID)
+	if err != nil {
+		t.Fatalf("GetWorker() after: %v", err)
+	}
+	if dormantAfter.Status != model.WorkerDormant {
+		t.Fatalf("Status = %q, want %q (dormant must be preserved)", dormantAfter.Status, model.WorkerDormant)
+	}
+	if dormantAfter.DormantAt == nil {
+		t.Fatalf("DormantAt = nil, want preserved")
+	}
+	if dormantAfter.DormantReason != dormantBefore.DormantReason {
+		t.Fatalf("DormantReason = %q, want %q", dormantAfter.DormantReason, dormantBefore.DormantReason)
+	}
+	if dormantAfter.DormantSignature != dormantBefore.DormantSignature {
+		t.Fatalf("DormantSignature = %q, want %q", dormantAfter.DormantSignature, dormantBefore.DormantSignature)
+	}
+	if dormantAfter.ResumeTrigger != dormantBefore.ResumeTrigger {
+		t.Fatalf("ResumeTrigger = %q, want %q", dormantAfter.ResumeTrigger, dormantBefore.ResumeTrigger)
 	}
 }
