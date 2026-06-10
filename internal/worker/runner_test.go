@@ -604,6 +604,110 @@ func TestPollLitestreamLocalState(t *testing.T) {
 	}
 }
 
+func TestWriteLitestreamConfigRemovesStateForInheritedReplicaTarget(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.ReplicaType = "s3"
+	cfg.S3Bucket = "bucket"
+	cfg.S3Path = "soak/worker-pr-62-low-vol/vol-pr"
+
+	stateDir := litestreamStateDir(cfg.DBPath)
+	ltxPath := filepath.Join(stateDir, "ltx", "0", "0000000000000001-0000000000000001.ltx")
+	if err := os.MkdirAll(filepath.Dir(ltxPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ltxPath, []byte("ltx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeLitestreamConfigFixture(t, cfg.ConfigPath, "s3://bucket/soak/worker-main-low-vol/vol-main")
+
+	runner := NewRunner(cfg)
+	if err := runner.writeLitestreamConfig(); err != nil {
+		t.Fatalf("writeLitestreamConfig() error = %v", err)
+	}
+
+	if _, err := os.Stat(ltxPath); !os.IsNotExist(err) {
+		t.Fatalf("stale ltx path exists after cleanup: %v", err)
+	}
+	marker, err := os.ReadFile(litestreamReplicaTargetPath(cfg.DBPath))
+	if err != nil {
+		t.Fatalf("read replica target marker: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(marker)), cfg.ReplicaURL(); got != want {
+		t.Fatalf("replica marker=%q want %q", got, want)
+	}
+	body, err := os.ReadFile(cfg.ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if strings.Contains(string(body), "worker-main-low-vol") {
+		t.Fatalf("config still references inherited main target:\n%s", body)
+	}
+	if !strings.Contains(string(body), cfg.ReplicaURL()) {
+		t.Fatalf("config does not contain current replica target %q:\n%s", cfg.ReplicaURL(), body)
+	}
+}
+
+func TestWriteLitestreamConfigKeepsStateForSameReplicaTarget(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.ReplicaType = "s3"
+	cfg.S3Bucket = "bucket"
+	cfg.S3Path = "soak/worker-pr-62-low-vol/vol-pr"
+
+	stateDir := litestreamStateDir(cfg.DBPath)
+	ltxPath := filepath.Join(stateDir, "ltx", "0", "0000000000000001-0000000000000001.ltx")
+	if err := os.MkdirAll(filepath.Dir(ltxPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ltxPath, []byte("ltx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeLitestreamConfigFixture(t, cfg.ConfigPath, cfg.ReplicaURL())
+
+	runner := NewRunner(cfg)
+	if err := runner.writeLitestreamConfig(); err != nil {
+		t.Fatalf("writeLitestreamConfig() error = %v", err)
+	}
+
+	if _, err := os.Stat(ltxPath); err != nil {
+		t.Fatalf("expected ltx state to remain: %v", err)
+	}
+	marker, err := os.ReadFile(litestreamReplicaTargetPath(cfg.DBPath))
+	if err != nil {
+		t.Fatalf("read replica target marker: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(marker)), cfg.ReplicaURL(); got != want {
+		t.Fatalf("replica marker=%q want %q", got, want)
+	}
+}
+
+func writeLitestreamConfigFixture(t *testing.T, path, replicaURL string) {
+	t.Helper()
+
+	body := fmt.Sprintf(`socket:
+  enabled: true
+  path: /data/litestream.sock
+
+dbs:
+  - path: /data/test.db
+    snapshot:
+      interval: 10m
+    replicas:
+      - url: %s
+        sync-interval: 1s
+`, replicaURL)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMonitorLitestreamCancelsRunContextOnUnexpectedExit(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
