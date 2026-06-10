@@ -1,0 +1,446 @@
+{{define "home_body"}}
+    <div class="status-strip">
+      <span><span class="ss-label">Workers</span> <span class="ss-value">{{.Summary.TotalWorkers}}</span></span>
+      <span><span class="ss-label">Healthy</span> <span class="ss-value ss-good">{{.Summary.HealthyWorkers}}</span></span>
+      <span><span class="ss-label">Attention</span> <span class="ss-value{{if gt .Summary.AttentionWorkers 0}} ss-warn{{end}}">{{.Summary.AttentionWorkers}}</span></span>
+      <span><span class="ss-label">Running Checks</span> <span class="ss-value{{if gt .Summary.ActiveVerifications 0}} ss-warn{{end}}">{{.Summary.ActiveVerifications}}</span></span>
+      <span><span class="ss-label">Failures</span> <span class="ss-value{{if gt .Summary.RecentFailures 0}} ss-bad{{end}}">{{.Summary.RecentFailures}}</span></span>
+    </div>
+    <div class="freshness-strip" aria-label="Data freshness">
+      <div class="freshness-item">
+        <span class="freshness-label">Page generated</span>
+        <span class="freshness-value status-good">{{timeAgoValue .GeneratedAt}}</span>
+        <span class="freshness-time">{{formatTime .GeneratedAt}}</span>
+      </div>
+      <div class="freshness-item">
+        <span class="freshness-label">Latest heartbeat</span>
+        <span class="freshness-value {{heartbeatClass .Summary.LatestHeartbeatAt}}">{{timeAgo .Summary.LatestHeartbeatAt}}</span>
+        <span class="freshness-time">{{formatTimePtr .Summary.LatestHeartbeatAt}}</span>
+      </div>
+      <div class="freshness-item">
+        <span class="freshness-label">Stalest runtime</span>
+        <span class="freshness-value {{heartbeatClass .Summary.StalestRuntimeAt}}">{{timeAgo .Summary.StalestRuntimeAt}}</span>
+        <span class="freshness-time">{{formatTimePtr .Summary.StalestRuntimeAt}}</span>
+      </div>
+      <div class="freshness-item">
+        <span class="freshness-label">Stalest heartbeat</span>
+        <span class="freshness-value {{heartbeatClass .Summary.StalestHeartbeatAt}}">{{timeAgo .Summary.StalestHeartbeatAt}}</span>
+        <span class="freshness-time">{{formatTimePtr .Summary.StalestHeartbeatAt}}</span>
+      </div>
+      <div class="freshness-item">
+        <span class="freshness-label">Latest verification</span>
+        <span class="freshness-value status-neutral">{{timeAgo .Summary.LatestVerificationAt}}</span>
+        <span class="freshness-time">{{formatTimePtr .Summary.LatestVerificationAt}}</span>
+      </div>
+    </div>
+
+    <div class="guide-grid">
+      <div class="guide-card">
+        <h2>Viewing</h2>
+        <p class="lead">This page is scoped to {{.SelectedSourceLabel}}.</p>
+        <p>{{.ScopeSummary}}</p>
+        {{if .ActiveSources}}
+        <div class="detail-list">
+          {{range .ActiveSources}}
+          <div class="detail-row">
+            <div class="detail-label">{{.Label}}</div>
+            <div class="detail-value">
+              <div class="detail-main">{{.Summary}}</div>
+              <div class="chip-row">
+                {{if .Status}}<span class="badge badge-{{if eq (deploymentClass .Status) "status-good"}}good{{else if eq (deploymentClass .Status) "status-warn"}}warn{{else if eq (deploymentClass .Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Status}}</span>{{end}}
+                {{if .Selected}}<span class="badge badge-info">viewing</span>{{else}}<a class="btn" href="{{.ViewURL}}">View</a>{{end}}
+                {{if .CompareURL}}<a class="btn" href="{{.CompareURL}}">Compare to main</a>{{end}}
+              </div>
+            </div>
+          </div>
+          {{end}}
+        </div>
+        {{end}}
+      </div>
+
+      {{if .HomeAction}}
+      <div class="guide-card">
+        <h2>Do This Now</h2>
+        <p class="lead">{{.HomeAction.Headline}}</p>
+        <p>{{.HomeAction.Summary}}</p>
+        <ul>
+          {{range .HomeAction.Steps}}
+          <li>{{.}}</li>
+          {{end}}
+        </ul>
+        <div class="chip-row">
+          <a class="btn btn-primary" href="{{.HomeAction.WorkerURL}}">Open {{.HomeAction.WorkerName}}</a>
+          <button type="button" class="btn" data-copy-url="{{.HomeAction.PromptURL}}">Copy AI prompt</button>
+          <a class="btn" href="{{.HomeAction.IncidentURL}}">Incident JSON</a>
+          {{if .HomeAction.CompareURL}}<a class="btn" href="{{.HomeAction.CompareURL}}">Compare to main</a>{{end}}
+        </div>
+      </div>
+      {{end}}
+
+      <div class="guide-card">
+        <h2>Current Diagnosis</h2>
+        <p class="lead">{{.Diagnosis.Headline}}</p>
+        <p style="margin-top:8px;">{{.Diagnosis.Summary}}</p>
+        {{if .Diagnosis.ProbableSubsystem}}
+        <div class="diag-meta">
+          {{if .Diagnosis.Confidence}}<span class="badge badge-{{if eq (confidenceClass .Diagnosis.Confidence) "status-good"}}good{{else if eq (confidenceClass .Diagnosis.Confidence) "status-warn"}}warn{{else}}neutral{{end}}">confidence: {{.Diagnosis.Confidence}}</span>{{end}}
+          <span class="badge badge-warn">{{.Diagnosis.ProbableSubsystem}}</span>
+          {{if .Diagnosis.DominantStage}}<span class="badge badge-neutral">stage: {{.Diagnosis.DominantStage}}</span>{{end}}
+          {{if .Diagnosis.DominantSignature}}<span class="badge badge-bad">{{shorten .Diagnosis.DominantSignature 80}}</span>{{end}}
+        </div>
+        {{end}}
+        {{if .Diagnosis.WhyLikely}}
+        <ul>
+          {{range .Diagnosis.WhyLikely}}
+          <li>{{.}}</li>
+          {{end}}
+        </ul>
+        {{end}}
+      </div>
+
+      <div class="guide-card">
+        <h2>Start Here</h2>
+        <p>Use the control plane for incident context and Grafana for cluster shape.</p>
+        <ul>
+          <li>Open a worker marked <strong>degraded</strong>, <strong>dormant</strong>, <strong>probing</strong>, or <strong>snapshot unhealthy</strong>.</li>
+          <li>Check failure stage, signature, and probable subsystem.</li>
+          <li>If the worker is <strong>dormant</strong>, the control plane already paused compute after sustained same-signature failures.</li>
+          <li>Copy the AI prompt or incident JSON.</li>
+          <li>Run the listed Fly triage commands before changing code.</li>
+        </ul>
+        <div class="chip-row">
+          <a class="btn btn-primary" href="/ui/help">Operator Help</a>
+          <a class="btn" href="/api/worker-summaries">Worker Summaries</a>
+        </div>
+      </div>
+
+      <div class="guide-card">
+        <h2>Coverage</h2>
+        <p>The active fleet should span multiple load modes and data shapes.</p>
+        {{if .Coverage.LoadModes}}
+        <div class="chip-row">
+          {{range .Coverage.LoadModes}}
+          <span class="chip"><strong>{{.Count}}</strong> {{.Label}}</span>
+          {{end}}
+        </div>
+        {{end}}
+        {{if .Coverage.ReplayDatasets}}
+        <div class="chip-row">
+          {{range .Coverage.ReplayDatasets}}
+          <span class="chip"><strong>{{.Count}}</strong> {{.Label}}</span>
+          {{end}}
+        </div>
+        {{end}}
+        {{if .Coverage.RuntimeStates}}
+        <div class="chip-row">
+          {{range .Coverage.RuntimeStates}}
+          <span class="chip"><strong>{{.Count}}</strong> {{runtimeLabel .Label}}</span>
+          {{end}}
+        </div>
+        {{end}}
+      </div>
+
+      <div class="guide-card">
+        <h2>Latest Rollout</h2>
+        {{if .LatestDeployment}}
+        <p class="lead">{{.LatestDeployment.Summary}}</p>
+        <div class="diag-meta">
+          <span class="badge badge-{{if eq (deploymentClass .LatestDeployment.Status) "status-good"}}good{{else if eq (deploymentClass .LatestDeployment.Status) "status-warn"}}warn{{else if eq (deploymentClass .LatestDeployment.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.LatestDeployment.Status}}</span>
+          <span class="badge badge-neutral">{{.LatestDeployment.UpdatedWorkers}}/{{.LatestDeployment.TotalWorkers}} updated</span>
+          {{if gt .LatestDeployment.ProbingWorkers 0}}<span class="badge badge-warn">{{.LatestDeployment.ProbingWorkers}} probing</span>{{end}}
+          {{if gt .LatestDeployment.DormantWorkers 0}}<span class="badge badge-bad">{{.LatestDeployment.DormantWorkers}} dormant</span>{{end}}
+          {{if gt .LatestDeployment.DegradedWorkers 0}}<span class="badge badge-bad">{{.LatestDeployment.DegradedWorkers}} degraded</span>{{end}}
+          {{if gt .LatestDeployment.RuntimeUnhealthyWorkers 0}}<span class="badge badge-bad">{{.LatestDeployment.RuntimeUnhealthyWorkers}} runtime unhealthy</span>{{end}}
+          {{if .LatestDeployment.GraceWindowExceeded}}<span class="badge badge-bad">beyond 45m grace</span>{{end}}
+        </div>
+        <div class="detail-list">
+          <div class="detail-row">
+            <div class="detail-label">Testing</div>
+            <div class="detail-value">
+              <div class="detail-main">
+                <a class="badge badge-info badge-link" href="{{deploymentSourceURL .LatestDeployment.Deployment}}" target="_blank" rel="noreferrer">{{deploymentSourceLabel .LatestDeployment.Deployment}}</a>
+              </div>
+              <div class="detail-subtle">{{deploymentSourceSummary .LatestDeployment.Deployment}}</div>
+            </div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">Rollout Time</div>
+            <div class="detail-value">
+              <div class="detail-main">Started {{timeAgoValue .LatestDeployment.Deployment.StartedAt}}</div>
+              <div class="detail-subtle">{{formatTime .LatestDeployment.Deployment.StartedAt}}</div>
+            </div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">Code Links</div>
+            <div class="detail-value">
+              <div class="detail-subtle">Open the exact soak build or Litestream commit only when you need to investigate or hand off to AI.</div>
+              <div class="action-row">
+                <a class="btn" href="{{soakCommitURL .LatestDeployment.Deployment.GitSHA}}" target="_blank" rel="noreferrer">Open soak commit</a>
+                <a class="btn" href="{{litestreamCommitURL .LatestDeployment.Deployment.LitestreamSHA}}" target="_blank" rel="noreferrer">Open Litestream commit</a>
+                <button type="button" class="btn" data-copy="{{deploymentCopyText .LatestDeployment.Deployment}}">Copy rollout context</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        {{if .LatestDeployment.NextAction}}
+        <p style="margin-top:10px;"><strong>Next action:</strong> {{.LatestDeployment.NextAction}}</p>
+        {{end}}
+        {{if gt .LatestDeployment.OutdatedWorkers 0}}
+        <ul>
+          {{range .LatestDeployment.Workers}}
+            {{if not .Updated}}
+            <li><a href="/ui/workers/{{pathEscape .WorkerID}}">{{.Name}}</a> is still on soak {{trimSHA .GitSHA}} / litestream {{trimSHA .LitestreamSHA}} with status {{.Status}}.</li>
+            {{end}}
+          {{end}}
+        </ul>
+        {{end}}
+        {{if .LatestDeployment.NextChecks}}
+        <ul>
+          {{range .LatestDeployment.NextChecks}}
+          <li>{{.}}</li>
+          {{end}}
+        </ul>
+        {{end}}
+        <div class="chip-row">
+          <a class="btn btn-primary" href="{{.LatestRolloutURL}}">Latest rollout JSON</a>
+          {{if .LatestRolloutPromptURL}}<a class="btn" href="{{.LatestRolloutPromptURL}}">{{.LatestRolloutPromptLabel}}</a>{{end}}
+          <a class="btn" href="/api/deployments">History</a>
+        </div>
+        {{else}}
+        <p class="empty">No deployments have been recorded yet.</p>
+        {{end}}
+      </div>
+
+      <div class="guide-card">
+        <h2>{{comparisonTitle .ReleaseComparison}}</h2>
+        {{if .ReleaseComparison}}
+        <p class="detail-subtle">{{comparisonModeSummary .ReleaseComparison}}</p>
+        <p class="lead">{{.ReleaseComparison.Summary}}</p>
+        <div class="diag-meta">
+          <span class="badge badge-{{if eq .ReleaseComparison.Verdict "better"}}good{{else if eq .ReleaseComparison.Verdict "worse"}}bad{{else if or (eq .ReleaseComparison.Verdict "mixed") (eq .ReleaseComparison.Verdict "insufficient_data")}}warn{{else}}neutral{{end}}">{{.ReleaseComparison.Verdict}}</span>
+          <span class="badge badge-neutral">pass delta: {{.ReleaseComparison.PassDelta}}</span>
+          <span class="badge badge-neutral">fail delta: {{.ReleaseComparison.FailDelta}}</span>
+          <span class="badge badge-neutral">awaiting: {{.ReleaseComparison.Head.AwaitingWorkers}}</span>
+        </div>
+        <div class="detail-list">
+          <div class="detail-row">
+            <div class="detail-label">{{comparisonBaseLabel .ReleaseComparison}}</div>
+            <div class="detail-value">
+              {{if .ReleaseComparison.Base}}
+              <div class="detail-main"><a class="badge badge-neutral badge-link" href="{{deploymentSourceURL .ReleaseComparison.Base.Deployment}}" target="_blank" rel="noreferrer">{{deploymentSourceLabel .ReleaseComparison.Base.Deployment}}</a></div>
+              <div class="detail-subtle">{{deploymentSourceSummary .ReleaseComparison.Base.Deployment}}</div>
+              <div class="action-row">
+                <a class="btn" href="{{soakCommitURL .ReleaseComparison.Base.Deployment.GitSHA}}" target="_blank" rel="noreferrer">Open soak commit</a>
+                <a class="btn" href="{{litestreamCommitURL .ReleaseComparison.Base.Deployment.LitestreamSHA}}" target="_blank" rel="noreferrer">Open Litestream commit</a>
+              </div>
+              {{else}}
+              <div class="detail-main"><a class="badge badge-neutral badge-link" href="{{sourceURL .ReleaseComparison.BaseSource}}" target="_blank" rel="noreferrer">{{sourceLabel .ReleaseComparison.BaseSource}}</a></div>
+              <div class="detail-subtle">No completed baseline deployment is available yet.</div>
+              {{end}}
+            </div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">{{comparisonHeadLabel .ReleaseComparison}}</div>
+            <div class="detail-value">
+              <div class="detail-main"><a class="badge badge-info badge-link" href="{{deploymentSourceURL .ReleaseComparison.Head.Deployment}}" target="_blank" rel="noreferrer">{{deploymentSourceLabel .ReleaseComparison.Head.Deployment}}</a></div>
+              <div class="detail-subtle">{{deploymentSourceSummary .ReleaseComparison.Head.Deployment}}</div>
+              <div class="action-row">
+                <a class="btn" href="{{soakCommitURL .ReleaseComparison.Head.Deployment.GitSHA}}" target="_blank" rel="noreferrer">Open soak commit</a>
+                <a class="btn" href="{{litestreamCommitURL .ReleaseComparison.Head.Deployment.LitestreamSHA}}" target="_blank" rel="noreferrer">Open Litestream commit</a>
+                <button type="button" class="btn" data-copy="{{comparisonCopyText .ReleaseComparison}}">Copy comparison context</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        {{if .ReleaseComparison.RegressedWorkers}}
+        <p style="margin-top:10px;"><strong>Regressed:</strong>
+          {{range $index, $worker := .ReleaseComparison.RegressedWorkers}}{{if $index}}, {{end}}<a href="/ui/workers/{{pathEscape $worker.WorkerID}}">{{$worker.Name}}</a>{{end}}
+        </p>
+        {{end}}
+        {{if .ReleaseComparison.ImprovedWorkers}}
+        <p style="margin-top:10px;"><strong>Improved:</strong>
+          {{range $index, $worker := .ReleaseComparison.ImprovedWorkers}}{{if $index}}, {{end}}<a href="/ui/workers/{{pathEscape $worker.WorkerID}}">{{$worker.Name}}</a>{{end}}
+        </p>
+        {{end}}
+        <div class="chip-row">
+          <a class="btn btn-primary" href="{{.ComparisonJSONURL}}">Comparison JSON</a>
+          {{if .ComparisonPromptURL}}<a class="btn" href="{{.ComparisonPromptURL}}">{{.ComparisonPromptLabel}}</a>{{end}}
+          <a class="btn" href="{{.LatestRolloutURL}}">Latest rollout JSON</a>
+        </div>
+        {{else}}
+        <p class="empty">No release comparison is available yet.</p>
+        {{end}}
+      </div>
+    </div>
+
+    {{if .Diagnosis.Clusters}}
+    <div class="section-head">
+      <span class="section-title">Active Clusters</span>
+    </div>
+    <div class="cluster-grid">
+      {{range .Diagnosis.Clusters}}
+      <div class="panel cluster-card">
+        <div class="cluster-head">
+          <div>
+            <div class="cluster-title">{{.Headline}}</div>
+            <div class="cluster-summary">{{.Summary}}</div>
+          </div>
+          <span class="badge badge-{{if eq (confidenceClass .Confidence) "status-good"}}good{{else if eq (confidenceClass .Confidence) "status-warn"}}warn{{else}}neutral{{end}}">confidence: {{.Confidence}}</span>
+        </div>
+        <div class="diag-meta">
+          <span class="badge badge-neutral">{{.WorkerCount}} workers</span>
+          {{if .ProbableSubsystem}}<span class="badge badge-warn">{{.ProbableSubsystem}}</span>{{end}}
+          {{if .Stage}}<span class="badge badge-neutral">stage: {{.Stage}}</span>{{end}}
+          {{if .Signature}}<span class="badge badge-bad">{{shorten .Signature 80}}</span>{{end}}
+        </div>
+        {{if .WhyLikely}}
+        <ul>
+          {{range .WhyLikely}}
+          <li>{{.}}</li>
+          {{end}}
+        </ul>
+        {{end}}
+        {{if .Workers}}
+        <div class="cluster-workers">
+          {{range $index, $worker := .Workers}}{{if $index}}, {{end}}<a href="/ui/workers/{{pathEscape $worker.ID}}">{{$worker.Name}}</a>{{end}}
+        </div>
+        {{end}}
+        <div class="feed-actions">
+          <a href="/ui/workers/{{pathEscape .RepresentativeWorker.ID}}">Open {{.RepresentativeWorker.Name}}</a>
+          <a href="/api/workers/{{pathEscape .RepresentativeWorker.ID}}/prompt?mode=triage">Prompt</a>
+        </div>
+      </div>
+      {{end}}
+    </div>
+    {{end}}
+
+    {{if .Spotlight}}
+    <div class="incident-alert">
+      <div class="incident-alert-body">
+        <div class="incident-alert-title">{{workerName .Spotlight.Worker .Spotlight.Verification.WorkerID}}: {{shorten (failureText .Spotlight.Verification) 120}}</div>
+        <div class="incident-alert-meta">{{timeAgoValue .Spotlight.Verification.StartedAt}} · {{.Spotlight.FailureStage}} · {{.Spotlight.ProbableSubsystem}} · {{formatDuration .Spotlight.Verification.DurationMS}}</div>
+      </div>
+      <div class="incident-alert-actions">
+        <a class="btn btn-danger" href="/ui/workers/{{pathEscape .Spotlight.Verification.WorkerID}}">Open</a>
+        <a class="btn" href="/api/workers/{{pathEscape .Spotlight.Verification.WorkerID}}/prompt">Copy Prompt</a>
+      </div>
+    </div>
+    {{else}}
+    {{if gt .Summary.ActiveVerifications 0}}
+    <div class="clear-banner">No failures recorded; {{.Summary.ActiveVerifications}} verification check(s) still running{{if .LatestRolloutPromptURL}} <a class="btn" href="{{.LatestRolloutPromptURL}}">{{.LatestRolloutPromptLabel}}</a>{{end}}</div>
+    {{else}}
+    <div class="clear-banner">All workers passing verification{{if .LatestRolloutPromptURL}} <a class="btn" href="{{.LatestRolloutPromptURL}}">{{.LatestRolloutPromptLabel}}</a>{{end}}</div>
+    {{end}}
+    {{end}}
+
+    <div class="section-head">
+      <span class="section-title">Fleet</span>
+    </div>
+
+    {{if .Workers}}
+    <div class="panel" style="padding:0; overflow-x:auto;">
+      <table class="worker-table">
+        <thead>
+          <tr>
+            <th style="width:32px;"></th>
+            <th>Name</th>
+            <th>Status</th>
+            <th>Heartbeat</th>
+            <th>Last Check</th>
+            <th>Profile</th>
+            <th>Workload</th>
+            <th>Telemetry</th>
+            <th>Signal</th>
+            <th style="width:80px;"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Workers}}
+          <tr class="clickable-row {{if or (eq (statusClass .Worker.Status) "status-bad") (eq (runtimeClass .RuntimeSnapshotStatus) "status-bad")}}row-bad{{else if or (eq (statusClass .Worker.Status) "status-warn") (eq (runtimeClass .RuntimeSnapshotStatus) "status-warn")}}row-warn{{end}}" data-href="/ui/workers/{{pathEscape .Worker.ID}}">
+            <td><span class="dot dot-{{if or (eq (statusClass .Worker.Status) "status-bad") (eq (runtimeClass .RuntimeSnapshotStatus) "status-bad")}}bad{{else if or (eq (statusClass .Worker.Status) "status-warn") (eq (runtimeClass .RuntimeSnapshotStatus) "status-warn")}}warn{{else if eq (statusClass .Worker.Status) "status-good"}}good{{else}}neutral{{end}}"></span></td>
+            <td><strong>{{.Worker.Name}}</strong></td>
+            <td><span class="badge badge-{{if eq (statusClass .Worker.Status) "status-good"}}good{{else if eq (statusClass .Worker.Status) "status-warn"}}warn{{else if eq (statusClass .Worker.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Worker.Status}}</span></td>
+            <td><span class="{{heartbeatClass .Worker.LastHeartbeatAt}}" title="{{formatTimePtr .Worker.LastHeartbeatAt}}">{{timeAgo .Worker.LastHeartbeatAt}}</span></td>
+            <td>
+              {{if .ActiveVerification}}<span class="badge badge-info">{{if .ActiveVerification.Stale}}stale check{{else}}running{{end}}</span> <span style="color:var(--muted); font-size:12px;" title="{{formatTime .ActiveVerification.StartedAt}}">{{timeAgoValue .ActiveVerification.StartedAt}}</span>
+              {{else if .LatestVerification}}<span class="badge badge-{{if eq (verificationClass .LatestVerification) "status-good"}}good{{else if eq (verificationClass .LatestVerification) "status-bad"}}bad{{else}}neutral{{end}}">{{verificationLabel .LatestVerification}}</span> <span style="color:var(--muted); font-size:12px;" title="{{formatTime .LatestVerification.StartedAt}}">{{timeAgoValue .LatestVerification.StartedAt}}</span>
+              {{else}}<span style="color:var(--faint);">none</span>{{end}}
+            </td>
+            <td>{{.Worker.ProfileName}}</td>
+            <td>{{.Workload.MetricLoadMode}}{{if ne .Workload.MetricReplayDataset "none"}} · {{.Workload.MetricReplayDataset}}{{end}}</td>
+            <td><span class="badge badge-{{if eq (runtimeClass .RuntimeSnapshotStatus) "status-good"}}good{{else if eq (runtimeClass .RuntimeSnapshotStatus) "status-warn"}}warn{{else if eq (runtimeClass .RuntimeSnapshotStatus) "status-bad"}}bad{{else}}neutral{{end}}">{{runtimeLabel .RuntimeSnapshotStatus}}</span></td>
+            <td>
+              {{if .CurrentFailureSignature}}
+              <span class="badge badge-bad">{{shorten .CurrentFailureSignature 48}}</span>
+              {{else if .ActiveVerification}}
+              <span class="badge badge-info">verification running</span>
+              {{else}}
+              <span class="badge badge-good">healthy</span>
+              {{end}}
+            </td>
+            <td><a href="{{workerPromptURL .Worker .CurrentFailureSignature .RuntimeSnapshotStatus}}" onclick="event.stopPropagation();" class="btn" style="padding:2px 8px;">Prompt</a></td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="panel"><p class="empty">No workers have reported to the control plane yet.</p></div>
+    {{end}}
+
+    <div class="bottom-grid">
+      <div>
+        <div class="section-head">
+          <span class="section-title">Failure Queue</span>
+        </div>
+        <div class="panel">
+          {{if .FailureQueue}}
+          {{range .FailureQueue}}
+          <div class="feed-item">
+            <div class="feed-row">
+              <div class="feed-body">
+                <div class="feed-title">{{workerName .Worker .Verification.WorkerID}}</div>
+                <div class="feed-meta">{{.FailureStage}} · {{.ProbableSubsystem}} · {{formatDuration .Verification.DurationMS}}</div>
+                <div class="feed-msg">{{shorten (failureText .Verification) 140}}</div>
+                <div class="feed-actions">
+                  <a href="/ui/workers/{{pathEscape .Verification.WorkerID}}">Open</a>
+                  <a href="/api/workers/{{pathEscape .Verification.WorkerID}}/prompt">Prompt</a>
+                </div>
+              </div>
+              <span class="feed-time">{{timeAgoValue .Verification.StartedAt}}</span>
+            </div>
+          </div>
+          {{end}}
+          {{else}}
+          <p class="empty">No failed verifications queued</p>
+          {{end}}
+        </div>
+      </div>
+
+      <div>
+        <div class="section-head">
+          <span class="section-title">Event Feed</span>
+        </div>
+        <div class="panel">
+          {{if .Events}}
+          {{range .Events}}
+          <div class="feed-item">
+            <div class="feed-row">
+              <div class="feed-body">
+                <span class="badge badge-{{if eq (eventClass .EventType) "status-good"}}good{{else if eq (eventClass .EventType) "status-bad"}}bad{{else}}neutral{{end}}">{{.EventType}}</span>
+                <div class="feed-msg">{{shorten .Message 140}}</div>
+                {{if .WorkerID}}<div class="feed-meta"><code class="mono">{{.WorkerID}}</code></div>{{end}}
+              </div>
+              <span class="feed-time">{{timeAgoValue .CreatedAt}}</span>
+            </div>
+          </div>
+          {{end}}
+          {{else}}
+          <p class="empty">No events recorded</p>
+          {{end}}
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">Generated {{formatTime .GeneratedAt}}</div>
+{{end}}
