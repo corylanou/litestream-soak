@@ -171,6 +171,9 @@ func normalizeLegacyExpiry(db *sql.DB) error {
 		if err := rows.Scan(&id, &raw); err != nil {
 			return err
 		}
+		if i := strings.Index(raw, "m="); i > 0 {
+			raw = strings.TrimSpace(raw[:i])
+		}
 		at, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", raw)
 		if err != nil {
 			continue
