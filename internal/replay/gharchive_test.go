@@ -3,10 +3,12 @@ package replay
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	_ "modernc.org/sqlite"
 )
 
@@ -88,5 +90,47 @@ func TestGHArchiveInsertLogsAndSkipsBadPayload(t *testing.T) {
 	}
 	if got := countRows(t, db, "gh_push_events"); got != 0 {
 		t.Fatalf("gh_push_events count=%d, want 0", got)
+	}
+}
+
+// Not parallel: the before/after delta reads on the shared package-level
+// counter would race with other tests that also drop a PushEvent payload.
+func TestGHArchiveDroppedPayloadsCounter(t *testing.T) {
+	db := newGHArchiveTestDB(t)
+
+	eventTypes := []struct {
+		eventType string
+		payload   string
+		table     string
+	}{
+		{"PushEvent", `"not-an-object"`, "gh_push_events"},
+		{"IssuesEvent", `"not-an-object"`, "gh_issue_events"},
+		{"PullRequestEvent", `"not-an-object"`, "gh_pr_events"},
+	}
+
+	for i, tc := range eventTypes {
+		before := testutil.ToFloat64(gharchiveDroppedPayloadsTotal.WithLabelValues(tc.eventType))
+
+		it := &ghArchiveIterator{event: ghEvent{
+			ID:        fmt.Sprintf("evt-drop-%d", i),
+			Type:      tc.eventType,
+			Payload:   json.RawMessage(tc.payload),
+			CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		}}
+		it.event.Actor.Login = "octocat"
+		it.event.Repo.Name = "octocat/hello"
+
+		if err := it.Insert(db); err != nil {
+			t.Fatalf("Insert() %s: %v", tc.eventType, err)
+		}
+
+		after := testutil.ToFloat64(gharchiveDroppedPayloadsTotal.WithLabelValues(tc.eventType))
+		if got := after - before; got != 1 {
+			t.Fatalf("Insert() dropped counter for %s = %v, want %v", tc.eventType, got, 1)
+		}
+
+		if got := countRows(t, db, tc.table); got != 0 {
+			t.Fatalf("%s count=%d, want 0", tc.table, got)
+		}
 	}
 }

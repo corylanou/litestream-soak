@@ -247,7 +247,9 @@ func (v *Verifier) logResult(start time.Time, passed bool, errMsg string) {
 
 	entry := fmt.Sprintf("%s | %s | duration=%s | db_size=%d | error=%s\n",
 		start.UTC().Format(time.RFC3339), result, time.Since(start).Round(time.Millisecond), dbSize, errMsg)
-	f.WriteString(entry)
+	if _, err := f.WriteString(entry); err != nil {
+		slog.Error("Failed to write verification log", "error", err)
+	}
 }
 
 func (v *Verifier) pauseLoad(ctx context.Context) error {

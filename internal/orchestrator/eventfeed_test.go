@@ -71,6 +71,33 @@ func TestCoalesceEventFeedMergesHistoricalPlatformSpam(t *testing.T) {
 	}
 }
 
+func TestCoalesceEventFeedAscendingOrderDoesNotCoalesceFarApartEvents(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.April, 14, 18, 7, 41, 0, time.UTC)
+	older := now.Add(-20 * time.Minute)
+
+	events := []model.Event{
+		{
+			WorkerID:  "worker-a",
+			EventType: "platform_oom",
+			Message:   "out of memory",
+			CreatedAt: older,
+		},
+		{
+			WorkerID:  "worker-a",
+			EventType: "platform_oom",
+			Message:   "out of memory",
+			CreatedAt: now,
+		},
+	}
+
+	collapsed := coalesceEventFeed(events)
+	if len(collapsed) != 2 {
+		t.Fatalf("coalesceEventFeed() len = %d, want %d", len(collapsed), 2)
+	}
+}
+
 func TestHandleListEventsDefaultsToCollapsedButSupportsRaw(t *testing.T) {
 	t.Parallel()
 
