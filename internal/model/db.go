@@ -118,6 +118,7 @@ CREATE INDEX IF NOT EXISTS idx_workers_source_status_created ON workers(source, 
 CREATE INDEX IF NOT EXISTS idx_alerts_worker ON alerts(worker_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at);
 CREATE INDEX IF NOT EXISTS idx_deployments_source_started ON deployments(source, started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_deployments_source_status_started ON deployments(source, status, started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_deployments_source_version_started ON deployments(source, git_sha, litestream_sha, started_at DESC, id DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_run_archives_unique ON run_archives(deployment_id, archive_type, worker_id);
 CREATE INDEX IF NOT EXISTS idx_run_archives_source_type_archived ON run_archives(source, archive_type, archived_at DESC);

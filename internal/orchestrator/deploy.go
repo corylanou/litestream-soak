@@ -98,6 +98,9 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 	}
 	imageRef = strings.TrimSpace(imageRef)
 	if imageRef == "" {
+		if d.manager == nil {
+			return "", fmt.Errorf("deployment manager unavailable")
+		}
 		var err error
 		imageRef, err = d.manager.currentWorkerImage(ctx)
 		if err != nil {
@@ -107,6 +110,12 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 	if err := validateDeploymentImageRef(imageRef); err != nil {
 		return "", err
 	}
+	if d.manager == nil {
+		return "", fmt.Errorf("deployment manager unavailable")
+	}
+
+	unlockSource := d.manager.lockSource(source)
+	defer unlockSource()
 
 	if err := d.db.UpsertReadyDeployment(&model.Deployment{
 		GitSHA:        sha,
@@ -124,12 +133,29 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 		return "", fmt.Errorf("record deploy event: %w", err)
 	}
 
+	current, latest, err := d.manager.latestReadyDeploymentMatches(source, imageRef, sha, litestreamSHA)
+	if err != nil {
+		return "", err
+	}
+	if !current {
+		slog.Info("Deployment ready superseded, skipping rollout", "source", source, "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "latest_sha", latest.GitSHA, "latest_litestream_sha", latest.LitestreamSHA, "latest_image", latest.ImageRef, "trigger", trigger)
+		return imageRef, nil
+	}
+
 	slog.Info("Deployment ready, starting rolling update", "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "trigger", trigger)
 	if err := d.manager.EnsureSourceFleet(ctx, source, sha, litestreamSHA, imageRef); err != nil {
 		return "", err
 	}
-	if err := d.manager.RollingUpdateSource(ctx, source, imageRef, sha, litestreamSHA); err != nil {
+	if err := d.manager.rollingUpdateSourceLocked(ctx, source, imageRef, sha, litestreamSHA); err != nil {
 		return "", err
+	}
+	current, latest, err = d.manager.latestReadyDeploymentMatches(source, imageRef, sha, litestreamSHA)
+	if err != nil {
+		return "", err
+	}
+	if !current {
+		slog.Info("Deployment ready superseded, skipping dormant resume", "source", source, "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "latest_sha", latest.GitSHA, "latest_litestream_sha", latest.LitestreamSHA, "latest_image", latest.ImageRef, "trigger", trigger)
+		return imageRef, nil
 	}
 	if err := d.manager.ResumeDormantWorkers(ctx, source, imageRef, sha, litestreamSHA, trigger); err != nil {
 		return "", err
