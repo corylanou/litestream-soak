@@ -364,7 +364,7 @@ func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, 
 			if err != nil {
 				return nil, fmt.Errorf("reload worker: %w", err)
 			}
-			if w.Status == model.WorkerStopped || w.Status == model.WorkerFailed {
+			if w.Status == model.WorkerStopped || w.Status == model.WorkerFailed || w.Status == model.WorkerDormant {
 				return nil, nil
 			}
 			if workerMatchesDeployment(*w, deployment) {

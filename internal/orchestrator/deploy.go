@@ -14,6 +14,7 @@ import (
 )
 
 var validSHARe = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
+var validImageRefRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`)
 
 type Deployer struct {
 	manager           *Manager
@@ -103,6 +104,9 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 			return "", fmt.Errorf("resolve worker image: %w", err)
 		}
 	}
+	if err := validateDeploymentImageRef(imageRef); err != nil {
+		return "", err
+	}
 
 	if err := d.db.UpsertReadyDeployment(&model.Deployment{
 		GitSHA:        sha,
@@ -164,9 +168,23 @@ func (d *Deployer) buildImage(sha string) (string, error) {
 			break
 		}
 	}
+	if err := validateDeploymentImageRef(imageTag); err != nil {
+		return "", err
+	}
 
 	slog.Info("Image built successfully", "sha", sha, "image", imageTag)
 	return imageTag, nil
+}
+
+func validateDeploymentImageRef(imageRef string) error {
+	imageRef = strings.TrimSpace(imageRef)
+	if imageRef == "" {
+		return fmt.Errorf("invalid deployment image ref: empty")
+	}
+	if !validImageRefRe.MatchString(imageRef) {
+		return fmt.Errorf("invalid deployment image ref %q", imageRef)
+	}
+	return nil
 }
 
 func resolveLitestreamBuildSHA(ctx context.Context, ref string) (string, error) {
