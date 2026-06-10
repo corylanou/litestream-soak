@@ -780,6 +780,46 @@ func TestNotifyDeploymentAttentionSendsWebhook(t *testing.T) {
 	}
 }
 
+func TestNotifyDeploymentAttentionDuplicateFingerprintSkipsDelivery(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+
+	var counter atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		counter.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	rollout := DeploymentRolloutResponse{
+		Deployment: model.Deployment{
+			Source:        "main",
+			GitSHA:        "def456",
+			LitestreamSHA: "ls789",
+		},
+		Status:              "needs_attention",
+		GraceWindowExceeded: true,
+		NextAction:          "investigate degraded workers",
+	}
+
+	d := NewAlertDispatcher(db, "", server.URL, "")
+	d.notifyDeploymentAttention(rollout)
+	d.notifyDeploymentAttention(rollout)
+
+	if counter.Load() != 1 {
+		t.Errorf("webhook calls = %d, want 1", counter.Load())
+	}
+
+	alerts, err := db.ListAlerts(10)
+	if err != nil {
+		t.Fatalf("ListAlerts error = %v", err)
+	}
+	if len(alerts) != 1 {
+		t.Errorf("len(alerts) = %d, want 1", len(alerts))
+	}
+}
+
 func TestAlertURLsEmptyBaseURL(t *testing.T) {
 	t.Parallel()
 

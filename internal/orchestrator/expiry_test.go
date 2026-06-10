@@ -252,6 +252,46 @@ func TestCheckStaleWorkersSkipsWorkersWithoutHeartbeat(t *testing.T) {
 	}
 }
 
+func TestCheckStaleWorkersFreshHeartbeatNotStale(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	createTestWorker(t, db, model.Worker{
+		ID:            "stale-fresh-hb",
+		Name:          "stale-fresh-hb",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		ProfileName:   "low",
+		ProfileConfig: "{}",
+	})
+	if err := db.UpdateWorkerHeartbeat("stale-fresh-hb"); err != nil {
+		t.Fatalf("UpdateWorkerHeartbeat error = %v", err)
+	}
+
+	mgr := &Manager{db: db}
+	mgr.checkStaleWorkers(ctx, time.Hour)
+
+	w, err := db.GetWorker("stale-fresh-hb")
+	if err != nil {
+		t.Fatalf("GetWorker error = %v", err)
+	}
+	if w.Status != model.WorkerRunning {
+		t.Errorf("status = %q, want %q", w.Status, model.WorkerRunning)
+	}
+
+	events, err := db.ListWorkerEvents("stale-fresh-hb", 10)
+	if err != nil {
+		t.Fatalf("ListWorkerEvents error = %v", err)
+	}
+	for _, e := range events {
+		if e.EventType == "worker_stale" {
+			t.Errorf("fresh heartbeat within positive timeout got unexpected worker_stale event")
+		}
+	}
+}
+
 func TestCheckStaleWorkersSendsStaleAlert(t *testing.T) {
 	t.Parallel()
 
