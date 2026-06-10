@@ -26,7 +26,7 @@ func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassifi
 		return classification
 	}
 	objectStore := ParseObjectStoreFailure(errorMessage)
-	if objectStore != nil && (classification.Stage == "" || classification.Stage == "validation") {
+	if objectStore != nil && classification.Stage != "sync" && classification.Stage != "restore" {
 		classification.Stage = "restore"
 	}
 	classification.Signature = inferFailureSignature(classification.Stage, text, errorMessage)
@@ -50,7 +50,9 @@ func InferFailureStage(checkType, errorMessage string) string {
 		return "disk_capacity"
 	case strings.Contains(text, "wait for sync") || strings.Contains(text, "sync request") || strings.Contains(text, "decode sync response") || strings.Contains(text, "litestream.sock"):
 		return "sync"
-	case strings.Contains(text, "restore failed") || strings.Contains(text, "check_type=restore") || strings.Contains(text, "get ltx time bounds") || strings.Contains(text, "restore plan") || strings.Contains(text, "read page header"):
+	case strings.Contains(text, "restore failed") || strings.Contains(text, "check_type=restore") || strings.Contains(text, "get ltx time bounds") || strings.Contains(text, "restore plan") ||
+		strings.Contains(text, "read page header") || strings.Contains(text, "open ltx file") || strings.Contains(text, "no such key") || strings.Contains(text, "missing ltx") ||
+		strings.Contains(text, "decode") || strings.Contains(text, "unexpected eof"):
 		return "restore"
 	case strings.Contains(text, "integrity check") || strings.Contains(text, "check_type=integrity_check") || strings.Contains(text, "wrong # of entries in index"):
 		return "integrity_check"
