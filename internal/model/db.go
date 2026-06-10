@@ -486,7 +486,7 @@ func (d *DB) UpdateWorkerMachineVersion(id, machineID, gitSHA, litestreamSHA str
 func (d *DB) GetWorker(id string) (*Worker, error) {
 	var w Worker
 	err := scanWorker(
-		d.db.QueryRow(`SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at FROM workers WHERE id = ?`, id),
+		d.db.QueryRow("SELECT "+workerColumns+" FROM workers WHERE id = ?", id),
 		&w,
 	)
 	if err != nil {
@@ -500,7 +500,7 @@ func (d *DB) ListWorkers(status string) ([]Worker, error) {
 }
 
 func (d *DB) ListWorkersFiltered(status, source string) ([]Worker, error) {
-	query := `SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at FROM workers`
+	query := "SELECT " + workerColumns + " FROM workers"
 	var args []any
 	if source != "" {
 		query += " WHERE source = ?"
@@ -515,44 +515,11 @@ func (d *DB) ListWorkersFiltered(status, source string) ([]Worker, error) {
 		args = append(args, status)
 	}
 	query += " ORDER BY created_at DESC"
-
-	rows, err := d.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	workers := make([]Worker, 0)
-	for rows.Next() {
-		var w Worker
-		if err := scanWorker(rows, &w); err != nil {
-			return nil, err
-		}
-		workers = append(workers, w)
-	}
-	return workers, nil
+	return d.queryWorkers(query, args...)
 }
 
 func (d *DB) ListDormancyWorkers() ([]Worker, error) {
-	rows, err := d.db.Query(`
-		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at
-		FROM workers
-		WHERE status IN ('running', 'degraded')
-		ORDER BY source, created_at`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	workers := make([]Worker, 0)
-	for rows.Next() {
-		var w Worker
-		if err := scanWorker(rows, &w); err != nil {
-			return nil, err
-		}
-		workers = append(workers, w)
-	}
-	return workers, nil
+	return d.queryWorkers("SELECT "+workerColumns+" FROM workers WHERE status IN ('running', 'degraded') ORDER BY source, created_at")
 }
 
 func (d *DB) ListActiveWorkerSources() ([]string, error) {
@@ -577,29 +544,14 @@ func (d *DB) ListActiveWorkerSources() ([]string, error) {
 		}
 		sources = append(sources, source)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return sources, nil
 }
 
 func (d *DB) ListExpiredWorkers() ([]Worker, error) {
-	rows, err := d.db.Query(`
-		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at
-		FROM workers
-		WHERE expires_at IS NOT NULL AND expires_at < datetime('now') AND status NOT IN ('stopped', 'failed')
-		ORDER BY expires_at`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	workers := make([]Worker, 0)
-	for rows.Next() {
-		var w Worker
-		if err := scanWorker(rows, &w); err != nil {
-			return nil, err
-		}
-		workers = append(workers, w)
-	}
-	return workers, nil
+	return d.queryWorkers("SELECT " + workerColumns + " FROM workers WHERE expires_at IS NOT NULL AND expires_at < datetime('now') AND status NOT IN ('stopped', 'failed') ORDER BY expires_at")
 }
 
 func (d *DB) RecordVerification(v *Verification) error {
@@ -642,6 +594,9 @@ func (d *DB) ListVerifications(workerID string, limit int) ([]Verification, erro
 			v.CompletedAt = &completedAt.Time
 		}
 		verifications = append(verifications, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return verifications, nil
 }
@@ -695,9 +650,7 @@ func (d *DB) CreateDeployment(dep *Deployment) (int64, error) {
 }
 
 func (d *DB) ListDeployments(source string, limit int) ([]Deployment, error) {
-	query := `
-		SELECT id, git_sha, litestream_sha, image_ref, source, pr_number, status, started_at, completed_at, error_message
-		FROM deployments`
+	query := "SELECT " + deploymentColumns + " FROM deployments"
 	args := make([]any, 0, 2)
 	if source != "" {
 		query += " WHERE source = ?"
@@ -720,7 +673,9 @@ func (d *DB) ListDeployments(source string, limit int) ([]Deployment, error) {
 		}
 		deployments = append(deployments, dep)
 	}
-
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return deployments, nil
 }
 
@@ -753,7 +708,7 @@ func (d *DB) UpsertReadyDeployment(dep *Deployment) error {
 func (d *DB) GetDeploymentBySHA(sha string) (*Deployment, error) {
 	var dep Deployment
 	err := scanDeployment(
-		d.db.QueryRow(`SELECT id, git_sha, litestream_sha, image_ref, source, pr_number, status, started_at, completed_at, error_message FROM deployments WHERE git_sha = ? ORDER BY started_at DESC LIMIT 1`, sha),
+		d.db.QueryRow("SELECT "+deploymentColumns+" FROM deployments WHERE git_sha = ? ORDER BY started_at DESC LIMIT 1", sha),
 		&dep,
 	)
 	if err != nil {
@@ -765,12 +720,7 @@ func (d *DB) GetDeploymentBySHA(sha string) (*Deployment, error) {
 func (d *DB) GetDeploymentByVersion(source, gitSHA, litestreamSHA string) (*Deployment, error) {
 	var dep Deployment
 	err := scanDeployment(
-		d.db.QueryRow(`
-			SELECT id, git_sha, litestream_sha, image_ref, source, pr_number, status, started_at, completed_at, error_message
-			FROM deployments
-			WHERE source = ? AND git_sha = ? AND litestream_sha = ?
-			ORDER BY started_at DESC, id DESC
-			LIMIT 1`,
+		d.db.QueryRow("SELECT "+deploymentColumns+" FROM deployments WHERE source = ? AND git_sha = ? AND litestream_sha = ? ORDER BY started_at DESC, id DESC LIMIT 1",
 			source,
 			gitSHA,
 			litestreamSHA,
@@ -784,9 +734,7 @@ func (d *DB) GetDeploymentByVersion(source, gitSHA, litestreamSHA string) (*Depl
 }
 
 func (d *DB) GetLatestDeployment(source string) (*Deployment, error) {
-	query := `
-		SELECT id, git_sha, litestream_sha, image_ref, source, pr_number, status, started_at, completed_at, error_message
-		FROM deployments`
+	query := "SELECT " + deploymentColumns + " FROM deployments"
 	args := make([]any, 0, 1)
 	if source != "" {
 		query += " WHERE source = ?"
@@ -864,9 +812,7 @@ func (d *DB) ListRunArchives(source, archiveType string, limit int) ([]RunArchiv
 		limit = 20
 	}
 
-	query := `
-		SELECT id, deployment_id, source, worker_id, archive_type, git_sha, litestream_sha, image_ref, status, summary, payload, archived_at
-		FROM run_archives`
+	query := "SELECT " + runArchiveColumns + " FROM run_archives"
 	args := make([]any, 0, 3)
 	clauses := make([]string, 0, 2)
 	if strings.TrimSpace(source) != "" {
@@ -897,16 +843,16 @@ func (d *DB) ListRunArchives(source, archiveType string, limit int) ([]RunArchiv
 		}
 		archives = append(archives, archive)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return archives, nil
 }
 
 func (d *DB) GetRunArchive(id int) (*RunArchive, error) {
 	var archive RunArchive
 	err := scanRunArchive(
-		d.db.QueryRow(`
-			SELECT id, deployment_id, source, worker_id, archive_type, git_sha, litestream_sha, image_ref, status, summary, payload, archived_at
-			FROM run_archives
-			WHERE id = ?`, id),
+		d.db.QueryRow("SELECT "+runArchiveColumns+" FROM run_archives WHERE id = ?", id),
 		&archive,
 	)
 	if err != nil {
@@ -1014,6 +960,9 @@ func (d *DB) ListEvents(limit int) ([]Event, error) {
 		}
 		events = append(events, e)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return events, nil
 }
 
@@ -1022,53 +971,18 @@ func (d *DB) ListMainWorkers() ([]Worker, error) {
 }
 
 func (d *DB) ListWorkersForSource(source string) ([]Worker, error) {
-	rows, err := d.db.Query(`
-		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at
-		FROM workers WHERE source = ? AND status NOT IN ('stopped', 'failed')
-		ORDER BY created_at`, source)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	workers := make([]Worker, 0)
-	for rows.Next() {
-		var w Worker
-		if err := scanWorker(rows, &w); err != nil {
-			return nil, err
-		}
-		workers = append(workers, w)
-	}
-	return workers, nil
+	return d.queryWorkers("SELECT "+workerColumns+" FROM workers WHERE source = ? AND status NOT IN ('stopped', 'failed') ORDER BY created_at", source)
 }
 
 func (d *DB) ListDormantWorkers(source string) ([]Worker, error) {
-	query := `
-		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at
-		FROM workers
-		WHERE status = 'dormant'`
+	query := "SELECT " + workerColumns + " FROM workers WHERE status = 'dormant'"
 	args := make([]any, 0, 1)
 	if source != "" {
 		query += " AND source = ?"
 		args = append(args, source)
 	}
 	query += " ORDER BY updated_at DESC"
-
-	rows, err := d.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	workers := make([]Worker, 0)
-	for rows.Next() {
-		var w Worker
-		if err := scanWorker(rows, &w); err != nil {
-			return nil, err
-		}
-		workers = append(workers, w)
-	}
-	return workers, nil
+	return d.queryWorkers(query, args...)
 }
 
 func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
@@ -1097,7 +1011,9 @@ func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
 		}
 		events = append(events, e)
 	}
-
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return events, nil
 }
 
@@ -1127,7 +1043,9 @@ func (d *DB) ListRecentFailedVerifications(limit int) ([]Verification, error) {
 		}
 		verifications = append(verifications, v)
 	}
-
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return verifications, nil
 }
 
@@ -1241,29 +1159,14 @@ func (d *DB) ListAlerts(limit int) ([]AlertDelivery, error) {
 		}
 		alerts = append(alerts, alert)
 	}
-
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return alerts, nil
 }
 
 func (d *DB) listWorkersBySource(source string) ([]Worker, error) {
-	rows, err := d.db.Query(`
-		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at
-		FROM workers WHERE source = ? AND status NOT IN ('stopped', 'failed', 'dormant')
-		ORDER BY created_at`, source)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	workers := make([]Worker, 0)
-	for rows.Next() {
-		var w Worker
-		if err := scanWorker(rows, &w); err != nil {
-			return nil, err
-		}
-		workers = append(workers, w)
-	}
-	return workers, nil
+	return d.queryWorkers("SELECT "+workerColumns+" FROM workers WHERE source = ? AND status NOT IN ('stopped', 'failed', 'dormant') ORDER BY created_at", source)
 }
 
 // DeleteWorker removes a worker from the database along with its verifications and events.
@@ -1289,11 +1192,15 @@ func (d *DB) DeleteWorker(id string) error {
 // StaleWorkers returns workers that haven't sent a heartbeat within the given duration.
 func (d *DB) StaleWorkers(timeout time.Duration) ([]Worker, error) {
 	cutoff := time.Now().UTC().Add(-timeout).Format("2006-01-02 15:04:05")
-	rows, err := d.db.Query(`
-		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at
-		FROM workers
-		WHERE status IN ('running', 'probing') AND last_heartbeat_at IS NOT NULL AND last_heartbeat_at < ?`,
-		cutoff)
+	return d.queryWorkers("SELECT "+workerColumns+" FROM workers WHERE status IN ('running', 'probing') AND last_heartbeat_at IS NOT NULL AND last_heartbeat_at < ?", cutoff)
+}
+
+const workerColumns = "id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at"
+const deploymentColumns = "id, git_sha, litestream_sha, image_ref, source, pr_number, status, started_at, completed_at, error_message"
+const runArchiveColumns = "id, deployment_id, source, worker_id, archive_type, git_sha, litestream_sha, image_ref, status, summary, payload, archived_at"
+
+func (d *DB) queryWorkers(query string, args ...any) ([]Worker, error) {
+	rows, err := d.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1306,6 +1213,9 @@ func (d *DB) StaleWorkers(timeout time.Duration) ([]Worker, error) {
 			return nil, err
 		}
 		workers = append(workers, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return workers, nil
 }
