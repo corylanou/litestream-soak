@@ -638,19 +638,12 @@ func (r *Runner) pollList(client *http.Client) (string, float64, error) {
 	}
 
 	db := result.Databases[0]
-	if db.TXID != nil || db.ReplicatedTXID != nil {
-		txid, replicated := uint64(0), uint64(0)
-		if db.TXID != nil {
-			txid = *db.TXID
-		}
-		if db.ReplicatedTXID != nil {
-			replicated = *db.ReplicatedTXID
-		}
+	if db.TXID != nil && db.ReplicatedTXID != nil {
 		lag := uint64(0)
-		if txid > replicated {
-			lag = txid - replicated
+		if *db.TXID > *db.ReplicatedTXID {
+			lag = *db.TXID - *db.ReplicatedTXID
 		}
-		SetReplicatedTXID(float64(replicated))
+		SetReplicatedTXID(float64(*db.ReplicatedTXID))
 		SetReplicationLag(float64(lag))
 	}
 	age := 0.0

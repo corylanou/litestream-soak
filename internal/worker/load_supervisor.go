@@ -97,12 +97,20 @@ func (s *loadSupervisor) supervise(ctx context.Context, cmd *exec.Cmd, done chan
 			s.exited = false
 			s.procDone = done
 			stopped := s.stopped
+			paused := s.paused
 			s.mu.Unlock()
 			IncLoadRestart("synthetic")
-			SetLoadRunning(true)
 			slog.Info("Restarted load generator")
 			if stopped && next.Process != nil {
 				_ = next.Process.Signal(os.Interrupt)
+			}
+			// A Pause that landed between waitWhilePaused and this commit saw
+			// the previous process as exited and signaled nothing, so the
+			// fresh process must be stopped here to honor it.
+			if paused && next.Process != nil {
+				_ = next.Process.Signal(syscall.SIGSTOP)
+			} else {
+				SetLoadRunning(true)
 			}
 			cmd = next
 			break

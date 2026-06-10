@@ -249,3 +249,89 @@ func TestLoadSupervisorStopWhilePausedReturns(t *testing.T) {
 		t.Fatal("Stop() did not return while process was paused")
 	}
 }
+
+func TestLoadSupervisorRestartWhilePausedStopsNewProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("signal handling requires Unix")
+	}
+
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "writes")
+	var starts atomic.Int32
+	restartEntered := make(chan struct{})
+	releaseRestart := make(chan struct{})
+
+	sup := newLoadSupervisor(func(ctx context.Context) (*exec.Cmd, error) {
+		n := starts.Add(1)
+		var script string
+		if n == 1 {
+			script = "exit 0"
+		} else {
+			if n == 2 {
+				close(restartEntered)
+				<-releaseRestart
+			}
+			script = "while true; do echo x >> " + outFile + "; sleep 0.02; done"
+		}
+		cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
+		if err := cmd.Start(); err != nil {
+			return nil, err
+		}
+		return cmd, nil
+	})
+	sup.initialBackoff = 10 * time.Millisecond
+	sup.maxBackoff = 10 * time.Millisecond
+	sup.healthyReset = time.Minute
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := sup.start(ctx); err != nil {
+		t.Fatalf("start() error = %v", err)
+	}
+
+	select {
+	case <-restartEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor never attempted restart")
+	}
+
+	if err := sup.Pause(context.Background()); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	close(releaseRestart)
+
+	if !waitUntil(2*time.Second, 10*time.Millisecond, func() bool {
+		sup.mu.Lock()
+		defer sup.mu.Unlock()
+		return !sup.exited
+	}) {
+		t.Fatal("restart never committed")
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	size1 := testFileSize(t, outFile)
+	time.Sleep(300 * time.Millisecond)
+	size2 := testFileSize(t, outFile)
+	if size2 != size1 {
+		t.Fatalf("restarted process kept writing while paused: size %d -> %d", size1, size2)
+	}
+
+	sup.Resume()
+	if !waitUntil(2*time.Second, 20*time.Millisecond, func() bool {
+		return testFileSize(t, outFile) > size2
+	}) {
+		t.Fatal("process did not resume writing after Resume")
+	}
+}
+
+func testFileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Size()
+}

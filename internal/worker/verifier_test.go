@@ -799,8 +799,14 @@ func TestPollDBStatsZeroTXIDsResetReplicationMetrics(t *testing.T) {
 		t.Fatalf("soak_replication_lag_txids after zero report = %v, want 0", got)
 	}
 
+	SetReplicatedTXID(7)
+	SetReplicationLag(3)
 	listBody.Store(`{"databases":[{"status":"replicating"}]}`)
-	if got := testutil.ToFloat64(replicatedTXID.WithLabelValues(labels...)); got != 0 {
-		t.Fatalf("soak_replicated_txid = %v, want unchanged 0", got)
+	runner.pollDBStats()
+	if got := testutil.ToFloat64(replicatedTXID.WithLabelValues(labels...)); got != 7 {
+		t.Fatalf("soak_replicated_txid = %v, want unchanged 7 when fields absent", got)
+	}
+	if got := testutil.ToFloat64(replicationLag.WithLabelValues(labels...)); got != 3 {
+		t.Fatalf("soak_replication_lag_txids = %v, want unchanged 3 when fields absent", got)
 	}
 }
