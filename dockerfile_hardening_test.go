@@ -203,6 +203,53 @@ printf 'setpriv %s\n' "$*" >> "$LOG"
 	}
 }
 
+func TestDockerEntrypointSetsHomeForDroppedPrivilegeUser(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	dataDir := filepath.Join(dir, "data")
+	dbPath := filepath.Join(dataDir, "test.db")
+	logPath := filepath.Join(dir, "calls.log")
+
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	if err := os.Mkdir(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+	if err := os.WriteFile(dbPath, nil, 0o644); err != nil {
+		t.Fatalf("write db: %v", err)
+	}
+
+	writeExecutable(t, filepath.Join(binDir, "stat"), `#!/bin/sh
+printf '10001:10001\n'
+`)
+	writeExecutable(t, filepath.Join(binDir, "setpriv"), `#!/bin/sh
+printf 'HOME=%s\n' "$HOME" >> "$LOG"
+printf 'setpriv %s\n' "$*" >> "$LOG"
+`)
+
+	cmd := exec.Command("sh", "docker-entrypoint.sh", "/usr/local/bin/soakctl")
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir,
+		"DATA_DIR="+dataDir,
+		"SOAK_DATA_DB="+dbPath,
+		"HOME=/root",
+		"LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run docker-entrypoint.sh: %v\n%s", err, output)
+	}
+
+	log := string(readFile(t, logPath))
+	if !strings.Contains(log, "HOME=/data\n") {
+		t.Fatalf("dropped-privilege runtime HOME must be /data\n%s", log)
+	}
+	if strings.Contains(log, "HOME=/root") {
+		t.Fatalf("dropped-privilege runtime must not inherit root HOME\n%s", log)
+	}
+}
+
 func TestEntrypointStillRunsRuntimeCommandAsNonRoot(t *testing.T) {
 	content := string(readFile(t, "docker-entrypoint.sh"))
 	setprivRE := regexp.MustCompile(`exec\s+setpriv\s+.*--reuid\s+soak\s+.*--regid\s+soak\s+.*--init-groups\s+"\$@"`)
