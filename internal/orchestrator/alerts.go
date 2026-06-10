@@ -74,7 +74,7 @@ func (d *AlertDispatcher) Enabled() bool {
 }
 
 func (d *AlertDispatcher) NotifyVerificationFailure(worker model.Worker, verification model.Verification) {
-	if !d.Enabled() || verification.Passed {
+	if !d.Enabled() || !verification.Failed() {
 		return
 	}
 	if !d.shouldAlertVerificationFailure(worker.ID, verification) {
@@ -185,13 +185,17 @@ func (d *AlertDispatcher) notifyDeploymentAttention(rollout DeploymentRolloutRes
 }
 
 func (d *AlertDispatcher) shouldAlertVerificationFailure(workerID string, current model.Verification) bool {
+	if !current.Failed() {
+		return false
+	}
+
 	verifications, err := d.db.ListVerifications(workerID, 2)
 	if err != nil || len(verifications) < 2 {
 		return true
 	}
 
 	previous := verifications[1]
-	if previous.Passed && previous.Status != "failed" {
+	if !previous.Failed() {
 		return true
 	}
 

@@ -46,14 +46,15 @@ func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, er
 		verification := verifications[0]
 		if observedAt, ok := verificationObservedAt(verification); ok && !observedAt.Before(worker.CreatedAt.UTC()) {
 			summary.LastVerification = &verification
-			if activeFailure(&verification) {
-				vf := classifyVerification(&verification)
-				summary.CurrentFailureStage = vf.Stage
-				summary.CurrentFailureSignature = vf.Signature
-				summary.CurrentFailureClassification = vf.Classification
-				summary.CurrentProbableSubsystem = vf.probableSubsystem()
-			}
 		}
+	}
+	latestConclusive := latestVerificationInWindow(verifications, worker.CreatedAt.UTC(), nil)
+	if activeFailure(latestConclusive) {
+		vf := classifyVerification(latestConclusive)
+		summary.CurrentFailureStage = vf.Stage
+		summary.CurrentFailureSignature = vf.Signature
+		summary.CurrentFailureClassification = vf.Classification
+		summary.CurrentProbableSubsystem = vf.probableSubsystem()
 	}
 
 	latestFailure, err := a.db.GetLatestFailedVerification(worker.ID)
@@ -111,7 +112,7 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 	response.RuntimeSnapshotStatus = reporting.SnapshotStatus(response.ReportedRuntime)
 
 	for _, verification := range verifications {
-		if verification.Passed && verification.Status != "failed" {
+		if !activeFailure(&verification) {
 			continue
 		}
 		verificationCopy := verification
@@ -307,13 +308,13 @@ func failureRecovery(verifications []model.Verification, latestFailure model.Ver
 	for i, verification := range verifications {
 		if verification.ID == latestFailure.ID && i > 0 {
 			nextVerification := verifications[i-1]
-			recovery.FailedThenNextPassed = nextVerification.Passed && nextVerification.Status != "failed"
+			recovery.FailedThenNextPassed = nextVerification.Succeeded()
 		}
 		observedAt, ok := verificationObservedAt(verification)
 		if !ok || !observedAt.After(failureAt) {
 			continue
 		}
-		if verification.Passed && verification.Status != "failed" {
+		if verification.Succeeded() {
 			if recovery.LastPassAfterFailureAt == nil || observedAt.After(*recovery.LastPassAfterFailureAt) {
 				passAt := observedAt
 				recovery.LastPassAfterFailureAt = &passAt
@@ -325,6 +326,9 @@ func failureRecovery(verifications []model.Verification, latestFailure model.Ver
 
 func latestVerificationInWindow(verifications []model.Verification, since time.Time, until *time.Time) *model.Verification {
 	for i := range verifications {
+		if verifications[i].Aborted() {
+			continue
+		}
 		observedAt, ok := verificationObservedAt(verifications[i])
 		if !ok {
 			continue

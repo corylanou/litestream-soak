@@ -266,12 +266,12 @@ func scoreDeploymentWorker(worker model.Worker, deployment model.Deployment, ver
 		WorkerID: worker.ID,
 		Name:     worker.Name,
 		Profile:  worker.ProfileName,
-		Passed:   verification.Passed,
+		Passed:   verification.Succeeded(),
 	}
 	if observedAt, ok := verificationObservedAt(*verification); ok {
 		outcome.VerifiedAt = &observedAt
 	}
-	if !verification.Passed {
+	if verification.Failed() {
 		vf := classifyVerification(verification)
 		outcome.FailureStage = vf.Stage
 		outcome.FailureSignature = vf.Signature
@@ -345,16 +345,18 @@ func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (Deployme
 			LastHeartbeatAt:       worker.LastHeartbeatAt,
 		}
 
-		verifications, err := db.ListVerifications(worker.ID, 1)
+		verifications, err := db.ListVerifications(worker.ID, 20)
 		if err == nil && len(verifications) > 0 {
 			if observedAt, ok := verificationObservedAt(verifications[0]); ok && !observedAt.Before(worker.CreatedAt.UTC()) {
 				progress.LastVerificationAt = &observedAt
-				progress.VerifiedSinceDeploy = progress.Updated && workerNeedsPostDeployVerification(worker.Status) && !deployment.StartedAt.IsZero() && !observedAt.Before(deployment.StartedAt)
-				if activeFailure(&verifications[0]) {
-					vf := classifyVerification(&verifications[0])
-					progress.CurrentFailureStage = vf.Stage
-					progress.CurrentFailureSignature = vf.Signature
-				}
+			}
+			latestConclusive := latestVerificationInWindow(verifications, worker.CreatedAt.UTC(), nil)
+			deploymentVerification := latestVerificationInWindow(verifications, deployment.StartedAt, nil)
+			progress.VerifiedSinceDeploy = progress.Updated && workerNeedsPostDeployVerification(worker.Status) && !deployment.StartedAt.IsZero() && deploymentVerification != nil
+			if activeFailure(latestConclusive) {
+				vf := classifyVerification(latestConclusive)
+				progress.CurrentFailureStage = vf.Stage
+				progress.CurrentFailureSignature = vf.Signature
 			}
 		}
 

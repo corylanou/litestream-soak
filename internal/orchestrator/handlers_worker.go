@@ -59,7 +59,9 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	}
 	payload.RuntimePayload = payload.Normalize(observedAt)
 	var vf verificationFailure
-	if !payload.Passed {
+	aborted := verificationStatusAborted(payload.Status)
+	failed := !payload.Passed && !aborted
+	if failed {
 		vf = classifyFailureMessage(payload.CheckType, payload.ErrorMessage)
 		if payload.FailureClassification == nil {
 			payload.FailureClassification = vf.Classification
@@ -99,9 +101,11 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to record verification")
 		return
 	}
-	if err := a.db.UpdateWorkerVerificationState(workerID, payload.Passed, payload.Summary); err != nil {
-		respondError(w, r, http.StatusInternalServerError, err, "failed to update worker state")
-		return
+	if !aborted {
+		if err := a.db.UpdateWorkerVerificationState(workerID, payload.Passed, payload.Summary); err != nil {
+			respondError(w, r, http.StatusInternalServerError, err, "failed to update worker state")
+			return
+		}
 	}
 
 	details, err := json.Marshal(payload)
@@ -112,28 +116,33 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 
 	eventType := "verification_passed"
 	message := payload.Summary
-	if message == "" && payload.Passed {
-		message = "verification passed"
-	}
-	if !payload.Passed {
+	switch {
+	case aborted:
+		eventType = "verification_aborted"
+		if message == "" {
+			message = "verification aborted"
+		}
+	case failed:
 		eventType = "verification_failed"
 		if message == "" {
 			message = "verification failed"
 		}
+	case message == "":
+		message = "verification passed"
 	}
 
 	if err := a.db.RecordEvent(workerID, eventType, message, string(details)); err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to record event")
 		return
 	}
-	if !payload.Passed && workerBeforeUpdate != nil && workerBeforeUpdate.Status != model.WorkerDegraded && workerBeforeUpdate.Status != model.WorkerDormant {
+	if failed && workerBeforeUpdate != nil && workerBeforeUpdate.Status != model.WorkerDegraded && workerBeforeUpdate.Status != model.WorkerDormant {
 		_ = a.db.RecordEvent(workerID, "first_failure", "Worker transitioned from healthy to failing", string(details))
 	}
 
 	if workerBeforeUpdate != nil && workerBeforeUpdate.Status == model.WorkerProbing {
-		if payload.Passed {
+		if payload.Passed && !aborted {
 			_ = a.db.RecordEvent(workerID, "worker_probe_passed", "Worker probe verification passed", "")
-		} else if a.manager != nil {
+		} else if failed && a.manager != nil {
 			signature := vf.Signature
 			reason := fmt.Sprintf("worker probe failed with %s; returning to dormant state", signature)
 			if err := a.manager.DormantWorker(r.Context(), workerID, reason, signature, "probe_failed"); err != nil {
@@ -157,6 +166,10 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func verificationStatusAborted(status string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), "aborted")
 }
 
 func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {

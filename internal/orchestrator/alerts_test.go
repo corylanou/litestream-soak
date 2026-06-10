@@ -416,6 +416,36 @@ func TestNotifyVerificationFailureSkipsPassedVerification(t *testing.T) {
 	}
 }
 
+func TestShouldAlertVerificationFailureSkipsAbortedVerification(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+
+	createTestWorker(t, db, model.Worker{
+		ID:            "verif-aborted-worker",
+		Name:          "verif-aborted-worker",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		ProfileName:   "low",
+		ProfileConfig: "{}",
+	})
+
+	current := model.Verification{
+		WorkerID:     "verif-aborted-worker",
+		StartedAt:    time.Now(),
+		Status:       "aborted",
+		CheckType:    "integrity",
+		Passed:       false,
+		ErrorMessage: "litestream process stopped during verification",
+	}
+	mustRecordVerification(t, db, &current)
+
+	d := NewAlertDispatcher(db, "", "http://webhook.example", "")
+	if d.shouldAlertVerificationFailure(current.WorkerID, current) {
+		t.Fatal("shouldAlertVerificationFailure() = true, want false for aborted verification")
+	}
+}
+
 func TestNotifyVerificationFailureDisabledDispatcherNoops(t *testing.T) {
 	t.Parallel()
 

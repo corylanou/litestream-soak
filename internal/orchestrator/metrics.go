@@ -294,7 +294,7 @@ func (m *controlMetrics) syncFromDB(db *model.DB) {
 		}
 		m.observeVerification(worker, verifications[0])
 
-		if verifications[0].Passed {
+		if !verifications[0].Failed() {
 			latestFailed, err := db.GetLatestFailedVerification(worker.ID)
 			if err == nil && latestFailed != nil {
 				m.observeLastFailure(worker, *latestFailed)
@@ -432,10 +432,10 @@ func (m *controlMetrics) observePlatformEvent(worker model.Worker, event *model.
 func (m *controlMetrics) observeVerification(worker model.Worker, verification model.Verification) {
 	labels := workerMetricLabels(worker)
 
-	if verification.Passed {
+	if verification.Succeeded() {
 		controlWorkerLastVerificationResult.WithLabelValues(labels...).Set(1)
 		m.clearFailure(worker.ID)
-	} else {
+	} else if verification.Failed() {
 		controlWorkerLastVerificationResult.WithLabelValues(labels...).Set(0)
 
 		stage := inferFailureStage(&verification)

@@ -1212,6 +1212,151 @@ func TestHandleVerificationDormantWorkerIgnored(t *testing.T) {
 	}
 }
 
+func TestHandleVerificationAbortedReportIsNeutral(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, db *model.DB, workerID string)
+	}{
+		{
+			name: "running",
+		},
+		{
+			name: "degraded",
+			setup: func(t *testing.T, db *model.DB, workerID string) {
+				t.Helper()
+				if err := db.UpdateWorkerVerificationState(workerID, false, "existing verification failure"); err != nil {
+					t.Fatalf("UpdateWorkerVerificationState() error = %v", err)
+				}
+			},
+		},
+		{
+			name: "probing",
+			setup: func(t *testing.T, db *model.DB, workerID string) {
+				t.Helper()
+				if err := db.MarkWorkerProbing(workerID, "manual_probe"); err != nil {
+					t.Fatalf("MarkWorkerProbing() error = %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := openTestDB(t)
+			workerID := "worker-aborted-" + tt.name
+			createTestWorker(t, db, model.Worker{
+				ID:            workerID,
+				Name:          workerID,
+				Status:        model.WorkerRunning,
+				Source:        "main",
+				GitSHA:        "abc123",
+				LitestreamSHA: "ls123",
+				ProfileName:   "low-volume",
+				ProfileConfig: "{}",
+			})
+			if tt.setup != nil {
+				tt.setup(t, db, workerID)
+			}
+
+			before, err := db.GetWorker(workerID)
+			if err != nil {
+				t.Fatalf("GetWorker() before: %v", err)
+			}
+
+			payload := reporting.VerificationPayload{
+				WorkerIdentity: reporting.WorkerIdentity{
+					WorkerID:      workerID,
+					Name:          workerID,
+					Source:        "main",
+					GitSHA:        "abc123",
+					LitestreamSHA: "ls123",
+					ProfileName:   "low-volume",
+					ProfileConfig: "{}",
+				},
+				StartedAt:    time.Date(2026, 4, 26, 14, 0, 0, 0, time.UTC),
+				CompletedAt:  time.Date(2026, 4, 26, 14, 2, 0, 0, time.UTC),
+				CheckType:    "integrity",
+				Status:       "aborted",
+				Passed:       false,
+				Summary:      "verification aborted",
+				ErrorMessage: "litestream process stopped during verification",
+				DurationMS:   120000,
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal payload: %v", err)
+			}
+
+			manager := &Manager{db: db, appName: "litestream-soak"}
+			api := NewAPI(db, nil, nil, nil, manager, nil)
+			request := httptest.NewRequest(http.MethodPost, "/api/workers/"+workerID+"/verifications", bytes.NewReader(body))
+			request.SetPathValue("id", workerID)
+			recorder := httptest.NewRecorder()
+
+			api.handleVerification(recorder, request)
+
+			if recorder.Code != http.StatusAccepted {
+				t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+			}
+
+			after, err := db.GetWorker(workerID)
+			if err != nil {
+				t.Fatalf("GetWorker() after: %v", err)
+			}
+			if after.Status != before.Status {
+				t.Fatalf("Status = %q, want %q", after.Status, before.Status)
+			}
+			if after.ErrorMessage != before.ErrorMessage {
+				t.Fatalf("ErrorMessage = %q, want %q", after.ErrorMessage, before.ErrorMessage)
+			}
+			if after.DormantReason != before.DormantReason {
+				t.Fatalf("DormantReason = %q, want %q", after.DormantReason, before.DormantReason)
+			}
+			if after.DormantSignature != before.DormantSignature {
+				t.Fatalf("DormantSignature = %q, want %q", after.DormantSignature, before.DormantSignature)
+			}
+			if after.ResumeTrigger != before.ResumeTrigger {
+				t.Fatalf("ResumeTrigger = %q, want %q", after.ResumeTrigger, before.ResumeTrigger)
+			}
+
+			verifications, err := db.ListVerifications(workerID, 10)
+			if err != nil {
+				t.Fatalf("ListVerifications() error = %v", err)
+			}
+			if len(verifications) != 1 {
+				t.Fatalf("len(verifications) = %d, want 1", len(verifications))
+			}
+			if verifications[0].Status != "aborted" {
+				t.Fatalf("verification Status = %q, want aborted", verifications[0].Status)
+			}
+			if verifications[0].Passed {
+				t.Fatalf("verification Passed = true, want false")
+			}
+
+			events, err := db.ListWorkerEvents(workerID, 10)
+			if err != nil {
+				t.Fatalf("ListWorkerEvents() error = %v", err)
+			}
+			foundAborted := false
+			for _, event := range events {
+				switch event.EventType {
+				case "verification_failed", "first_failure", "worker_probe_failed", "worker_dormant":
+					t.Fatalf("unexpected failure event %q recorded: %+v", event.EventType, events)
+				case "verification_aborted":
+					foundAborted = true
+				}
+			}
+			if !foundAborted {
+				t.Fatalf("verification_aborted event not recorded; got: %+v", events)
+			}
+		})
+	}
+}
+
 func TestHandleHeartbeatRuntimeAtGating(t *testing.T) {
 	t.Parallel()
 

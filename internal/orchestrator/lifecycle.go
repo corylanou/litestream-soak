@@ -426,7 +426,7 @@ func workerPassedSuccessWindow(db *model.DB, worker model.Worker, deployment mod
 		if activeFailure(&verification) {
 			return false, nil
 		}
-		if verification.Passed && verification.Status != "failed" && observedAt.After(latestPassAt) {
+		if verification.Succeeded() && observedAt.After(latestPassAt) {
 			latestPassAt = observedAt
 		}
 	}

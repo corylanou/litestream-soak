@@ -331,7 +331,10 @@ func verificationClass(value any) string {
 	if verification == nil {
 		return "status-neutral"
 	}
-	if verification.Passed {
+	if verification.Aborted() {
+		return "status-neutral"
+	}
+	if verification.Succeeded() {
 		return "status-good"
 	}
 	return "status-bad"
@@ -342,7 +345,10 @@ func verificationLabel(value any) string {
 	if verification == nil {
 		return "no data"
 	}
-	if verification.Passed {
+	if verification.Aborted() {
+		return "aborted"
+	}
+	if verification.Succeeded() {
 		return "pass"
 	}
 	return "fail"

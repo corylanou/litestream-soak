@@ -58,7 +58,7 @@ func (d *DB) GetLatestFailedVerification(workerID string) (*Verification, error)
 	err := d.db.QueryRow(`
 		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message
 		FROM verifications
-		WHERE worker_id = ? AND (passed = 0 OR status = 'failed')
+		WHERE worker_id = ? AND (passed = 0 OR lower(trim(status)) = 'failed') AND lower(trim(status)) <> 'aborted'
 		ORDER BY started_at DESC
 		LIMIT 1`,
 		workerID,
@@ -91,7 +91,7 @@ func (d *DB) ListRecentFailedVerifications(limit int) ([]Verification, error) {
 	rows, err := d.db.Query(`
 		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message
 		FROM verifications
-		WHERE passed = 0 OR status = 'failed'
+		WHERE (passed = 0 OR lower(trim(status)) = 'failed') AND lower(trim(status)) <> 'aborted'
 		ORDER BY started_at DESC
 		LIMIT ?`,
 		limit,
