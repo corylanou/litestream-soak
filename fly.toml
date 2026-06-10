@@ -28,6 +28,16 @@ primary_region = "ord"
   port = 9091
   path = "/metrics"
 
+[checks]
+  [checks.healthz]
+    type = "http"
+    port = 9091
+    method = "GET"
+    path = "/healthz"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "5m"
+
 [mounts]
   source = "soak_data"
   destination = "/data"
