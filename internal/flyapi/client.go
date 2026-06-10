@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -43,6 +44,14 @@ func NewClient(appName, token string) *Client {
 			Timeout: 60 * time.Second,
 		},
 	}
+}
+
+func NewClientWithBaseURL(appName, token, baseURL string) *Client {
+	client := NewClient(appName, token)
+	if strings.TrimSpace(baseURL) != "" {
+		client.baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	}
+	return client
 }
 
 func (c *Client) AppName() string {
