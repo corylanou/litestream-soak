@@ -147,8 +147,46 @@ func Open(path string) (*DB, error) {
 	if err := ensureDeploymentColumns(db); err != nil {
 		return nil, fmt.Errorf("ensure deployment columns: %w", err)
 	}
+	if err := normalizeLegacyExpiry(db); err != nil {
+		return nil, fmt.Errorf("normalize legacy expires_at: %w", err)
+	}
 
 	return &DB{db: db}, nil
+}
+
+func normalizeLegacyExpiry(db *sql.DB) error {
+	rows, err := db.Query(`SELECT id, CAST(expires_at AS TEXT) FROM workers WHERE expires_at IS NOT NULL`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+
+	type rewrite struct {
+		id string
+		at time.Time
+	}
+	var rewrites []rewrite
+	for rows.Next() {
+		var id, raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			return err
+		}
+		at, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", raw)
+		if err != nil {
+			continue
+		}
+		rewrites = append(rewrites, rewrite{id: id, at: at.UTC()})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, r := range rewrites {
+		if _, err := db.Exec(`UPDATE workers SET expires_at = ? WHERE id = ?`, r.at, r.id); err != nil {
+			return fmt.Errorf("rewrite expires_at for worker %s: %w", r.id, err)
+		}
+	}
+	return nil
 }
 
 func ensureWorkerColumns(db *sql.DB) error {
