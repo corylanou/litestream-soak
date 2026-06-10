@@ -32,6 +32,54 @@ func TestClassifyVerificationFailureS3ListRequestCanceled(t *testing.T) {
 	}
 }
 
+func TestClassifyVerificationFailureSyncDecodeError(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", "wait for sync: decode sync response: invalid character '<' looking for beginning of value")
+	if got.Stage != "sync" {
+		t.Fatalf("Stage = %q, want sync", got.Stage)
+	}
+	if got.Signature != "sync_decode_error" {
+		t.Fatalf("Signature = %q, want sync_decode_error", got.Signature)
+	}
+	if got.Restore != nil {
+		t.Fatalf("Restore = %#v, want nil", got.Restore)
+	}
+}
+
+func TestClassifyVerificationFailureSyncObjectStore(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", `wait for sync: sync request: operation error S3: GetObject, https response error StatusCode: 408, RequestID: 1777230002707552565, HostID: , api error RequestCanceled: Request is canceled.`)
+	if got.Stage != "sync" {
+		t.Fatalf("Stage = %q, want sync", got.Stage)
+	}
+	if got.Signature != "sync_s3_get_request_canceled" {
+		t.Fatalf("Signature = %q, want sync_s3_get_request_canceled", got.Signature)
+	}
+	if got.ObjectStore == nil {
+		t.Fatal("ObjectStore = nil")
+	}
+	if got.ObjectStore.Operation != "GetObject" {
+		t.Fatalf("Operation = %q, want GetObject", got.ObjectStore.Operation)
+	}
+	if got.Restore != nil {
+		t.Fatalf("Restore = %#v, want nil", got.Restore)
+	}
+}
+
+func TestClassifyVerificationFailureRestoreAttachesRestoreFailure(t *testing.T) {
+	got := ClassifyVerificationFailure("restore", `validation failed (exit 1): error="restore failed: get LTX time bounds: operation error S3: ListObjectsV2, https response error StatusCode: 408, RequestID: 1777230002707552565, HostID: , api error RequestCanceled: Request is canceled."`)
+	if got.Stage != "restore" {
+		t.Fatalf("Stage = %q, want restore", got.Stage)
+	}
+	if got.Signature != "restore_s3_list_request_canceled" {
+		t.Fatalf("Signature = %q, want restore_s3_list_request_canceled", got.Signature)
+	}
+	if got.Restore == nil {
+		t.Fatal("Restore = nil, want attached RestoreFailure")
+	}
+	if got.Restore.Phase != "TimeBounds" {
+		t.Fatalf("Restore.Phase = %q, want TimeBounds", got.Restore.Phase)
+	}
+}
+
 func TestClassifyVerificationFailureRestoreDecodeError(t *testing.T) {
 	got := ClassifyVerificationFailure("restore", "validation failed: restore failed: read page header: unexpected EOF")
 	if got.Stage != "restore" {

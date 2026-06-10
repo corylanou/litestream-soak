@@ -67,6 +67,70 @@ func TestClassifyPlatformLog(t *testing.T) {
 			wantOK:    true,
 		},
 		{
+			name: "restart after unclean exit",
+			entry: flyapi.AppLogEntry{
+				Attributes: flyapi.AppLogAttributes{
+					Message: "Restarting machine due to unclean exit",
+					Meta: flyapi.AppLogMeta{
+						Event: flyapi.AppLogMetaEvent{Provider: "vm"},
+					},
+				},
+			},
+			wantType:  "platform_restart",
+			wantMatch: "platform event",
+			wantOK:    true,
+		},
+		{
+			name: "nonzero exit code",
+			entry: flyapi.AppLogEntry{
+				Attributes: flyapi.AppLogAttributes{
+					Message: "main child exited with exit code: 1",
+					Meta: flyapi.AppLogMeta{
+						Event: flyapi.AppLogMetaEvent{Provider: "vm"},
+					},
+				},
+			},
+			wantType:  "platform_restart",
+			wantMatch: "platform event",
+			wantOK:    true,
+		},
+		{
+			name: "routine boot starting init",
+			entry: flyapi.AppLogEntry{
+				Attributes: flyapi.AppLogAttributes{
+					Message: "Starting init (commit: 8a0563c)...",
+					Meta: flyapi.AppLogMeta{
+						Event: flyapi.AppLogMetaEvent{Provider: "vm"},
+					},
+				},
+			},
+			wantOK: false,
+		},
+		{
+			name: "routine machine started",
+			entry: flyapi.AppLogEntry{
+				Attributes: flyapi.AppLogAttributes{
+					Message: "[info] Machine started in 537ms",
+					Meta: flyapi.AppLogMeta{
+						Event: flyapi.AppLogMetaEvent{Provider: "vm"},
+					},
+				},
+			},
+			wantOK: false,
+		},
+		{
+			name: "clean exit not restarting",
+			entry: flyapi.AppLogEntry{
+				Attributes: flyapi.AppLogAttributes{
+					Message: "machine exited with exit code 0, not restarting",
+					Meta: flyapi.AppLogMeta{
+						Event: flyapi.AppLogMetaEvent{Provider: "vm"},
+					},
+				},
+			},
+			wantOK: false,
+		},
+		{
 			name: "ordinary app log",
 			entry: flyapi.AppLogEntry{
 				Attributes: flyapi.AppLogAttributes{

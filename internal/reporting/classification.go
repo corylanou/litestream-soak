@@ -18,25 +18,26 @@ var (
 func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassification {
 	text := strings.ToLower(errorMessage)
 	classification := FailureClassification{
-		Stage:     InferFailureStage(checkType, errorMessage),
-		Signature: inferFailureSignature(text, errorMessage),
+		Stage: InferFailureStage(checkType, errorMessage),
 	}
 	if isDiskCapacityFailure(text) {
 		classification.Stage = "disk_capacity"
 		classification.Signature = "disk_capacity_full"
 		return classification
 	}
-	if objectStore := ParseObjectStoreFailure(errorMessage); objectStore != nil {
+	objectStore := ParseObjectStoreFailure(errorMessage)
+	if objectStore != nil && (classification.Stage == "" || classification.Stage == "validation") {
+		classification.Stage = "restore"
+	}
+	classification.Signature = inferFailureSignature(classification.Stage, text, errorMessage)
+	if objectStore != nil {
 		objectStore.Phase = firstNonEmpty(objectStore.Phase, inferRestorePhase(text))
 		classification.ObjectStore = objectStore
-		if classification.Stage == "" || classification.Stage == "validation" {
-			classification.Stage = "restore"
-		}
-		if signature := objectStoreSignature(*objectStore); signature != "" {
+		if signature := objectStoreSignature(classification.Stage, *objectStore); signature != "" {
 			classification.Signature = signature
 		}
 	}
-	if classification.Stage == "restore" || strings.HasPrefix(classification.Signature, "restore_") {
+	if classification.Stage == "restore" {
 		classification.Restore = &RestoreFailure{Phase: inferRestorePhase(text)}
 	}
 	return classification
@@ -47,7 +48,7 @@ func InferFailureStage(checkType, errorMessage string) string {
 	switch {
 	case isDiskCapacityFailure(text):
 		return "disk_capacity"
-	case strings.Contains(text, "wait for sync") || strings.Contains(text, "sync request") || strings.Contains(text, "litestream.sock"):
+	case strings.Contains(text, "wait for sync") || strings.Contains(text, "sync request") || strings.Contains(text, "decode sync response") || strings.Contains(text, "litestream.sock"):
 		return "sync"
 	case strings.Contains(text, "restore failed") || strings.Contains(text, "check_type=restore") || strings.Contains(text, "get ltx time bounds") || strings.Contains(text, "restore plan"):
 		return "restore"
@@ -147,7 +148,7 @@ func firstRegexMatch(pattern *regexp.Regexp, text string) string {
 	return strings.TrimSpace(matches[1])
 }
 
-func inferFailureSignature(text, original string) string {
+func inferFailureSignature(stage, text, original string) string {
 	switch {
 	case isDiskCapacityFailure(text):
 		return "disk_capacity_full"
@@ -164,7 +165,7 @@ func inferFailureSignature(text, original string) string {
 	case strings.Contains(text, "open ltx file: file does not exist") || strings.Contains(text, "no such key") || strings.Contains(text, "missing ltx"):
 		return "restore_missing_ltx"
 	case strings.Contains(text, "read page header") || strings.Contains(text, "decode") || strings.Contains(text, "unexpected eof"):
-		return "restore_decode_error"
+		return signatureStagePrefix(stage) + "_decode_error"
 	case strings.Contains(text, "restore plan") || strings.Contains(text, "calc restore"):
 		return "restore_plan_failed"
 	case strings.Contains(text, "ltx continuity"):
@@ -184,23 +185,31 @@ func isDiskCapacityFailure(text string) bool {
 		strings.Contains(text, "sqlite_full")
 }
 
-func objectStoreSignature(failure ObjectStoreFailure) string {
+func objectStoreSignature(stage string, failure ObjectStoreFailure) string {
+	prefix := signatureStagePrefix(stage)
 	operation := strings.ToLower(failure.Operation)
 	apiCode := strings.ToLower(failure.APICode)
 	switch {
 	case operation == "listobjectsv2" && (failure.HTTPStatus == 408 || apiCode == "requestcanceled"):
-		return "restore_s3_list_request_canceled"
+		return prefix + "_s3_list_request_canceled"
 	case operation == "getobject" && (failure.HTTPStatus == 408 || apiCode == "requestcanceled"):
-		return "restore_s3_get_request_canceled"
+		return prefix + "_s3_get_request_canceled"
 	case failure.HTTPStatus == 403 || apiCode == "accessdenied":
-		return "restore_s3_access_denied"
+		return prefix + "_s3_access_denied"
 	case operation == "listobjectsv2":
-		return "restore_s3_list_failed"
+		return prefix + "_s3_list_failed"
 	case operation == "getobject":
-		return "restore_s3_get_failed"
+		return prefix + "_s3_get_failed"
 	default:
-		return "restore_s3_failed"
+		return prefix + "_s3_failed"
 	}
+}
+
+func signatureStagePrefix(stage string) string {
+	if stage == "sync" {
+		return "sync"
+	}
+	return "restore"
 }
 
 func inferRestorePhase(text string) string {
