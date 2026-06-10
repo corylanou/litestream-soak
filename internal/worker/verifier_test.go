@@ -103,6 +103,37 @@ func holdWriteLock(t *testing.T, dbPath string) {
 	})
 }
 
+func TestLogResultWritesEntry(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+
+	verifier := NewVerifier(cfg)
+	start := time.Now()
+
+	verifier.logResult(start, true, "")
+	logPath := filepath.Join(dir, "verification.log")
+	got := readFile(t, logPath)
+	if !strings.Contains(got, "PASS") {
+		t.Fatalf("logResult() entry = %q, want contains %q", got, "PASS")
+	}
+	if strings.Contains(got, "FAIL") {
+		t.Fatalf("logResult() entry = %q, want no %q for passing result", got, "FAIL")
+	}
+
+	verifier.logResult(start, false, "something went wrong")
+	got = readFile(t, logPath)
+	if !strings.Contains(got, "FAIL") {
+		t.Fatalf("logResult() entry = %q, want contains %q", got, "FAIL")
+	}
+	if !strings.Contains(got, "something went wrong") {
+		t.Fatalf("logResult() entry = %q, want contains %q", got, "something went wrong")
+	}
+}
+
 func TestCheckpointTruncatesWAL(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

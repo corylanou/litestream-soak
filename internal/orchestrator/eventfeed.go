@@ -9,6 +9,10 @@ import (
 
 const eventFeedCoalesceWindow = 10 * time.Minute
 
+// coalesceEventFeed collapses consecutive platform events with the same coalesce
+// key that fall within eventFeedCoalesceWindow of each other into a single entry.
+// Callers must pass events in created_at descending order (newest first), as
+// produced by the event feed query.
 func coalesceEventFeed(events []model.Event) []model.Event {
 	if len(events) == 0 {
 		return nil
@@ -27,7 +31,11 @@ func coalesceEventFeed(events []model.Event) []model.Event {
 		key := eventCoalesceKey(normalized)
 		if index, ok := latestByKey[key]; ok {
 			current := collapsed[index]
-			if current.CreatedAt.Sub(normalized.CreatedAt) <= eventFeedCoalesceWindow {
+			delta := current.CreatedAt.Sub(normalized.CreatedAt)
+			if delta < 0 {
+				delta = -delta
+			}
+			if delta <= eventFeedCoalesceWindow {
 				if current.CollapsedCount == 0 {
 					current.CollapsedCount = 1
 					current.CollapsedWindowEnd = timePtr(current.CreatedAt)

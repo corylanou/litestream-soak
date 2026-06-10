@@ -210,7 +210,7 @@ func (d *DB) CreateWorker(w *Worker) error {
 			profile_name = excluded.profile_name,
 			profile_config = excluded.profile_config,
 			expires_at = excluded.expires_at,
-			created_at = datetime('now'),
+			created_at = datetime('now'), -- worker ID reuse signals fresh provision; reset all runtime state including created_at
 			last_heartbeat_at = NULL,
 			last_runtime_json = '',
 			last_runtime_at = NULL,

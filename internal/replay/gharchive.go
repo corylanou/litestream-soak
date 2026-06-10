@@ -9,6 +9,16 @@ import (
 	"log/slog"
 	"os"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+var (
+	gharchiveDroppedPayloadsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_replay_gharchive_dropped_payloads_total",
+		Help: "Total gharchive event payloads dropped due to JSON parse failures.",
+	}, []string{"event_type"})
 )
 
 type GHArchiveAdapter struct {
@@ -168,6 +178,7 @@ func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 		}
 		if uerr := json.Unmarshal(e.Payload, &p); uerr != nil {
 			slog.Warn("gharchive payload parse failed", "event_id", e.ID, "type", e.Type, "error", uerr)
+			gharchiveDroppedPayloadsTotal.WithLabelValues(e.Type).Inc()
 			break
 		}
 		_, err = tx.Exec(`INSERT INTO gh_push_events (event_id, repo_name, actor_login, ref, commit_count, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -183,6 +194,7 @@ func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 		}
 		if uerr := json.Unmarshal(e.Payload, &p); uerr != nil {
 			slog.Warn("gharchive payload parse failed", "event_id", e.ID, "type", e.Type, "error", uerr)
+			gharchiveDroppedPayloadsTotal.WithLabelValues(e.Type).Inc()
 			break
 		}
 		_, err = tx.Exec(`INSERT INTO gh_issue_events (event_id, repo_name, actor_login, action, issue_number, title, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -198,6 +210,7 @@ func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 		}
 		if uerr := json.Unmarshal(e.Payload, &p); uerr != nil {
 			slog.Warn("gharchive payload parse failed", "event_id", e.ID, "type", e.Type, "error", uerr)
+			gharchiveDroppedPayloadsTotal.WithLabelValues(e.Type).Inc()
 			break
 		}
 		_, err = tx.Exec(`INSERT INTO gh_pr_events (event_id, repo_name, actor_login, action, pr_number, title, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,

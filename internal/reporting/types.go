@@ -61,9 +61,6 @@ func (p RuntimePayload) Normalize(observedAt time.Time) RuntimePayload {
 	if normalized.SnapshotCollectedAt.IsZero() && !observedAt.IsZero() {
 		normalized.SnapshotCollectedAt = observedAt
 	}
-	if hadSnapshotMetadata {
-		return normalized
-	}
 	return normalized
 }
 

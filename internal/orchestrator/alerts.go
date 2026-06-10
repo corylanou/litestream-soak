@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -130,7 +131,7 @@ func (d *AlertDispatcher) notifyVerificationFailure(worker model.Worker, verific
 func (d *AlertDispatcher) notifyWorkerStale(worker model.Worker) {
 	lastHeartbeat := "unknown"
 	if worker.LastHeartbeatAt != nil && !worker.LastHeartbeatAt.IsZero() {
-		lastHeartbeat = strconvFormatInt(worker.LastHeartbeatAt.Unix())
+		lastHeartbeat = strconv.FormatInt(worker.LastHeartbeatAt.Unix(), 10)
 	}
 
 	fingerprint := fmt.Sprintf("worker_stale:%s:%s", worker.ID, lastHeartbeat)
@@ -369,8 +370,4 @@ func (d *AlertDispatcher) sendAlert(id int64, workerID, alertType string, payloa
 	if err := d.db.UpdateAlertDelivery(id, "sent", string(body), "", &now); err != nil {
 		slog.Error("Failed to update sent alert", "alert_id", id, "error", err)
 	}
-}
-
-func strconvFormatInt(value int64) string {
-	return fmt.Sprintf("%d", value)
 }
