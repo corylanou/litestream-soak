@@ -172,7 +172,7 @@ func buildIncidentGuide(bundle *IncidentBundle) incidentGuide {
 		recommendedMode = promptModeTriage
 		subsystem = "Pending verification"
 	} else if bundle.LatestFailure != nil {
-		headline = fmt.Sprintf("Worker recovered; use this as the current healthy baseline")
+		headline = "Worker recovered; use this as the current healthy baseline"
 		summary = fmt.Sprintf("This worker is running now, but its latest recorded failure happened during %s with signature %s.", valueOrUnknown(stage), valueOrUnknown(signature))
 		recommendedMode = promptModeHealthy
 		subsystem = "Healthy baseline"
@@ -758,7 +758,7 @@ func buildPromptEventSummaries(events []model.Event) []promptEventSummary {
 			if err := json.Unmarshal([]byte(event.Details), &payload); err == nil {
 				summary.RunID = payload.RunID
 				summary.ActiveVerification = payload.ActiveVerification
-				runtime := payload.RuntimePayload.Normalize(event.CreatedAt.UTC())
+				runtime := payload.Normalize(event.CreatedAt.UTC())
 				summary.RuntimeSnapshotStatus = reporting.SnapshotStatus(&runtime)
 				summary.RuntimeSnapshotError = runtime.LitestreamSnapshotError
 			}
@@ -769,7 +769,7 @@ func buildPromptEventSummaries(events []model.Event) []promptEventSummary {
 				summary.VerificationStatus = payload.Status
 				summary.Passed = boolPtr(payload.Passed)
 
-				runtime := payload.RuntimePayload.Normalize(event.CreatedAt.UTC())
+				runtime := payload.Normalize(event.CreatedAt.UTC())
 				summary.RuntimeSnapshotStatus = reporting.SnapshotStatus(&runtime)
 				summary.RuntimeSnapshotError = runtime.LitestreamSnapshotError
 				summary.RunID = payload.RunID
@@ -790,7 +790,7 @@ func buildPromptEventSummaries(events []model.Event) []promptEventSummary {
 			if err := json.Unmarshal([]byte(event.Details), &payload); err == nil {
 				summary.RunID = payload.RunID
 				summary.FailureDebugCaptured = payload.FailureDebug != nil
-				runtime := payload.RuntimePayload.Normalize(event.CreatedAt.UTC())
+				runtime := payload.Normalize(event.CreatedAt.UTC())
 				summary.RuntimeSnapshotStatus = reporting.SnapshotStatus(&runtime)
 				summary.RuntimeSnapshotError = runtime.LitestreamSnapshotError
 			}
@@ -854,26 +854,6 @@ func promptReturnFormat(mode promptMode) string {
 			"5. Fastest next commands or logs, preferring the auth-safe control-plane and Fly commands already provided",
 			"6. Whether to investigate Litestream, runtime, S3, or the harness first",
 		}, "\n")
-	}
-}
-
-func inferProbableSubsystem(stage, signature string) string {
-	text := strings.ToLower(stage + " " + signature)
-	switch {
-	case strings.Contains(text, "disk_capacity") || strings.Contains(text, "disk_full"):
-		return "Disk capacity / restore scratch headroom"
-	case strings.Contains(text, "db_sync_executor") || strings.Contains(text, "db sync executor"):
-		return "Litestream DB sync executor"
-	case strings.Contains(text, "sync") || strings.Contains(text, "litestream_sync_socket_refused") || strings.Contains(text, "litestream_sync_timeout") || strings.Contains(text, "litestream_sync_fd_exhausted"):
-		return "Litestream sync/control socket"
-	case strings.Contains(text, "restore") || strings.Contains(text, "replica_") || strings.Contains(text, "ltx"):
-		return "Replication or restore path"
-	case strings.Contains(text, "integrity") || strings.Contains(text, "sqlite_index_mismatch") || strings.Contains(text, "validation_failed") || strings.Contains(text, "validation"):
-		return "Restore correctness / integrity validation"
-	case strings.Contains(text, "pause load") || strings.Contains(text, "checkpoint"):
-		return "Soak harness or worker runtime"
-	default:
-		return "Needs operator triage"
 	}
 }
 
@@ -1240,24 +1220,6 @@ func uniqueSortedStrings(values []string) []string {
 	return items
 }
 
-func topCurrentFailure(summaries []WorkerSummaryResponse, key func(WorkerSummaryResponse) string) (string, int) {
-	counts := make(map[string]int)
-	topValue := ""
-	topCount := 0
-	for _, summary := range summaries {
-		value := strings.TrimSpace(key(summary))
-		if value == "" {
-			continue
-		}
-		counts[value]++
-		if counts[value] > topCount {
-			topValue = value
-			topCount = counts[value]
-		}
-	}
-	return topValue, topCount
-}
-
 func bulletLines(values []string) string {
 	if len(values) == 0 {
 		return "- none"
@@ -1270,10 +1232,3 @@ func bulletLines(values []string) string {
 }
 
 const timeFormatRFC3339 = "2006-01-02T15:04:05Z07:00"
-
-func activeFailure(verification *model.Verification) bool {
-	if verification == nil {
-		return false
-	}
-	return !verification.Passed || strings.EqualFold(verification.Status, "failed")
-}
