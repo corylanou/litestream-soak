@@ -102,7 +102,11 @@ func TestResolveWorkerVolumeSizeUsesDefaultFleetForRollouts(t *testing.T) {
 		ProfileConfig: workload.Config{LoadMode: "synthetic"}.JSON(),
 	}
 
-	if got := resolveWorkerVolumeSize(worker, normalizeWorkload(workload.ParseConfig(worker.ProfileConfig))); got != 100 {
+	parsedCfg, err := workload.ParseConfig(worker.ProfileConfig)
+	if err != nil {
+		t.Fatalf("ParseConfig(%q) error = %v, want nil", worker.ProfileConfig, err)
+	}
+	if got := resolveWorkerVolumeSize(worker, normalizeWorkload(parsedCfg)); got != 100 {
 		t.Fatalf("resolveWorkerVolumeSize() = %d, want 100", got)
 	}
 }

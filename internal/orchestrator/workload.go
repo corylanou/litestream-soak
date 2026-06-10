@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"log/slog"
+
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/workload"
 )
@@ -15,7 +17,13 @@ func resolveWorkerWorkload(worker model.Worker) workload.Config {
 		}
 	}
 
-	return normalizeWorkload(workload.ParseConfig(worker.ProfileConfig))
+	cfg, err := workload.ParseConfig(worker.ProfileConfig)
+	if err != nil {
+		slog.Warn("Invalid worker profile config, falling back to defaults",
+			"worker_id", worker.ID, "worker_name", worker.Name,
+			"profile_name", worker.ProfileName, "error", err)
+	}
+	return normalizeWorkload(cfg)
 }
 
 func resolveWorkerVolumeSize(worker model.Worker, workloadCfg workload.Config) int {
