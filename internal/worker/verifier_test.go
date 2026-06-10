@@ -113,8 +113,12 @@ func TestCheckpointTruncatesWAL(t *testing.T) {
 	cfg.DBPath = dbPath
 
 	verifier := NewVerifier(cfg)
-	if err := verifier.checkpoint(context.Background()); err != nil {
+	residualBusy, err := verifier.checkpoint(context.Background())
+	if err != nil {
 		t.Fatalf("checkpoint() error = %v", err)
+	}
+	if residualBusy {
+		t.Fatal("checkpoint() residualBusy = true, want false with no lock holders")
 	}
 
 	info, err := os.Stat(dbPath + "-wal")
@@ -123,7 +127,7 @@ func TestCheckpointTruncatesWAL(t *testing.T) {
 	}
 }
 
-func TestCheckpointReportsBusy(t *testing.T) {
+func TestCheckpointReportsResidualBusy(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	createWALDatabaseWithPendingFrames(t, dbPath)
@@ -138,16 +142,16 @@ func TestCheckpointReportsBusy(t *testing.T) {
 	verifier.checkpointRetryDelay = 10 * time.Millisecond
 	verifier.checkpointBusyTimeout = 50 * time.Millisecond
 
-	err := verifier.checkpoint(context.Background())
-	if err == nil {
-		t.Fatal("checkpoint() error = nil, want busy error")
+	residualBusy, err := verifier.checkpoint(context.Background())
+	if err != nil {
+		t.Fatalf("checkpoint() error = %v, want nil (busy is non-fatal)", err)
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "busy") {
-		t.Fatalf("checkpoint() error = %q, want it to mention busy", err.Error())
+	if !residualBusy {
+		t.Fatal("checkpoint() residualBusy = false, want true while a lock is held")
 	}
 }
 
-func TestRunCycleFailsWhenCheckpointFails(t *testing.T) {
+func TestRunCycleProceedsWhenCheckpointBusy(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	createWALDatabaseWithPendingFrames(t, dbPath)
@@ -177,21 +181,18 @@ func TestRunCycleFailsWhenCheckpointFails(t *testing.T) {
 	verifier.checkpointBusyTimeout = 50 * time.Millisecond
 
 	result, err := verifier.RunCycle(context.Background())
-	if err == nil {
-		t.Fatal("RunCycle() error = nil, want checkpoint error")
+	if err != nil && strings.Contains(err.Error(), "checkpoint") {
+		t.Fatalf("RunCycle() error = %q, want cycle to proceed past busy checkpoint", err.Error())
 	}
-	if !strings.Contains(err.Error(), "checkpoint") {
-		t.Fatalf("RunCycle() error = %q, want checkpoint error", err.Error())
-	}
-	if result.Status != "failed" {
-		t.Fatalf("result status = %q, want failed", result.Status)
+	if !result.CheckpointResidualBusy {
+		t.Fatal("result.CheckpointResidualBusy = false, want true")
 	}
 	checkpointStep := findStep(t, result.Steps, "checkpoint")
-	if checkpointStep.Status != "error" {
-		t.Fatalf("checkpoint step status = %q, want error", checkpointStep.Status)
+	if checkpointStep.Status == "error" {
+		t.Fatalf("checkpoint step status = %q, want non-error for residual busy", checkpointStep.Status)
 	}
-	if got := syncHits.Load(); got != 0 {
-		t.Fatalf("/sync requests = %d, want 0", got)
+	if got := syncHits.Load(); got == 0 {
+		t.Fatal("/sync requests = 0, want sync to run after busy checkpoint")
 	}
 }
 
@@ -879,8 +880,12 @@ func TestCheckpointCyclesPausersWhenBusy(t *testing.T) {
 	verifier.checkpointRetryDelay = 20 * time.Millisecond
 	verifier.checkpointBusyTimeout = 50 * time.Millisecond
 
-	if err := verifier.checkpoint(context.Background()); err != nil {
+	residualBusy, err := verifier.checkpoint(context.Background())
+	if err != nil {
 		t.Fatalf("checkpoint() error = %v, want success after pauser cycle releases the writer", err)
+	}
+	if residualBusy {
+		t.Fatal("checkpoint() residualBusy = true, want clean checkpoint once the writer releases")
 	}
 	if pauser.resumeCalls.Load() == 0 {
 		t.Fatal("expected checkpoint to resume pausers between busy attempts")
