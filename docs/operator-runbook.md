@@ -42,6 +42,11 @@ machine creation, so rotating the token requires recreating worker machines
 (for example via a fleet rollout) — restarting an existing machine keeps the
 old value and its reports will be rejected with `401`.
 
+The token is fleet-wide: it authenticates that a report comes from *a* worker,
+not from a specific one, and it is stored in plaintext in each worker
+machine's config (like the replica credentials), so treat read access to the
+worker app as equivalent to holding the token.
+
 First rollout ordering matters: worker machines created before this control
 plane version have no token in their env, and there is no grace mode.
 
