@@ -347,6 +347,19 @@ func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, 
 	unlockSource := m.lockSource(source)
 	defer unlockSource()
 
+	return m.rollingUpdateSourceLocked(ctx, source, newImageRef, newSHA, newLitestreamSHA)
+}
+
+func (m *Manager) rollingUpdateSourceLocked(ctx context.Context, source, newImageRef, newSHA, newLitestreamSHA string) error {
+	current, latest, err := m.latestReadyDeploymentMatches(source, newImageRef, newSHA, newLitestreamSHA)
+	if err != nil {
+		return err
+	}
+	if !current {
+		slog.Info("Skipping superseded rolling update", "source", source, "sha", newSHA, "litestream_sha", newLitestreamSHA, "image", newImageRef, "latest_sha", latest.GitSHA, "latest_litestream_sha", latest.LitestreamSHA, "latest_image", latest.ImageRef)
+		return nil
+	}
+
 	workers, err := m.db.ListWorkersForSource(source)
 	if err != nil {
 		return fmt.Errorf("list %s workers: %w", source, err)
@@ -382,6 +395,26 @@ func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, 
 	}
 
 	return nil
+}
+
+func (m *Manager) latestReadyDeploymentMatches(source, imageRef, gitSHA, litestreamSHA string) (bool, *model.Deployment, error) {
+	latest, err := m.db.GetLatestReadyDeployment(source)
+	if err != nil {
+		return false, nil, fmt.Errorf("get latest ready deployment for %s: %w", source, err)
+	}
+	if latest == nil {
+		return true, nil, nil
+	}
+	if deploymentMatchesTarget(*latest, imageRef, gitSHA, litestreamSHA) {
+		return true, latest, nil
+	}
+	return false, latest, nil
+}
+
+func deploymentMatchesTarget(deployment model.Deployment, imageRef, gitSHA, litestreamSHA string) bool {
+	return strings.TrimSpace(deployment.ImageRef) == strings.TrimSpace(imageRef) &&
+		strings.TrimSpace(deployment.GitSHA) == strings.TrimSpace(gitSHA) &&
+		strings.TrimSpace(deployment.LitestreamSHA) == strings.TrimSpace(litestreamSHA)
 }
 
 func (m *Manager) RollWorker(ctx context.Context, workerID, newImageRef, newSHA, newLitestreamSHA string) (*model.Worker, error) {

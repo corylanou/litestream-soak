@@ -410,3 +410,57 @@ func TestRollingUpdateSourceSkipsUpToDateWorkers(t *testing.T) {
 	unlock := mgr.lockSource("main")
 	unlock()
 }
+
+func TestRollingUpdateSourceSkipsSupersededTarget(t *testing.T) {
+	db := openTestDB(t)
+	source := "main"
+	oldSHA := "1111111111111111111111111111111111111111"
+	oldLitestreamSHA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	oldImageRef := "registry.fly.io/litestream-soak:sha-111111111111"
+	latestSHA := "2222222222222222222222222222222222222222"
+	latestLitestreamSHA := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	latestImageRef := "registry.fly.io/litestream-soak:sha-222222222222"
+
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        latestSHA,
+		LitestreamSHA: latestLitestreamSHA,
+		ImageRef:      latestImageRef,
+		Source:        source,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-low-vol",
+		AppName:       "litestream-soak",
+		Name:          "worker-main-low-vol",
+		Status:        model.WorkerRunning,
+		Source:        source,
+		GitSHA:        latestSHA,
+		LitestreamSHA: latestLitestreamSHA,
+		ProfileName:   "low-volume",
+		ProfileConfig: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}.JSON(),
+		FlyMachineID:  "latest-machine",
+		FlyVolumeID:   "latest-volume",
+	})
+
+	fly := newDeployTestFlyServer(t, db, source, latestSHA, latestLitestreamSHA, latestImageRef)
+	mgr := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+	if err := mgr.RollingUpdateSource(context.Background(), source, oldImageRef, oldSHA, oldLitestreamSHA); err != nil {
+		t.Fatalf("RollingUpdateSource() error = %v", err)
+	}
+
+	worker := mustWorker(t, db, "worker-main-low-vol")
+	if worker.GitSHA != latestSHA {
+		t.Fatalf("worker.GitSHA = %q, want %q", worker.GitSHA, latestSHA)
+	}
+	if worker.LitestreamSHA != latestLitestreamSHA {
+		t.Fatalf("worker.LitestreamSHA = %q, want %q", worker.LitestreamSHA, latestLitestreamSHA)
+	}
+	if worker.FlyMachineID != "latest-machine" || worker.FlyVolumeID != "latest-volume" {
+		t.Fatalf("worker machine/volume changed: machine=%q volume=%q", worker.FlyMachineID, worker.FlyVolumeID)
+	}
+	fly.assertCreateCounts(t, 0, 0)
+	fly.assertNoErrors(t)
+}

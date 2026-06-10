@@ -14,6 +14,7 @@ type deploymentScanner interface {
 func scanDeployment(scanner deploymentScanner, dep *Deployment) error {
 	var completedAt sql.NullTime
 	var prNumber sql.NullInt64
+	var errorMessage sql.NullString
 	if err := scanner.Scan(
 		&dep.ID,
 		&dep.GitSHA,
@@ -24,7 +25,7 @@ func scanDeployment(scanner deploymentScanner, dep *Deployment) error {
 		&dep.Status,
 		&dep.StartedAt,
 		&completedAt,
-		&dep.ErrorMessage,
+		&errorMessage,
 	); err != nil {
 		return err
 	}
@@ -34,6 +35,9 @@ func scanDeployment(scanner deploymentScanner, dep *Deployment) error {
 	}
 	if completedAt.Valid {
 		dep.CompletedAt = &completedAt.Time
+	}
+	if errorMessage.Valid {
+		dep.ErrorMessage = errorMessage.String
 	}
 	return nil
 }
@@ -139,6 +143,26 @@ func (d *DB) GetLatestDeployment(source string) (*Deployment, error) {
 	args := make([]any, 0, 1)
 	if source != "" {
 		query += " WHERE source = ?"
+		args = append(args, source)
+	}
+	query += " ORDER BY started_at DESC, id DESC LIMIT 1"
+
+	var dep Deployment
+	err := scanDeployment(d.db.QueryRow(query, args...), &dep)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &dep, nil
+}
+
+func (d *DB) GetLatestReadyDeployment(source string) (*Deployment, error) {
+	query := "SELECT " + deploymentColumns + " FROM deployments WHERE status = 'ready'"
+	args := make([]any, 0, 1)
+	if source != "" {
+		query += " AND source = ?"
 		args = append(args, source)
 	}
 	query += " ORDER BY started_at DESC, id DESC LIMIT 1"

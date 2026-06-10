@@ -307,6 +307,107 @@ func TestNotifyDeploymentReadyRecordsReadyDeploymentBeforeRolloutAndIsIdempotent
 	}
 }
 
+func TestNotifyDeploymentReadySkipsSupersededDeployment(t *testing.T) {
+	db := openTestDB(t)
+	source := "pr-1228"
+	oldSHA := "1111111111111111111111111111111111111111"
+	oldLitestreamSHA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	oldImageRef := "registry.fly.io/litestream-soak:sha-111111111111-pr-1228"
+	latestSHA := "2222222222222222222222222222222222222222"
+	latestLitestreamSHA := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	latestImageRef := "registry.fly.io/litestream-soak:sha-222222222222-pr-1228"
+
+	if _, err := db.CreateDeployment(&model.Deployment{
+		GitSHA:        oldSHA,
+		LitestreamSHA: oldLitestreamSHA,
+		ImageRef:      "",
+		Source:        source,
+		PRNumber:      1228,
+		Status:        "building",
+	}); err != nil {
+		t.Fatalf("CreateDeployment(old) error = %v", err)
+	}
+	latestID, err := db.CreateDeployment(&model.Deployment{
+		GitSHA:        latestSHA,
+		LitestreamSHA: latestLitestreamSHA,
+		ImageRef:      "",
+		Source:        source,
+		PRNumber:      1228,
+		Status:        "building",
+	})
+	if err != nil {
+		t.Fatalf("CreateDeployment(latest) error = %v", err)
+	}
+	if err := db.UpdateDeployment(latestID, "ready", latestImageRef, ""); err != nil {
+		t.Fatalf("UpdateDeployment(latest) error = %v", err)
+	}
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-1228-low-vol",
+		AppName:       "litestream-soak",
+		Name:          "worker-pr-1228-low-vol",
+		Status:        model.WorkerRunning,
+		Source:        source,
+		GitSHA:        latestSHA,
+		LitestreamSHA: latestLitestreamSHA,
+		PRNumber:      1228,
+		ProfileName:   "low-volume",
+		ProfileConfig: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}.JSON(),
+		FlyVolumeID:   "latest-dormant-volume",
+	})
+	if err := db.MarkWorkerDormant("worker-pr-1228-low-vol", "stale failure", "same_failure", "test"); err != nil {
+		t.Fatalf("MarkWorkerDormant() error = %v", err)
+	}
+
+	fly := newDeployTestFlyServer(t, db, source, latestSHA, latestLitestreamSHA, latestImageRef)
+	deployer := NewDeployer(
+		NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", ""),
+		db,
+		"litestream-soak",
+		false,
+	)
+
+	gotImageRef, err := deployer.NotifyDeploymentReady(context.Background(), source, oldSHA, oldLitestreamSHA, oldImageRef, "github_actions_pr_soak")
+	if err != nil {
+		t.Fatalf("NotifyDeploymentReady() error = %v", err)
+	}
+	if gotImageRef != oldImageRef {
+		t.Fatalf("imageRef = %q, want %q", gotImageRef, oldImageRef)
+	}
+
+	latest, err := db.GetLatestReadyDeployment(source)
+	if err != nil {
+		t.Fatalf("GetLatestReadyDeployment() error = %v", err)
+	}
+	if latest == nil {
+		t.Fatal("GetLatestReadyDeployment() = nil, want deployment")
+	}
+	if latest.GitSHA != latestSHA {
+		t.Fatalf("latest.GitSHA = %q, want %q", latest.GitSHA, latestSHA)
+	}
+
+	oldDeployment := mustDeploymentByVersion(t, db, source, oldSHA, oldLitestreamSHA)
+	if oldDeployment.Status != "ready" {
+		t.Fatalf("oldDeployment.Status = %q, want ready", oldDeployment.Status)
+	}
+
+	workers := mustWorkersForSource(t, db, source)
+	if len(workers) != 1 {
+		t.Fatalf("len(workers) = %d, want 1", len(workers))
+	}
+	dormant := mustWorker(t, db, "worker-pr-1228-low-vol")
+	if dormant.Status != model.WorkerDormant {
+		t.Fatalf("dormant.Status = %q, want dormant", dormant.Status)
+	}
+	if dormant.GitSHA != latestSHA {
+		t.Fatalf("dormant.GitSHA = %q, want %q", dormant.GitSHA, latestSHA)
+	}
+	if dormant.LitestreamSHA != latestLitestreamSHA {
+		t.Fatalf("dormant.LitestreamSHA = %q, want %q", dormant.LitestreamSHA, latestLitestreamSHA)
+	}
+	fly.assertCreateCounts(t, 0, 0)
+	fly.assertNoErrors(t)
+}
+
 func TestNotifyDeploymentReadyRejectsMalformedImageRef(t *testing.T) {
 	t.Parallel()
 
