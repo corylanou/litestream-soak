@@ -6,6 +6,7 @@ primary_region = "ord"
 
 [env]
   WORKER_ID = "worker-main-low-vol"
+  WORKER_NAME = "worker-main-low-vol"
   GIT_SHA = "main"
   SOURCE = "main"
   PROFILE = "low-volume"
@@ -13,9 +14,10 @@ primary_region = "ord"
   VERIFY_INTERVAL = "30m"
   SNAPSHOT_INTERVAL = "10m"
   REPLICA_TYPE = "s3"
-  S3_BUCKET = "litestream-soak-replicas"
+  S3_BUCKET = "litestream-soak-replicas-shared"
   S3_PATH = "soak/low-volume"
   S3_ENDPOINT = "https://fly.storage.tigris.dev"
+  CONTROL_BASE_URL = "https://litestream-soak-ctl.fly.dev"
 
 [[vm]]
   memory = "1gb"

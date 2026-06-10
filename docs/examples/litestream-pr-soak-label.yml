@@ -1,0 +1,47 @@
+name: request-soak-pr
+
+on:
+  pull_request_target:
+    types:
+      - labeled
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dispatch:
+    if: github.event.label.name == vars.SOAK_PR_LABEL_NAME
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate actor
+        shell: bash
+        env:
+          SOAK_PR_ACTOR_ALLOWLIST: ${{ vars.SOAK_PR_ACTOR_ALLOWLIST }}
+        run: |
+          set -euo pipefail
+
+          allowed_actors="${SOAK_PR_ACTOR_ALLOWLIST:-benbjohnson,corylanou}"
+          actor_login="${{ github.actor }}"
+
+          if ! printf '%s\n' "${allowed_actors}" | tr ',' '\n' | grep -Fxq "${actor_login}"; then
+            echo "actor ${actor_login} is not allowed to trigger soak dispatch" >&2
+            exit 1
+          fi
+
+      - name: Dispatch to soak repo
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.SOAK_DISPATCH_TOKEN }}
+          SOAK_DISPATCH_REPO: ${{ vars.SOAK_DISPATCH_REPO }}
+        run: |
+          set -euo pipefail
+
+          gh api "repos/${SOAK_DISPATCH_REPO}/dispatches" \
+            -X POST \
+            -f event_type=litestream_pr_soak_requested \
+            -F "client_payload[pr_number]=${{ github.event.pull_request.number }}" \
+            -F "client_payload[pr_sha]=${{ github.event.pull_request.head.sha }}" \
+            -F "client_payload[repo_full_name]=${{ github.repository }}" \
+            -F "client_payload[actor]=${{ github.actor }}" \
+            -F "client_payload[label]=${{ github.event.label.name }}"

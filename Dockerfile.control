@@ -5,10 +5,17 @@ RUN go mod download
 COPY . .
 RUN go build -ldflags "-s -w" -o /usr/local/bin/soakctl ./cmd/soakctl
 
+FROM debian:bookworm-slim AS flyctl
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://fly.io/install.sh | FLYCTL_INSTALL=/opt/fly sh
+
 FROM debian:bookworm-slim
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get install -y --no-install-recommends ca-certificates curl iproute2 jq lsof procps sqlite3 && \
     rm -rf /var/lib/apt/lists/*
+COPY --from=flyctl /opt/fly/bin/ /usr/local/bin/
 COPY --from=builder /usr/local/bin/soakctl /usr/local/bin/soakctl
 VOLUME /data
 EXPOSE 8080

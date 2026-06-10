@@ -1,0 +1,176 @@
+name: soak-pr
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Litestream PR number to soak
+        required: true
+        type: string
+      repo_full_name:
+        description: Upstream GitHub repo in owner/name form
+        required: false
+        type: string
+        default: benbjohnson/litestream
+      pr_sha:
+        description: Optional explicit PR head SHA override
+        required: false
+        type: string
+  repository_dispatch:
+    types:
+      - litestream_pr_soak_requested
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: soak-pr-${{ github.event.client_payload.pr_number || github.event.inputs.pr_number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-request:
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      repo_full_name: ${{ steps.resolve.outputs.repo_full_name }}
+      pr_sha: ${{ steps.resolve.outputs.pr_sha }}
+      source_name: ${{ steps.resolve.outputs.source_name }}
+      trigger: ${{ steps.resolve.outputs.trigger }}
+    steps:
+      - id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOAK_PR_REPO_ALLOWLIST: ${{ vars.SOAK_PR_REPO_ALLOWLIST }}
+          SOAK_PR_ACTOR_ALLOWLIST: ${{ vars.SOAK_PR_ACTOR_ALLOWLIST }}
+          SOAK_PR_LABEL_NAME: ${{ vars.SOAK_PR_LABEL_NAME }}
+        run: |
+          set -euo pipefail
+
+          pr_number="${{ github.event.client_payload.pr_number || github.event.inputs.pr_number }}"
+          repo_full_name="${{ github.event.client_payload.repo_full_name || github.event.inputs.repo_full_name || 'benbjohnson/litestream' }}"
+          pr_sha="${{ github.event.client_payload.pr_sha || github.event.inputs.pr_sha || '' }}"
+          allowed_repos="${SOAK_PR_REPO_ALLOWLIST:-benbjohnson/litestream}"
+          allowed_actors="${SOAK_PR_ACTOR_ALLOWLIST:-benbjohnson,corylanou}"
+          actor_login="${{ github.event.client_payload.actor || '' }}"
+          requested_label="${{ github.event.client_payload.label || '' }}"
+          expected_label="${SOAK_PR_LABEL_NAME:-soak:test}"
+
+          if [ -z "${pr_number}" ]; then
+            echo "pr_number is required" >&2
+            exit 1
+          fi
+
+          case ",${allowed_repos}," in
+            *,"${repo_full_name}",*) ;;
+            *)
+              echo "repo ${repo_full_name} is not in SOAK_PR_REPO_ALLOWLIST (${allowed_repos})" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            if [ -z "${actor_login}" ]; then
+              echo "repository_dispatch requests must include client_payload.actor" >&2
+              exit 1
+            fi
+            if ! printf '%s\n' "${allowed_actors}" | tr ',' '\n' | grep -Fxq "${actor_login}"; then
+              echo "actor ${actor_login} is not in SOAK_PR_ACTOR_ALLOWLIST (${allowed_actors})" >&2
+              exit 1
+            fi
+            if [ -n "${requested_label}" ] && [ "${requested_label}" != "${expected_label}" ]; then
+              echo "label ${requested_label} does not match SOAK_PR_LABEL_NAME (${expected_label})" >&2
+              exit 1
+            fi
+          fi
+
+          if [ -z "${pr_sha}" ]; then
+            pr_sha="$(gh api "repos/${repo_full_name}/pulls/${pr_number}" --jq .head.sha)"
+          fi
+          if [ -z "${pr_sha}" ]; then
+            echo "failed to resolve PR head SHA" >&2
+            exit 1
+          fi
+
+          source_name="pr-${pr_number}"
+          trigger="github_actions_pr_soak"
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            trigger="repository_dispatch_pr_soak"
+          fi
+
+          {
+            echo "pr_number=${pr_number}"
+            echo "repo_full_name=${repo_full_name}"
+            echo "pr_sha=${pr_sha}"
+            echo "source_name=${source_name}"
+            echo "trigger=${trigger}"
+          } >> "${GITHUB_OUTPUT}"
+
+  build-worker-image:
+    needs: resolve-request
+    runs-on: ubuntu-latest
+    outputs:
+      image_ref: ${{ steps.build.outputs.image_ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - id: build
+        shell: bash
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA::12}"
+          pr_number="${{ needs.resolve-request.outputs.pr_number }}"
+          pr_sha="${{ needs.resolve-request.outputs.pr_sha }}"
+          image_label="sha-${short_sha}-pr-${pr_number}-ls-${pr_sha::12}"
+          log_file="$(mktemp)"
+
+          flyctl deploy \
+            --remote-only \
+            --app litestream-soak \
+            --config fly.toml \
+            --image-label "${image_label}" \
+            --build-arg "LITESTREAM_SHA=${pr_sha}" \
+            --build-only \
+            --push 2>&1 | tee "${log_file}"
+
+          image_ref="$(awk '/^image:/{print $2}' "${log_file}" | tail -n 1)"
+          if [ -z "${image_ref}" ]; then
+            echo "failed to parse image ref from flyctl output" >&2
+            exit 1
+          fi
+
+          echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
+
+  notify-worker-fleet:
+    needs:
+      - resolve-request
+      - build-worker-image
+    if: needs.build-worker-image.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - shell: bash
+        env:
+          CONTROL_BASE_URL: ${{ vars.SOAK_CONTROL_BASE_URL }}
+          SOAK_ADMIN_BEARER_TOKEN: ${{ secrets.SOAK_ADMIN_BEARER_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CONTROL_BASE_URL}" ]; then
+            export CONTROL_BASE_URL="https://litestream-soak-ctl.fly.dev"
+          fi
+
+          chmod +x scripts/notify-deployment-ready.sh
+          ./scripts/notify-deployment-ready.sh \
+            "${GITHUB_SHA}" \
+            "${{ needs.resolve-request.outputs.source_name }}" \
+            "${{ needs.resolve-request.outputs.trigger }}" \
+            "${{ needs.build-worker-image.outputs.image_ref }}" \
+            "${{ needs.resolve-request.outputs.pr_sha }}"

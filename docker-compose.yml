@@ -33,7 +33,9 @@ services:
       context: .
       dockerfile: Dockerfile.worker
       args:
-        LITESTREAM_SHA: main
+        # the "main" default reuses Docker's cached clone layer even after
+        # upstream moves; run `make compose-build` to pin upstream HEAD
+        LITESTREAM_SHA: ${LITESTREAM_SHA:-main}
     depends_on:
       minio-init:
         condition: service_completed_successfully

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,20 @@ type Client struct {
 	httpClient *http.Client
 }
 
+type APIError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Body)
+}
+
+func IsNotFound(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
 func NewClient(appName, token string) *Client {
 	return &Client{
 		baseURL: defaultBaseURL,
@@ -27,6 +42,22 @@ func NewClient(appName, token string) *Client {
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 		},
+	}
+}
+
+func (c *Client) AppName() string {
+	return c.appName
+}
+
+func (c *Client) ForApp(appName string) *Client {
+	if appName == "" || appName == c.appName {
+		return c
+	}
+	return &Client{
+		baseURL:    c.baseURL,
+		appName:    appName,
+		token:      c.token,
+		httpClient: c.httpClient,
 	}
 }
 
@@ -41,6 +72,16 @@ func (c *Client) ListMachines(ctx context.Context) ([]Machine, error) {
 func (c *Client) GetMachine(ctx context.Context, id string) (*Machine, error) {
 	var machine Machine
 	if err := c.do(ctx, "GET", fmt.Sprintf("/apps/%s/machines/%s", c.appName, id), nil, &machine); err != nil {
+		if IsNotFound(err) {
+			machines, listErr := c.ListMachines(ctx)
+			if listErr == nil {
+				for _, candidate := range machines {
+					if candidate.ID == id {
+						return &candidate, nil
+					}
+				}
+			}
+		}
 		return nil, fmt.Errorf("get machine %s: %w", id, err)
 	}
 	return &machine, nil
@@ -112,6 +153,10 @@ func (c *Client) DestroyVolume(ctx context.Context, id string) error {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body interface{}, result interface{}) error {
+	return c.doAbsolute(ctx, method, c.baseURL+path, body, result)
+}
+
+func (c *Client) doAbsolute(ctx context.Context, method, endpoint string, body interface{}, result interface{}) error {
 	var reqBody io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -121,7 +166,7 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}, 
 		reqBody = bytes.NewReader(b)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, reqBody)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -143,7 +188,7 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}, 
 	}
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+		return &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	if result != nil && len(respBody) > 0 {

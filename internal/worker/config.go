@@ -3,13 +3,25 @@ package worker
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
 type Config struct {
-	WorkerID string
-	GitSHA   string
-	Source   string // "main" or "pr"
+	WorkerID      string
+	WorkerName    string
+	GitSHA        string
+	LitestreamSHA string
+	RunID         string
+	ImageRef      string
+	VolumeID      string
+	VolumeSizeGB  string
+	Source        string // "main" or "pr"
+	AppName       string
+	MachineID     string
+	Region        string
 
 	// Paths
 	DataDir    string
@@ -30,8 +42,9 @@ type Config struct {
 	LoadDuration time.Duration
 
 	// Verification
-	VerifyInterval time.Duration
-	VerifyType     string // quick, integrity, checksum, full
+	VerifyInterval    time.Duration
+	VerifyType        string // quick, integrity, checksum, full
+	VerifySyncTimeout time.Duration
 
 	// Replica config
 	ReplicaType string // "file" or "s3"
@@ -49,20 +62,25 @@ type Config struct {
 	SyncInterval     time.Duration
 
 	// Replay
-	LoadMode        string  // "synthetic", "replay", "both"
-	ReplayDataset   string  // "taxi", "gharchive"
-	ReplayDataPath  string  // path to dataset file
-	ReplaySpeed     float64 // speed multiplier (1.0 = real-time)
-	ReplayLoop      bool
+	LoadMode       string  // "synthetic", "replay", "both"
+	ReplayDataset  string  // "taxi", "gharchive", "orders"
+	ReplayDataPath string  // path to dataset file
+	ReplayDataURL  string  // remote dataset URL downloaded on demand
+	ReplaySpeed    float64 // speed multiplier (1.0 = real-time)
+	ReplayLoop     bool
 
 	// Metrics
 	MetricsAddr string
+
+	// Control plane
+	ControlBaseURL string
 }
 
 func DefaultConfig() Config {
 	return Config{
-		WorkerID: "worker-1",
-		Source:   "main",
+		WorkerID:   "worker-1",
+		WorkerName: "worker-1",
+		Source:     "main",
 
 		DataDir:    "/data",
 		DBPath:     "/data/test.db",
@@ -83,8 +101,9 @@ func DefaultConfig() Config {
 		ReplaySpeed: 10.0,
 		ReplayLoop:  true,
 
-		VerifyInterval: 30 * time.Minute,
-		VerifyType:     "integrity",
+		VerifyInterval:    30 * time.Minute,
+		VerifyType:        "integrity",
+		VerifySyncTimeout: 5 * time.Minute,
 
 		ReplicaType: "file",
 		ReplicaPath: "/data/replicas",
@@ -105,11 +124,36 @@ func ConfigFromEnv() (Config, error) {
 	if v := os.Getenv("WORKER_ID"); v != "" {
 		c.WorkerID = v
 	}
+	if v := os.Getenv("WORKER_NAME"); v != "" {
+		c.WorkerName = v
+	}
 	if v := os.Getenv("GIT_SHA"); v != "" {
 		c.GitSHA = v
 	}
+	c.LitestreamSHA = resolveLitestreamSHA()
+	if v := os.Getenv("SOAK_RUN_ID"); v != "" {
+		c.RunID = v
+	}
+	if v := os.Getenv("SOAK_IMAGE_REF"); v != "" {
+		c.ImageRef = v
+	}
+	if v := os.Getenv("SOAK_VOLUME_ID"); v != "" {
+		c.VolumeID = v
+	}
+	if v := os.Getenv("SOAK_VOLUME_SIZE_GB"); v != "" {
+		c.VolumeSizeGB = v
+	}
 	if v := os.Getenv("SOURCE"); v != "" {
 		c.Source = v
+	}
+	if v := os.Getenv("FLY_APP_NAME"); v != "" {
+		c.AppName = v
+	}
+	if v := os.Getenv("FLY_MACHINE_ID"); v != "" {
+		c.MachineID = v
+	}
+	if v := os.Getenv("FLY_REGION"); v != "" {
+		c.Region = v
 	}
 	if v := os.Getenv("DATA_DIR"); v != "" {
 		c.DataDir = v
@@ -139,6 +183,13 @@ func ConfigFromEnv() (Config, error) {
 			c.PayloadSize = 2048
 			c.Workers = 4
 			c.InitialSize = "20MB"
+		case "read-heavy":
+			c.WriteRate = 80
+			c.Pattern = "constant"
+			c.PayloadSize = 512
+			c.ReadRatio = 0.95
+			c.Workers = 6
+			c.InitialSize = "10MB"
 		}
 	}
 
@@ -178,6 +229,13 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if v := os.Getenv("VERIFY_TYPE"); v != "" {
 		c.VerifyType = v
+	}
+	if v := os.Getenv("VERIFY_SYNC_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid VERIFY_SYNC_TIMEOUT: %w", err)
+		}
+		c.VerifySyncTimeout = d
 	}
 
 	if v := os.Getenv("REPLICA_TYPE"); v != "" {
@@ -226,6 +284,9 @@ func ConfigFromEnv() (Config, error) {
 	if v := os.Getenv("REPLAY_DATA_PATH"); v != "" {
 		c.ReplayDataPath = v
 	}
+	if v := os.Getenv("REPLAY_DATA_URL"); v != "" {
+		c.ReplayDataURL = v
+	}
 	if v := os.Getenv("REPLAY_SPEED"); v != "" {
 		if _, err := fmt.Sscanf(v, "%f", &c.ReplaySpeed); err != nil {
 			return c, fmt.Errorf("invalid REPLAY_SPEED: %w", err)
@@ -238,6 +299,13 @@ func ConfigFromEnv() (Config, error) {
 	if v := os.Getenv("METRICS_ADDR"); v != "" {
 		c.MetricsAddr = v
 	}
+	if v := os.Getenv("CONTROL_BASE_URL"); v != "" {
+		c.ControlBaseURL = v
+	}
+
+	if c.WorkerName == "" {
+		c.WorkerName = c.WorkerID
+	}
 
 	if c.ReplicaType == "s3" && c.S3Bucket == "" {
 		return c, fmt.Errorf("S3_BUCKET is required when REPLICA_TYPE=s3")
@@ -246,9 +314,48 @@ func ConfigFromEnv() (Config, error) {
 	return c, nil
 }
 
+func resolveLitestreamSHA() string {
+	if v := strings.TrimSpace(os.Getenv("LITESTREAM_SHA")); v != "" {
+		return v
+	}
+
+	shaFile := strings.TrimSpace(os.Getenv("LITESTREAM_SHA_FILE"))
+	if shaFile == "" {
+		shaFile = "/opt/soak/litestream.sha"
+	}
+
+	body, err := os.ReadFile(shaFile)
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(string(body))
+}
+
 func (c Config) ReplicaURL() string {
 	if c.ReplicaType == "file" {
 		return "file://" + c.ReplicaPath
 	}
 	return fmt.Sprintf("s3://%s/%s", c.S3Bucket, c.S3Path)
+}
+
+func (c Config) WorkloadConfig() workload.Config {
+	return workload.Config{
+		LoadMode:         c.LoadMode,
+		WriteRate:        c.WriteRate,
+		Pattern:          c.Pattern,
+		PayloadSize:      c.PayloadSize,
+		ReadRatio:        c.ReadRatio,
+		Workers:          c.Workers,
+		InitialSize:      c.InitialSize,
+		VerifyInterval:   c.VerifyInterval.String(),
+		VerifyType:       c.VerifyType,
+		SnapshotInterval: c.SnapshotInterval.String(),
+		SyncInterval:     c.SyncInterval.String(),
+		ReplayDataset:    c.ReplayDataset,
+		ReplayDataPath:   c.ReplayDataPath,
+		ReplayDataURL:    c.ReplayDataURL,
+		ReplaySpeed:      c.ReplaySpeed,
+		ReplayLoop:       c.ReplayLoop,
+	}
 }

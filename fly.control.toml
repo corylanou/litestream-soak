@@ -4,10 +4,35 @@ primary_region = "ord"
 [build]
   dockerfile = "Dockerfile.control"
 
+# SOAK_WORKER_TOKEN is required and must be set as a Fly secret, not here:
+#   fly secrets set SOAK_WORKER_TOKEN=<random secret> -a litestream-soak-ctl
 [env]
-  FLY_APP_NAME = "litestream-soak"
+  WORKER_APP_NAME = "litestream-soak"
   DB_PATH = "/data/soakctl.db"
   LISTEN_ADDR = ":8080"
+  CONTROL_BASE_URL = "https://litestream-soak-ctl.fly.dev"
+  SOAK_MAIN_FLEET_ENABLED = "true"
+  SOAK_DORMANCY_ENABLED = "true"
+  SOAK_DORMANCY_THRESHOLD = "24h"
+  SOAK_DORMANCY_CHECK_INTERVAL = "10m"
+  SOAK_DORMANCY_MIN_FAILURES = "3"
+  SOAK_SUCCESS_TEARDOWN_ENABLED = "true"
+  SOAK_SUCCESS_TEARDOWN_THRESHOLD = "24h"
+  SOAK_SUCCESS_TEARDOWN_CHECK_INTERVAL = "10m"
+  SOAK_SUCCESS_TEARDOWN_HEARTBEAT_STALE_AFTER = "15m"
+  SOAK_SUCCESS_TEARDOWN_SOURCES = "pr-*"
+  SOAK_PR_MAX_AGE_ENABLED = "false"
+  SOAK_PR_MAX_AGE_THRESHOLD = "24h"
+  SOAK_PR_MAX_AGE_CHECK_INTERVAL = "10m"
+  SOAK_PR_MAX_AGE_SOURCES = "pr-*"
+  SOAK_PR_MAX_AGE_ACTION = "stop"
+  SOAK_FAILED_SOURCE_PAUSE_ENABLED = "true"
+  SOAK_FAILED_SOURCE_PAUSE_CHECK_INTERVAL = "10m"
+  SOAK_FAILED_SOURCE_PAUSE_SOURCES = "main"
+  SOAK_PLATFORM_LOG_MONITOR_ENABLED = "true"
+  SOAK_PLATFORM_LOG_POLL_INTERVAL = "1m"
+  GITHUB_WEBHOOK_DEPLOY_ENABLED = "false"
+  SOAK_ADMIN_BASIC_FALLBACK_ENABLED = "true"
 
 [http_service]
   internal_port = 8080
@@ -15,6 +40,11 @@ primary_region = "ord"
   auto_stop_machines = "off"
   auto_start_machines = true
   min_machines_running = 1
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
 
 [[metrics]]
   port = 8080

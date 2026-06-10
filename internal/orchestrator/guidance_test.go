@@ -1,0 +1,661 @@
+package orchestrator
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
+	"github.com/corylanou/litestream-soak/internal/workload"
+)
+
+func TestInferFailureStageSync(t *testing.T) {
+	verification := &model.Verification{
+		CheckType:    "integrity",
+		ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`,
+	}
+
+	if got := inferFailureStage(verification); got != "sync" {
+		t.Fatalf("inferFailureStage()=%q want %q", got, "sync")
+	}
+}
+
+func TestInferFailureSignatureSyncSocketRefused(t *testing.T) {
+	verification := &model.Verification{
+		CheckType:    "integrity",
+		ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`,
+	}
+
+	if got := inferFailureSignature(verification); got != "litestream_sync_socket_refused" {
+		t.Fatalf("inferFailureSignature()=%q want %q", got, "litestream_sync_socket_refused")
+	}
+}
+
+func TestInferFailureSignatureSyncFDExhausted(t *testing.T) {
+	verification := &model.Verification{
+		CheckType:    "integrity",
+		ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: socket: too many open files`,
+	}
+
+	if got := inferFailureSignature(verification); got != "litestream_sync_fd_exhausted" {
+		t.Fatalf("inferFailureSignature()=%q want %q", got, "litestream_sync_fd_exhausted")
+	}
+}
+
+func TestInferFailureSignatureDBSyncExecutor(t *testing.T) {
+	verification := &model.Verification{
+		CheckType:    "integrity",
+		ErrorMessage: `wait for sync: sync returned 500: sync database: db sync: wait for db sync executor: context deadline exceeded`,
+	}
+
+	if got := inferFailureSignature(verification); got != "litestream_db_sync_executor_timeout" {
+		t.Fatalf("inferFailureSignature()=%q want %q", got, "litestream_db_sync_executor_timeout")
+	}
+	if got := inferProbableSubsystem("sync", inferFailureSignature(verification)); got != "Litestream DB sync executor" {
+		t.Fatalf("inferProbableSubsystem()=%q want Litestream DB sync executor", got)
+	}
+}
+
+func TestInferProbableSubsystemDiskCapacity(t *testing.T) {
+	verification := &model.Verification{
+		CheckType:    "integrity",
+		ErrorMessage: `checkpoint failed: database or disk is full (13); sync failed: write /data/.test.db-litestream/ltx/0/000000000001.ltx.tmp: no space left on device`,
+	}
+
+	if got := inferFailureStage(verification); got != "disk_capacity" {
+		t.Fatalf("inferFailureStage()=%q want disk_capacity", got)
+	}
+	if got := inferFailureSignature(verification); got != "disk_capacity_full" {
+		t.Fatalf("inferFailureSignature()=%q want disk_capacity_full", got)
+	}
+	if got := inferProbableSubsystem(inferFailureStage(verification), inferFailureSignature(verification)); got != "Disk capacity / restore scratch headroom" {
+		t.Fatalf("inferProbableSubsystem()=%q want disk capacity", got)
+	}
+}
+
+func TestInferFailureSignatureValidationFailed(t *testing.T) {
+	verification := &model.Verification{
+		CheckType:    "restore",
+		ErrorMessage: `validation failed (exit 1): time=2026-04-15T20:29:24.359Z level=INFO msg="Starting validation" source_db=/data/test.db replica_url="" check_type=restore`,
+	}
+
+	if got := inferFailureSignature(verification); got != "validation_failed" {
+		t.Fatalf("inferFailureSignature()=%q want %q", got, "validation_failed")
+	}
+}
+
+func TestInferFailureSignatureRestoreS3ListRequestCanceled(t *testing.T) {
+	verification := &model.Verification{
+		CheckType:    "restore",
+		ErrorMessage: `validation failed (exit 1): error="restore failed: get LTX time bounds: operation error S3: ListObjectsV2, https response error StatusCode: 408, RequestID: 1777230002707552565, HostID: , api error RequestCanceled: Request is canceled."`,
+	}
+
+	if got := inferFailureStage(verification); got != "restore" {
+		t.Fatalf("inferFailureStage()=%q want %q", got, "restore")
+	}
+	if got := inferFailureSignature(verification); got != "restore_s3_list_request_canceled" {
+		t.Fatalf("inferFailureSignature()=%q want %q", got, "restore_s3_list_request_canceled")
+	}
+}
+
+func TestBuildIncidentGuideSync(t *testing.T) {
+	bundle := &IncidentBundle{
+		Worker: model.Worker{
+			ID:     "worker-main-gharchive",
+			Status: model.WorkerDegraded,
+		},
+		ActiveFailure:    true,
+		FailureStage:     "sync",
+		FailureSignature: "litestream_sync_socket_refused",
+		ReportedRuntime: &reporting.RuntimePayload{
+			SnapshotCollectedAt:       timeMustParse("2026-04-11T21:05:00Z"),
+			LitestreamSnapshotHealthy: false,
+			LitestreamSnapshotError:   "read txid: dial unix /data/litestream.sock: connect: connection refused",
+		},
+		Workload: workload.Config{
+			LoadMode:      "replay",
+			ReplayDataset: "gharchive",
+		},
+		TriageCommands: []string{"fly logs -a litestream-soak -i machine"},
+	}
+
+	guide := buildIncidentGuide(bundle)
+	if guide.ProbableSubsystem != "Litestream sync/control socket" {
+		t.Fatalf("guide probable subsystem=%q", guide.ProbableSubsystem)
+	}
+	if guide.RecommendedPromptMode != "litestream" {
+		t.Fatalf("guide recommended prompt=%q", guide.RecommendedPromptMode)
+	}
+	if len(guide.NextSteps) == 0 {
+		t.Fatal("expected next steps")
+	}
+	if !strings.Contains(strings.Join(guide.WhyLikely, "\n"), "runtime snapshot is unhealthy") {
+		t.Fatalf("expected runtime snapshot note in why_likely, got %v", guide.WhyLikely)
+	}
+}
+
+func TestBuildIncidentGuideLegacyRuntimeTelemetry(t *testing.T) {
+	bundle := &IncidentBundle{
+		Worker: model.Worker{
+			ID:     "worker-main-burst-vol",
+			Status: model.WorkerDegraded,
+		},
+		ActiveFailure:    true,
+		FailureStage:     "sync",
+		FailureSignature: "litestream_sync_socket_refused",
+		ReportedRuntime: &reporting.RuntimePayload{
+			SnapshotCollectedAt:       timeMustParse("2026-04-12T01:40:51Z"),
+			DBStatus:                  "replicating",
+			LitestreamSnapshotHealthy: false,
+			LitestreamSnapshotError:   reporting.LegacyRuntimeTelemetryError,
+		},
+		Workload: workload.Config{
+			LoadMode: "synthetic",
+			Pattern:  "burst",
+		},
+	}
+
+	guide := buildIncidentGuide(bundle)
+	why := strings.Join(guide.WhyLikely, "\n")
+	steps := strings.Join(guide.NextSteps, "\n")
+	if !strings.Contains(why, "legacy runtime telemetry") {
+		t.Fatalf("expected legacy runtime note in why_likely, got %v", guide.WhyLikely)
+	}
+	if !strings.Contains(steps, "Treat runtime fields on this page as advisory") {
+		t.Fatalf("expected legacy runtime note in next_steps, got %v", guide.NextSteps)
+	}
+}
+
+func TestBuildIncidentGuideHealthyUsesBaselineMode(t *testing.T) {
+	bundle := &IncidentBundle{
+		Worker: model.Worker{
+			ID:     "worker-pr-1228-low-vol",
+			Status: model.WorkerRunning,
+		},
+		ActiveFailure: false,
+		ReportedRuntime: &reporting.RuntimePayload{
+			SnapshotCollectedAt:       timeMustParse("2026-04-23T14:00:00Z"),
+			LitestreamSnapshotHealthy: true,
+			DBStatus:                  "replicating",
+		},
+		Workload: workload.Config{
+			LoadMode: "synthetic",
+			Pattern:  "steady",
+		},
+		TriageCommands: []string{"curl -sS https://litestream-soak-ctl.fly.dev/api/workers/worker-pr-1228-low-vol/incident"},
+	}
+
+	guide := buildIncidentGuide(bundle)
+	if guide.ProbableSubsystem != "Healthy baseline" {
+		t.Fatalf("guide probable subsystem=%q", guide.ProbableSubsystem)
+	}
+	if guide.RecommendedPromptMode != "healthy" {
+		t.Fatalf("guide recommended prompt=%q", guide.RecommendedPromptMode)
+	}
+	if !strings.Contains(strings.Join(guide.NextSteps, "\n"), "clean baseline") {
+		t.Fatalf("expected healthy baseline next step, got %v", guide.NextSteps)
+	}
+}
+
+func TestBuildDiagnosisSnapshotUsesCurrentFailures(t *testing.T) {
+	summaries := []WorkerSummaryResponse{
+		{
+			Worker: model.Worker{ID: "w1", ProfileName: "gharchive", Status: model.WorkerDegraded},
+			Workload: workload.Config{
+				LoadMode:      "replay",
+				ReplayDataset: "gharchive",
+			},
+			CurrentFailureStage:      "sync",
+			CurrentFailureSignature:  "litestream_sync_socket_refused",
+			CurrentProbableSubsystem: "Litestream sync/control socket",
+		},
+		{
+			Worker: model.Worker{ID: "w2", ProfileName: "high-volume", Status: model.WorkerDegraded},
+			Workload: workload.Config{
+				LoadMode: "synthetic",
+				Pattern:  "wave",
+			},
+			CurrentFailureStage:      "sync",
+			CurrentFailureSignature:  "litestream_sync_socket_refused",
+			CurrentProbableSubsystem: "Litestream sync/control socket",
+		},
+	}
+
+	diagnosis := buildDiagnosisSnapshot(summaries)
+	if diagnosis.AffectedWorkers != 2 {
+		t.Fatalf("affected workers=%d want 2", diagnosis.AffectedWorkers)
+	}
+	if diagnosis.ProbableSubsystem != "Litestream sync/control socket" {
+		t.Fatalf("probable subsystem=%q", diagnosis.ProbableSubsystem)
+	}
+	if diagnosis.DominantSignature != "litestream_sync_socket_refused" {
+		t.Fatalf("dominant signature=%q", diagnosis.DominantSignature)
+	}
+	if diagnosis.Confidence != "high" {
+		t.Fatalf("confidence=%q want %q", diagnosis.Confidence, "high")
+	}
+	if len(diagnosis.Clusters) != 1 {
+		t.Fatalf("clusters=%d want 1", len(diagnosis.Clusters))
+	}
+}
+
+func TestBuildDiagnosisSnapshotTracksActiveVerification(t *testing.T) {
+	summaries := []WorkerSummaryResponse{
+		{
+			Worker: model.Worker{ID: "w1", Name: "worker-pr-1265-high-vol", ProfileName: "high-volume", Status: model.WorkerRunning},
+			Workload: workload.Config{
+				LoadMode: "synthetic",
+			},
+			RuntimeSnapshotStatus: reporting.RuntimeSnapshotStatusHealthy,
+			ActiveVerification: &reporting.ActiveVerification{
+				StartedAt: timeMustParse("2026-05-11T13:34:50Z"),
+				CheckType: "integrity",
+				Status:    "running",
+			},
+		},
+	}
+
+	diagnosis := buildDiagnosisSnapshot(summaries)
+	if diagnosis.ProbableSubsystem != "Pending verification" {
+		t.Fatalf("probable subsystem=%q", diagnosis.ProbableSubsystem)
+	}
+	if diagnosis.ActiveVerifications != 1 {
+		t.Fatalf("active verifications=%d want 1", diagnosis.ActiveVerifications)
+	}
+	if len(diagnosis.ActiveVerificationWorkers) != 1 || diagnosis.ActiveVerificationWorkers[0].ID != "w1" {
+		t.Fatalf("active verification workers=%+v", diagnosis.ActiveVerificationWorkers)
+	}
+	if strings.Contains(diagnosis.Headline, "passing") {
+		t.Fatalf("headline should not claim passing while verification is active: %q", diagnosis.Headline)
+	}
+}
+
+func TestActiveVerificationFromEventsClearsAfterCompletion(t *testing.T) {
+	startedAt := timeMustParse("2026-05-11T13:34:50Z")
+	details, err := json.Marshal(reporting.WorkerEventPayload{
+		ActiveVerification: &reporting.ActiveVerification{
+			StartedAt: startedAt,
+			CheckType: "integrity",
+			Status:    "running",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal event details: %v", err)
+	}
+
+	events := []model.Event{
+		{
+			EventType: "verification_started",
+			Details:   string(details),
+			CreatedAt: startedAt,
+		},
+	}
+	if active := activeVerificationFromEvents(events, nil); active == nil {
+		t.Fatal("expected active verification before completion")
+	}
+
+	completedAt := startedAt.Add(2 * time.Minute)
+	verifications := []model.Verification{
+		{
+			StartedAt:   startedAt,
+			CompletedAt: &completedAt,
+			Status:      "passed",
+			Passed:      true,
+		},
+	}
+	if active := activeVerificationFromEvents(events, verifications); active != nil {
+		t.Fatalf("active verification should clear after completion: %+v", active)
+	}
+}
+
+func TestBuildDiagnosisSnapshotClustersMultipleFailureFamilies(t *testing.T) {
+	summaries := []WorkerSummaryResponse{
+		{
+			Worker: model.Worker{ID: "w1", ProfileName: "gharchive-replay", Status: model.WorkerDegraded, Name: "worker-main-gharchive"},
+			Workload: workload.Config{
+				LoadMode:      "replay",
+				ReplayDataset: "gharchive",
+			},
+			RuntimeSnapshotStatus:    reporting.RuntimeSnapshotStatusLegacy,
+			LastVerification:         &model.Verification{WorkerID: "w1"},
+			CurrentFailureStage:      "sync",
+			CurrentFailureSignature:  "litestream_sync_socket_refused",
+			CurrentProbableSubsystem: "Litestream sync/control socket",
+		},
+		{
+			Worker: model.Worker{ID: "w2", ProfileName: "high-volume", Status: model.WorkerDegraded, Name: "worker-main-high-vol"},
+			Workload: workload.Config{
+				LoadMode: "synthetic",
+				Pattern:  "wave",
+			},
+			RuntimeSnapshotStatus:    reporting.RuntimeSnapshotStatusLegacy,
+			LastVerification:         &model.Verification{WorkerID: "w2"},
+			CurrentFailureStage:      "sync",
+			CurrentFailureSignature:  "litestream_sync_socket_refused",
+			CurrentProbableSubsystem: "Litestream sync/control socket",
+		},
+		{
+			Worker: model.Worker{ID: "w3", ProfileName: "taxi-replay", Status: model.WorkerDegraded, Name: "worker-main-taxi-replay"},
+			Workload: workload.Config{
+				LoadMode:      "replay",
+				ReplayDataset: "taxi",
+			},
+			RuntimeSnapshotStatus:    reporting.RuntimeSnapshotStatusHealthy,
+			LastVerification:         &model.Verification{WorkerID: "w3"},
+			CurrentFailureStage:      "restore",
+			CurrentFailureSignature:  "replica_s3_timeout",
+			CurrentProbableSubsystem: "Replication or restore path",
+		},
+	}
+
+	diagnosis := buildDiagnosisSnapshot(summaries)
+	if len(diagnosis.Clusters) != 2 {
+		t.Fatalf("clusters=%d want 2", len(diagnosis.Clusters))
+	}
+	if diagnosis.Headline != "2 active failure clusters across 3 workers" {
+		t.Fatalf("headline=%q", diagnosis.Headline)
+	}
+	if diagnosis.Clusters[0].Signature != "litestream_sync_socket_refused" {
+		t.Fatalf("top cluster signature=%q", diagnosis.Clusters[0].Signature)
+	}
+	if diagnosis.Clusters[0].Confidence != "high" {
+		t.Fatalf("top cluster confidence=%q", diagnosis.Clusters[0].Confidence)
+	}
+	if !strings.Contains(strings.Join(diagnosis.WhyLikely, "\n"), "legacy runtime telemetry") {
+		t.Fatalf("expected legacy runtime note in diagnosis why_likely, got %v", diagnosis.WhyLikely)
+	}
+	if !strings.Contains(strings.Join(diagnosis.NextSteps, "\n"), "Refresh the worker fleet image") {
+		t.Fatalf("expected fleet refresh note in diagnosis next_steps, got %v", diagnosis.NextSteps)
+	}
+}
+
+func TestBuildCoverageSnapshotIncludesRuntimeStates(t *testing.T) {
+	summaries := []WorkerSummaryResponse{
+		{Worker: model.Worker{ID: "w1", ProfileName: "low-volume"}, Workload: workload.Config{LoadMode: "synthetic"}, RuntimeSnapshotStatus: reporting.RuntimeSnapshotStatusHealthy},
+		{Worker: model.Worker{ID: "w2", ProfileName: "gharchive-replay"}, Workload: workload.Config{LoadMode: "replay", ReplayDataset: "gharchive"}, RuntimeSnapshotStatus: reporting.RuntimeSnapshotStatusLegacy},
+		{Worker: model.Worker{ID: "w3", ProfileName: "high-volume"}, Workload: workload.Config{LoadMode: "synthetic"}, RuntimeSnapshotStatus: reporting.RuntimeSnapshotStatusLegacy},
+	}
+
+	coverage := buildCoverageSnapshot(summaries)
+	if len(coverage.RuntimeStates) != 2 {
+		t.Fatalf("runtime state count=%d want 2", len(coverage.RuntimeStates))
+	}
+	if coverage.RuntimeStates[0].Label != reporting.RuntimeSnapshotStatusLegacy || coverage.RuntimeStates[0].Count != 2 {
+		t.Fatalf("top runtime state=%+v want legacy x2", coverage.RuntimeStates[0])
+	}
+}
+
+func TestRelatedDiagnosisClustersPrefersWorkerCluster(t *testing.T) {
+	diagnosis := diagnosisSnapshot{
+		Clusters: []diagnosisCluster{
+			{
+				Key:               "sync|litestream_sync_socket_refused|Litestream sync/control socket",
+				Signature:         "litestream_sync_socket_refused",
+				ProbableSubsystem: "Litestream sync/control socket",
+				Workers: []diagnosisWorkerRef{
+					{ID: "worker-main-burst-vol", Name: "worker-main-burst-vol"},
+					{ID: "worker-main-high-vol", Name: "worker-main-high-vol"},
+				},
+			},
+			{
+				Key:               "restore|replica_s3_timeout|Replication or restore path",
+				Signature:         "replica_s3_timeout",
+				ProbableSubsystem: "Replication or restore path",
+				Workers: []diagnosisWorkerRef{
+					{ID: "worker-main-taxi-replay", Name: "worker-main-taxi-replay"},
+				},
+			},
+		},
+	}
+
+	clusters := relatedDiagnosisClusters(diagnosis, "worker-main-burst-vol", "litestream_sync_socket_refused", "Litestream sync/control socket")
+	if len(clusters) == 0 {
+		t.Fatal("expected related clusters")
+	}
+	if clusters[0].Signature != "litestream_sync_socket_refused" {
+		t.Fatalf("first related cluster=%q", clusters[0].Signature)
+	}
+}
+
+func TestBuildTriageCommandsUseBasicAuth(t *testing.T) {
+	commands := buildTriageCommands(model.Worker{ID: "worker-main-burst-vol", AppName: "litestream-soak"}, false)
+	text := strings.Join(commands, "\n")
+
+	if !strings.Contains(text, "SOAK_BASIC_AUTH_USERNAME") {
+		t.Fatalf("triage commands missing basic auth vars: %s", text)
+	}
+	if !strings.Contains(text, "/api/diagnosis") {
+		t.Fatalf("triage commands missing diagnosis endpoint: %s", text)
+	}
+	if !strings.Contains(text, "/debug-snapshot") {
+		t.Fatalf("triage commands missing debug snapshot endpoint: %s", text)
+	}
+}
+
+func TestBuildPromptIncludesFleetDiagnosisAndAuthGuidance(t *testing.T) {
+	failureDebug := &reporting.FailureDebugSnapshot{
+		Reason: "wait for sync: connection refused",
+		Run: reporting.WorkerIdentity{
+			WorkerID: "worker-main-burst-vol",
+			RunID:    "run-123",
+		},
+		FDCounts: []reporting.ProcessFDCounts{
+			{PID: 100, Command: "litestream", Total: 12, ByType: map[string]int{"socket": 10}},
+		},
+	}
+	legacyEventDetails, err := json.Marshal(reporting.VerificationPayload{
+		WorkerIdentity: reporting.WorkerIdentity{
+			WorkerID: "worker-main-burst-vol",
+			RunID:    "run-123",
+		},
+		StartedAt:    timeMustParse("2026-04-11T20:30:00Z"),
+		CompletedAt:  timeMustParse("2026-04-11T20:30:02Z"),
+		CheckType:    "integrity",
+		Status:       "failed",
+		Passed:       false,
+		ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`,
+		Steps: []reporting.VerificationStep{
+			{Name: "sync", Status: "error", Error: "connection refused"},
+		},
+		FailureDebug: failureDebug,
+		RuntimePayload: reporting.RuntimePayload{
+			DBStatus: "replicating",
+			DBTXID:   42,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal event payload: %v", err)
+	}
+
+	bundle := &IncidentBundle{
+		GeneratedAt: timeMustParse("2026-04-11T21:00:00Z"),
+		Worker: model.Worker{
+			ID:     "worker-main-burst-vol",
+			Status: model.WorkerDegraded,
+		},
+		Workload: workload.Config{
+			LoadMode: "synthetic",
+			Pattern:  "burst",
+		},
+		FailureStage:      "sync",
+		FailureSignature:  "litestream_sync_socket_refused",
+		ProbableSubsystem: "Litestream sync/control socket",
+		Guide: incidentGuide{
+			Summary:           "The latest verification is failing during sync.",
+			ProbableSubsystem: "Litestream sync/control socket",
+			WhyLikely:         []string{"The latest verification is still failing."},
+			NextSteps:         []string{"Inspect the worker logs."},
+		},
+		Diagnosis: diagnosisSnapshot{
+			Headline:          "2 active failure clusters across 4 workers",
+			Summary:           "The dominant live cluster is litestream_sync_socket_refused during sync.",
+			ProbableSubsystem: "Litestream sync/control socket",
+			Confidence:        "high",
+			AffectedWorkers:   4,
+			DominantStage:     "sync",
+			DominantSignature: "litestream_sync_socket_refused",
+			WhyLikely:         []string{"3 workers share the dominant signature."},
+			NextSteps:         []string{"Open a representative worker first."},
+		},
+		RelatedClusters: []diagnosisCluster{
+			{
+				Key:               "sync|litestream_sync_socket_refused|Litestream sync/control socket",
+				Signature:         "litestream_sync_socket_refused",
+				ProbableSubsystem: "Litestream sync/control socket",
+			},
+		},
+		ReportedRuntime: &reporting.RuntimePayload{
+			SnapshotCollectedAt:       timeMustParse("2026-04-11T21:00:10Z"),
+			DBStatus:                  "unknown",
+			LitestreamSnapshotHealthy: false,
+			LitestreamSnapshotError:   "read txid: dial unix /data/litestream.sock: connect: connection refused",
+		},
+		FailureDebug: failureDebug,
+		TriageCommands: []string{
+			`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/workers/worker-main-burst-vol/incident | jq .`,
+			`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/workers/worker-main-burst-vol/debug-snapshot | jq .`,
+			`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/diagnosis | jq .`,
+		},
+		RecentEvents: []model.Event{
+			{
+				EventType: "verification_failed",
+				Message:   `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`,
+				Details:   string(legacyEventDetails),
+				CreatedAt: timeMustParse("2026-04-11T20:30:02Z"),
+			},
+		},
+	}
+
+	prompt := buildPrompt(bundle, promptModeLitestream)
+	for _, want := range []string{
+		"<fleet_diagnosis>",
+		"<related_clusters>",
+		"<control_plane_access>",
+		"shared across the fleet or isolated",
+		"<worker_debug_tools>",
+		"debug-snapshot",
+		"<failure_debug_snapshot>",
+		"<reported_runtime>",
+		"<runtime_interpretation>",
+		"<recent_event_summaries>",
+		`"run_id": "run-123"`,
+		`"failure_debug_captured": true`,
+		`"name": "sync"`,
+		"litestream_snapshot_healthy",
+		"current_runtime_snapshot_status: unknown",
+		`"runtime_snapshot_status": "legacy"`,
+		"SOAK_BASIC_AUTH_USERNAME",
+		"/api/diagnosis",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q", want)
+		}
+	}
+	if strings.Contains(prompt, "<recent_events>") {
+		t.Fatalf("prompt should not include raw recent events: %s", prompt)
+	}
+}
+
+func TestBuildPromptHealthyBaseline(t *testing.T) {
+	bundle := &IncidentBundle{
+		GeneratedAt: timeMustParse("2026-04-23T14:00:00Z"),
+		Worker: model.Worker{
+			ID:     "worker-pr-1228-low-vol",
+			Status: model.WorkerRunning,
+		},
+		Workload: workload.Config{
+			LoadMode: "synthetic",
+			Pattern:  "steady",
+		},
+		Guide: incidentGuide{
+			Summary:               "No active failure is present on this worker.",
+			ProbableSubsystem:     "Healthy baseline",
+			RecommendedPromptMode: "healthy",
+			WhyLikely:             []string{"The worker status is running and the latest verification is not actively failing."},
+			NextSteps:             []string{"Capture this prompt as a clean baseline before the next deploy or workload change."},
+		},
+		RuntimeSnapshotStatus: reporting.RuntimeSnapshotStatusHealthy,
+		ReportedRuntime: &reporting.RuntimePayload{
+			SnapshotCollectedAt:       timeMustParse("2026-04-23T14:00:10Z"),
+			LitestreamSnapshotHealthy: true,
+			DBStatus:                  "replicating",
+		},
+		RecentVerifications: []model.Verification{
+			{
+				WorkerID:   "worker-pr-1228-low-vol",
+				StartedAt:  timeMustParse("2026-04-23T13:59:30Z"),
+				Status:     "passed",
+				CheckType:  "integrity",
+				Passed:     true,
+				DurationMS: 15000,
+			},
+		},
+	}
+
+	prompt := buildPrompt(bundle, promptModeHealthy)
+	for _, want := range []string{
+		"healthy Litestream soak baseline",
+		"<mode>",
+		"healthy",
+		"Why this looks healthy enough to use as a baseline",
+		"future regressions should be compared against",
+		"<reported_runtime>",
+		"current_runtime_snapshot_status: healthy",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q", want)
+		}
+	}
+}
+
+func TestBuildPromptIncludesActiveVerification(t *testing.T) {
+	bundle := &IncidentBundle{
+		GeneratedAt: timeMustParse("2026-05-11T13:36:00Z"),
+		Worker: model.Worker{
+			ID:     "worker-pr-1265-high-vol",
+			Status: model.WorkerRunning,
+		},
+		Workload: workload.Config{LoadMode: "synthetic"},
+		ActiveVerification: &reporting.ActiveVerification{
+			StartedAt: timeMustParse("2026-05-11T13:34:50Z"),
+			CheckType: "integrity",
+			Status:    "running",
+		},
+		Guide: incidentGuide{
+			Summary:               "Verification is currently running.",
+			ProbableSubsystem:     "Pending verification",
+			RecommendedPromptMode: "triage",
+			WhyLikely:             []string{"A verification is in progress."},
+			NextSteps:             []string{"Wait for completion."},
+		},
+		Diagnosis: diagnosisSnapshot{
+			Headline:            "1 worker currently running verification",
+			Summary:             "No active failure is recorded, but verification is in progress.",
+			ProbableSubsystem:   "Pending verification",
+			ActiveVerifications: 1,
+		},
+		RuntimeSnapshotStatus: reporting.RuntimeSnapshotStatusHealthy,
+	}
+
+	prompt := buildPrompt(bundle, promptModeTriage)
+	for _, want := range []string{
+		"<active_verification>",
+		`"check_type": "integrity"`,
+		"active_verifications: 1",
+		"green live diagnosis as pending",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q", want)
+		}
+	}
+}
+
+func timeMustParse(raw string) time.Time {
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		panic(err)
+	}
+	return t
+}

@@ -13,16 +13,19 @@ import (
 )
 
 type WebhookHandler struct {
-	secret  string
-	manager *Manager
-	deployer *Deployer
+	secret        string
+	deployer      *Deployer
+	deployEnabled bool
 }
 
-func NewWebhookHandler(secret string, manager *Manager, deployer *Deployer) *WebhookHandler {
+func NewWebhookHandler(secret string, deployer *Deployer, deployEnabled bool) *WebhookHandler {
+	if secret == "" {
+		slog.Warn("GITHUB_WEBHOOK_SECRET is not set; refusing all webhook deliveries")
+	}
 	return &WebhookHandler{
-		secret:   secret,
-		manager:  manager,
-		deployer: deployer,
+		secret:        secret,
+		deployer:      deployer,
+		deployEnabled: deployEnabled,
 	}
 }
 
@@ -38,12 +41,14 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.secret != "" {
-		sig := r.Header.Get("X-Hub-Signature-256")
-		if !h.verifySignature(body, sig) {
-			http.Error(w, "invalid signature", http.StatusUnauthorized)
-			return
-		}
+	if h.secret == "" {
+		http.Error(w, "webhook secret not configured", http.StatusServiceUnavailable)
+		return
+	}
+	sig := r.Header.Get("X-Hub-Signature-256")
+	if !h.verifySignature(body, sig) {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
 	}
 
 	event := r.Header.Get("X-GitHub-Event")
@@ -92,6 +97,19 @@ func (h *WebhookHandler) handlePush(w http.ResponseWriter, body []byte) {
 		"sha", sha,
 		"message", payload.HeadCommit.Message,
 	)
+	if h.deployer != nil {
+		_ = h.deployer.db.RecordEvent("", "github_push_received", fmt.Sprintf("Push received for %s on main", trimSHA(sha)), payload.HeadCommit.Message)
+	}
+
+	if !h.deployEnabled {
+		slog.Info("Webhook deploy disabled; awaiting external CI", "sha", sha)
+		if h.deployer != nil {
+			_ = h.deployer.db.RecordEvent("", "github_push_awaiting_ci", "Push acknowledged; awaiting external deploy automation", sha)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprintln(w, "acknowledged: awaiting external deploy automation")
+		return
+	}
 
 	go func() {
 		if err := h.deployer.DeployNewSHA(sha); err != nil {

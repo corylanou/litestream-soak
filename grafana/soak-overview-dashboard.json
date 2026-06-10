@@ -1,0 +1,1993 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Fleet-first overview for the Litestream soak project. Read top cards for posture, then Verification By Worker and Compute State By Worker for pattern. Paused Compute means dormant workers whose Fly Machines were intentionally stopped to avoid wasting money. Click a worker row or timeline bar to open that worker in the control plane.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 2,
+  "links": [
+    {
+      "targetBlank": true,
+      "title": "Drilldown Dashboard",
+      "type": "link",
+      "url": "/d/litestream-soak?var-source=${source}&var-worker=${worker}"
+    },
+    {
+      "targetBlank": true,
+      "title": "Release Quality",
+      "type": "link",
+      "url": "/d/litestream-release-quality"
+    },
+    {
+      "targetBlank": true,
+      "title": "Source Compare",
+      "type": "link",
+      "url": "/d/litestream-source-compare?var-compare_source=pr-1228"
+    },
+    {
+      "targetBlank": true,
+      "title": "Control Plane",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/ui"
+    },
+    {
+      "targetBlank": true,
+      "title": "Selected Worker",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${worker}"
+    },
+    {
+      "targetBlank": true,
+      "title": "Prompt Bundle",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/workers/${worker}/prompt"
+    },
+    {
+      "targetBlank": true,
+      "title": "Worker Summaries",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/worker-summaries"
+    },
+    {
+      "targetBlank": true,
+      "title": "Diagnosis JSON",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/diagnosis"
+    },
+    {
+      "targetBlank": true,
+      "title": "Latest Rollout",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/deployments/latest?source=${source}"
+    },
+    {
+      "targetBlank": true,
+      "title": "Events JSON",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/events"
+    }
+  ],
+  "panels": [
+    {
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 31,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "expr": "(sum(soak_control_worker_last_verification_result{source=\"$source\"}) or on() vector(0)) / clamp_min((count(soak_control_worker_last_verification_result{source=\"$source\"}) or on() vector(0)), 1)",
+          "instant": true,
+          "legendFormat": "healthy"
+        }
+      ],
+      "title": "Fleet Health",
+      "type": "gauge"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "(count(soak_control_worker_last_verification_result{source=\"$source\"}) - sum(soak_control_worker_last_verification_result{source=\"$source\"})) or on() vector(0)",
+          "legendFormat": "failing"
+        }
+      ],
+      "title": "Failing Workers",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "count(count by (failure_stage, failure_signature) (soak_control_worker_failure_info{source=\"$source\"} == 1))",
+          "legendFormat": "clusters"
+        }
+      ],
+      "title": "Failure Clusters",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 20,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "expr": "topk(1, count by (failure_signature) (soak_control_worker_failure_info{source=\"$source\"} == 1))",
+          "instant": true,
+          "legendFormat": "{{failure_signature}}"
+        }
+      ],
+      "title": "Dominant Failure Now",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 6,
+        "y": 3
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "sum(soak_control_worker_last_verification_result{source=\"$source\"}) or on() vector(0)",
+          "legendFormat": "passing"
+        }
+      ],
+      "title": "Passing Workers",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 12,
+        "y": 3
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "count(soak_control_worker_status{status=\"dormant\"} == 1)",
+          "legendFormat": "paused"
+        }
+      ],
+      "title": "Paused Compute",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "gray",
+                  "text": "no workers"
+                },
+                "1": {
+                  "color": "orange",
+                  "text": "rolling out"
+                },
+                "2": {
+                  "color": "yellow",
+                  "text": "probing"
+                },
+                "3": {
+                  "color": "red",
+                  "text": "needs attention"
+                },
+                "4": {
+                  "color": "green",
+                  "text": "stable"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "gray",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              },
+              {
+                "color": "green",
+                "value": 4
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 18,
+        "y": 3
+      },
+      "id": 21,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "topk(1, max by (status) (soak_control_latest_deployment_info{source=\"$source\"}))",
+          "instant": true,
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "title": "Rollout Status",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 120
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 5,
+        "x": 0,
+        "y": 6
+      },
+      "id": 103,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "time() - max(soak_control_worker_last_heartbeat_unixtime{source=\"$source\"} and on(worker_id) (soak_control_worker_status{source=\"$source\",status=~\"running|probing|degraded\"} == 1))",
+          "instant": true,
+          "legendFormat": "latest heartbeat"
+        }
+      ],
+      "title": "Latest Heartbeat",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 180
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 5,
+        "x": 5,
+        "y": 6
+      },
+      "id": 104,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "time() - min(soak_control_worker_last_heartbeat_unixtime{source=\"$source\"} and on(worker_id) (soak_control_worker_status{source=\"$source\",status=~\"running|probing|degraded\"} == 1))",
+          "instant": true,
+          "legendFormat": "stalest heartbeat"
+        }
+      ],
+      "title": "Stalest Active Heartbeat",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 10,
+        "y": 6
+      },
+      "id": 107,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "sum((time() - (soak_control_worker_last_heartbeat_unixtime{source=\"$source\"} and on(worker_id) (soak_control_worker_status{source=\"$source\",status=~\"running|probing|degraded\"} == 1))) > bool 180)",
+          "instant": true,
+          "legendFormat": "stale active workers"
+        }
+      ],
+      "title": "Stale Active Workers",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 5,
+        "x": 14,
+        "y": 6
+      },
+      "id": 105,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "max(soak_control_latest_deployment_workers{source=\"$source\",worker_state=\"verified_since_deploy\"})",
+          "instant": true,
+          "legendFormat": "verified"
+        }
+      ],
+      "title": "Checked This Rollout",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 5,
+        "x": 19,
+        "y": 6
+      },
+      "id": 106,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "max(soak_control_latest_deployment_workers{source=\"$source\",worker_state=\"awaiting_verification\"})",
+          "instant": true,
+          "legendFormat": "awaiting"
+        }
+      ],
+      "title": "Awaiting Check",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "PASS"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "FAIL"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 9
+      },
+      "id": 15,
+      "options": {
+        "displayLabels": [
+          "name",
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(soak_control_worker_last_verification_result{source=\"$source\"}) or on() vector(0)",
+          "instant": true,
+          "legendFormat": "PASS"
+        },
+        {
+          "expr": "(count(soak_control_worker_last_verification_result{source=\"$source\"}) - sum(soak_control_worker_last_verification_result{source=\"$source\"})) or on() vector(0)",
+          "instant": true,
+          "legendFormat": "FAIL"
+        }
+      ],
+      "title": "Verification Split",
+      "type": "piechart"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 9
+      },
+      "id": 16,
+      "options": {
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "count by (failure_signature) (soak_control_worker_failure_info{source=\"$source\"} == 1)",
+          "instant": true,
+          "legendFormat": "{{failure_signature}}"
+        }
+      ],
+      "title": "Failure Distribution",
+      "type": "piechart"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ACTIVE"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "PAUSED"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 9
+      },
+      "id": 17,
+      "options": {
+        "displayLabels": [
+          "name",
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "count(soak_control_worker_status{source=\"$source\",status=~\"running|degraded|probing|starting|building|pending\"} == 1)",
+          "instant": true,
+          "legendFormat": "ACTIVE"
+        },
+        {
+          "expr": "count(soak_control_worker_status{source=\"$source\",status=\"dormant\"} == 1)",
+          "instant": true,
+          "legendFormat": "PAUSED"
+        }
+      ],
+      "title": "Compute Spend",
+      "type": "piechart"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "links": [
+            {
+              "targetBlank": true,
+              "title": "Open Worker",
+              "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__field.labels.worker_id}"
+            }
+          ],
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "FAIL"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "PASS"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "id": 18,
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "always",
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "soak_control_worker_last_verification_result{source=\"$source\"}",
+          "legendFormat": "{{profile}}"
+        }
+      ],
+      "title": "Verification By Worker",
+      "type": "state-timeline"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "links": [
+            {
+              "targetBlank": true,
+              "title": "Open Worker",
+              "url": "https://litestream-soak-ctl.fly.dev/ui/workers/worker-main-${__series.name}"
+            }
+          ],
+          "mappings": [
+            {
+              "options": {
+                "1": {
+                  "color": "green",
+                  "text": "RUNNING"
+                },
+                "2": {
+                  "color": "red",
+                  "text": "DEGRADED"
+                },
+                "3": {
+                  "color": "blue",
+                  "text": "DORMANT"
+                },
+                "4": {
+                  "color": "orange",
+                  "text": "PROBING"
+                },
+                "5": {
+                  "color": "yellow",
+                  "text": "PENDING"
+                },
+                "6": {
+                  "color": "yellow",
+                  "text": "BUILDING"
+                },
+                "7": {
+                  "color": "yellow",
+                  "text": "STARTING"
+                },
+                "8": {
+                  "color": "gray",
+                  "text": "STOPPED"
+                },
+                "9": {
+                  "color": "red",
+                  "text": "FAILED"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "id": 19,
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "always",
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "label_replace(sum by (worker_id) ((((soak_control_worker_status{status=\"running\"} == 1) * 1) or ((soak_control_worker_status{status=\"degraded\"} == 1) * 2) or ((soak_control_worker_status{status=\"dormant\"} == 1) * 3) or ((soak_control_worker_status{status=\"probing\"} == 1) * 4) or ((soak_control_worker_status{status=\"pending\"} == 1) * 5) or ((soak_control_worker_status{status=\"building\"} == 1) * 6) or ((soak_control_worker_status{status=\"starting\"} == 1) * 7) or ((soak_control_worker_status{status=\"stopped\"} == 1) * 8) or ((soak_control_worker_status{status=\"failed\"} == 1) * 9))), \"worker\", \"$1\", \"worker_id\", \"worker-main-(.*)\")",
+          "legendFormat": "{{worker}}"
+        }
+      ],
+      "title": "Compute State By Worker",
+      "type": "state-timeline"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Worker"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": true,
+                    "title": "Open Worker",
+                    "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__value.raw}"
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "data-links"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 15,
+        "x": 0,
+        "y": 34
+      },
+      "id": 8,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "(((soak_control_worker_failure_info == 1) * on(worker_id) group_left(runtime_status) (soak_control_worker_runtime_snapshot_status == 1)) * on(worker_id) group_left(load_mode, replay_dataset, profile) (soak_control_worker_workload_info == 1)) * on(worker_id) group_left(status) (soak_control_worker_status == 1)",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Failing Workers Right Now",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "worker_id": 0,
+              "status": 1,
+              "failure_signature": 2,
+              "failure_stage": 3,
+              "runtime_status": 4,
+              "load_mode": 5,
+              "replay_dataset": 6,
+              "profile": 7
+            },
+            "renameByName": {
+              "worker_id": "Worker",
+              "status": "Status",
+              "failure_signature": "Failure",
+              "failure_stage": "Stage",
+              "runtime_status": "Runtime",
+              "load_mode": "Load",
+              "replay_dataset": "Dataset",
+              "profile": "Profile"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 9,
+        "x": 15,
+        "y": 34
+      },
+      "id": 9,
+      "options": {
+        "displayMode": "basic",
+        "namePlacement": "left",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": false,
+        "sizing": "manual",
+        "text": {}
+      },
+      "targets": [
+        {
+          "expr": "count by (failure_signature) (soak_control_worker_failure_info == 1)",
+          "instant": true,
+          "legendFormat": "{{failure_signature}}"
+        }
+      ],
+      "title": "Failure Breakdown",
+      "type": "bargauge"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "id": 100,
+      "panels": [
+        {
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "green",
+                      "text": "within grace"
+                    },
+                    "1": {
+                      "color": "red",
+                      "text": "overdue"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 4,
+            "x": 0,
+            "y": 40
+          },
+          "id": 120,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "value"
+          },
+          "targets": [
+            {
+              "expr": "topk(1, max by (status) (soak_control_latest_deployment_grace_exceeded))",
+              "instant": true,
+              "legendFormat": "{{status}}"
+            }
+          ],
+          "title": "Rollout Grace",
+          "type": "stat"
+        },
+        {
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 4,
+            "x": 4,
+            "y": 40
+          },
+          "id": 22,
+          "options": {
+            "displayMode": "basic",
+            "namePlacement": "left",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": false,
+            "sizing": "manual",
+            "text": {}
+          },
+          "targets": [
+            {
+              "expr": "sum by (worker_state) (soak_control_latest_deployment_workers{worker_state=~\"updated|outdated|probing|dormant|degraded\"})",
+              "instant": true,
+              "legendFormat": "{{worker_state}}"
+            }
+          ],
+          "title": "Latest Rollout Progress",
+          "type": "bargauge"
+        },
+        {
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Worker"
+                },
+                "properties": [
+                  {
+                    "id": "links",
+                    "value": [
+                      {
+                        "targetBlank": true,
+                        "title": "Open Worker",
+                        "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__value.raw}"
+                      }
+                    ]
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "data-links"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 16,
+            "x": 8,
+            "y": 40
+          },
+          "id": 10,
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "countRows": false,
+              "fields": "",
+              "reducer": [
+                "sum"
+              ],
+              "show": false
+            },
+            "showHeader": true
+          },
+          "targets": [
+            {
+              "expr": "(((soak_control_worker_status{status=\"dormant\"} == 1) * on(worker_id) group_left(failure_signature, failure_stage) (soak_control_worker_last_failure_info == 1)) * on(worker_id) group_left(load_mode, replay_dataset, profile) (soak_control_worker_workload_info == 1))",
+              "format": "table",
+              "instant": true
+            }
+          ],
+          "title": "Paused Compute Right Now",
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Value": true,
+                  "__name__": true,
+                  "instance": true,
+                  "job": true
+                },
+                "indexByName": {
+                  "worker_id": 0,
+                  "failure_signature": 1,
+                  "failure_stage": 2,
+                  "load_mode": 3,
+                  "replay_dataset": 4,
+                  "profile": 5
+                },
+                "renameByName": {
+                  "worker_id": "Worker",
+                  "failure_signature": "Failure",
+                  "failure_stage": "Stage",
+                  "load_mode": "Load",
+                  "replay_dataset": "Dataset",
+                  "profile": "Profile"
+                }
+              }
+            }
+          ],
+          "type": "table"
+        },
+        {
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Worker"
+                },
+                "properties": [
+                  {
+                    "id": "links",
+                    "value": [
+                      {
+                        "targetBlank": true,
+                        "title": "Open Worker",
+                        "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__value.raw}"
+                      }
+                    ]
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "data-links"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 24,
+            "x": 0,
+            "y": 47
+          },
+          "id": 14,
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "countRows": false,
+              "fields": "",
+              "reducer": [
+                "sum"
+              ],
+              "show": false
+            },
+            "showHeader": true
+          },
+          "targets": [
+            {
+              "expr": "sort_desc(time() - soak_control_worker_last_failure_unixtime)",
+              "format": "table",
+              "instant": true
+            }
+          ],
+          "title": "Fleet Last Failure Age",
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "__name__": true,
+                  "instance": true,
+                  "job": true
+                },
+                "indexByName": {
+                  "worker_id": 0,
+                  "Value": 1
+                },
+                "renameByName": {
+                  "worker_id": "Worker",
+                  "Value": "Age"
+                }
+              }
+            }
+          ],
+          "type": "table"
+        }
+      ],
+      "title": "Rollout and Dormancy",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "id": 101,
+      "panels": [
+        {
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 0,
+            "y": 41
+          },
+          "id": 11,
+          "options": {
+            "displayMode": "basic",
+            "namePlacement": "left",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": false,
+            "sizing": "manual",
+            "text": {}
+          },
+          "targets": [
+            {
+              "expr": "count by (profile) (soak_control_worker_workload_info == 1)",
+              "instant": true,
+              "legendFormat": "{{profile}}"
+            }
+          ],
+          "title": "Coverage By Profile",
+          "type": "bargauge"
+        },
+        {
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed"
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "snapshot_ok"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "green",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "legacy_telemetry"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "yellow",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "snapshot_unhealthy"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "red",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "snapshot_missing"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "gray",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 12,
+            "y": 41
+          },
+          "id": 30,
+          "options": {
+            "displayMode": "basic",
+            "namePlacement": "left",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": false,
+            "sizing": "manual",
+            "text": {}
+          },
+          "targets": [
+            {
+              "expr": "count by (runtime_status) (soak_control_worker_runtime_snapshot_status == 1)",
+              "instant": true,
+              "legendFormat": "{{runtime_status}}"
+            }
+          ],
+          "title": "Runtime Health",
+          "type": "bargauge"
+        }
+      ],
+      "title": "Fleet Composition",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "id": 102,
+      "panels": [
+        {
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Worker"
+                },
+                "properties": [
+                  {
+                    "id": "links",
+                    "value": [
+                      {
+                        "targetBlank": true,
+                        "title": "Open Worker",
+                        "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__value.raw}"
+                      }
+                    ]
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "data-links"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 16,
+            "x": 0,
+            "y": 42
+          },
+          "id": 130,
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "countRows": false,
+              "fields": "",
+              "reducer": [
+                "sum"
+              ],
+              "show": false
+            },
+            "showHeader": true
+          },
+          "targets": [
+            {
+              "expr": "((soak_control_worker_latest_platform_event_window_count > 0) * on(worker_id) group_left(status) (soak_control_worker_status == 1))",
+              "format": "table",
+              "instant": true
+            }
+          ],
+          "title": "Platform Signals Right Now",
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "__name__": true,
+                  "app_name": true,
+                  "instance": true,
+                  "job": true,
+                  "region": true,
+                  "source": true
+                },
+                "indexByName": {
+                  "worker_id": 0,
+                  "status": 1,
+                  "event_type": 2,
+                  "event_summary": 3,
+                  "Value": 4,
+                  "profile": 5
+                },
+                "renameByName": {
+                  "worker_id": "Worker",
+                  "status": "Status",
+                  "event_type": "Event",
+                  "event_summary": "Summary",
+                  "Value": "Window Count",
+                  "profile": "Profile"
+                }
+              }
+            }
+          ],
+          "type": "table"
+        },
+        {
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 16,
+            "y": 42
+          },
+          "id": 131,
+          "options": {
+            "displayMode": "basic",
+            "namePlacement": "left",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": false,
+            "sizing": "manual",
+            "text": {}
+          },
+          "targets": [
+            {
+              "expr": "count by (event_type) (soak_control_worker_latest_platform_event_info == 1)",
+              "instant": true,
+              "legendFormat": "{{event_type}}"
+            }
+          ],
+          "title": "Platform Signal Types",
+          "type": "bargauge"
+        }
+      ],
+      "title": "Platform Signals",
+      "type": "row"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "links": [
+            {
+              "targetBlank": true,
+              "title": "Open Worker",
+              "url": "https://litestream-soak-ctl.fly.dev/ui/workers/${__series.name}"
+            }
+          ],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 45
+      },
+      "id": 140,
+      "options": {
+        "displayMode": "basic",
+        "namePlacement": "left",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": false,
+        "sizing": "manual",
+        "text": {}
+      },
+      "targets": [
+        {
+          "expr": "sort_desc(max by (worker_id) (soak_control_worker_data_disk_used_percent{source=\"$source\"})) or sort_desc(max by (worker_id) (soak_data_disk_used_percent{source=\"$source\"})) or on() vector(0)",
+          "legendFormat": "{{worker_id}}"
+        }
+      ],
+      "title": "Disk Pressure By Worker",
+      "type": "bargauge"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 45
+      },
+      "id": 141,
+      "options": {
+        "displayMode": "basic",
+        "namePlacement": "left",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": false,
+        "sizing": "manual",
+        "text": {}
+      },
+      "targets": [
+        {
+          "expr": "sum by (attachment_state) (soak_control_app_volume_size_gb) or on() vector(0)",
+          "legendFormat": "{{attachment_state}}"
+        }
+      ],
+      "title": "Volume GB By State",
+      "type": "bargauge"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "litestream",
+    "soak",
+    "fly",
+    "overview"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "main",
+          "value": "main"
+        },
+        "definition": "main,pr-1228",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Source",
+        "multi": false,
+        "name": "source",
+        "options": [
+          {
+            "selected": true,
+            "text": "main",
+            "value": "main"
+          },
+          {
+            "selected": false,
+            "text": "pr-1228",
+            "value": "pr-1228"
+          }
+        ],
+        "query": "main,pr-1228",
+        "refresh": 0,
+        "regex": "",
+        "sort": 1,
+        "type": "custom"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "worker-main-orders-replay",
+          "value": "worker-main-orders-replay"
+        },
+        "definition": "label_values(soak_control_worker_info{source=\"$source\"}, worker_id)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Worker",
+        "multi": false,
+        "name": "worker",
+        "options": [
+          {
+            "selected": true,
+            "text": "worker-main-orders-replay",
+            "value": "worker-main-orders-replay"
+          },
+          {
+            "selected": false,
+            "text": "worker-pr-1228-high-vol",
+            "value": "worker-pr-1228-high-vol"
+          }
+        ],
+        "query": "label_values(soak_control_worker_info{source=\"$source\"}, worker_id)",
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "title": "Litestream Soak Overview",
+  "uid": "litestream-soak-overview",
+  "version": 12
+}

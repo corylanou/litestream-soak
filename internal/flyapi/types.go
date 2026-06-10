@@ -3,16 +3,16 @@ package flyapi
 import "time"
 
 type Machine struct {
-	ID         string            `json:"id"`
-	Name       string            `json:"name"`
-	State      string            `json:"state"`
-	Region     string            `json:"region"`
-	InstanceID string            `json:"instance_id"`
-	Config     MachineConfig     `json:"config"`
-	ImageRef   ImageRef          `json:"image_ref"`
-	CreatedAt  time.Time         `json:"created_at"`
-	UpdatedAt  time.Time         `json:"updated_at"`
-	Events     []MachineEvent    `json:"events"`
+	ID         string         `json:"id"`
+	Name       string         `json:"name"`
+	State      string         `json:"state"`
+	Region     string         `json:"region"`
+	InstanceID string         `json:"instance_id"`
+	Config     MachineConfig  `json:"config"`
+	ImageRef   ImageRef       `json:"image_ref"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+	Events     []MachineEvent `json:"events"`
 }
 
 type MachineConfig struct {
@@ -58,9 +58,41 @@ type ImageRef struct {
 }
 
 type MachineEvent struct {
-	Type      string    `json:"type"`
-	Status    string    `json:"status"`
-	Timestamp time.Time `json:"timestamp"`
+	Type      string `json:"type"`
+	Status    string `json:"status"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+type AppLogsResponse struct {
+	Data []AppLogEntry `json:"data"`
+	Meta AppLogsMeta   `json:"meta"`
+}
+
+type AppLogsMeta struct {
+	NextToken string `json:"next_token"`
+}
+
+type AppLogEntry struct {
+	ID         string           `json:"id"`
+	Type       string           `json:"type"`
+	Attributes AppLogAttributes `json:"attributes"`
+}
+
+type AppLogAttributes struct {
+	Timestamp time.Time  `json:"timestamp"`
+	Message   string     `json:"message"`
+	Level     string     `json:"level"`
+	Instance  string     `json:"instance"`
+	Region    string     `json:"region"`
+	Meta      AppLogMeta `json:"meta"`
+}
+
+type AppLogMeta struct {
+	Event AppLogMetaEvent `json:"event"`
+}
+
+type AppLogMetaEvent struct {
+	Provider string `json:"provider"`
 }
 
 type Volume struct {

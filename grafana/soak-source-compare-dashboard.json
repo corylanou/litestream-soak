@@ -1,0 +1,737 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Cross-source comparison view for Litestream soak. Select a PR or alternate source and compare its latest rollout directly against main using control-plane scorecards.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 2,
+  "links": [
+    {
+      "targetBlank": true,
+      "title": "Overview Dashboard",
+      "type": "link",
+      "url": "/d/litestream-soak-overview?var-source=main&var-worker=worker-main-orders-replay"
+    },
+    {
+      "targetBlank": true,
+      "title": "Release Quality",
+      "type": "link",
+      "url": "/d/litestream-release-quality"
+    },
+    {
+      "targetBlank": true,
+      "title": "Control Plane Compare",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/ui?base_source=main&head_source=${compare_source}"
+    },
+    {
+      "targetBlank": true,
+      "title": "Main Rollout",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/deployments/latest?source=main"
+    },
+    {
+      "targetBlank": true,
+      "title": "Selected Rollout",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/deployments/latest?source=${compare_source}"
+    },
+    {
+      "targetBlank": true,
+      "title": "Comparison JSON",
+      "type": "link",
+      "url": "https://litestream-soak-ctl.fly.dev/api/deployments/compare/latest?base_source=main&head_source=${compare_source}"
+    }
+  ],
+  "panels": [
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name"
+      },
+      "targets": [
+        {
+          "expr": "topk(1, max by (verdict) (soak_control_source_comparison_info{base_source=\"main\",head_source=\"$compare_source\"}))",
+          "instant": true,
+          "legendFormat": "{{verdict}}"
+        }
+      ],
+      "title": "Release Verdict",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "max(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"verified\"})",
+          "instant": true,
+          "legendFormat": "main verified"
+        }
+      ],
+      "title": "Main Verified",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 9,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "max(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"verified\"})",
+          "instant": true,
+          "legendFormat": "selected verified"
+        }
+      ],
+      "title": "Selected Verified",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 12,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "max(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"awaiting\"})",
+          "instant": true,
+          "legendFormat": "main awaiting"
+        }
+      ],
+      "title": "Main Awaiting",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 15,
+        "y": 0
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "max(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"awaiting\"})",
+          "instant": true,
+          "legendFormat": "selected awaiting"
+        }
+      ],
+      "title": "Selected Awaiting",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 18,
+        "y": 0
+      },
+      "id": 6,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "max(soak_control_source_comparison_delta{base_source=\"main\",head_source=\"$compare_source\",delta_type=\"new_failures\"})",
+          "instant": true,
+          "legendFormat": "new_failures"
+        }
+      ],
+      "title": "New Failure Types",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 21,
+        "y": 0
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "max(soak_control_source_comparison_delta{base_source=\"main\",head_source=\"$compare_source\",delta_type=\"resolved_failures\"})",
+          "instant": true,
+          "legendFormat": "resolved_failures"
+        }
+      ],
+      "title": "Resolved Failure Types",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 4
+      },
+      "id": 8,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"passed\"}) / clamp_min(sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"total\"}), 1)",
+          "instant": true,
+          "legendFormat": "main"
+        },
+        {
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"passed\"}) / clamp_min(sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"total\"}), 1)",
+          "instant": true,
+          "legendFormat": "${compare_source}"
+        }
+      ],
+      "title": "Pass Rate",
+      "type": "bargauge"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 4
+      },
+      "id": 9,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"passed\"})",
+          "instant": true,
+          "legendFormat": "main passed"
+        },
+        {
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"failed\"})",
+          "instant": true,
+          "legendFormat": "main failed"
+        },
+        {
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"awaiting\"})",
+          "instant": true,
+          "legendFormat": "main awaiting"
+        },
+        {
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"passed\"})",
+          "instant": true,
+          "legendFormat": "${compare_source} passed"
+        },
+        {
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"failed\"})",
+          "instant": true,
+          "legendFormat": "${compare_source} failed"
+        },
+        {
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"awaiting\"})",
+          "instant": true,
+          "legendFormat": "${compare_source} awaiting"
+        }
+      ],
+      "title": "Outcome Counts",
+      "type": "bargauge"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 4
+      },
+      "id": 10,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (failure_signature) (soak_control_source_comparison_failure{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\"})",
+          "instant": true,
+          "legendFormat": "{{failure_signature}}"
+        }
+      ],
+      "title": "Selected Failure Signatures",
+      "type": "bargauge"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 11,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (failure_signature) (soak_control_source_comparison_failure{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"new\"})",
+          "instant": true,
+          "legendFormat": "new {{failure_signature}}"
+        },
+        {
+          "expr": "sum by (failure_signature) (soak_control_source_comparison_failure{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"resolved\"})",
+          "instant": true,
+          "legendFormat": "resolved {{failure_signature}}"
+        }
+      ],
+      "title": "New Vs Resolved Failure Types",
+      "type": "bargauge"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 12,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"verified\"})",
+          "instant": true,
+          "legendFormat": "main verified"
+        },
+        {
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"awaiting\"})",
+          "instant": true,
+          "legendFormat": "main awaiting"
+        },
+        {
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"base\",worker_state=\"total\"})",
+          "instant": true,
+          "legendFormat": "main total"
+        },
+        {
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"verified\"})",
+          "instant": true,
+          "legendFormat": "${compare_source} verified"
+        },
+        {
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"awaiting\"})",
+          "instant": true,
+          "legendFormat": "${compare_source} awaiting"
+        },
+        {
+          "expr": "sum(soak_control_source_comparison_workers{base_source=\"main\",head_source=\"$compare_source\",comparison_role=\"head\",worker_state=\"total\"})",
+          "instant": true,
+          "legendFormat": "${compare_source} total"
+        }
+      ],
+      "title": "Verification Coverage",
+      "type": "bargauge"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "litestream",
+    "soak",
+    "release-quality"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "pr-1228",
+          "value": "pr-1228"
+        },
+        "definition": "pr-1228",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Compare Source",
+        "multi": false,
+        "name": "compare_source",
+        "options": [
+          {
+            "selected": true,
+            "text": "pr-1228",
+            "value": "pr-1228"
+          }
+        ],
+        "query": "pr-1228",
+        "refresh": 0,
+        "regex": "",
+        "sort": 1,
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Litestream Source Compare",
+  "uid": "litestream-source-compare",
+  "version": 1,
+  "weekStart": ""
+}

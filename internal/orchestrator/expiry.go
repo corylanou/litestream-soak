@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/model"
 )
 
 func (m *Manager) RunExpiryLoop(ctx context.Context) {
@@ -58,6 +60,17 @@ func (m *Manager) checkStaleWorkers(ctx context.Context, timeout time.Duration) 
 
 	for _, w := range workers {
 		slog.Warn("Stale worker detected", "name", w.Name, "worker_id", w.ID, "last_heartbeat", w.LastHeartbeatAt)
+		if err := m.db.UpdateWorkerStatus(w.ID, model.WorkerDegraded, "worker missed heartbeat deadline"); err != nil {
+			slog.Error("Failed to update stale worker status", "worker_id", w.ID, "error", err)
+			continue
+		}
 		m.db.RecordEvent(w.ID, "worker_stale", "Worker missed heartbeat deadline", "")
+		m.observeWorkerByID(w.ID)
+		if m.alerts != nil {
+			latestWorker, err := m.db.GetWorker(w.ID)
+			if err == nil {
+				m.alerts.NotifyWorkerStale(*latestWorker)
+			}
+		}
 	}
 }

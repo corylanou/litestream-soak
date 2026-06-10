@@ -1,0 +1,145 @@
+name: sync-upstream-main
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Force a rebuild even if the tracked upstream SHA matches
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: true
+
+jobs:
+  resolve-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.resolve.outputs.should_build }}
+      litestream_sha: ${{ steps.resolve.outputs.litestream_sha }}
+      current_litestream_sha: ${{ steps.resolve.outputs.current_litestream_sha }}
+      trigger: ${{ steps.resolve.outputs.trigger }}
+    steps:
+      - id: resolve
+        shell: bash
+        env:
+          CONTROL_BASE_URL: ${{ vars.SOAK_CONTROL_BASE_URL }}
+        run: |
+          set -euo pipefail
+
+          base_url="${CONTROL_BASE_URL:-https://litestream-soak-ctl.fly.dev}"
+          litestream_sha="$(git ls-remote https://github.com/benbjohnson/litestream.git refs/heads/main | awk 'NR==1{print $1}')"
+          if [ -z "${litestream_sha}" ]; then
+            echo "failed to resolve upstream Litestream main" >&2
+            exit 1
+          fi
+
+          current_litestream_sha="$(curl -fsSL "${base_url}/metrics" | awk '
+            /^soak_control_latest_deployment_version_info\{/ {
+              if ($0 ~ /source="main"/) {
+                split($0, parts, "litestream_sha=\"")
+                if (length(parts) > 1) {
+                  split(parts[2], tail, "\"")
+                  print tail[1]
+                  exit
+                }
+              }
+            }
+          ')"
+
+          force_rebuild="false"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.force || '' }}" = "true" ]; then
+            force_rebuild="true"
+          fi
+
+          should_build="true"
+          if [ "${force_rebuild}" != "true" ] && [ -n "${current_litestream_sha}" ] && [ "${current_litestream_sha}" = "${litestream_sha}" ]; then
+            should_build="false"
+          fi
+
+          trigger="upstream_main_schedule"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            trigger="upstream_main_manual"
+          fi
+
+          {
+            echo "should_build=${should_build}"
+            echo "litestream_sha=${litestream_sha}"
+            echo "current_litestream_sha=${current_litestream_sha}"
+            echo "trigger=${trigger}"
+          } >> "${GITHUB_OUTPUT}"
+
+  build-worker-image:
+    needs: resolve-upstream
+    if: needs.resolve-upstream.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      image_ref: ${{ steps.build.outputs.image_ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - id: build
+        shell: bash
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA::12}"
+          litestream_sha="${{ needs.resolve-upstream.outputs.litestream_sha }}"
+          image_label="sha-${short_sha}-ls-${litestream_sha::12}"
+          log_file="$(mktemp)"
+
+          flyctl deploy \
+            --remote-only \
+            --app litestream-soak \
+            --config fly.toml \
+            --image-label "${image_label}" \
+            --build-arg "LITESTREAM_SHA=${litestream_sha}" \
+            --build-only \
+            --push 2>&1 | tee "${log_file}"
+
+          image_ref="$(awk '/^image:/{print $2}' "${log_file}" | tail -n 1)"
+          if [ -z "${image_ref}" ]; then
+            echo "failed to parse image ref from flyctl output" >&2
+            exit 1
+          fi
+
+          echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
+
+  notify-worker-fleet:
+    needs:
+      - resolve-upstream
+      - build-worker-image
+    if: needs.resolve-upstream.outputs.should_build == 'true' && needs.build-worker-image.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - shell: bash
+        env:
+          CONTROL_BASE_URL: ${{ vars.SOAK_CONTROL_BASE_URL }}
+          SOAK_ADMIN_BEARER_TOKEN: ${{ secrets.SOAK_ADMIN_BEARER_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CONTROL_BASE_URL}" ]; then
+            export CONTROL_BASE_URL="https://litestream-soak-ctl.fly.dev"
+          fi
+
+          chmod +x scripts/notify-deployment-ready.sh
+          ./scripts/notify-deployment-ready.sh \
+            "${GITHUB_SHA}" \
+            main \
+            "${{ needs.resolve-upstream.outputs.trigger }}" \
+            "${{ needs.build-worker-image.outputs.image_ref }}" \
+            "${{ needs.resolve-upstream.outputs.litestream_sha }}"

@@ -1,0 +1,11 @@
+.git
+bin/
+tmp/
+/soakctl
+/soakworker
+*.db
+*.db-wal
+*.db-shm
+*.restored
+.env
+.envrc
