@@ -1,0 +1,235 @@
+{{define "help"}}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <title>Operator Help · Litestream Soak</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-raised: #1c2129;
+      --border: #30363d;
+      --border-subtle: #21262d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --faint: #484f58;
+      --green: #3fb950;
+      --amber: #d29922;
+      --red: #f85149;
+      --blue: #58a6ff;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: "SF Mono", "Cascadia Code", "Fira Code", Consolas, "Liberation Mono", monospace;
+      --radius: 8px;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { font-family: var(--mono); font-size: 12px; }
+    .shell { max-width: 1240px; margin: 0 auto; padding: 0 16px 32px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); margin-bottom: 20px; font-size: 13px; }
+    .topbar-nav { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+    .topbar-nav a { color: var(--muted); }
+    .hero { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; margin-bottom: 16px; }
+    .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+    .panel h1, .panel h2, .panel h3 { margin: 0 0 8px; }
+    .panel p { margin: 0; color: var(--muted); }
+    .panel p + p { margin-top: 8px; }
+    .panel ul, .panel ol { margin: 10px 0 0 18px; color: var(--muted); }
+    .panel li + li { margin-top: 6px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .cluster-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 16px; }
+    .cluster-card ul { margin: 10px 0 0 18px; }
+    .cluster-card li + li { margin-top: 6px; }
+    .cluster-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .cluster-title { font-size: 14px; font-weight: 600; }
+    .cluster-summary { margin-top: 4px; color: var(--muted); font-size: 13px; }
+    .badge-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border-subtle); background: var(--surface-raised); }
+    .badge strong { color: var(--blue); }
+    .callout { color: var(--text); font-weight: 600; }
+    .footer { padding-top: 18px; margin-top: 24px; border-top: 1px solid var(--border-subtle); color: var(--faint); font-size: 11px; text-align: center; }
+    @media (max-width: 900px) {
+      .hero, .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div class="topbar-nav">
+        <a href="/ui">Litestream Soak</a>
+        <span>/</span>
+        <span>Operator Help</span>
+      </div>
+      <div class="topbar-nav">
+        <a href="/api/diagnosis">Diagnosis JSON</a>
+        <a href="/api/worker-summaries">Worker Summaries</a>
+      </div>
+    </div>
+
+    <div class="hero">
+      <div class="panel">
+        <h1>How To Use This System</h1>
+        <p class="callout">{{.Diagnosis.Headline}}</p>
+        <p>{{.Diagnosis.Summary}}</p>
+        <div class="badge-row">
+          {{if .Diagnosis.Confidence}}<span class="badge">confidence: {{.Diagnosis.Confidence}}</span>{{end}}
+          {{if .Diagnosis.ProbableSubsystem}}<span class="badge">{{.Diagnosis.ProbableSubsystem}}</span>{{end}}
+          {{if .Diagnosis.DominantStage}}<span class="badge">stage: {{.Diagnosis.DominantStage}}</span>{{end}}
+          {{if .Diagnosis.DominantSignature}}<span class="badge">{{shorten .Diagnosis.DominantSignature 96}}</span>{{end}}
+        </div>
+        {{if .Diagnosis.WhyLikely}}
+        <ul>
+          {{range .Diagnosis.WhyLikely}}
+          <li>{{.}}</li>
+          {{end}}
+        </ul>
+        {{end}}
+      </div>
+
+      <div class="panel">
+        <h2>Coverage Snapshot</h2>
+        <p>The fleet should cover multiple load modes and replay shapes so failures are easier to cluster.</p>
+        {{if .Coverage.LoadModes}}
+        <div class="badge-row">
+          {{range .Coverage.LoadModes}}
+          <span class="badge"><strong>{{.Count}}</strong> {{.Label}}</span>
+          {{end}}
+        </div>
+        {{end}}
+        {{if .Coverage.ReplayDatasets}}
+        <div class="badge-row">
+          {{range .Coverage.ReplayDatasets}}
+          <span class="badge"><strong>{{.Count}}</strong> {{.Label}}</span>
+          {{end}}
+        </div>
+        {{end}}
+        {{if .Coverage.RuntimeStates}}
+        <div class="badge-row">
+          {{range .Coverage.RuntimeStates}}
+          <span class="badge"><strong>{{.Count}}</strong> {{runtimeLabel .Label}}</span>
+          {{end}}
+        </div>
+        {{end}}
+      </div>
+    </div>
+
+    {{if .Diagnosis.Clusters}}
+    <div class="cluster-grid">
+      {{range .Diagnosis.Clusters}}
+      <div class="panel cluster-card">
+        <div class="cluster-head">
+          <div>
+            <div class="cluster-title">{{.Headline}}</div>
+            <div class="cluster-summary">{{.Summary}}</div>
+          </div>
+          <span class="badge">confidence: {{.Confidence}}</span>
+        </div>
+        <div class="badge-row">
+          <span class="badge"><strong>{{.WorkerCount}}</strong> workers</span>
+          {{if .ProbableSubsystem}}<span class="badge">{{.ProbableSubsystem}}</span>{{end}}
+          {{if .Stage}}<span class="badge">stage: {{.Stage}}</span>{{end}}
+        </div>
+        {{if .WhyLikely}}
+        <ul>
+          {{range .WhyLikely}}
+          <li>{{.}}</li>
+          {{end}}
+        </ul>
+        {{end}}
+      </div>
+      {{end}}
+    </div>
+    {{end}}
+
+    <div class="grid">
+      <div class="panel">
+        <h2>Operator Workflow</h2>
+        <ol>
+          <li>Start on <code>/ui</code> and find workers marked <code>degraded</code>, <code>dormant</code>, or <code>probing</code>.</li>
+          <li>Open the failing worker page and record the failure stage, signature, and workload shape.</li>
+          <li>If the worker is <code>dormant</code>, treat that as a known-bad paused worker, not a recovered one. Dormant means compute was intentionally stopped to avoid paying for repeated failures.</li>
+          <li>Check the worker telemetry badge before trusting runtime fields. <code>legacy telemetry</code> means those fields are advisory until the fleet image is refreshed.</li>
+          <li>Use Grafana to see whether the failure is isolated or clustered by profile or replay dataset.</li>
+          <li>Copy the AI prompt or incident JSON, then run the listed Fly triage commands.</li>
+        </ol>
+      </div>
+
+      <div class="panel">
+        <h2>Control Plane vs Grafana</h2>
+        <ul>
+          <li>Use the control plane for worker identity, incident context, machine metadata, and next commands.</li>
+          <li>Use Grafana for fleet posture, workload shape comparison, sync age drift, restart counters, and failure clustering.</li>
+          <li>If the same signature appears across multiple profiles at once, suspect a shared subsystem first.</li>
+        </ul>
+      </div>
+
+      <div class="panel">
+        <h2>Post-Merge Verification</h2>
+        <ol>
+          <li>Open <code>/api/deployments/latest</code> or the <strong>Latest Rollout</strong> card on <code>/ui</code>.</li>
+          <li>Confirm the new SHA is recorded and <code>updated_workers</code> reaches the fleet size.</li>
+          <li>If any workers are <code>probing</code>, wait for the next verification cycle and check whether they return to <code>running</code>.</li>
+          <li>If the rollout shows <code>beyond 45m grace</code>, treat it as a stuck rollout and open the affected workers before merging more changes.</li>
+          <li>If workers remain <code>degraded</code> or go back to <code>dormant</code>, open those worker pages and inspect the latest failure before retrying.</li>
+        </ol>
+      </div>
+
+      <div class="panel">
+        <h2>How To Use AI</h2>
+        <p>Each worker page includes multiple prompt modes. Pick the prompt that matches your current question.</p>
+        <ul>
+          {{range .PromptModes}}
+          <li><strong>{{.Label}}</strong>: {{.Summary}}</li>
+          {{end}}
+        </ul>
+        <p>Ask the model to rank hypotheses, cite evidence from the incident bundle, and give exact next commands before proposing code changes.</p>
+        <p>When a failed worker has a <code>failure_debug_snapshot</code>, use that first. It includes verifier substep timing, restore-plan metadata, process and FD evidence, socket state, disk and cgroup snapshots, child exit evidence, and the worker tools available for live follow-up.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Failure Families</h2>
+        <ul>
+          <li><strong>sync</strong>: Litestream control socket missing or timing out. Check <code>/data/litestream.sock</code>, the Litestream process, and restart behavior.</li>
+          <li><strong>restore</strong>: replica object fetch, restore plan, or missing LTX trouble. Check restore logs and object-store behavior.</li>
+          <li><strong>integrity_check</strong>: restore completed but validation failed. Focus on restore correctness and integrity output.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top:16px;">
+      <div class="panel">
+        <h2>Useful Endpoints</h2>
+        <ul>
+          <li><code>/ui</code></li>
+          <li><code>/api/worker-summaries</code></li>
+          <li><code>/api/failures</code></li>
+          <li><code>/api/workers/{id}/incident</code></li>
+          <li><code>/api/workers/{id}/prompt?mode=healthy|triage|litestream|harness</code></li>
+          <li><code>/api/deployments/latest/prompt?source=&lt;source&gt;&amp;mode=healthy|triage</code></li>
+          <li><code>/api/deployments/compare/latest/prompt?base_source=&lt;base&gt;&amp;head_source=&lt;head&gt;&amp;mode=healthy|triage</code></li>
+          <li><code>/api/run-archives/{id}/prompt?mode=healthy|triage</code></li>
+          <li><code>/api/workers/{id}/debug-snapshot</code></li>
+        </ul>
+      </div>
+
+      <div class="panel">
+        <h2>What Good Looks Like</h2>
+        <ul>
+          <li>You can explain the failing workload shape without SSHing anywhere.</li>
+          <li>You can tell whether the issue is clustered or isolated before opening logs.</li>
+          <li>You can hand the AI prompt bundle to another engineer and they can start immediately.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="footer">Generated {{formatTime .GeneratedAt}}</div>
+  </div>
+</body>
+</html>
+{{end}}
