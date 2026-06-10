@@ -203,7 +203,6 @@ func main() {
 		"unattached_volume_ttl", unattachedVolumeTTL,
 		"platform_log_token_overridden", platformLogToken != flyToken,
 		"webhook_deploy_enabled", webhookDeployEnabled,
-		"worker_token_enabled", workerToken != "",
 	)
 
 	server := &http.Server{

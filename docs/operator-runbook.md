@@ -42,6 +42,15 @@ machine creation, so rotating the token requires recreating worker machines
 (for example via a fleet rollout) — restarting an existing machine keeps the
 old value and its reports will be rejected with `401`.
 
+First rollout ordering matters: worker machines created before this control
+plane version have no token in their env, and there is no grace mode.
+
+1. `fly secrets set SOAK_WORKER_TOKEN=<random secret> -a litestream-soak-ctl`
+   (the control plane refuses to start without it)
+2. Deploy the control plane
+3. Recreate/roll all worker machines immediately — until then the existing
+   fleet's heartbeats, verifications, and events are rejected with `401`
+
 Grafana:
 
 - import `grafana/soak-overview-dashboard.json`

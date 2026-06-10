@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,10 +29,15 @@ func NewReporter(cfg Config) *Reporter {
 		return nil
 	}
 
+	token := strings.TrimSpace(os.Getenv("SOAK_WORKER_TOKEN"))
+	if token == "" {
+		slog.Warn("SOAK_WORKER_TOKEN is not set; the control plane will reject reports")
+	}
+
 	profileConfig := cfg.WorkloadConfig().JSON()
 	return &Reporter{
 		baseURL: baseURL,
-		token:   strings.TrimSpace(os.Getenv("SOAK_WORKER_TOKEN")),
+		token:   token,
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},
