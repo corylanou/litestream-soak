@@ -32,6 +32,11 @@ func main() {
 		slog.Error("FLY_API_TOKEN is required")
 		os.Exit(1)
 	}
+	workerToken := os.Getenv("SOAK_WORKER_TOKEN")
+	if workerToken == "" {
+		slog.Error("SOAK_WORKER_TOKEN is required")
+		os.Exit(1)
+	}
 	platformLogToken := envOrDefault("SOAK_PLATFORM_LOG_TOKEN", flyToken)
 
 	dbPath := envOrDefault("DB_PATH", "/data/soakctl.db")
@@ -112,6 +117,7 @@ func main() {
 	if (basicAuthUsername != "" && basicAuthPassword != "") || adminBearerToken != "" {
 		handler = newAuthMiddleware(basicAuthUsername, basicAuthPassword, adminBearerToken, adminBasicFallbackEnabled)(handler)
 	}
+	handler = newWorkerAuthMiddleware(workerToken)(handler)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -197,6 +203,7 @@ func main() {
 		"unattached_volume_ttl", unattachedVolumeTTL,
 		"platform_log_token_overridden", platformLogToken != flyToken,
 		"webhook_deploy_enabled", webhookDeployEnabled,
+		"worker_token_enabled", workerToken != "",
 	)
 
 	server := &http.Server{
@@ -341,9 +348,41 @@ func skipBasicAuth(r *http.Request) bool {
 	if r.Method == http.MethodPost && r.URL.Path == "/webhooks/github" {
 		return true
 	}
+	return isWorkerReportPath(r)
+}
+
+func isWorkerReportPath(r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return false
 	}
 	return strings.HasPrefix(r.URL.Path, "/api/workers/") &&
 		(strings.HasSuffix(r.URL.Path, "/heartbeat") || strings.HasSuffix(r.URL.Path, "/verifications") || strings.HasSuffix(r.URL.Path, "/events"))
+}
+
+func isWorkerBearerAuthorized(r *http.Request, workerToken string) bool {
+	if workerToken == "" {
+		return false
+	}
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return false
+	}
+	providedToken := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	return subtle.ConstantTimeCompare([]byte(providedToken), []byte(workerToken)) == 1
+}
+
+func newWorkerAuthMiddleware(workerToken string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !isWorkerReportPath(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if !isWorkerBearerAuthorized(r, workerToken) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }

@@ -26,6 +26,20 @@ that in GitHub Actions secrets as `SOAK_ADMIN_BEARER_TOKEN` instead of reusing
 the UI basic-auth credentials. `/api/admin/*` is reserved for bearer-authenticated
 admin automation only.
 
+Worker reporting endpoints (`POST /api/workers/{id}/heartbeat`,
+`/verifications`, and `/events`) require a third shared secret,
+`SOAK_WORKER_TOKEN`, sent as `Authorization: Bearer <token>`. The control
+plane refuses to start if it is unset, and rejects worker reports with `401`
+if the token does not match. Set it once on the control plane app:
+
+```bash
+fly secrets set SOAK_WORKER_TOKEN=<random secret> -a litestream-soak-ctl
+```
+
+The orchestrator injects the token into every worker machine's environment
+automatically, so workers need no manual configuration. Rotating the token
+requires restarting workers so they pick up the new value.
+
 Grafana:
 
 - import `grafana/soak-overview-dashboard.json`
