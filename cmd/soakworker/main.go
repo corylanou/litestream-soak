@@ -37,7 +37,9 @@ func main() {
 		mux.Handle("/metrics", promhttp.Handler())
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("ok"))
+			if _, err := w.Write([]byte("ok")); err != nil {
+				slog.Debug("Failed to write health response", "error", err)
+			}
 		})
 		slog.Info("Metrics server starting", "addr", cfg.MetricsAddr)
 		if err := http.ListenAndServe(cfg.MetricsAddr, mux); err != nil {
@@ -49,7 +51,7 @@ func main() {
 	defer cancel()
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigCh, shutdownSignals()...)
 	go func() {
 		sig := <-sigCh
 		slog.Info("Received signal, shutting down", "signal", sig)
@@ -61,4 +63,8 @@ func main() {
 		slog.Error("Worker failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+func shutdownSignals() []os.Signal {
+	return []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
 }

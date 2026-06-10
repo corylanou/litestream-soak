@@ -20,6 +20,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+const shutdownTimeout = 30 * time.Second
+
+type shutdowner interface {
+	Shutdown(context.Context) error
+}
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -87,7 +93,11 @@ func main() {
 		slog.Error("Failed to open database", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			slog.Error("Failed to close database", "error", err)
+		}
+	}()
 
 	metrics := orchestrator.NewControlMetrics(db)
 	alerts := orchestrator.NewAlertDispatcher(db, controlBaseURL, alertWebhookURL, alertWebhookToken)
@@ -107,7 +117,9 @@ func main() {
 	mux.Handle("POST /webhooks/github", webhookHandler)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "ok")
+		if _, err := fmt.Fprintln(w, "ok"); err != nil {
+			slog.Debug("Failed to write health response", "error", err)
+		}
 	})
 	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.Handle("GET /debug/pprof/", http.DefaultServeMux)
@@ -213,15 +225,28 @@ func main() {
 		WriteTimeout:      2 * time.Minute,
 		IdleTimeout:       30 * time.Second,
 	}
+	shutdownErrCh := make(chan error, 1)
 	go func() {
-		<-ctx.Done()
-		server.Shutdown(context.Background())
+		shutdownErrCh <- shutdownOnCancel(ctx, server, shutdownTimeout)
 	}()
 
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("Server failed", "error", err)
 		os.Exit(1)
 	}
+	if ctx.Err() != nil {
+		if err := <-shutdownErrCh; err != nil {
+			slog.Error("Server shutdown failed", "error", err)
+			os.Exit(1)
+		}
+	}
+}
+
+func shutdownOnCancel(ctx context.Context, server shutdowner, timeout time.Duration) error {
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return server.Shutdown(shutdownCtx)
 }
 
 func envOrDefault(key, def string) string {

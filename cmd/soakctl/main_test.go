@@ -1,10 +1,55 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
+
+type blockingShutdowner struct {
+	ctxCh chan context.Context
+}
+
+func (s *blockingShutdowner) Shutdown(ctx context.Context) error {
+	s.ctxCh <- ctx
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestShutdownOnCancelUsesBoundedContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	server := &blockingShutdowner{ctxCh: make(chan context.Context, 1)}
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- shutdownOnCancel(ctx, server, 20*time.Millisecond)
+	}()
+
+	cancel()
+
+	var shutdownCtx context.Context
+	select {
+	case shutdownCtx = <-server.ctxCh:
+	case <-time.After(time.Second):
+		t.Fatal("expected shutdown to start after cancellation")
+	}
+
+	if _, ok := shutdownCtx.Deadline(); !ok {
+		t.Fatal("expected shutdown context to have a deadline")
+	}
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("shutdown returned %v, want %v", err, context.DeadlineExceeded)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected shutdown to return after timeout")
+	}
+}
 
 func TestIsAdminBearerAuthorized(t *testing.T) {
 	request := httptest.NewRequest("POST", "/api/admin/deployments/ready", nil)
