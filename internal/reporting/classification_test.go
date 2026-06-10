@@ -32,6 +32,151 @@ func TestClassifyVerificationFailureS3ListRequestCanceled(t *testing.T) {
 	}
 }
 
+func TestClassifyVerificationFailureSyncDecodeError(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", "wait for sync: decode sync response: invalid character '<' looking for beginning of value")
+	if got.Stage != "sync" {
+		t.Fatalf("Stage = %q, want sync", got.Stage)
+	}
+	if got.Signature != "sync_decode_error" {
+		t.Fatalf("Signature = %q, want sync_decode_error", got.Signature)
+	}
+	if got.Restore != nil {
+		t.Fatalf("Restore = %#v, want nil", got.Restore)
+	}
+}
+
+func TestClassifyVerificationFailureSyncObjectStore(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", `wait for sync: sync request: operation error S3: GetObject, https response error StatusCode: 408, RequestID: 1777230002707552565, HostID: , api error RequestCanceled: Request is canceled.`)
+	if got.Stage != "sync" {
+		t.Fatalf("Stage = %q, want sync", got.Stage)
+	}
+	if got.Signature != "sync_s3_get_request_canceled" {
+		t.Fatalf("Signature = %q, want sync_s3_get_request_canceled", got.Signature)
+	}
+	if got.ObjectStore == nil {
+		t.Fatal("ObjectStore = nil")
+	}
+	if got.ObjectStore.Operation != "GetObject" {
+		t.Fatalf("Operation = %q, want GetObject", got.ObjectStore.Operation)
+	}
+	if got.Restore != nil {
+		t.Fatalf("Restore = %#v, want nil", got.Restore)
+	}
+}
+
+func TestClassifyVerificationFailureRestoreAttachesRestoreFailure(t *testing.T) {
+	got := ClassifyVerificationFailure("restore", `validation failed (exit 1): error="restore failed: get LTX time bounds: operation error S3: ListObjectsV2, https response error StatusCode: 408, RequestID: 1777230002707552565, HostID: , api error RequestCanceled: Request is canceled."`)
+	if got.Stage != "restore" {
+		t.Fatalf("Stage = %q, want restore", got.Stage)
+	}
+	if got.Signature != "restore_s3_list_request_canceled" {
+		t.Fatalf("Signature = %q, want restore_s3_list_request_canceled", got.Signature)
+	}
+	if got.Restore == nil {
+		t.Fatal("Restore = nil, want attached RestoreFailure")
+	}
+	if got.Restore.Phase != "TimeBounds" {
+		t.Fatalf("Restore.Phase = %q, want TimeBounds", got.Restore.Phase)
+	}
+}
+
+func TestClassifyVerificationFailureIntegrityCheckTypeDecodeError(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", "read page header: unexpected EOF")
+	if got.Stage != "restore" {
+		t.Fatalf("Stage = %q, want restore", got.Stage)
+	}
+	if got.Signature != "restore_decode_error" {
+		t.Fatalf("Signature = %q, want restore_decode_error", got.Signature)
+	}
+	if got.Restore == nil {
+		t.Fatal("Restore = nil, want attached RestoreFailure")
+	}
+	if got.Restore.Phase != "Decode" {
+		t.Fatalf("Restore.Phase = %q, want Decode", got.Restore.Phase)
+	}
+}
+
+func TestClassifyVerificationFailureMissingLTXKeepsRestoreMetadata(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", "open ltx file: file does not exist")
+	if got.Stage != "restore" {
+		t.Fatalf("Stage = %q, want restore", got.Stage)
+	}
+	if got.Signature != "restore_missing_ltx" {
+		t.Fatalf("Signature = %q, want restore_missing_ltx", got.Signature)
+	}
+	if got.Restore == nil {
+		t.Fatal("Restore = nil, want attached RestoreFailure")
+	}
+}
+
+func TestClassifyVerificationFailureBareDecodeKeepsRestoreMetadata(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", "decode ltx header: unexpected EOF")
+	if got.Stage != "restore" {
+		t.Fatalf("Stage = %q, want restore", got.Stage)
+	}
+	if got.Signature != "restore_decode_error" {
+		t.Fatalf("Signature = %q, want restore_decode_error", got.Signature)
+	}
+	if got.Restore == nil {
+		t.Fatal("Restore = nil, want attached RestoreFailure")
+	}
+	if got.Restore.Phase != "Decode" {
+		t.Fatalf("Restore.Phase = %q, want Decode", got.Restore.Phase)
+	}
+}
+
+func TestClassifyVerificationFailureIntegrityCheckObjectStore(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", `integrity check failed: operation error S3: GetObject, https response error StatusCode: 408, RequestID: 1777230002707552565, HostID: , api error RequestCanceled: Request is canceled.`)
+	if got.Stage != "restore" {
+		t.Fatalf("Stage = %q, want restore", got.Stage)
+	}
+	if got.Signature != "restore_s3_get_request_canceled" {
+		t.Fatalf("Signature = %q, want restore_s3_get_request_canceled", got.Signature)
+	}
+	if got.ObjectStore == nil {
+		t.Fatal("ObjectStore = nil")
+	}
+	if got.Restore == nil {
+		t.Fatal("Restore = nil, want attached RestoreFailure")
+	}
+}
+
+func TestClassifyVerificationFailureValidationEOFNotRestoreStage(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", "validation failed (exit 1): unexpected EOF reading stdout")
+	if got.Stage != "validation" {
+		t.Fatalf("Stage = %q, want validation", got.Stage)
+	}
+	if got.Restore != nil {
+		t.Fatalf("Restore = %#v, want nil", got.Restore)
+	}
+}
+
+func TestClassifyVerificationFailureCalcRestoreKeepsMetadata(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", "calc restore target: context deadline exceeded")
+	if got.Stage != "restore" {
+		t.Fatalf("Stage = %q, want restore", got.Stage)
+	}
+	if got.Signature != "restore_plan_failed" {
+		t.Fatalf("Signature = %q, want restore_plan_failed", got.Signature)
+	}
+	if got.Restore == nil {
+		t.Fatal("Restore = nil, want attached RestoreFailure")
+	}
+}
+
+func TestClassifyVerificationFailureSyncMissingLTX(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", "wait for sync: sync request: no such key")
+	if got.Stage != "sync" {
+		t.Fatalf("Stage = %q, want sync", got.Stage)
+	}
+	if got.Signature != "sync_missing_ltx" {
+		t.Fatalf("Signature = %q, want sync_missing_ltx", got.Signature)
+	}
+	if got.Restore != nil {
+		t.Fatalf("Restore = %#v, want nil", got.Restore)
+	}
+}
+
 func TestClassifyVerificationFailureRestoreDecodeError(t *testing.T) {
 	got := ClassifyVerificationFailure("restore", "validation failed: restore failed: read page header: unexpected EOF")
 	if got.Stage != "restore" {

@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -172,11 +174,32 @@ func classifyPlatformLog(entry flyapi.AppLogEntry) (string, string, bool) {
 	case strings.Contains(lower, "signal: killed"):
 		return "platform_killed", fmt.Sprintf("Fly log reported process kill: %s", normalizePlatformMessage(lower, message)), true
 	case entry.Attributes.Meta.Event.Provider != "" && entry.Attributes.Meta.Event.Provider != "app" &&
-		(strings.Contains(lower, "restart") || strings.Contains(lower, "restarted") || strings.Contains(lower, "starting") || strings.Contains(lower, "started")):
+		isUnexpectedPlatformRestart(lower):
 		return "platform_restart", fmt.Sprintf("Fly platform event: %s", normalizePlatformMessage(lower, message)), true
 	default:
 		return "", "", false
 	}
+}
+
+var exitCodePattern = regexp.MustCompile(`exit code:?\s*([0-9]+)`)
+
+const gracefulStopExitCode = 143
+
+func isUnexpectedPlatformRestart(lower string) bool {
+	if match := exitCodePattern.FindStringSubmatch(lower); len(match) == 2 {
+		code, err := strconv.Atoi(match[1])
+		return err == nil && code != 0 && code != gracefulStopExitCode
+	}
+	if strings.Contains(lower, "crashed") ||
+		strings.Contains(lower, "unclean exit") ||
+		strings.Contains(lower, "restart count") {
+		return true
+	}
+	if strings.Contains(lower, "not restarting") {
+		return false
+	}
+	return strings.Contains(lower, "restarting machine") ||
+		strings.Contains(lower, "machine restarted")
 }
 
 func normalizePlatformMessage(lower, raw string) string {
