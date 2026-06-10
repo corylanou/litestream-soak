@@ -8,6 +8,32 @@ import (
 	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
+func TestOpenAppliesPragmas(t *testing.T) {
+	t.Parallel()
+
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	var journalMode string
+	if err := db.db.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		t.Fatalf("PRAGMA journal_mode: %v", err)
+	}
+	if journalMode != "wal" {
+		t.Fatalf("journal_mode = %q, want wal", journalMode)
+	}
+
+	var busyTimeout int
+	if err := db.db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+		t.Fatalf("PRAGMA busy_timeout: %v", err)
+	}
+	if busyTimeout != 30000 {
+		t.Fatalf("busy_timeout = %d, want 30000", busyTimeout)
+	}
+}
+
 func TestRecordWindowedEventAt(t *testing.T) {
 	t.Parallel()
 
@@ -378,5 +404,393 @@ func TestRecordRunArchiveIsIdempotent(t *testing.T) {
 	}
 	if stored.Payload != `{"ok":true}` {
 		t.Fatalf("Payload = %q", stored.Payload)
+	}
+}
+
+func TestStaleWorkersUTCIndependent(t *testing.T) {
+	origLocal := time.Local
+	t.Cleanup(func() { time.Local = origLocal })
+
+	newWorker := func(id string) *Worker {
+		return &Worker{
+			ID:            id,
+			Name:          id,
+			Status:        WorkerRunning,
+			Source:        "main",
+			GitSHA:        "abc123",
+			LitestreamSHA: "ls123",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		}
+	}
+
+	t.Run("fresh heartbeat not stale in UTC+13", func(t *testing.T) {
+		time.Local = time.FixedZone("UTC+13", 13*3600)
+
+		db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+
+		w := newWorker("worker-utc-fresh")
+		if err := db.CreateWorker(w); err != nil {
+			t.Fatalf("CreateWorker() error = %v", err)
+		}
+		if err := db.UpdateWorkerHeartbeat(w.ID); err != nil {
+			t.Fatalf("UpdateWorkerHeartbeat() error = %v", err)
+		}
+
+		stale, err := db.StaleWorkers(5 * time.Minute)
+		if err != nil {
+			t.Fatalf("StaleWorkers() error = %v", err)
+		}
+		if len(stale) != 0 {
+			t.Fatalf("StaleWorkers() = %d workers, want 0 (fresh heartbeat should not be stale)", len(stale))
+		}
+	})
+
+	t.Run("old heartbeat stale in UTC-12", func(t *testing.T) {
+		time.Local = time.FixedZone("UTC-12", -12*3600)
+
+		db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+
+		w := newWorker("worker-utc-old")
+		if err := db.CreateWorker(w); err != nil {
+			t.Fatalf("CreateWorker() error = %v", err)
+		}
+		if _, err := db.db.Exec(
+			"UPDATE workers SET last_heartbeat_at = datetime('now','-1 hour') WHERE id = ?",
+			w.ID,
+		); err != nil {
+			t.Fatalf("backdate heartbeat: %v", err)
+		}
+
+		stale, err := db.StaleWorkers(5 * time.Minute)
+		if err != nil {
+			t.Fatalf("StaleWorkers() error = %v", err)
+		}
+		if len(stale) != 1 {
+			t.Fatalf("StaleWorkers() = %d workers, want 1 (old heartbeat should be stale)", len(stale))
+		}
+		if stale[0].ID != w.ID {
+			t.Fatalf("stale worker ID = %q, want %q", stale[0].ID, w.ID)
+		}
+	})
+}
+
+func TestUpdateWorkerVerificationStateProtectedStatuses(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		status      WorkerStatus
+		setupDormant bool
+	}
+
+	cases := []testCase{
+		{status: WorkerDormant, setupDormant: true},
+		{status: WorkerStopped},
+		{status: WorkerFailed},
+	}
+
+	for _, tc := range cases {
+		t.Run(string(tc.status), func(t *testing.T) {
+			t.Parallel()
+
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			db, err := Open(dbPath)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+
+			workerID := "worker-protected-" + string(tc.status)
+			w := &Worker{
+				ID:            workerID,
+				Name:          workerID,
+				Status:        WorkerRunning,
+				Source:        "main",
+				GitSHA:        "abc123",
+				LitestreamSHA: "ls123",
+				ProfileName:   "low-volume",
+				ProfileConfig: "{}",
+			}
+			if err := db.CreateWorker(w); err != nil {
+				t.Fatalf("CreateWorker() error = %v", err)
+			}
+
+			if tc.setupDormant {
+				if err := db.MarkWorkerDormant(workerID, "probe window expired", "probe_expired", "probe"); err != nil {
+					t.Fatalf("MarkWorkerDormant() error = %v", err)
+				}
+				if _, err := db.db.Exec(
+					"UPDATE workers SET last_probe_at = datetime('now') WHERE id = ?",
+					workerID,
+				); err != nil {
+					t.Fatalf("set last_probe_at: %v", err)
+				}
+			} else {
+				if err := db.UpdateWorkerStatus(workerID, tc.status, "some error"); err != nil {
+					t.Fatalf("UpdateWorkerStatus() error = %v", err)
+				}
+			}
+
+			before, err := db.GetWorker(workerID)
+			if err != nil {
+				t.Fatalf("GetWorker() before: %v", err)
+			}
+
+			if err := db.UpdateWorkerVerificationState(workerID, true, ""); err != nil {
+				t.Fatalf("UpdateWorkerVerificationState(passed=true) error = %v", err)
+			}
+
+			after, err := db.GetWorker(workerID)
+			if err != nil {
+				t.Fatalf("GetWorker() after passed: %v", err)
+			}
+			if after.Status != before.Status {
+				t.Fatalf("after passed: Status = %q, want %q (unchanged)", after.Status, before.Status)
+			}
+			if after.ErrorMessage != before.ErrorMessage {
+				t.Fatalf("after passed: ErrorMessage = %q, want %q (unchanged)", after.ErrorMessage, before.ErrorMessage)
+			}
+			if tc.setupDormant {
+				if after.DormantAt == nil {
+					t.Fatalf("after passed: DormantAt = nil, want preserved")
+				}
+				if after.DormantReason != before.DormantReason {
+					t.Fatalf("after passed: DormantReason = %q, want %q", after.DormantReason, before.DormantReason)
+				}
+				if after.DormantSignature != before.DormantSignature {
+					t.Fatalf("after passed: DormantSignature = %q, want %q", after.DormantSignature, before.DormantSignature)
+				}
+				if after.ResumeTrigger != before.ResumeTrigger {
+					t.Fatalf("after passed: ResumeTrigger = %q, want %q", after.ResumeTrigger, before.ResumeTrigger)
+				}
+				if after.LastProbeAt == nil {
+					t.Fatalf("after passed: LastProbeAt = nil, want preserved")
+				}
+			}
+
+			if err := db.UpdateWorkerVerificationState(workerID, false, "boom"); err != nil {
+				t.Fatalf("UpdateWorkerVerificationState(passed=false) error = %v", err)
+			}
+
+			after2, err := db.GetWorker(workerID)
+			if err != nil {
+				t.Fatalf("GetWorker() after failed: %v", err)
+			}
+			if after2.Status != before.Status {
+				t.Fatalf("after failed: Status = %q, want %q (unchanged)", after2.Status, before.Status)
+			}
+			if after2.ErrorMessage != before.ErrorMessage {
+				t.Fatalf("after failed: ErrorMessage = %q, want %q (unchanged)", after2.ErrorMessage, before.ErrorMessage)
+			}
+			if tc.setupDormant {
+				if after2.DormantAt == nil {
+					t.Fatalf("after failed: DormantAt = nil, want preserved")
+				}
+				if after2.DormantReason != before.DormantReason {
+					t.Fatalf("after failed: DormantReason = %q, want %q", after2.DormantReason, before.DormantReason)
+				}
+				if after2.DormantSignature != before.DormantSignature {
+					t.Fatalf("after failed: DormantSignature = %q, want %q", after2.DormantSignature, before.DormantSignature)
+				}
+				if after2.ResumeTrigger != before.ResumeTrigger {
+					t.Fatalf("after failed: ResumeTrigger = %q, want %q", after2.ResumeTrigger, before.ResumeTrigger)
+				}
+				if after2.LastProbeAt == nil {
+					t.Fatalf("after failed: LastProbeAt = nil, want preserved")
+				}
+			}
+		})
+	}
+
+	t.Run("running+failed becomes degraded", func(t *testing.T) {
+		t.Parallel()
+
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		db, err := Open(dbPath)
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+
+		workerID := "worker-running-degraded"
+		w := &Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        WorkerRunning,
+			Source:        "main",
+			GitSHA:        "abc123",
+			LitestreamSHA: "ls123",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		}
+		if err := db.CreateWorker(w); err != nil {
+			t.Fatalf("CreateWorker() error = %v", err)
+		}
+		if err := db.UpdateWorkerVerificationState(workerID, false, "checksum mismatch"); err != nil {
+			t.Fatalf("UpdateWorkerVerificationState() error = %v", err)
+		}
+		stored, err := db.GetWorker(workerID)
+		if err != nil {
+			t.Fatalf("GetWorker() error = %v", err)
+		}
+		if stored.Status != WorkerDegraded {
+			t.Fatalf("Status = %q, want %q", stored.Status, WorkerDegraded)
+		}
+		if stored.ErrorMessage != "checksum mismatch" {
+			t.Fatalf("ErrorMessage = %q, want checksum mismatch", stored.ErrorMessage)
+		}
+	})
+
+	t.Run("probing+passed becomes running", func(t *testing.T) {
+		t.Parallel()
+
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		db, err := Open(dbPath)
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+
+		workerID := "worker-probing-running"
+		w := &Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        WorkerRunning,
+			Source:        "main",
+			GitSHA:        "abc123",
+			LitestreamSHA: "ls123",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		}
+		if err := db.CreateWorker(w); err != nil {
+			t.Fatalf("CreateWorker() error = %v", err)
+		}
+		if err := db.MarkWorkerProbing(workerID, "probe"); err != nil {
+			t.Fatalf("MarkWorkerProbing() error = %v", err)
+		}
+		if err := db.UpdateWorkerVerificationState(workerID, true, ""); err != nil {
+			t.Fatalf("UpdateWorkerVerificationState() error = %v", err)
+		}
+		stored, err := db.GetWorker(workerID)
+		if err != nil {
+			t.Fatalf("GetWorker() error = %v", err)
+		}
+		if stored.Status != WorkerRunning {
+			t.Fatalf("Status = %q, want %q", stored.Status, WorkerRunning)
+		}
+	})
+}
+
+func TestUpsertReportedWorkerDoesNotResurrectStopped(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		status       WorkerStatus
+		errorMessage string
+		wantStatus   WorkerStatus
+		wantError    string
+		wantRunning  bool
+	}
+
+	cases := []testCase{
+		{
+			status:       WorkerStopped,
+			errorMessage: "machine stopped by operator",
+			wantStatus:   WorkerStopped,
+			wantError:    "machine stopped by operator",
+			wantRunning:  false,
+		},
+		{
+			status:       WorkerFailed,
+			errorMessage: "disk full",
+			wantStatus:   WorkerFailed,
+			wantError:    "disk full",
+			wantRunning:  false,
+		},
+		{
+			status:      WorkerPending,
+			wantStatus:  WorkerRunning,
+			wantError:   "",
+			wantRunning: true,
+		},
+		{
+			status:      WorkerBuilding,
+			wantStatus:  WorkerRunning,
+			wantError:   "",
+			wantRunning: true,
+		},
+		{
+			status:      WorkerStarting,
+			wantStatus:  WorkerRunning,
+			wantError:   "",
+			wantRunning: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(string(tc.status), func(t *testing.T) {
+			t.Parallel()
+
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			db, err := Open(dbPath)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+
+			workerID := "worker-upsert-" + string(tc.status)
+			w := &Worker{
+				ID:            workerID,
+				Name:          workerID,
+				Status:        tc.status,
+				Source:        "main",
+				GitSHA:        "abc123",
+				LitestreamSHA: "ls123",
+				ProfileName:   "low-volume",
+				ProfileConfig: "{}",
+			}
+			if err := db.CreateWorker(w); err != nil {
+				t.Fatalf("CreateWorker() error = %v", err)
+			}
+			if tc.errorMessage != "" {
+				if err := db.UpdateWorkerStatus(workerID, tc.status, tc.errorMessage); err != nil {
+					t.Fatalf("UpdateWorkerStatus() error = %v", err)
+				}
+			}
+
+			if err := db.UpsertReportedWorker(reporting.WorkerIdentity{
+				WorkerID:      workerID,
+				Name:          workerID,
+				Source:        "main",
+				GitSHA:        "abc123",
+				LitestreamSHA: "ls123",
+				ProfileName:   "low-volume",
+				ProfileConfig: "{}",
+			}); err != nil {
+				t.Fatalf("UpsertReportedWorker() error = %v", err)
+			}
+
+			stored, err := db.GetWorker(workerID)
+			if err != nil {
+				t.Fatalf("GetWorker() error = %v", err)
+			}
+			if stored.Status != tc.wantStatus {
+				t.Fatalf("Status = %q, want %q", stored.Status, tc.wantStatus)
+			}
+			if stored.ErrorMessage != tc.wantError {
+				t.Fatalf("ErrorMessage = %q, want %q", stored.ErrorMessage, tc.wantError)
+			}
+			if stored.LastHeartbeatAt == nil {
+				t.Fatalf("LastHeartbeatAt = nil, want non-nil (heartbeat should always refresh)")
+			}
+		})
 	}
 }

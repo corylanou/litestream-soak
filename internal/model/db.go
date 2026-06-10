@@ -131,7 +131,7 @@ type DB struct {
 }
 
 func Open(path string) (*DB, error) {
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=30000")
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -272,6 +272,12 @@ func (d *DB) UpdateWorkerRuntimeSnapshot(id string, payload reporting.RuntimePay
 	return err
 }
 
+// UpsertReportedWorker inserts or updates a worker based on an incoming report.
+// A report from a stopped or failed worker preserves status and error_message;
+// only last_heartbeat_at, updated_at, and identity fields refresh, which is
+// harmless because staleness detection only considers running/probing workers —
+// so teardown races leave an observable heartbeat trail without resurrecting
+// the row. Only pending, building, and starting workers are flipped to running.
 func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
 	name := identity.Name
 	if name == "" {
@@ -298,12 +304,12 @@ func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
 			fly_machine_id = COALESCE(excluded.fly_machine_id, workers.fly_machine_id),
 				name = excluded.name,
 				status = CASE
-					WHEN workers.status IN ('pending', 'building', 'starting', 'stopped', 'failed') THEN 'running'
+					WHEN workers.status IN ('pending', 'building', 'starting') THEN 'running'
 					WHEN workers.status = 'degraded' AND workers.error_message = 'worker missed heartbeat deadline' THEN 'running'
 					ELSE workers.status
 				END,
 				error_message = CASE
-					WHEN workers.status IN ('pending', 'building', 'starting', 'stopped', 'failed') THEN ''
+					WHEN workers.status IN ('pending', 'building', 'starting') THEN ''
 					WHEN workers.status = 'degraded' AND workers.error_message = 'worker missed heartbeat deadline' THEN ''
 					ELSE workers.error_message
 				END,
@@ -335,6 +341,9 @@ func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
 	return err
 }
 
+// UpdateWorkerVerificationState updates a worker's status based on a verification result.
+// Verification reports never change a stopped, failed, or dormant worker; dormancy
+// state is only cleared via the explicit probe/resume path (MarkWorkerProbing).
 func (d *DB) UpdateWorkerVerificationState(id string, passed bool, summary string) error {
 	status := WorkerRunning
 	errMsg := ""
@@ -347,7 +356,7 @@ func (d *DB) UpdateWorkerVerificationState(id string, passed bool, summary strin
 		_, err := d.db.Exec(`
 			UPDATE workers
 			SET status = ?, error_message = ?, dormant_at = NULL, dormant_reason = '', dormant_signature = '', resume_trigger = '', last_probe_at = NULL, updated_at = datetime('now')
-			WHERE id = ?`,
+			WHERE id = ? AND status NOT IN ('stopped','failed','dormant')`,
 			status, errMsg, id,
 		)
 		return err
@@ -356,7 +365,7 @@ func (d *DB) UpdateWorkerVerificationState(id string, passed bool, summary strin
 	_, err := d.db.Exec(`
 		UPDATE workers
 		SET status = ?, error_message = ?, updated_at = datetime('now')
-		WHERE id = ?`,
+		WHERE id = ? AND status NOT IN ('stopped','failed','dormant')`,
 		status, errMsg, id,
 	)
 	return err
@@ -1217,7 +1226,7 @@ func (d *DB) DeleteWorker(id string) error {
 
 // StaleWorkers returns workers that haven't sent a heartbeat within the given duration.
 func (d *DB) StaleWorkers(timeout time.Duration) ([]Worker, error) {
-	cutoff := time.Now().Add(-timeout)
+	cutoff := time.Now().UTC().Add(-timeout).Format("2006-01-02 15:04:05")
 	rows, err := d.db.Query(`
 		SELECT id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at
 		FROM workers
