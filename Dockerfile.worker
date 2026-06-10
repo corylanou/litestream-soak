@@ -40,7 +40,8 @@ RUN apt-get update && \
       s3cmd \
       strace \
       time \
-      sqlite3 && \
+      sqlite3 \
+      util-linux && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd --system --gid 10001 soak && \
     useradd --system --uid 10001 --gid soak --home-dir /data --shell /usr/sbin/nologin soak && \
@@ -51,8 +52,11 @@ COPY --from=litestream-builder /usr/local/bin/litestream-test /usr/local/bin/lit
 COPY --from=litestream-builder /tmp/litestream.sha /opt/soak/litestream.sha
 COPY --from=soakworker-builder /usr/local/bin/soakworker /usr/local/bin/soakworker
 COPY --from=soakworker-builder /src/soak/datasets /opt/soak/datasets
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint
+RUN chmod 0755 /usr/local/bin/docker-entrypoint
 ENV LITESTREAM_SHA_FILE=/opt/soak/litestream.sha
+ENV SOAK_DATA_DB=/data/test.db
 VOLUME /data
-USER soak:soak
 EXPOSE 9091
-ENTRYPOINT ["/usr/local/bin/soakworker"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint"]
+CMD ["/usr/local/bin/soakworker"]
