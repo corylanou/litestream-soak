@@ -91,6 +91,71 @@ func TestDefaultFleetForSource(t *testing.T) {
 	}
 }
 
+func TestDefaultMainFleetIncludesRegionalWorkers(t *testing.T) {
+	t.Parallel()
+
+	spec := DefaultMainFleet()
+	regional := map[string]DesiredWorker{}
+	for _, worker := range spec.Workers {
+		if worker.Region == "ord" {
+			continue
+		}
+		regional[worker.ProfileName] = worker
+	}
+
+	lowVol, ok := regional["low-vol-syd"]
+	if !ok {
+		t.Fatal("DefaultMainFleet() missing low-vol-syd regional worker")
+	}
+	if lowVol.Region != "syd" {
+		t.Fatalf("low-vol-syd Region = %q, want syd", lowVol.Region)
+	}
+	if lowVol.Workload.WriteRate != 10 || lowVol.Workload.Pattern != "constant" {
+		t.Fatalf("low-vol-syd workload = %+v, want low-volume shape", lowVol.Workload)
+	}
+
+	highVol, ok := regional["high-vol-ams"]
+	if !ok {
+		t.Fatal("DefaultMainFleet() missing high-vol-ams regional worker")
+	}
+	if highVol.Region != "ams" {
+		t.Fatalf("high-vol-ams Region = %q, want ams", highVol.Region)
+	}
+	if highVol.VolumeSizeGB != 100 {
+		t.Fatalf("high-vol-ams VolumeSizeGB = %d, want 100", highVol.VolumeSizeGB)
+	}
+	if highVol.Workload.WriteRate != 500 || highVol.Workload.Pattern != "wave" {
+		t.Fatalf("high-vol-ams workload = %+v, want high-volume shape", highVol.Workload)
+	}
+}
+
+func TestDefaultFleetForSourceRewritesRegionalWorkers(t *testing.T) {
+	t.Parallel()
+
+	spec := DefaultFleetForSource("pr-1221", "soak-sha", "litestream-sha")
+	regional := map[string]DesiredWorker{}
+	for _, worker := range spec.Workers {
+		if worker.Region == "ord" {
+			continue
+		}
+		regional[worker.ProfileName] = worker
+	}
+
+	lowVol, ok := regional["low-vol-syd"]
+	if !ok {
+		t.Fatal("DefaultFleetForSource() missing low-vol-syd regional worker")
+	}
+	if lowVol.WorkerID != "worker-pr-1221-low-vol-syd" {
+		t.Fatalf("low-vol-syd WorkerID = %q, want worker-pr-1221-low-vol-syd", lowVol.WorkerID)
+	}
+	if lowVol.Name != "worker-pr-1221-low-vol-syd" {
+		t.Fatalf("low-vol-syd Name = %q, want worker-pr-1221-low-vol-syd", lowVol.Name)
+	}
+	if lowVol.Region != "syd" {
+		t.Fatalf("low-vol-syd Region = %q, want syd", lowVol.Region)
+	}
+}
+
 func TestResolveWorkerVolumeSizeUsesDefaultFleetForRollouts(t *testing.T) {
 	t.Parallel()
 

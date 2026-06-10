@@ -76,7 +76,7 @@ func TestLoadSupervisorRestartsWithBackoff(t *testing.T) {
 	cfg.Source = "test"
 	SetWorkerInfo(cfg)
 
-	restartCounter := loadRestarts.WithLabelValues(cfg.WorkerID, cfg.ProfileName, cfg.Source, "synthetic")
+	restartCounter := loadRestarts.WithLabelValues(cfg.WorkerID, cfg.ProfileName, cfg.Source, metricRegion(cfg.Region), "synthetic")
 	before := testutil.ToFloat64(restartCounter)
 
 	ctx, cancel := context.WithCancel(context.Background())

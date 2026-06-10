@@ -547,7 +547,7 @@ func (f *deployTestFlyServer) observeReadyBeforeFly() {
 		return
 	}
 
-	events, err := f.db.ListEvents(20)
+	events, err := f.db.ListEvents(100)
 	if err != nil {
 		f.recordError("list events before rollout: %v", err)
 		return
