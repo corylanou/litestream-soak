@@ -131,7 +131,7 @@ type DB struct {
 }
 
 func Open(path string) (*DB, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)")
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_time_format=sqlite&_timezone=UTC")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -147,8 +147,61 @@ func Open(path string) (*DB, error) {
 	if err := ensureDeploymentColumns(db); err != nil {
 		return nil, fmt.Errorf("ensure deployment columns: %w", err)
 	}
+	if err := normalizeLegacyExpiry(db); err != nil {
+		return nil, fmt.Errorf("normalize legacy expires_at: %w", err)
+	}
 
 	return &DB{db: db}, nil
+}
+
+func normalizeLegacyExpiry(db *sql.DB) error {
+	rows, err := db.Query(`SELECT id, CAST(expires_at AS TEXT) FROM workers WHERE expires_at IS NOT NULL`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+
+	type rewrite struct {
+		id string
+		at time.Time
+	}
+	var rewrites []rewrite
+	for rows.Next() {
+		var id, raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			return err
+		}
+		at, ok := parseLegacyTimestamp(raw)
+		if !ok {
+			continue
+		}
+		rewrites = append(rewrites, rewrite{id: id, at: at.UTC()})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, r := range rewrites {
+		if _, err := db.Exec(`UPDATE workers SET expires_at = ? WHERE id = ?`, r.at, r.id); err != nil {
+			return fmt.Errorf("rewrite expires_at for worker %s: %w", r.id, err)
+		}
+	}
+	return nil
+}
+
+func parseLegacyTimestamp(raw string) (time.Time, bool) {
+	if i := strings.Index(raw, "m="); i > 0 {
+		raw = strings.TrimSpace(raw[:i])
+	}
+	if at, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", raw); err == nil {
+		return at, true
+	}
+	if i := strings.LastIndexByte(raw, ' '); i > 0 {
+		if at, err := time.Parse("2006-01-02 15:04:05.999999999 -0700", raw[:i]); err == nil {
+			return at, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func ensureWorkerColumns(db *sql.DB) error {
@@ -221,7 +274,7 @@ func (d *DB) CreateWorker(w *Worker) error {
 			resume_trigger = '',
 			last_probe_at = NULL,
 			updated_at = datetime('now')`,
-		w.ID, w.AppName, w.Region, nullIntString(w.FlyMachineID), nullIntString(w.FlyVolumeID), w.Name, w.Status, w.Source, w.GitSHA, w.LitestreamSHA, w.PRNumber, w.ProfileName, w.ProfileConfig, w.ExpiresAt,
+		w.ID, w.AppName, w.Region, nullIntString(w.FlyMachineID), nullIntString(w.FlyVolumeID), w.Name, w.Status, w.Source, w.GitSHA, w.LitestreamSHA, w.PRNumber, w.ProfileName, w.ProfileConfig, utcTimePtr(w.ExpiresAt),
 	)
 	return err
 }
@@ -276,7 +329,7 @@ func (d *DB) UpdateWorkerRuntimeSnapshot(id string, payload reporting.RuntimePay
 	_, err = d.db.Exec(`
 		UPDATE workers SET last_runtime_json = ?, last_runtime_at = ?, updated_at = datetime('now')
 		WHERE id = ?`,
-		string(body), reportedAt, id,
+		string(body), reportedAt.UTC(), id,
 	)
 	return err
 }
@@ -1400,16 +1453,23 @@ func scanWorker(scanner workerScanner, w *Worker) error {
 	return nil
 }
 
-func nullInt(value int) interface{} {
+func nullInt(value int) any {
 	if value == 0 {
 		return nil
 	}
 	return value
 }
 
-func nullIntString(value string) interface{} {
+func nullIntString(value string) any {
 	if value == "" {
 		return nil
 	}
 	return value
+}
+
+func utcTimePtr(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t.UTC()
 }
