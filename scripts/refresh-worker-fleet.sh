@@ -15,7 +15,7 @@ if [[ -z "$target_image" ]]; then
       | last
       | .config.image
     ) // (
-      map(select((.config.image // "") != "" and ((.name // "") | test("^pr-") | not) and ((.config.image // "") | test("-pr-") | not)))
+      map(select((.config.image // "") != "" and ((.name // "") | test("(^|-)pr-[0-9]+(-|$)") | not) and ((.config.image // "") | test("-pr-") | not)))
       | sort_by(.updated_at)
       | last
       | .config.image
