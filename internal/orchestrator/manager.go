@@ -6,6 +6,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/flyapi"
@@ -26,7 +27,7 @@ type WorkerRequest struct {
 	ImageRef      string
 	Region        string
 	VolumeSizeGB  int
-	ExpiresAt     *string
+	ExpiresAt     *time.Time
 	Workload      workload.Config
 }
 
@@ -47,6 +48,45 @@ type Manager struct {
 	replica          ReplicaConfig
 	controlBaseURL   string
 	platformLogToken string
+
+	locks          sync.Mutex
+	workerLocks    map[string]*sync.Mutex
+	sourceRollouts map[string]bool
+}
+
+func (m *Manager) lockWorker(id string) func() {
+	m.locks.Lock()
+	if m.workerLocks == nil {
+		m.workerLocks = make(map[string]*sync.Mutex)
+	}
+	mu, ok := m.workerLocks[id]
+	if !ok {
+		mu = &sync.Mutex{}
+		m.workerLocks[id] = mu
+	}
+	m.locks.Unlock()
+
+	mu.Lock()
+	return mu.Unlock
+}
+
+func (m *Manager) beginSourceRollout(source string) bool {
+	m.locks.Lock()
+	defer m.locks.Unlock()
+	if m.sourceRollouts == nil {
+		m.sourceRollouts = make(map[string]bool)
+	}
+	if m.sourceRollouts[source] {
+		return false
+	}
+	m.sourceRollouts[source] = true
+	return true
+}
+
+func (m *Manager) endSourceRollout(source string) {
+	m.locks.Lock()
+	defer m.locks.Unlock()
+	delete(m.sourceRollouts, source)
 }
 
 func NewManager(fly *flyapi.Client, db *model.DB, metrics *controlMetrics, alerts *AlertDispatcher, appName string, replica ReplicaConfig, controlBaseURL, platformLogToken string) *Manager {
@@ -62,7 +102,7 @@ func NewManager(fly *flyapi.Client, db *model.DB, metrics *controlMetrics, alert
 	}
 }
 
-func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.Worker, error) {
+func (m *Manager) newWorkerRecord(req WorkerRequest) *model.Worker {
 	workerID := strings.TrimSpace(req.WorkerID)
 	if workerID == "" {
 		workerID = uuid.New().String()
@@ -71,10 +111,8 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 	if region == "" {
 		region = "ord"
 	}
-	workloadCfg := req.Workload
-	workloadCfg = normalizeWorkloadConfig(workloadCfg)
 
-	worker := &model.Worker{
+	return &model.Worker{
 		ID:            workerID,
 		AppName:       m.appName,
 		Name:          req.Name,
@@ -84,9 +122,25 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 		LitestreamSHA: req.LitestreamSHA,
 		PRNumber:      req.PRNumber,
 		ProfileName:   req.ProfileName,
-		ProfileConfig: workloadCfg.JSON(),
+		ProfileConfig: normalizeWorkloadConfig(req.Workload).JSON(),
 		Region:        region,
+		ExpiresAt:     req.ExpiresAt,
 	}
+}
+
+func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.Worker, error) {
+	if id := strings.TrimSpace(req.WorkerID); id != "" {
+		unlock := m.lockWorker(id)
+		defer unlock()
+	}
+	return m.createWorker(ctx, req)
+}
+
+func (m *Manager) createWorker(ctx context.Context, req WorkerRequest) (*model.Worker, error) {
+	worker := m.newWorkerRecord(req)
+	workerID := worker.ID
+	region := worker.Region
+	workloadCfg := normalizeWorkloadConfig(req.Workload)
 
 	if err := m.db.CreateWorker(worker); err != nil {
 		return nil, fmt.Errorf("create worker record: %w", err)
@@ -192,6 +246,15 @@ func (m *Manager) clearWorkerReplicaPrefix(ctx context.Context, worker model.Wor
 	return nil
 }
 
+func (m *Manager) clearOldWorkerReplicaPrefix(ctx context.Context, w model.Worker) {
+	if strings.TrimSpace(w.FlyVolumeID) == "" {
+		return
+	}
+	if err := m.clearWorkerReplicaPrefix(ctx, w); err != nil {
+		slog.Warn("Failed to clear old worker replica prefix during update", "worker_id", w.ID, "error", err)
+	}
+}
+
 func flyVolumeName(workerName string) string {
 	var b strings.Builder
 	b.Grow(len(workerName) + 5)
@@ -229,6 +292,12 @@ func flyVolumeName(workerName string) string {
 }
 
 func (m *Manager) StopWorker(ctx context.Context, workerID string) error {
+	unlock := m.lockWorker(workerID)
+	defer unlock()
+	return m.stopWorker(ctx, workerID)
+}
+
+func (m *Manager) stopWorker(ctx context.Context, workerID string) error {
 	worker, err := m.db.GetWorker(workerID)
 	if err != nil {
 		return fmt.Errorf("get worker: %w", err)
@@ -247,6 +316,12 @@ func (m *Manager) StopWorker(ctx context.Context, workerID string) error {
 }
 
 func (m *Manager) DestroyWorker(ctx context.Context, workerID string) error {
+	unlock := m.lockWorker(workerID)
+	defer unlock()
+	return m.destroyWorker(ctx, workerID)
+}
+
+func (m *Manager) destroyWorker(ctx context.Context, workerID string) error {
 	worker, err := m.db.GetWorker(workerID)
 	if err != nil {
 		return fmt.Errorf("get worker: %w", err)
@@ -279,6 +354,12 @@ func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA, newLit
 
 func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, newSHA, newLitestreamSHA string) error {
 	source = firstNonEmpty(strings.TrimSpace(source), "main")
+	if !m.beginSourceRollout(source) {
+		slog.Info("Rolling update already in progress for source, skipping", "source", source, "sha", newSHA)
+		return nil
+	}
+	defer m.endSourceRollout(source)
+
 	workers, err := m.db.ListWorkersForSource(source)
 	if err != nil {
 		return fmt.Errorf("list %s workers: %w", source, err)
@@ -290,7 +371,11 @@ func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, 
 		if workerMatchesDeployment(w, model.Deployment{GitSHA: newSHA, LitestreamSHA: newLitestreamSHA}) {
 			continue
 		}
-		newWorker, err := m.replaceWorker(ctx, w, newImageRef, newSHA, newLitestreamSHA)
+		newWorker, err := func() (*model.Worker, error) {
+			unlock := m.lockWorker(w.ID)
+			defer unlock()
+			return m.replaceWorker(ctx, w, newImageRef, newSHA, newLitestreamSHA)
+		}()
 		if err != nil {
 			slog.Error("Failed to create updated worker", "name", w.Name, "error", err)
 			continue
@@ -302,6 +387,9 @@ func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, 
 }
 
 func (m *Manager) RollWorker(ctx context.Context, workerID, newImageRef, newSHA, newLitestreamSHA string) (*model.Worker, error) {
+	unlock := m.lockWorker(workerID)
+	defer unlock()
+
 	worker, err := m.db.GetWorker(workerID)
 	if err != nil {
 		return nil, fmt.Errorf("get worker: %w", err)
@@ -341,11 +429,15 @@ func (m *Manager) replaceWorker(ctx context.Context, w model.Worker, newImageRef
 		}
 	}
 
-	workloadCfg := resolveWorkerWorkload(w)
-	volumeSizeGB := resolveWorkerVolumeSize(w, workloadCfg)
+	m.clearOldWorkerReplicaPrefix(ctx, w)
 
-	return m.CreateWorker(ctx, WorkerRequest{
-		WorkerID:      w.Name,
+	return m.createWorker(ctx, replacementRequest(w, newImageRef, newSHA, newLitestreamSHA))
+}
+
+func replacementRequest(w model.Worker, newImageRef, newSHA, newLitestreamSHA string) WorkerRequest {
+	workloadCfg := resolveWorkerWorkload(w)
+	return WorkerRequest{
+		WorkerID:      w.ID,
 		Name:          w.Name,
 		Source:        w.Source,
 		GitSHA:        newSHA,
@@ -354,9 +446,9 @@ func (m *Manager) replaceWorker(ctx context.Context, w model.Worker, newImageRef
 		ProfileName:   w.ProfileName,
 		ImageRef:      newImageRef,
 		Region:        w.Region,
-		VolumeSizeGB:  volumeSizeGB,
+		VolumeSizeGB:  resolveWorkerVolumeSize(w, workloadCfg),
 		Workload:      workloadCfg,
-	})
+	}
 }
 
 func (m *Manager) observeWorkerByID(workerID string) {
