@@ -37,7 +37,6 @@ done < <(printf '%s' "$machine_json" | jq -r --arg img "$target_image" '
       (.state == "started") and
       ((.config.metadata.fly_process_group // "") != "app") and
       ((.name // "") | test("(^|-)pr-[0-9]+(-|$)") | not) and
-      ((.config.image // "") | test("-pr-") | not) and
       ((.config.image // "") != $img)
     )
   )
