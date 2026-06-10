@@ -1210,3 +1210,235 @@ func TestHandleVerificationDormantWorkerIgnored(t *testing.T) {
 		t.Fatalf("ResumeTrigger = %q, want %q", dormantAfter.ResumeTrigger, dormantBefore.ResumeTrigger)
 	}
 }
+
+func TestHandleHeartbeatRuntimeAtGating(t *testing.T) {
+	t.Parallel()
+
+	workerID := "worker-hb-gating"
+
+	t.Run("healthy payload sets LastRuntimeAt", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "sha-a",
+			LitestreamSHA: "ls-a",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+
+		collectedAt := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+		payload := reporting.HeartbeatPayload{
+			WorkerIdentity: reporting.WorkerIdentity{
+				WorkerID:      workerID,
+				Name:          workerID,
+				Source:        "main",
+				GitSHA:        "sha-a",
+				LitestreamSHA: "ls-a",
+				ProfileName:   "low-volume",
+				ProfileConfig: "{}",
+			},
+			SentAt: collectedAt,
+			RuntimePayload: reporting.RuntimePayload{
+				LitestreamSnapshotHealthy: true,
+				SnapshotCollectedAt:       collectedAt,
+			},
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+
+		api := NewAPI(db, nil, nil, nil, nil, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/workers/"+workerID+"/heartbeat", bytes.NewReader(body))
+		request.SetPathValue("id", workerID)
+		recorder := httptest.NewRecorder()
+		api.handleHeartbeat(recorder, request)
+
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+		}
+
+		stored, err := db.GetWorker(workerID)
+		if err != nil {
+			t.Fatalf("GetWorker() error = %v", err)
+		}
+		if stored.LastRuntimeAt == nil {
+			t.Fatalf("LastRuntimeAt = nil, want %v", collectedAt)
+		}
+		if !stored.LastRuntimeAt.Equal(collectedAt) {
+			t.Fatalf("LastRuntimeAt = %v, want %v", stored.LastRuntimeAt, collectedAt)
+		}
+	})
+
+	t.Run("failing snapshot payload does not set LastRuntimeAt", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "sha-a",
+			LitestreamSHA: "ls-a",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+
+		sentAt := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+		payload := reporting.HeartbeatPayload{
+			WorkerIdentity: reporting.WorkerIdentity{
+				WorkerID:      workerID,
+				Name:          workerID,
+				Source:        "main",
+				GitSHA:        "sha-a",
+				LitestreamSHA: "ls-a",
+				ProfileName:   "low-volume",
+				ProfileConfig: "{}",
+			},
+			SentAt: sentAt,
+			RuntimePayload: reporting.RuntimePayload{
+				LitestreamSnapshotHealthy: false,
+				LitestreamSnapshotError:   "litestream process not responding",
+				SnapshotCollectedAt:       sentAt,
+			},
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+
+		api := NewAPI(db, nil, nil, nil, nil, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/workers/"+workerID+"/heartbeat", bytes.NewReader(body))
+		request.SetPathValue("id", workerID)
+		recorder := httptest.NewRecorder()
+		api.handleHeartbeat(recorder, request)
+
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+		}
+
+		stored, err := db.GetWorker(workerID)
+		if err != nil {
+			t.Fatalf("GetWorker() error = %v", err)
+		}
+		if stored.LastRuntimeAt != nil {
+			t.Fatalf("LastRuntimeAt = %v, want nil (failing snapshot must not refresh timestamp)", stored.LastRuntimeAt)
+		}
+	})
+
+	t.Run("legacy payload with no snapshot metadata does not set LastRuntimeAt", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "sha-a",
+			LitestreamSHA: "ls-a",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+
+		sentAt := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+		payload := reporting.HeartbeatPayload{
+			WorkerIdentity: reporting.WorkerIdentity{
+				WorkerID:      workerID,
+				Name:          workerID,
+				Source:        "main",
+				GitSHA:        "sha-a",
+				LitestreamSHA: "ls-a",
+				ProfileName:   "low-volume",
+				ProfileConfig: "{}",
+			},
+			SentAt:         sentAt,
+			RuntimePayload: reporting.RuntimePayload{},
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+
+		api := NewAPI(db, nil, nil, nil, nil, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/workers/"+workerID+"/heartbeat", bytes.NewReader(body))
+		request.SetPathValue("id", workerID)
+		recorder := httptest.NewRecorder()
+		api.handleHeartbeat(recorder, request)
+
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+		}
+
+		stored, err := db.GetWorker(workerID)
+		if err != nil {
+			t.Fatalf("GetWorker() error = %v", err)
+		}
+		if stored.LastRuntimeAt != nil {
+			t.Fatalf("LastRuntimeAt = %v, want nil (legacy payload must not refresh timestamp)", stored.LastRuntimeAt)
+		}
+	})
+}
+
+func TestBuildHomePageDataStalestRuntimeAt(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+
+	olderAt := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	newerAt := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
+
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-older",
+		Name:          "worker-older",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "sha-a",
+		LitestreamSHA: "ls-a",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	if err := db.UpdateWorkerRuntimeSnapshot("worker-older", reporting.RuntimePayload{
+		LitestreamSnapshotHealthy: true,
+		SnapshotCollectedAt:       olderAt,
+	}); err != nil {
+		t.Fatalf("UpdateWorkerRuntimeSnapshot(older) error = %v", err)
+	}
+
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-newer",
+		Name:          "worker-newer",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "sha-a",
+		LitestreamSHA: "ls-a",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	if err := db.UpdateWorkerRuntimeSnapshot("worker-newer", reporting.RuntimePayload{
+		LitestreamSnapshotHealthy: true,
+		SnapshotCollectedAt:       newerAt,
+	}); err != nil {
+		t.Fatalf("UpdateWorkerRuntimeSnapshot(newer) error = %v", err)
+	}
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/ui", nil)
+	data, err := api.buildHomePageData(request)
+	if err != nil {
+		t.Fatalf("buildHomePageData() error = %v", err)
+	}
+
+	if data.Summary.StalestRuntimeAt == nil {
+		t.Fatalf("StalestRuntimeAt = nil, want %v", olderAt)
+	}
+	if !data.Summary.StalestRuntimeAt.Equal(olderAt) {
+		t.Fatalf("StalestRuntimeAt = %v, want %v (oldest timestamp)", data.Summary.StalestRuntimeAt, olderAt)
+	}
+}
