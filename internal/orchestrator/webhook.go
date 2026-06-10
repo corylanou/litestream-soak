@@ -19,6 +19,9 @@ type WebhookHandler struct {
 }
 
 func NewWebhookHandler(secret string, deployer *Deployer, deployEnabled bool) *WebhookHandler {
+	if secret == "" {
+		slog.Warn("GITHUB_WEBHOOK_SECRET is not set; refusing all webhook deliveries")
+	}
 	return &WebhookHandler{
 		secret:        secret,
 		deployer:      deployer,
@@ -38,12 +41,14 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.secret != "" {
-		sig := r.Header.Get("X-Hub-Signature-256")
-		if !h.verifySignature(body, sig) {
-			http.Error(w, "invalid signature", http.StatusUnauthorized)
-			return
-		}
+	if h.secret == "" {
+		http.Error(w, "webhook secret not configured", http.StatusServiceUnavailable)
+		return
+	}
+	sig := r.Header.Get("X-Hub-Signature-256")
+	if !h.verifySignature(body, sig) {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
 	}
 
 	event := r.Header.Get("X-GitHub-Event")
@@ -93,11 +98,7 @@ func (h *WebhookHandler) handlePush(w http.ResponseWriter, body []byte) {
 		"message", payload.HeadCommit.Message,
 	)
 	if h.deployer != nil {
-		shortSHA := sha
-		if len(shortSHA) > 12 {
-			shortSHA = shortSHA[:12]
-		}
-		_ = h.deployer.db.RecordEvent("", "github_push_received", fmt.Sprintf("Push received for %s on main", shortSHA), payload.HeadCommit.Message)
+		_ = h.deployer.db.RecordEvent("", "github_push_received", fmt.Sprintf("Push received for %s on main", trimSHA(sha)), payload.HeadCommit.Message)
 	}
 
 	if !h.deployEnabled {

@@ -3,7 +3,7 @@ LITESTREAM_REPO ?= ../../../benbjohnson/litestream
 WORKER_IMAGE ?= registry.fly.io/litestream-soak:worker-$(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 LOCAL_DATA_DIR ?= /tmp/litestream-soak
 
-.PHONY: build build-worker build-deps test vet clean run-local clean-local docker-worker refresh-worker-fleet
+.PHONY: build build-worker build-deps test vet clean run-local clean-local docker-worker compose-build refresh-worker-fleet
 
 build:
 	go build -o bin/soakworker ./cmd/soakworker
@@ -53,7 +53,7 @@ test-replay: build-worker
 	REPLICA_PATH="/tmp/litestream-soak-replay/replicas" \
 	LOAD_MODE=replay \
 	REPLAY_DATASET=taxi \
-	REPLAY_DATA_PATH="/tmp/litestream-soak/datasets/taxi-2024-01-sample.csv" \
+	REPLAY_DATA_PATH="$(CURDIR)/datasets/taxi_sample.csv" \
 	REPLAY_SPEED=1000 \
 	INITIAL_SIZE=1MB \
 	VERIFY_INTERVAL=5m \
@@ -63,7 +63,12 @@ test-replay: build-worker
 	./bin/soakworker
 
 docker-worker:
-	docker build -f Dockerfile.worker --build-arg LITESTREAM_SHA=$(LITESTREAM_SHA) -t $(WORKER_IMAGE) .
+	@litestream_sha="$$(./scripts/resolve-litestream-sha.sh "$(LITESTREAM_SHA)")" && \
+	docker build -f Dockerfile.worker --build-arg LITESTREAM_SHA="$$litestream_sha" -t $(WORKER_IMAGE) .
+
+compose-build:
+	@litestream_sha="$$(./scripts/resolve-litestream-sha.sh "$(LITESTREAM_SHA)")" && \
+	LITESTREAM_SHA="$$litestream_sha" docker compose build
 
 refresh-worker-fleet:
 	./scripts/refresh-worker-fleet.sh

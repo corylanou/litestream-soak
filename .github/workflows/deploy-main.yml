@@ -48,7 +48,7 @@ jobs:
               esac
 
               case "$file" in
-                cmd/soakworker/*|internal/worker/*|internal/replay/*|internal/workload/*|internal/reporting/*|internal/model/*|internal/flyapi/*|fly.toml|fly.worker.toml|Dockerfile.worker|datasets/*|go.mod|go.sum)
+                cmd/soakworker/*|internal/worker/*|internal/replay/*|internal/workload/*|internal/reporting/*|internal/model/*|internal/flyapi/*|fly.toml|Dockerfile.worker|datasets/*|go.mod|go.sum)
                   worker_changed=true
                   ;;
               esac
