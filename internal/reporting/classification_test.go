@@ -141,6 +141,42 @@ func TestClassifyVerificationFailureIntegrityCheckObjectStore(t *testing.T) {
 	}
 }
 
+func TestClassifyVerificationFailureValidationEOFNotRestoreStage(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", "validation failed (exit 1): unexpected EOF reading stdout")
+	if got.Stage != "validation" {
+		t.Fatalf("Stage = %q, want validation", got.Stage)
+	}
+	if got.Restore != nil {
+		t.Fatalf("Restore = %#v, want nil", got.Restore)
+	}
+}
+
+func TestClassifyVerificationFailureCalcRestoreKeepsMetadata(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", "calc restore target: context deadline exceeded")
+	if got.Stage != "restore" {
+		t.Fatalf("Stage = %q, want restore", got.Stage)
+	}
+	if got.Signature != "restore_plan_failed" {
+		t.Fatalf("Signature = %q, want restore_plan_failed", got.Signature)
+	}
+	if got.Restore == nil {
+		t.Fatal("Restore = nil, want attached RestoreFailure")
+	}
+}
+
+func TestClassifyVerificationFailureSyncMissingLTX(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", "wait for sync: sync request: no such key")
+	if got.Stage != "sync" {
+		t.Fatalf("Stage = %q, want sync", got.Stage)
+	}
+	if got.Signature != "sync_missing_ltx" {
+		t.Fatalf("Signature = %q, want sync_missing_ltx", got.Signature)
+	}
+	if got.Restore != nil {
+		t.Fatalf("Restore = %#v, want nil", got.Restore)
+	}
+}
+
 func TestClassifyVerificationFailureRestoreDecodeError(t *testing.T) {
 	got := ClassifyVerificationFailure("restore", "validation failed: restore failed: read page header: unexpected EOF")
 	if got.Stage != "restore" {

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -182,9 +183,12 @@ func classifyPlatformLog(entry flyapi.AppLogEntry) (string, string, bool) {
 
 var exitCodePattern = regexp.MustCompile(`exit code:?\s*([0-9]+)`)
 
+const gracefulStopExitCode = 143
+
 func isUnexpectedPlatformRestart(lower string) bool {
 	if match := exitCodePattern.FindStringSubmatch(lower); len(match) == 2 {
-		return match[1] != "0"
+		code, err := strconv.Atoi(match[1])
+		return err == nil && code != 0 && code != gracefulStopExitCode
 	}
 	if strings.Contains(lower, "crashed") ||
 		strings.Contains(lower, "unclean exit") ||

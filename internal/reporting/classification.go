@@ -50,14 +50,15 @@ func InferFailureStage(checkType, errorMessage string) string {
 		return "disk_capacity"
 	case strings.Contains(text, "wait for sync") || strings.Contains(text, "sync request") || strings.Contains(text, "decode sync response") || strings.Contains(text, "litestream.sock"):
 		return "sync"
-	case strings.Contains(text, "restore failed") || strings.Contains(text, "check_type=restore") || strings.Contains(text, "get ltx time bounds") || strings.Contains(text, "restore plan") ||
-		strings.Contains(text, "read page header") || strings.Contains(text, "open ltx file") || strings.Contains(text, "no such key") || strings.Contains(text, "missing ltx") ||
-		strings.Contains(text, "decode") || strings.Contains(text, "unexpected eof"):
+	case strings.Contains(text, "restore failed") || strings.Contains(text, "check_type=restore") || strings.Contains(text, "get ltx time bounds") || strings.Contains(text, "restore plan") || strings.Contains(text, "calc restore") ||
+		strings.Contains(text, "read page header") || strings.Contains(text, "open ltx file") || strings.Contains(text, "no such key") || strings.Contains(text, "missing ltx"):
 		return "restore"
 	case strings.Contains(text, "integrity check") || strings.Contains(text, "check_type=integrity_check") || strings.Contains(text, "wrong # of entries in index"):
 		return "integrity_check"
 	case strings.Contains(text, "validation failed"):
 		return "validation"
+	case strings.Contains(text, "decode") || strings.Contains(text, "unexpected eof"):
+		return "restore"
 	case strings.TrimSpace(checkType) != "":
 		return strings.TrimSpace(checkType)
 	default:
@@ -165,11 +166,11 @@ func inferFailureSignature(stage, text, original string) string {
 	case strings.Contains(text, "wrong # of entries in index"):
 		return "sqlite_index_mismatch"
 	case strings.Contains(text, "open ltx file: file does not exist") || strings.Contains(text, "no such key") || strings.Contains(text, "missing ltx"):
-		return "restore_missing_ltx"
+		return signatureStagePrefix(stage) + "_missing_ltx"
 	case strings.Contains(text, "read page header") || strings.Contains(text, "decode") || strings.Contains(text, "unexpected eof"):
 		return signatureStagePrefix(stage) + "_decode_error"
 	case strings.Contains(text, "restore plan") || strings.Contains(text, "calc restore"):
-		return "restore_plan_failed"
+		return signatureStagePrefix(stage) + "_plan_failed"
 	case strings.Contains(text, "ltx continuity"):
 		return "ltx_continuity"
 	case strings.Contains(text, "validation failed"):

@@ -137,6 +137,18 @@ func TestClassifyPlatformLog(t *testing.T) {
 			wantOK:    true,
 		},
 		{
+			name: "graceful stop during deploy",
+			entry: flyapi.AppLogEntry{
+				Attributes: flyapi.AppLogAttributes{
+					Message: "main child exited with exit code: 143",
+					Meta: flyapi.AppLogMeta{
+						Event: flyapi.AppLogMetaEvent{Provider: "vm"},
+					},
+				},
+			},
+			wantOK: false,
+		},
+		{
 			name: "routine boot starting init",
 			entry: flyapi.AppLogEntry{
 				Attributes: flyapi.AppLogAttributes{
