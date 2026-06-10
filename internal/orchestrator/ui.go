@@ -46,7 +46,7 @@ type homeSummary struct {
 	RecentFailures       int
 	LatestHeartbeatAt    *time.Time
 	StalestHeartbeatAt   *time.Time
-	LatestRuntimeAt      *time.Time
+	StalestRuntimeAt     *time.Time
 	LatestVerificationAt *time.Time
 }
 
@@ -236,7 +236,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 			summary.StalestHeartbeatAt = minTime(summary.StalestHeartbeatAt, *workerSummary.Worker.LastHeartbeatAt)
 		}
 		if workerSummary.Worker.LastRuntimeAt != nil && !workerSummary.Worker.LastRuntimeAt.IsZero() {
-			summary.LatestRuntimeAt = maxTime(summary.LatestRuntimeAt, *workerSummary.Worker.LastRuntimeAt)
+			summary.StalestRuntimeAt = minTime(summary.StalestRuntimeAt, *workerSummary.Worker.LastRuntimeAt)
 		}
 		if workerSummary.LastVerification != nil {
 			if observedAt, ok := verificationObservedAt(*workerSummary.LastVerification); ok {
@@ -1291,9 +1291,9 @@ const homeBodyTemplate = `{{define "home_body"}}
         <span class="freshness-time">{{formatTimePtr .Summary.LatestHeartbeatAt}}</span>
       </div>
       <div class="freshness-item">
-        <span class="freshness-label">Latest runtime</span>
-        <span class="freshness-value {{heartbeatClass .Summary.LatestRuntimeAt}}">{{timeAgo .Summary.LatestRuntimeAt}}</span>
-        <span class="freshness-time">{{formatTimePtr .Summary.LatestRuntimeAt}}</span>
+        <span class="freshness-label">Stalest runtime</span>
+        <span class="freshness-value {{heartbeatClass .Summary.StalestRuntimeAt}}">{{timeAgo .Summary.StalestRuntimeAt}}</span>
+        <span class="freshness-time">{{formatTimePtr .Summary.StalestRuntimeAt}}</span>
       </div>
       <div class="freshness-item">
         <span class="freshness-label">Stalest heartbeat</span>

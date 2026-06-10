@@ -259,6 +259,15 @@ func (d *DB) UpdateWorkerRuntimeSnapshot(id string, payload reporting.RuntimePay
 		return fmt.Errorf("marshal runtime payload: %w", err)
 	}
 
+	if !payload.LitestreamSnapshotHealthy {
+		_, err = d.db.Exec(`
+			UPDATE workers SET last_runtime_json = ?, updated_at = datetime('now')
+			WHERE id = ?`,
+			string(body), id,
+		)
+		return err
+	}
+
 	reportedAt := payload.SnapshotCollectedAt
 	if reportedAt.IsZero() {
 		reportedAt = time.Now().UTC()
