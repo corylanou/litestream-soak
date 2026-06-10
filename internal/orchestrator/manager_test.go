@@ -212,7 +212,7 @@ func TestClearOldWorkerReplicaPrefix(t *testing.T) {
 		wantRequests bool
 		wantPrefix   string
 	}{
-		{name: "volume set clears prefix", volumeID: "vol_abc", wantRequests: true, wantPrefix: "soak/worker-main-x/vol_abc"},
+		{name: "volume set clears prefix", volumeID: "vol_abc", wantRequests: true, wantPrefix: "soak/worker-main-x/vol_abc/"},
 		{name: "empty volume skips clear", volumeID: "", wantRequests: false},
 	}
 
