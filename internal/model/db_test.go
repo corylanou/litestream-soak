@@ -697,7 +697,6 @@ func TestUpsertReportedWorkerDoesNotResurrectStopped(t *testing.T) {
 		errorMessage string
 		wantStatus   WorkerStatus
 		wantError    string
-		wantRunning  bool
 	}
 
 	cases := []testCase{
@@ -706,32 +705,27 @@ func TestUpsertReportedWorkerDoesNotResurrectStopped(t *testing.T) {
 			errorMessage: "machine stopped by operator",
 			wantStatus:   WorkerStopped,
 			wantError:    "machine stopped by operator",
-			wantRunning:  false,
 		},
 		{
 			status:       WorkerFailed,
 			errorMessage: "disk full",
 			wantStatus:   WorkerFailed,
 			wantError:    "disk full",
-			wantRunning:  false,
 		},
 		{
-			status:      WorkerPending,
-			wantStatus:  WorkerRunning,
-			wantError:   "",
-			wantRunning: true,
+			status:     WorkerPending,
+			wantStatus: WorkerRunning,
+			wantError:  "",
 		},
 		{
-			status:      WorkerBuilding,
-			wantStatus:  WorkerRunning,
-			wantError:   "",
-			wantRunning: true,
+			status:     WorkerBuilding,
+			wantStatus: WorkerRunning,
+			wantError:  "",
 		},
 		{
-			status:      WorkerStarting,
-			wantStatus:  WorkerRunning,
-			wantError:   "",
-			wantRunning: true,
+			status:     WorkerStarting,
+			wantStatus: WorkerRunning,
+			wantError:  "",
 		},
 	}
 
