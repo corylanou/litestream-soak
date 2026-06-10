@@ -85,6 +85,81 @@ func TestScoreDeploymentWorkerRespectsWindowBounds(t *testing.T) {
 	}
 }
 
+func TestBuildDeploymentRolloutIgnoresAbortedForVerifiedSinceDeploy(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-aborted-rollout",
+		LitestreamSHA: "litestream-aborted-rollout",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-aborted-rollout",
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+
+	deployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment() error = %v", err)
+	}
+
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-aborted-after-pass",
+		Name:          "worker-aborted-after-pass",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "sha-aborted-rollout",
+		LitestreamSHA: "litestream-aborted-rollout",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+
+	passedAt := deployment.StartedAt.Add(5 * time.Minute).UTC()
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-aborted-after-pass",
+		StartedAt:   passedAt.Add(-2 * time.Minute),
+		CompletedAt: &passedAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  120000,
+	})
+
+	abortedAt := deployment.StartedAt.Add(10 * time.Minute).UTC()
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:     "worker-aborted-after-pass",
+		StartedAt:    abortedAt.Add(-2 * time.Minute),
+		CompletedAt:  &abortedAt,
+		Status:       "aborted",
+		CheckType:    "integrity",
+		Passed:       false,
+		ErrorMessage: "litestream process stopped during verification",
+		DurationMS:   120000,
+	})
+
+	rollout, err := buildDeploymentRollout(db, *deployment)
+	if err != nil {
+		t.Fatalf("buildDeploymentRollout() error = %v", err)
+	}
+
+	if rollout.VerifiedSinceDeploy != 1 {
+		t.Fatalf("VerifiedSinceDeploy = %d, want 1", rollout.VerifiedSinceDeploy)
+	}
+	if rollout.AwaitingVerification != 0 {
+		t.Fatalf("AwaitingVerification = %d, want 0", rollout.AwaitingVerification)
+	}
+	if len(rollout.Workers) != 1 {
+		t.Fatalf("len(Workers) = %d, want 1", len(rollout.Workers))
+	}
+	if !rollout.Workers[0].VerifiedSinceDeploy {
+		t.Fatalf("worker VerifiedSinceDeploy = false, want true")
+	}
+	if rollout.Workers[0].LastVerificationAt == nil || !rollout.Workers[0].LastVerificationAt.Equal(abortedAt) {
+		t.Fatalf("LastVerificationAt = %v, want aborted report time %v", rollout.Workers[0].LastVerificationAt, abortedAt)
+	}
+}
+
 func TestCountDeploymentScorecardOutcomeCountsFailuresBySignature(t *testing.T) {
 	t.Parallel()
 

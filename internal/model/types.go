@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type WorkerStatus string
 
@@ -56,6 +59,18 @@ type Verification struct {
 	Passed           bool       `json:"passed"`
 	DurationMS       int        `json:"duration_ms,omitempty"`
 	ErrorMessage     string     `json:"error_message,omitempty"`
+}
+
+func (v Verification) Aborted() bool {
+	return strings.EqualFold(strings.TrimSpace(v.Status), "aborted")
+}
+
+func (v Verification) Failed() bool {
+	return !v.Aborted() && (!v.Passed || strings.EqualFold(strings.TrimSpace(v.Status), "failed"))
+}
+
+func (v Verification) Succeeded() bool {
+	return !v.Aborted() && v.Passed && !strings.EqualFold(strings.TrimSpace(v.Status), "failed")
 }
 
 type Deployment struct {

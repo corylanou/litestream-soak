@@ -67,5 +67,5 @@ func activeFailure(verification *model.Verification) bool {
 	if verification == nil {
 		return false
 	}
-	return !verification.Passed || strings.EqualFold(verification.Status, "failed")
+	return verification.Failed()
 }
