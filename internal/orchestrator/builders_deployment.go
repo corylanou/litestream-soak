@@ -217,12 +217,7 @@ func comparisonOutcomeKey(outcome DeploymentWorkerOutcome) string {
 }
 
 func buildDeploymentScorecard(db *model.DB, deployment model.Deployment, windowEnd *time.Time) (DeploymentScorecard, error) {
-	source := strings.TrimSpace(deployment.Source)
-	if source == "" {
-		source = "main"
-	}
-
-	workers, err := db.ListWorkersForSource(source)
+	workers, err := deploymentScorecardWorkers(db, deployment)
 	if err != nil {
 		return DeploymentScorecard{}, err
 	}
@@ -241,39 +236,71 @@ func buildDeploymentScorecard(db *model.DB, deployment model.Deployment, windowE
 		if err != nil {
 			return DeploymentScorecard{}, err
 		}
-		verification := latestVerificationInWindow(verifications, deployment.StartedAt, windowEnd)
-		if verification == nil {
-			scorecard.AwaitingWorkers++
-			continue
-		}
-
-		outcome := DeploymentWorkerOutcome{
-			WorkerID: worker.ID,
-			Name:     worker.Name,
-			Profile:  worker.ProfileName,
-			Passed:   verification.Passed,
-		}
-		if observedAt, ok := verificationObservedAt(*verification); ok {
-			outcome.VerifiedAt = &observedAt
-		}
-		scorecard.VerifiedWorkers++
-		if verification.Passed {
-			scorecard.PassedWorkers++
-		} else {
-			scorecard.FailedWorkers++
-			vf := classifyVerification(verification)
-			outcome.FailureStage = vf.Stage
-			outcome.FailureSignature = vf.Signature
-			outcome.ProbableSubsystem = vf.probableSubsystem()
-			failure := failureCounts[outcome.FailureSignature]
-			failure.Signature = outcome.FailureSignature
-			failure.Stage = outcome.FailureStage
-			failure.Count++
-			failureCounts[outcome.FailureSignature] = failure
-		}
-		scorecard.Outcomes = append(scorecard.Outcomes, outcome)
+		outcome, verified := scoreDeploymentWorker(worker, deployment, verifications, windowEnd)
+		countDeploymentScorecardOutcome(&scorecard, failureCounts, outcome, verified)
 	}
 
+	finalizeDeploymentScorecard(&scorecard, failureCounts)
+	return scorecard, nil
+}
+
+func deploymentScorecardSource(deployment model.Deployment) string {
+	source := strings.TrimSpace(deployment.Source)
+	if source == "" {
+		return "main"
+	}
+	return source
+}
+
+func deploymentScorecardWorkers(db *model.DB, deployment model.Deployment) ([]model.Worker, error) {
+	return db.ListWorkersForSource(deploymentScorecardSource(deployment))
+}
+
+func scoreDeploymentWorker(worker model.Worker, deployment model.Deployment, verifications []model.Verification, windowEnd *time.Time) (DeploymentWorkerOutcome, bool) {
+	verification := latestVerificationInWindow(verifications, deployment.StartedAt, windowEnd)
+	if verification == nil {
+		return DeploymentWorkerOutcome{}, false
+	}
+
+	outcome := DeploymentWorkerOutcome{
+		WorkerID: worker.ID,
+		Name:     worker.Name,
+		Profile:  worker.ProfileName,
+		Passed:   verification.Passed,
+	}
+	if observedAt, ok := verificationObservedAt(*verification); ok {
+		outcome.VerifiedAt = &observedAt
+	}
+	if !verification.Passed {
+		vf := classifyVerification(verification)
+		outcome.FailureStage = vf.Stage
+		outcome.FailureSignature = vf.Signature
+		outcome.ProbableSubsystem = vf.probableSubsystem()
+	}
+	return outcome, true
+}
+
+func countDeploymentScorecardOutcome(scorecard *DeploymentScorecard, failureCounts map[string]DeploymentFailureCount, outcome DeploymentWorkerOutcome, verified bool) {
+	if !verified {
+		scorecard.AwaitingWorkers++
+		return
+	}
+
+	scorecard.VerifiedWorkers++
+	if outcome.Passed {
+		scorecard.PassedWorkers++
+	} else {
+		scorecard.FailedWorkers++
+		failure := failureCounts[outcome.FailureSignature]
+		failure.Signature = outcome.FailureSignature
+		failure.Stage = outcome.FailureStage
+		failure.Count++
+		failureCounts[outcome.FailureSignature] = failure
+	}
+	scorecard.Outcomes = append(scorecard.Outcomes, outcome)
+}
+
+func finalizeDeploymentScorecard(scorecard *DeploymentScorecard, failureCounts map[string]DeploymentFailureCount) {
 	if scorecard.TotalWorkers > 0 {
 		scorecard.PassRate = float64(scorecard.PassedWorkers) / float64(scorecard.TotalWorkers)
 	}
@@ -287,8 +314,6 @@ func buildDeploymentScorecard(db *model.DB, deployment model.Deployment, windowE
 		return scorecard.Failures[i].Signature < scorecard.Failures[j].Signature
 	})
 	sort.SliceStable(scorecard.Outcomes, func(i, j int) bool { return scorecard.Outcomes[i].Name < scorecard.Outcomes[j].Name })
-
-	return scorecard, nil
 }
 
 func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (DeploymentRolloutResponse, error) {
