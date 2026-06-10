@@ -1,22 +1,41 @@
-FROM golang:1.25 AS builder
+FROM golang:1.25@sha256:fb6b5fe6aca5fb55b7238c2fadaac64bd955ceeb6f305cb0ac3fd28b377e4415 AS builder
 WORKDIR /src/soak
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN go build -ldflags "-s -w" -o /usr/local/bin/soakctl ./cmd/soakctl
 
-FROM debian:bookworm-slim AS flyctl
+FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS flyctl
+ARG TARGETARCH
+ARG FLYCTL_VERSION=0.4.59
+ARG FLYCTL_AMD64_SHA256=1c560d9dbdbfdccf1fe4899ae6e55dd073cc7b5400fc15d9ae4d0176c4eff17d
+ARG FLYCTL_ARM64_SHA256=33745457758150e500e80fc8d47e2fc68803302c668b1bca845c8b284e17c17e
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://fly.io/install.sh | FLYCTL_INSTALL=/opt/fly sh
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) flyctl_arch=x86_64; flyctl_sha256="$FLYCTL_AMD64_SHA256" ;; \
+      arm64) flyctl_arch=arm64; flyctl_sha256="$FLYCTL_ARM64_SHA256" ;; \
+      *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    archive="flyctl_${FLYCTL_VERSION}_Linux_${flyctl_arch}.tar.gz"; \
+    curl -fsSLO "https://github.com/superfly/flyctl/releases/download/v${FLYCTL_VERSION}/${archive}"; \
+    echo "${flyctl_sha256}  ${archive}" | sha256sum -c; \
+    tar -xzf "${archive}" -C /usr/local/bin flyctl; \
+    rm "${archive}"
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl iproute2 jq lsof procps sqlite3 && \
-    rm -rf /var/lib/apt/lists/*
-COPY --from=flyctl /opt/fly/bin/ /usr/local/bin/
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd --system --gid 10001 soak && \
+    useradd --system --uid 10001 --gid soak --home-dir /data --shell /usr/sbin/nologin soak && \
+    mkdir -p /data && \
+    chown soak:soak /data
+COPY --from=flyctl /usr/local/bin/flyctl /usr/local/bin/flyctl
 COPY --from=builder /usr/local/bin/soakctl /usr/local/bin/soakctl
 VOLUME /data
+USER soak:soak
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/soakctl"]
