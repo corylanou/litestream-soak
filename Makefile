@@ -63,11 +63,11 @@ test-replay: build-worker
 	./bin/soakworker
 
 docker-worker:
-	@litestream_sha="$$(./scripts/resolve-litestream-sha.sh "$(LITESTREAM_SHA)")"; \
+	@litestream_sha="$$(./scripts/resolve-litestream-sha.sh "$(LITESTREAM_SHA)")" && \
 	docker build -f Dockerfile.worker --build-arg LITESTREAM_SHA="$$litestream_sha" -t $(WORKER_IMAGE) .
 
 compose-build:
-	@litestream_sha="$$(./scripts/resolve-litestream-sha.sh "$(LITESTREAM_SHA)")"; \
+	@litestream_sha="$$(./scripts/resolve-litestream-sha.sh "$(LITESTREAM_SHA)")" && \
 	LITESTREAM_SHA="$$litestream_sha" docker compose build
 
 refresh-worker-fleet:

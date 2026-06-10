@@ -183,16 +183,30 @@ func resolveLitestreamBuildSHA(ctx context.Context, ref string) (string, error) 
 		pattern = "refs/heads/main"
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", "https://github.com/benbjohnson/litestream.git", pattern)
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "https://github.com/benbjohnson/litestream.git", pattern, pattern+"^{}")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("git ls-remote %s: %w", pattern, err)
 	}
 
-	fields := strings.Fields(string(output))
-	if len(fields) == 0 {
+	// annotated tags list both the tag object and the peeled commit (ref^{});
+	// prefer the peeled line so deployments record the commit under test
+	first := ""
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if first == "" {
+			first = fields[0]
+		}
+		if strings.HasSuffix(fields[1], "^{}") {
+			return fields[0], nil
+		}
+	}
+	if first == "" {
 		return "", fmt.Errorf("no upstream Litestream ref matched %q", ref)
 	}
 
-	return fields[0], nil
+	return first, nil
 }
