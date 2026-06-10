@@ -334,6 +334,27 @@ curl -X POST -sS \
   "https://litestream-soak-ctl.fly.dev/api/admin/resume-dormant?source=main&trigger=manual_resume" | jq .
 ```
 
+## Fly Health Checks
+
+Both Fly apps declare `/healthz` checks in their Fly config.
+
+- `fly.control.toml` uses `[[http_service.checks]]` on the control-plane HTTP
+  service. The endpoint is unauthenticated for `GET` and `HEAD`, returns `200`,
+  and should stay lightweight.
+- `fly.toml` uses top-level `[checks.healthz]` on port `9091`, the same private
+  port used by worker metrics. Do not add an `[http_service]` block to the
+  worker app just for health checks; that would expose the worker metrics and
+  health port publicly.
+
+The worker check uses a `5m` grace period so deploy health checks do not race
+the Litestream restore and first-sync path. Before changing either config,
+validate both files locally:
+
+```bash
+fly config validate -c fly.toml
+fly config validate -c fly.control.toml
+```
+
 ## Automatic Upstream Main Pickup
 
 The soak system can now rebuild itself against the latest upstream Litestream
