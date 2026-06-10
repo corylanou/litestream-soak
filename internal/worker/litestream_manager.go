@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"text/template"
@@ -55,6 +57,10 @@ dbs:
 `))
 
 func (m *litestreamManager) writeLitestreamConfig() error {
+	if err := m.cleanupStaleLitestreamState(); err != nil {
+		return err
+	}
+
 	if m.cfg.ReplicaType == "file" {
 		if err := os.MkdirAll(m.cfg.ReplicaPath, 0755); err != nil {
 			return fmt.Errorf("create replica dir: %w", err)
@@ -89,7 +95,107 @@ func (m *litestreamManager) writeLitestreamConfig() error {
 		S3Endpoint:       m.cfg.S3Endpoint,
 	}
 
-	return litestreamConfigTmpl.Execute(f, data)
+	if err := litestreamConfigTmpl.Execute(f, data); err != nil {
+		return err
+	}
+	if err := m.writeLitestreamReplicaTarget(); err != nil {
+		return fmt.Errorf("write replica target marker: %w", err)
+	}
+	return nil
+}
+
+func (m *litestreamManager) cleanupStaleLitestreamState() error {
+	current := strings.TrimSpace(m.cfg.ReplicaURL())
+	if current == "" {
+		return nil
+	}
+
+	targets, err := m.previousLitestreamReplicaTargets()
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if target == "" || target == current {
+			continue
+		}
+		stateDir := litestreamStateDir(m.cfg.DBPath)
+		slog.Info("Removing stale Litestream local state", "state_dir", stateDir, "previous_replica", target, "current_replica", current)
+		if err := os.RemoveAll(stateDir); err != nil {
+			return fmt.Errorf("remove stale litestream state: %w", err)
+		}
+		return nil
+	}
+	return nil
+}
+
+func (m *litestreamManager) previousLitestreamReplicaTargets() ([]string, error) {
+	var targets []string
+
+	marker, err := os.ReadFile(litestreamReplicaTargetPath(m.cfg.DBPath))
+	if err == nil {
+		if target := strings.TrimSpace(string(marker)); target != "" {
+			targets = append(targets, target)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read replica target marker: %w", err)
+	}
+
+	target, ok, err := litestreamConfigReplicaTarget(m.cfg.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		targets = append(targets, target)
+	}
+	return targets, nil
+}
+
+func (m *litestreamManager) writeLitestreamReplicaTarget() error {
+	target := strings.TrimSpace(m.cfg.ReplicaURL())
+	if target == "" {
+		return nil
+	}
+	stateDir := litestreamStateDir(m.cfg.DBPath)
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		return fmt.Errorf("create litestream state dir: %w", err)
+	}
+	return os.WriteFile(litestreamReplicaTargetPath(m.cfg.DBPath), []byte(target+"\n"), 0644)
+}
+
+func litestreamReplicaTargetPath(dbPath string) string {
+	return filepath.Join(litestreamStateDir(dbPath), "soak-replica-url")
+}
+
+func litestreamConfigReplicaTarget(configPath string) (string, bool, error) {
+	body, err := os.ReadFile(configPath)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read litestream config: %w", err)
+	}
+
+	inReplicas := false
+	for _, raw := range strings.Split(string(body), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "replicas:" {
+			inReplicas = true
+			continue
+		}
+		if !inReplicas {
+			continue
+		}
+		if target := strings.TrimSpace(strings.TrimPrefix(line, "- url:")); target != line {
+			return target, target != "", nil
+		}
+		if target := strings.TrimSpace(strings.TrimPrefix(line, "- path:")); target != line {
+			if target == "" {
+				return "", false, nil
+			}
+			return "file://" + target, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 func (m *litestreamManager) startLitestream(ctx context.Context) error {

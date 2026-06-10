@@ -2,13 +2,18 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/workload"
 )
@@ -169,6 +174,169 @@ func TestNewWorkerRecordCopiesExpiresAt(t *testing.T) {
 	withoutExpiry := mgr.newWorkerRecord(WorkerRequest{WorkerID: "w2", Name: "w2", Source: "main"})
 	if withoutExpiry.ExpiresAt != nil {
 		t.Fatalf("ExpiresAt=%v, want nil", withoutExpiry.ExpiresAt)
+	}
+}
+
+func TestCreateWorkerForksPRWorkerFromEligibleMainVolume(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-low-vol",
+		AppName:       "litestream-soak",
+		Name:          "worker-main-low-vol",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "main",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+		Region:        "ord",
+		FlyMachineID:  "machine-main",
+		FlyVolumeID:   "vol-main-001",
+	})
+
+	fly := newCreateWorkerFlyServer(t)
+	mgr := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+	worker, err := mgr.CreateWorker(context.Background(), WorkerRequest{
+		WorkerID:    "worker-pr-62-low-vol",
+		Name:        "worker-pr-62-low-vol",
+		Source:      "pr-62",
+		GitSHA:      "soak-sha",
+		ProfileName: "low-volume",
+		ImageRef:    "registry.fly.io/litestream-soak:test",
+		Region:      "ord",
+		Workload: workload.Config{
+			LoadMode:    "synthetic",
+			InitialSize: "5MB",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateWorker() error = %v", err)
+	}
+
+	volumes := fly.volumeRequests()
+	if len(volumes) != 1 {
+		t.Fatalf("volume requests=%d want 1", len(volumes))
+	}
+	if got := volumes[0].SourceID; got != "vol-main-001" {
+		t.Fatalf("fork source_vol_id=%q want %q", got, "vol-main-001")
+	}
+
+	machines := fly.machineRequests()
+	if len(machines) != 1 {
+		t.Fatalf("machine requests=%d want 1", len(machines))
+	}
+	if got := machines[0].Config.Env["S3_PATH"]; strings.Contains(got, "worker-main") {
+		t.Fatalf("S3_PATH=%q should not target a main prefix", got)
+	}
+	if got, want := machines[0].Config.Env["S3_PATH"], "soak/worker-pr-62-low-vol/"+worker.FlyVolumeID; got != want {
+		t.Fatalf("S3_PATH=%q want %q", got, want)
+	}
+
+	event := requireWorkerEvent(t, db, worker.ID, "worker_volume_forked")
+	if !strings.Contains(event.Details, "vol-main-001") || !strings.Contains(event.Details, "worker-main-low-vol") {
+		t.Fatalf("fork event details=%q, want source worker and volume", event.Details)
+	}
+}
+
+func TestCreateWorkerUsesFreshVolumeWithoutEligibleMainCounterpart(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		main      *model.Worker
+		wantCause string
+	}{
+		{
+			name:      "no matching main worker",
+			wantCause: "no_matching_main_worker",
+		},
+		{
+			name: "main worker degraded",
+			main: &model.Worker{
+				Status:      model.WorkerDegraded,
+				Region:      "ord",
+				FlyVolumeID: "vol-main-001",
+			},
+			wantCause: "main_worker_not_running",
+		},
+		{
+			name: "main worker missing volume",
+			main: &model.Worker{
+				Status: model.WorkerRunning,
+				Region: "ord",
+			},
+			wantCause: "main_worker_missing_volume",
+		},
+		{
+			name: "main worker region mismatch",
+			main: &model.Worker{
+				Status:      model.WorkerRunning,
+				Region:      "ams",
+				FlyVolumeID: "vol-main-001",
+			},
+			wantCause: "main_worker_region_mismatch",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := openTestDB(t)
+			if tt.main != nil {
+				main := *tt.main
+				main.ID = "worker-main-low-vol"
+				main.AppName = "litestream-soak"
+				main.Name = "worker-main-low-vol"
+				main.Source = "main"
+				main.GitSHA = "main"
+				main.ProfileName = "low-volume"
+				main.ProfileConfig = "{}"
+				createTestWorker(t, db, main)
+			}
+
+			fly := newCreateWorkerFlyServer(t)
+			mgr := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+			worker, err := mgr.CreateWorker(context.Background(), WorkerRequest{
+				WorkerID:     "worker-pr-62-low-vol",
+				Name:         "worker-pr-62-low-vol",
+				Source:       "pr-62",
+				GitSHA:       "soak-sha",
+				ProfileName:  "low-volume",
+				ImageRef:     "registry.fly.io/litestream-soak:test",
+				Region:       "ord",
+				VolumeSizeGB: 20,
+				Workload: workload.Config{
+					LoadMode:    "synthetic",
+					InitialSize: "5MB",
+				},
+			})
+			if err != nil {
+				t.Fatalf("CreateWorker() error = %v", err)
+			}
+
+			volumes := fly.volumeRequests()
+			if len(volumes) != 1 {
+				t.Fatalf("volume requests=%d want 1", len(volumes))
+			}
+			if got := volumes[0].SourceID; got != "" {
+				t.Fatalf("fresh volume source_vol_id=%q want empty", got)
+			}
+			if got := volumes[0].Region; got != "ord" {
+				t.Fatalf("fresh volume region=%q want ord", got)
+			}
+			if got := volumes[0].SizeGB; got != 20 {
+				t.Fatalf("fresh volume size=%d want 20", got)
+			}
+
+			event := requireWorkerEvent(t, db, worker.ID, "worker_volume_fresh")
+			if !strings.Contains(event.Details, tt.wantCause) {
+				t.Fatalf("fresh event details=%q, want cause %q", event.Details, tt.wantCause)
+			}
+		})
 	}
 }
 
@@ -358,6 +526,88 @@ func TestLockWorkerDistinctIDsDoNotBlock(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("lockWorker(w2) blocked behind lockWorker(w1)")
 	}
+}
+
+type createWorkerFlyServer struct {
+	client *flyapi.Client
+	server *httptest.Server
+
+	mu       sync.Mutex
+	volumes  []flyapi.CreateVolumeRequest
+	machines []flyapi.CreateMachineRequest
+}
+
+func newCreateWorkerFlyServer(t *testing.T) *createWorkerFlyServer {
+	t.Helper()
+
+	fake := &createWorkerFlyServer{}
+	fake.server = httptest.NewServer(http.HandlerFunc(fake.handle))
+	t.Cleanup(fake.server.Close)
+	fake.client = flyapi.NewClientWithBaseURL("litestream-soak", "test-token", fake.server.URL)
+	return fake
+}
+
+func (f *createWorkerFlyServer) handle(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	switch {
+	case r.Method == http.MethodPost && r.URL.Path == "/apps/litestream-soak/volumes":
+		var req flyapi.CreateVolumeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		f.mu.Lock()
+		f.volumes = append(f.volumes, req)
+		id := fmt.Sprintf("vol-%03d", len(f.volumes))
+		f.mu.Unlock()
+		writeCreateWorkerJSON(w, flyapi.Volume{ID: id, Name: req.Name, SizeGB: req.SizeGB, Region: req.Region, State: "created"})
+	case r.Method == http.MethodPost && r.URL.Path == "/apps/litestream-soak/machines":
+		var req flyapi.CreateMachineRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		f.mu.Lock()
+		f.machines = append(f.machines, req)
+		id := fmt.Sprintf("machine-%03d", len(f.machines))
+		f.mu.Unlock()
+		writeCreateWorkerJSON(w, flyapi.Machine{ID: id, Name: req.Name, State: "started", Config: req.Config})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (f *createWorkerFlyServer) volumeRequests() []flyapi.CreateVolumeRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]flyapi.CreateVolumeRequest(nil), f.volumes...)
+}
+
+func (f *createWorkerFlyServer) machineRequests() []flyapi.CreateMachineRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]flyapi.CreateMachineRequest(nil), f.machines...)
+}
+
+func writeCreateWorkerJSON(w http.ResponseWriter, value any) {
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func requireWorkerEvent(t *testing.T, db *model.DB, workerID, eventType string) model.Event {
+	t.Helper()
+
+	events, err := db.ListWorkerEvents(workerID, 20)
+	if err != nil {
+		t.Fatalf("ListWorkerEvents(%q) error = %v", workerID, err)
+	}
+	for _, event := range events {
+		if event.EventType == eventType {
+			return event
+		}
+	}
+	t.Fatalf("event %q not recorded for %s; got %+v", eventType, workerID, events)
+	return model.Event{}
 }
 
 func TestRollingUpdateSourceSkipsUpToDateWorkers(t *testing.T) {

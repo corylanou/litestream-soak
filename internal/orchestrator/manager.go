@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
@@ -128,7 +129,6 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 func (m *Manager) createWorker(ctx context.Context, req WorkerRequest) (*model.Worker, error) {
 	worker := m.newWorkerRecord(req)
 	workerID := worker.ID
-	region := worker.Region
 	workloadCfg := normalizeWorkloadConfig(req.Workload)
 
 	if err := m.db.CreateWorker(worker); err != nil {
@@ -143,12 +143,7 @@ func (m *Manager) createWorker(ctx context.Context, req WorkerRequest) (*model.W
 		volSize = 10
 	}
 
-	vol, err := m.fly.CreateVolume(ctx, flyapi.CreateVolumeRequest{
-		Name:      flyVolumeName(req.Name),
-		SizeGB:    volSize,
-		Region:    region,
-		Encrypted: true,
-	})
+	vol, err := m.createWorkerVolume(ctx, *worker, volSize)
 	if err != nil {
 		m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error())
 		m.observeWorkerByID(workerID)
@@ -189,6 +184,109 @@ func (m *Manager) createWorker(ctx context.Context, req WorkerRequest) (*model.W
 	slog.Info("Worker created", "name", req.Name, "machine_id", machine.ID, "volume_id", vol.ID, "profile", req.ProfileName)
 
 	return worker, nil
+}
+
+func (m *Manager) createWorkerVolume(ctx context.Context, worker model.Worker, volSize int) (*flyapi.Volume, error) {
+	sourceWorker, freshReason, err := m.forkSourceForWorker(worker)
+	if err != nil {
+		return nil, err
+	}
+
+	volumeName := flyVolumeName(worker.Name)
+	client := m.flyClientForWorker(worker)
+	if sourceWorker != nil {
+		vol, err := client.ForkVolume(ctx, sourceWorker.FlyVolumeID, volumeName)
+		if err == nil {
+			m.recordWorkerVolumeForked(worker, *sourceWorker, vol.ID)
+			return vol, nil
+		}
+		freshReason = "fork_volume_failed"
+		slog.Warn("Failed to fork worker volume; creating fresh volume", "worker_id", worker.ID, "source_worker_id", sourceWorker.ID, "source_volume_id", sourceWorker.FlyVolumeID, "error", err)
+	}
+
+	vol, err := client.CreateVolume(ctx, flyapi.CreateVolumeRequest{
+		Name:      volumeName,
+		SizeGB:    volSize,
+		Region:    worker.Region,
+		Encrypted: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	m.recordWorkerVolumeFresh(worker, freshReason, sourceWorker, vol.ID)
+	return vol, nil
+}
+
+func (m *Manager) forkSourceForWorker(worker model.Worker) (*model.Worker, string, error) {
+	source := strings.TrimSpace(worker.Source)
+	if source == "" || source == "main" {
+		return nil, "main_source", nil
+	}
+
+	mainWorkers, err := m.db.ListWorkersForSource("main")
+	if err != nil {
+		return nil, "", fmt.Errorf("list main workers for volume fork: %w", err)
+	}
+
+	profileName := strings.TrimSpace(worker.ProfileName)
+	region := strings.TrimSpace(worker.Region)
+	reason := "no_matching_main_worker"
+	for i := range mainWorkers {
+		candidate := mainWorkers[i]
+		if strings.TrimSpace(candidate.ProfileName) != profileName {
+			continue
+		}
+		reason = "main_worker_not_running"
+		if candidate.Status != model.WorkerRunning {
+			continue
+		}
+		reason = "main_worker_missing_volume"
+		if strings.TrimSpace(candidate.FlyVolumeID) == "" {
+			continue
+		}
+		reason = "main_worker_region_mismatch"
+		if strings.TrimSpace(candidate.Region) != region {
+			continue
+		}
+		return &candidate, "", nil
+	}
+	return nil, reason, nil
+}
+
+func (m *Manager) recordWorkerVolumeForked(worker, sourceWorker model.Worker, volumeID string) {
+	if m.db == nil {
+		return
+	}
+	details := workerVolumeEventDetails("fork", "", volumeID, &sourceWorker)
+	_ = m.db.RecordEvent(worker.ID, "worker_volume_forked", fmt.Sprintf("Forked volume for worker %s from main worker %s", worker.Name, sourceWorker.Name), details)
+}
+
+func (m *Manager) recordWorkerVolumeFresh(worker model.Worker, reason string, sourceWorker *model.Worker, volumeID string) {
+	if m.db == nil {
+		return
+	}
+	details := workerVolumeEventDetails("fresh", reason, volumeID, sourceWorker)
+	_ = m.db.RecordEvent(worker.ID, "worker_volume_fresh", fmt.Sprintf("Created fresh volume for worker %s", worker.Name), details)
+}
+
+func workerVolumeEventDetails(path, reason, volumeID string, sourceWorker *model.Worker) string {
+	details := map[string]string{
+		"path":      path,
+		"volume_id": volumeID,
+	}
+	if strings.TrimSpace(reason) != "" {
+		details["reason"] = reason
+	}
+	if sourceWorker != nil {
+		details["source_worker_id"] = sourceWorker.ID
+		details["source_worker_name"] = sourceWorker.Name
+		details["source_volume_id"] = sourceWorker.FlyVolumeID
+	}
+	body, err := json.Marshal(details)
+	if err != nil {
+		return ""
+	}
+	return string(body)
 }
 
 func workerReplicaPath(worker model.Worker) string {
