@@ -4,6 +4,8 @@ primary_region = "ord"
 [build]
   dockerfile = "Dockerfile.control"
 
+# SOAK_WORKER_TOKEN is required and must be set as a Fly secret, not here:
+#   fly secrets set SOAK_WORKER_TOKEN=<random secret> -a litestream-soak-ctl
 [env]
   WORKER_APP_NAME = "litestream-soak"
   DB_PATH = "/data/soakctl.db"

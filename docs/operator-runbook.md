@@ -26,6 +26,36 @@ that in GitHub Actions secrets as `SOAK_ADMIN_BEARER_TOKEN` instead of reusing
 the UI basic-auth credentials. `/api/admin/*` is reserved for bearer-authenticated
 admin automation only.
 
+Worker reporting endpoints (`POST /api/workers/{id}/heartbeat`,
+`/verifications`, and `/events`) require a third shared secret,
+`SOAK_WORKER_TOKEN`, sent as `Authorization: Bearer <token>`. The control
+plane refuses to start if it is unset, and rejects worker reports with `401`
+if the token does not match. Set it once on the control plane app:
+
+```bash
+fly secrets set SOAK_WORKER_TOKEN=<random secret> -a litestream-soak-ctl
+```
+
+The orchestrator injects the token into every worker machine's environment
+automatically, so workers need no manual configuration. The env is fixed at
+machine creation, so rotating the token requires recreating worker machines
+(for example via a fleet rollout) — restarting an existing machine keeps the
+old value and its reports will be rejected with `401`.
+
+The token is fleet-wide: it authenticates that a report comes from *a* worker,
+not from a specific one, and it is stored in plaintext in each worker
+machine's config (like the replica credentials), so treat read access to the
+worker app as equivalent to holding the token.
+
+First rollout ordering matters: worker machines created before this control
+plane version have no token in their env, and there is no grace mode.
+
+1. `fly secrets set SOAK_WORKER_TOKEN=<random secret> -a litestream-soak-ctl`
+   (the control plane refuses to start without it)
+2. Deploy the control plane
+3. Recreate/roll all worker machines immediately — until then the existing
+   fleet's heartbeats, verifications, and events are rejected with `401`
+
 Grafana:
 
 - import `grafana/soak-overview-dashboard.json`

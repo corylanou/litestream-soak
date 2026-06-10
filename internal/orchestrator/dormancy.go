@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -72,6 +73,9 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 		"S3_ENDPOINT":         m.replica.Endpoint,
 		"AWS_ENDPOINT_URL_S3": m.replica.Endpoint,
 		"CONTROL_BASE_URL":    m.controlBaseURL,
+	}
+	if token := strings.TrimSpace(os.Getenv("SOAK_WORKER_TOKEN")); token != "" {
+		env["SOAK_WORKER_TOKEN"] = token
 	}
 	if m.replica.AccessKey != "" {
 		env["AWS_ACCESS_KEY_ID"] = m.replica.AccessKey

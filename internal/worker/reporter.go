@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ type Reporter struct {
 	baseURL  string
 	client   *http.Client
 	identity reporting.WorkerIdentity
+	token    string
 }
 
 func NewReporter(cfg Config) *Reporter {
@@ -26,9 +29,15 @@ func NewReporter(cfg Config) *Reporter {
 		return nil
 	}
 
+	token := strings.TrimSpace(os.Getenv("SOAK_WORKER_TOKEN"))
+	if token == "" {
+		slog.Warn("SOAK_WORKER_TOKEN is not set; the control plane will reject reports")
+	}
+
 	profileConfig := cfg.WorkloadConfig().JSON()
 	return &Reporter{
 		baseURL: baseURL,
+		token:   token,
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -101,6 +110,9 @@ func (r *Reporter) postJSON(ctx context.Context, path string, payload any) error
 		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if r.token != "" {
+		req.Header.Set("Authorization", "Bearer "+r.token)
+	}
 
 	resp, err := r.client.Do(req)
 	if err != nil {
