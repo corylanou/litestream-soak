@@ -347,17 +347,6 @@ func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, 
 	unlockSource := m.lockSource(source)
 	defer unlockSource()
 
-	if latest, err := m.db.GetLatestDeployment(source); err == nil && latest != nil {
-		if strings.TrimSpace(latest.GitSHA) != strings.TrimSpace(newSHA) ||
-			strings.TrimSpace(latest.LitestreamSHA) != strings.TrimSpace(newLitestreamSHA) {
-			slog.Info("Rolling update superseded by newer ready deployment, skipping",
-				"source", source,
-				"requested_sha", newSHA, "requested_litestream_sha", newLitestreamSHA,
-				"latest_sha", latest.GitSHA, "latest_litestream_sha", latest.LitestreamSHA)
-			return nil
-		}
-	}
-
 	workers, err := m.db.ListWorkersForSource(source)
 	if err != nil {
 		return fmt.Errorf("list %s workers: %w", source, err)
