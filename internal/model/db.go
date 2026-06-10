@@ -171,11 +171,8 @@ func normalizeLegacyExpiry(db *sql.DB) error {
 		if err := rows.Scan(&id, &raw); err != nil {
 			return err
 		}
-		if i := strings.Index(raw, "m="); i > 0 {
-			raw = strings.TrimSpace(raw[:i])
-		}
-		at, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", raw)
-		if err != nil {
+		at, ok := parseLegacyTimestamp(raw)
+		if !ok {
 			continue
 		}
 		rewrites = append(rewrites, rewrite{id: id, at: at.UTC()})
@@ -190,6 +187,21 @@ func normalizeLegacyExpiry(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func parseLegacyTimestamp(raw string) (time.Time, bool) {
+	if i := strings.Index(raw, "m="); i > 0 {
+		raw = strings.TrimSpace(raw[:i])
+	}
+	if at, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", raw); err == nil {
+		return at, true
+	}
+	if i := strings.LastIndexByte(raw, ' '); i > 0 {
+		if at, err := time.Parse("2006-01-02 15:04:05.999999999 -0700", raw[:i]); err == nil {
+			return at, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func ensureWorkerColumns(db *sql.DB) error {

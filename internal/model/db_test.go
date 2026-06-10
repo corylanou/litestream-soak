@@ -909,10 +909,14 @@ func TestOpenNormalizesLegacyNonUTCExpiresAt(t *testing.T) {
 	futureWorker := newWorker("worker-legacy-neg-future")
 	pastWorker := newWorker("worker-legacy-pos-past")
 	monotonicWorker := newWorker("worker-legacy-neg-future-monotonic")
+	namedOffsetWorker := newWorker("worker-legacy-named-offset-future")
+	emptyZoneWorker := newWorker("worker-legacy-empty-zone-future")
 	for id, raw := range map[string]string{
-		futureWorker.ID:    futureInstant.In(negZone).Format(legacyLayout),
-		pastWorker.ID:      pastInstant.In(posZone).Format(legacyLayout),
-		monotonicWorker.ID: futureInstant.In(negZone).Format(legacyLayout) + " m=+123.456789001",
+		futureWorker.ID:      futureInstant.In(negZone).Format(legacyLayout),
+		pastWorker.ID:        pastInstant.In(posZone).Format(legacyLayout),
+		monotonicWorker.ID:   futureInstant.In(negZone).Format(legacyLayout) + " m=+123.456789001",
+		namedOffsetWorker.ID: futureInstant.In(time.FixedZone("UTC-5", -5*3600)).String(),
+		emptyZoneWorker.ID:   futureInstant.In(time.FixedZone("", -5*3600)).String(),
 	} {
 		w := newWorker(id)
 		if err := db.CreateWorker(w); err != nil {
@@ -944,6 +948,12 @@ func TestOpenNormalizesLegacyNonUTCExpiresAt(t *testing.T) {
 		if w.ID == monotonicWorker.ID {
 			t.Fatalf("legacy future expiry with monotonic suffix wrongly in ListExpiredWorkers()")
 		}
+		if w.ID == namedOffsetWorker.ID {
+			t.Fatalf("legacy future expiry with offset-named zone wrongly in ListExpiredWorkers()")
+		}
+		if w.ID == emptyZoneWorker.ID {
+			t.Fatalf("legacy future expiry with empty zone name wrongly in ListExpiredWorkers()")
+		}
 		if w.ID == pastWorker.ID {
 			foundPast = true
 		}
@@ -953,9 +963,11 @@ func TestOpenNormalizesLegacyNonUTCExpiresAt(t *testing.T) {
 	}
 
 	for id, want := range map[string]time.Time{
-		futureWorker.ID:    futureInstant,
-		pastWorker.ID:      pastInstant,
-		monotonicWorker.ID: futureInstant,
+		futureWorker.ID:      futureInstant,
+		pastWorker.ID:        pastInstant,
+		monotonicWorker.ID:   futureInstant,
+		namedOffsetWorker.ID: futureInstant,
+		emptyZoneWorker.ID:   futureInstant,
 	} {
 		var raw string
 		if err := db.db.QueryRow("SELECT expires_at FROM workers WHERE id = ?", id).Scan(&raw); err != nil {
