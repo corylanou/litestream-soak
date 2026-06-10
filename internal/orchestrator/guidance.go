@@ -776,22 +776,13 @@ func buildPromptEventSummaries(events []model.Event) []promptEventSummary {
 				summary.VerificationSteps = payload.Steps
 				summary.FailureDebugCaptured = payload.FailureDebug != nil
 
-				verification := model.Verification{
-					WorkerID:     payload.WorkerID,
-					StartedAt:    payload.StartedAt,
-					Status:       payload.Status,
-					CheckType:    payload.CheckType,
-					Passed:       payload.Passed,
-					DurationMS:   payload.DurationMS,
-					ErrorMessage: payload.ErrorMessage,
-				}
-				summary.FailureStage = inferFailureStage(&verification)
-				summary.FailureSignature = inferFailureSignature(&verification)
+				failure := classifyFailureMessage(payload.CheckType, payload.ErrorMessage)
+				summary.FailureStage = failure.Stage
+				summary.FailureSignature = failure.Signature
 				if payload.FailureClassification != nil {
 					summary.FailureClassification = payload.FailureClassification
 				} else {
-					classification := reporting.ClassifyVerificationFailure(verification.CheckType, verification.ErrorMessage)
-					summary.FailureClassification = &classification
+					summary.FailureClassification = failure.Classification
 				}
 			}
 		} else if event.EventType == "worker_failed" {

@@ -247,7 +247,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 func (a *API) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 	workers, err := a.db.ListWorkersFiltered(r.URL.Query().Get("status"), strings.TrimSpace(r.URL.Query().Get("source")))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to list workers")
 		return
 	}
 	writeAPIJSON(w, workers)
@@ -256,7 +256,7 @@ func (a *API) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleListWorkerSummaries(w http.ResponseWriter, r *http.Request) {
 	summaries, err := a.listWorkerSummaries(r.URL.Query().Get("status"), strings.TrimSpace(r.URL.Query().Get("source")))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to list worker summaries")
 		return
 	}
 
@@ -266,7 +266,7 @@ func (a *API) handleListWorkerSummaries(w http.ResponseWriter, r *http.Request) 
 func (a *API) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 	deployments, err := a.db.ListDeployments(strings.TrimSpace(r.URL.Query().Get("source")), readLimit(r, 10))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to list deployments")
 		return
 	}
 
@@ -274,7 +274,7 @@ func (a *API) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 	for _, deployment := range deployments {
 		rollout, err := a.buildDeploymentRollout(deployment)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			respondError(w, r, http.StatusInternalServerError, err, "failed to build deployment rollout")
 			return
 		}
 		rollouts = append(rollouts, rollout)
@@ -286,17 +286,17 @@ func (a *API) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleGetLatestDeployment(w http.ResponseWriter, r *http.Request) {
 	deployment, err := a.db.GetLatestDeployment(strings.TrimSpace(r.URL.Query().Get("source")))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to load latest deployment")
 		return
 	}
 	if deployment == nil {
-		http.Error(w, "deployment not found", http.StatusNotFound)
+		respondError(w, r, http.StatusNotFound, nil, "deployment not found")
 		return
 	}
 
 	rollout, err := a.buildDeploymentRollout(*deployment)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to build deployment rollout")
 		return
 	}
 
@@ -306,17 +306,17 @@ func (a *API) handleGetLatestDeployment(w http.ResponseWriter, r *http.Request) 
 func (a *API) handleGetLatestDeploymentPrompt(w http.ResponseWriter, r *http.Request) {
 	deployment, err := a.db.GetLatestDeployment(strings.TrimSpace(r.URL.Query().Get("source")))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to load latest deployment")
 		return
 	}
 	if deployment == nil {
-		http.Error(w, "deployment not found", http.StatusNotFound)
+		respondError(w, r, http.StatusNotFound, nil, "deployment not found")
 		return
 	}
 
 	rollout, err := a.buildDeploymentRollout(*deployment)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to build deployment rollout")
 		return
 	}
 	mode := parsePromptMode(r.URL.Query().Get("mode"), defaultPromptModeForRollout(rollout))
@@ -332,11 +332,11 @@ func (a *API) handleGetLatestDeploymentComparison(w http.ResponseWriter, r *http
 		strings.TrimSpace(r.URL.Query().Get("head_source")),
 	)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to build deployment comparison")
 		return
 	}
 	if comparison == nil {
-		http.Error(w, "deployment not found", http.StatusNotFound)
+		respondError(w, r, http.StatusNotFound, nil, "deployment not found")
 		return
 	}
 
@@ -350,11 +350,11 @@ func (a *API) handleGetLatestDeploymentComparisonPrompt(w http.ResponseWriter, r
 		strings.TrimSpace(r.URL.Query().Get("head_source")),
 	)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to build deployment comparison")
 		return
 	}
 	if comparison == nil {
-		http.Error(w, "deployment not found", http.StatusNotFound)
+		respondError(w, r, http.StatusNotFound, nil, "deployment not found")
 		return
 	}
 
@@ -367,13 +367,13 @@ func (a *API) handleGetLatestDeploymentComparisonPrompt(w http.ResponseWriter, r
 func (a *API) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
 	deployment, err := a.db.GetDeploymentBySHA(strings.TrimSpace(r.PathValue("sha")))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		respondError(w, r, http.StatusNotFound, err, "deployment not found")
 		return
 	}
 
 	rollout, err := a.buildDeploymentRollout(*deployment)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to build deployment rollout")
 		return
 	}
 
@@ -387,7 +387,7 @@ func (a *API) handleListRunArchives(w http.ResponseWriter, r *http.Request) {
 		readLimit(r, 20),
 	)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to list run archives")
 		return
 	}
 	writeAPIJSON(w, archives)
@@ -396,13 +396,13 @@ func (a *API) handleListRunArchives(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleGetRunArchive(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(strings.TrimSpace(r.PathValue("id")))
 	if err != nil || id <= 0 {
-		http.Error(w, "invalid archive id", http.StatusBadRequest)
+		respondError(w, r, http.StatusBadRequest, nil, "invalid archive id")
 		return
 	}
 
 	archive, err := a.db.GetRunArchive(id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		respondError(w, r, http.StatusNotFound, err, "run archive not found")
 		return
 	}
 	writeAPIJSON(w, archive)
@@ -411,13 +411,13 @@ func (a *API) handleGetRunArchive(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleGetRunArchivePrompt(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(strings.TrimSpace(r.PathValue("id")))
 	if err != nil || id <= 0 {
-		http.Error(w, "invalid archive id", http.StatusBadRequest)
+		respondError(w, r, http.StatusBadRequest, nil, "invalid archive id")
 		return
 	}
 
 	archive, err := a.db.GetRunArchive(id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		respondError(w, r, http.StatusNotFound, err, "run archive not found")
 		return
 	}
 	mode := parsePromptMode(r.URL.Query().Get("mode"), defaultPromptModeForArchive(*archive))
@@ -693,9 +693,10 @@ func buildDeploymentScorecard(db *model.DB, deployment model.Deployment, windowE
 			scorecard.PassedWorkers++
 		} else {
 			scorecard.FailedWorkers++
-			outcome.FailureStage = inferFailureStage(verification)
-			outcome.FailureSignature = inferFailureSignature(verification)
-			outcome.ProbableSubsystem = inferProbableSubsystem(outcome.FailureStage, outcome.FailureSignature)
+			vf := classifyVerification(verification)
+			outcome.FailureStage = vf.Stage
+			outcome.FailureSignature = vf.Signature
+			outcome.ProbableSubsystem = vf.probableSubsystem()
 			failure := failureCounts[outcome.FailureSignature]
 			failure.Signature = outcome.FailureSignature
 			failure.Stage = outcome.FailureStage
@@ -757,8 +758,9 @@ func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (Deployme
 				progress.LastVerificationAt = &observedAt
 				progress.VerifiedSinceDeploy = progress.Updated && workerNeedsPostDeployVerification(worker.Status) && !deployment.StartedAt.IsZero() && !observedAt.Before(deployment.StartedAt)
 				if activeFailure(&verifications[0]) {
-					progress.CurrentFailureStage = inferFailureStage(&verifications[0])
-					progress.CurrentFailureSignature = inferFailureSignature(&verifications[0])
+					vf := classifyVerification(&verifications[0])
+					progress.CurrentFailureStage = vf.Stage
+					progress.CurrentFailureSignature = vf.Signature
 				}
 			}
 		}
@@ -846,7 +848,7 @@ func (a *API) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		events, err = a.db.ListEvents(limit)
 	}
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to list events")
 		return
 	}
 	if !readBoolQuery(r, "raw") {
@@ -858,17 +860,18 @@ func (a *API) handleListEvents(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleListFailures(w http.ResponseWriter, r *http.Request) {
 	verifications, err := a.db.ListRecentFailedVerifications(readLimit(r, 20))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to list failures")
 		return
 	}
 
 	failures := make([]FailureResponse, 0, len(verifications))
 	for _, verification := range verifications {
+		vf := classifyVerification(&verification)
 		failure := FailureResponse{
 			Verification:      verification,
-			FailureStage:      inferFailureStage(&verification),
-			FailureSignature:  inferFailureSignature(&verification),
-			ProbableSubsystem: inferProbableSubsystem(inferFailureStage(&verification), inferFailureSignature(&verification)),
+			FailureStage:      vf.Stage,
+			FailureSignature:  vf.Signature,
+			ProbableSubsystem: vf.probableSubsystem(),
 		}
 		worker, err := a.db.GetWorker(verification.WorkerID)
 		if err == nil {
@@ -884,7 +887,7 @@ func (a *API) handleListFailures(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 	alerts, err := a.db.ListAlerts(readLimit(r, 20))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to list alerts")
 		return
 	}
 
@@ -915,7 +918,7 @@ func (a *API) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 	response, status, err := a.workerDetail(r.PathValue("id"))
 	if err != nil {
-		http.Error(w, err.Error(), status)
+		respondError(w, r, status, err, "")
 		return
 	}
 	writeAPIJSON(w, response)
@@ -938,11 +941,11 @@ func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, er
 		if observedAt, ok := verificationObservedAt(verification); ok && !observedAt.Before(worker.CreatedAt.UTC()) {
 			summary.LastVerification = &verification
 			if activeFailure(&verification) {
-				summary.CurrentFailureStage = inferFailureStage(&verification)
-				summary.CurrentFailureSignature = inferFailureSignature(&verification)
-				classification := reporting.ClassifyVerificationFailure(verification.CheckType, verification.ErrorMessage)
-				summary.CurrentFailureClassification = &classification
-				summary.CurrentProbableSubsystem = inferProbableSubsystem(summary.CurrentFailureStage, summary.CurrentFailureSignature)
+				vf := classifyVerification(&verification)
+				summary.CurrentFailureStage = vf.Stage
+				summary.CurrentFailureSignature = vf.Signature
+				summary.CurrentFailureClassification = vf.Classification
+				summary.CurrentProbableSubsystem = vf.probableSubsystem()
 			}
 		}
 	}
@@ -952,12 +955,12 @@ func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, er
 		return summary, err
 	}
 	if latestFailure != nil {
+		vf := classifyVerification(latestFailure)
 		summary.LatestFailure = latestFailure
-		summary.LatestFailureStage = inferFailureStage(latestFailure)
-		summary.LatestFailureSignature = inferFailureSignature(latestFailure)
-		classification := reporting.ClassifyVerificationFailure(latestFailure.CheckType, latestFailure.ErrorMessage)
-		summary.LatestFailureClassification = &classification
-		summary.LatestProbableSubsystem = inferProbableSubsystem(summary.LatestFailureStage, summary.LatestFailureSignature)
+		summary.LatestFailureStage = vf.Stage
+		summary.LatestFailureSignature = vf.Signature
+		summary.LatestFailureClassification = vf.Classification
+		summary.LatestProbableSubsystem = vf.probableSubsystem()
 		recovery := failureRecovery(verifications, *latestFailure)
 		summary.Recovery = &recovery
 	}
@@ -975,7 +978,7 @@ func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, er
 func (a *API) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 	bundle, status, err := a.buildIncidentBundle(r.PathValue("id"))
 	if err != nil {
-		http.Error(w, err.Error(), status)
+		respondError(w, r, status, err, "")
 		return
 	}
 	writeAPIJSON(w, bundle)
@@ -984,7 +987,7 @@ func (a *API) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleGetPrompt(w http.ResponseWriter, r *http.Request) {
 	bundle, status, err := a.buildIncidentBundle(r.PathValue("id"))
 	if err != nil {
-		http.Error(w, err.Error(), status)
+		respondError(w, r, status, err, "")
 		return
 	}
 	mode := parsePromptMode(r.URL.Query().Get("mode"), bundle.Guide.RecommendedPromptMode)
@@ -1017,19 +1020,19 @@ func defaultPromptModeForArchive(archive model.RunArchive) string {
 func (a *API) handleGetWorkerDebugSnapshot(w http.ResponseWriter, r *http.Request) {
 	workerID := r.PathValue("id")
 	if _, err := a.db.GetWorker(workerID); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		respondError(w, r, http.StatusNotFound, err, "worker not found")
 		return
 	}
 
 	events, err := a.db.ListWorkerEvents(workerID, 40)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to list worker events")
 		return
 	}
 
 	snapshot := latestFailureDebugSnapshot(events)
 	if snapshot == nil {
-		http.Error(w, "no failure debug snapshot recorded for worker", http.StatusNotFound)
+		respondError(w, r, http.StatusNotFound, nil, "no failure debug snapshot recorded for worker")
 		return
 	}
 	writeAPIJSON(w, snapshot)
@@ -1038,7 +1041,7 @@ func (a *API) handleGetWorkerDebugSnapshot(w http.ResponseWriter, r *http.Reques
 func (a *API) handleGetDiagnosis(w http.ResponseWriter, r *http.Request) {
 	summaries, err := a.listWorkerSummaries(r.URL.Query().Get("status"), strings.TrimSpace(r.URL.Query().Get("source")))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to list worker summaries")
 		return
 	}
 
@@ -1060,17 +1063,17 @@ type deploymentReadyRequest struct {
 
 func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 	if a.deployer == nil {
-		http.Error(w, "deployer unavailable", http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, nil, "deployer unavailable")
 		return
 	}
 
 	request, err := readDeploymentReadyRequest(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		respondError(w, r, http.StatusBadRequest, err, "invalid payload")
 		return
 	}
 	if strings.TrimSpace(request.SHA) == "" {
-		http.Error(w, "sha is required", http.StatusBadRequest)
+		respondError(w, r, http.StatusBadRequest, nil, "sha is required")
 		return
 	}
 
@@ -1110,33 +1113,33 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleRollWorker(w http.ResponseWriter, r *http.Request) {
 	if a.manager == nil {
-		http.Error(w, "roll manager unavailable", http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, nil, "roll manager unavailable")
 		return
 	}
 
 	workerID := strings.TrimSpace(r.PathValue("id"))
 	if workerID == "" {
-		http.Error(w, "worker id is required", http.StatusBadRequest)
+		respondError(w, r, http.StatusBadRequest, nil, "worker id is required")
 		return
 	}
 
 	request, err := readDeploymentReadyRequest(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		respondError(w, r, http.StatusBadRequest, err, "invalid payload")
 		return
 	}
 	if strings.TrimSpace(request.SHA) == "" {
-		http.Error(w, "sha is required", http.StatusBadRequest)
+		respondError(w, r, http.StatusBadRequest, nil, "sha is required")
 		return
 	}
 	if strings.TrimSpace(request.LitestreamSHA) == "" {
-		http.Error(w, "litestream_sha is required", http.StatusBadRequest)
+		respondError(w, r, http.StatusBadRequest, nil, "litestream_sha is required")
 		return
 	}
 
 	worker, err := a.db.GetWorker(workerID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		respondError(w, r, http.StatusNotFound, err, "worker not found")
 		return
 	}
 	source := strings.TrimSpace(request.Source)
@@ -1147,7 +1150,7 @@ func (a *API) handleRollWorker(w http.ResponseWriter, r *http.Request) {
 		source = "main"
 	}
 	if worker.Source != "" && source != worker.Source {
-		http.Error(w, fmt.Sprintf("worker %s belongs to source %s, not %s", workerID, worker.Source, source), http.StatusBadRequest)
+		respondError(w, r, http.StatusBadRequest, nil, fmt.Sprintf("worker %s belongs to source %s, not %s", workerID, worker.Source, source))
 		return
 	}
 
@@ -1159,7 +1162,7 @@ func (a *API) handleRollWorker(w http.ResponseWriter, r *http.Request) {
 	if imageRef == "" {
 		imageRef, err = a.manager.currentWorkerImage(r.Context())
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			respondError(w, r, http.StatusInternalServerError, err, "failed to resolve worker image")
 			return
 		}
 	}
@@ -1172,7 +1175,7 @@ func (a *API) handleRollWorker(w http.ResponseWriter, r *http.Request) {
 		PRNumber:      sourcePRNumber(source),
 		Status:        "ready",
 	}); err != nil {
-		http.Error(w, fmt.Sprintf("record ready deployment: %v", err), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to record ready deployment")
 		return
 	}
 
@@ -1205,7 +1208,7 @@ func (a *API) handleRollWorker(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleResumeDormantWorkers(w http.ResponseWriter, r *http.Request) {
 	if a.manager == nil {
-		http.Error(w, "resume manager unavailable", http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, nil, "resume manager unavailable")
 		return
 	}
 
@@ -1218,7 +1221,7 @@ func (a *API) handleResumeDormantWorkers(w http.ResponseWriter, r *http.Request)
 		var err error
 		imageRef, err = a.manager.currentWorkerImage(r.Context())
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			respondError(w, r, http.StatusInternalServerError, err, "failed to resolve worker image")
 			return
 		}
 	}
@@ -1231,12 +1234,12 @@ func (a *API) handleResumeDormantWorkers(w http.ResponseWriter, r *http.Request)
 
 	dormantWorkers, err := a.db.ListDormantWorkers(source)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to list dormant workers")
 		return
 	}
 
 	if err := a.manager.ResumeDormantWorkers(r.Context(), source, imageRef, sha, litestreamSHA, trigger); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to resume dormant workers")
 		return
 	}
 
@@ -1260,7 +1263,7 @@ func (a *API) handleResumeDormantWorkers(w http.ResponseWriter, r *http.Request)
 
 func (a *API) handlePauseSourceWorkers(w http.ResponseWriter, r *http.Request) {
 	if a.manager == nil {
-		http.Error(w, "pause manager unavailable", http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, nil, "pause manager unavailable")
 		return
 	}
 
@@ -1283,7 +1286,7 @@ func (a *API) handlePauseSourceWorkers(w http.ResponseWriter, r *http.Request) {
 
 	pausedWorkerIDs, err := a.manager.PauseSourceWorkers(r.Context(), source, reason, signature, trigger)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to pause workers")
 		return
 	}
 
@@ -1360,7 +1363,7 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	workerID := r.PathValue("id")
 	var payload reporting.HeartbeatPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "invalid payload", http.StatusBadRequest)
+		respondError(w, r, http.StatusBadRequest, nil, "invalid payload")
 		return
 	}
 	payload.WorkerID = workerID
@@ -1370,11 +1373,11 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	payload.RuntimePayload = payload.RuntimePayload.Normalize(payload.SentAt)
 
 	if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to record worker")
 		return
 	}
 	if err := a.db.UpdateWorkerRuntimeSnapshot(workerID, payload.RuntimePayload); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to record runtime snapshot")
 		return
 	}
 	if worker, err := a.db.GetWorker(workerID); err == nil {
@@ -1391,7 +1394,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	workerID := r.PathValue("id")
 	var payload reporting.VerificationPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "invalid payload", http.StatusBadRequest)
+		respondError(w, r, http.StatusBadRequest, nil, "invalid payload")
 		return
 	}
 	payload.WorkerID = workerID
@@ -1403,9 +1406,12 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		observedAt = time.Now().UTC()
 	}
 	payload.RuntimePayload = payload.RuntimePayload.Normalize(observedAt)
-	if !payload.Passed && payload.FailureClassification == nil {
-		classification := reporting.ClassifyVerificationFailure(payload.CheckType, payload.ErrorMessage)
-		payload.FailureClassification = &classification
+	var vf verificationFailure
+	if !payload.Passed {
+		vf = classifyFailureMessage(payload.CheckType, payload.ErrorMessage)
+		if payload.FailureClassification == nil {
+			payload.FailureClassification = vf.Classification
+		}
 	}
 	if payload.FailureDebug != nil && payload.FailureDebug.FailureClassification == nil && payload.FailureClassification != nil {
 		classification := *payload.FailureClassification
@@ -1413,11 +1419,11 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to record worker")
 		return
 	}
 	if err := a.db.UpdateWorkerRuntimeSnapshot(workerID, payload.RuntimePayload); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to record runtime snapshot")
 		return
 	}
 
@@ -1438,17 +1444,17 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := a.db.RecordVerification(verification); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to record verification")
 		return
 	}
 	if err := a.db.UpdateWorkerVerificationState(workerID, payload.Passed, payload.Summary); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to update worker state")
 		return
 	}
 
 	details, err := json.Marshal(payload)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to encode event details")
 		return
 	}
 
@@ -1465,7 +1471,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := a.db.RecordEvent(workerID, eventType, message, string(details)); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to record event")
 		return
 	}
 	if !payload.Passed && workerBeforeUpdate != nil && workerBeforeUpdate.Status != model.WorkerDegraded && workerBeforeUpdate.Status != model.WorkerDormant {
@@ -1476,10 +1482,10 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		if payload.Passed {
 			_ = a.db.RecordEvent(workerID, "worker_probe_passed", "Worker probe verification passed", "")
 		} else if a.manager != nil {
-			signature := inferFailureSignature(verification)
+			signature := vf.Signature
 			reason := fmt.Sprintf("worker probe failed with %s; returning to dormant state", signature)
 			if err := a.manager.DormantWorker(r.Context(), workerID, reason, signature, "probe_failed"); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				respondError(w, r, http.StatusInternalServerError, err, "failed to update worker state")
 				return
 			}
 			_ = a.db.RecordEvent(workerID, "worker_probe_failed", reason, string(details))
@@ -1505,7 +1511,7 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 	workerID := r.PathValue("id")
 	var payload reporting.WorkerEventPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "invalid payload", http.StatusBadRequest)
+		respondError(w, r, http.StatusBadRequest, nil, "invalid payload")
 		return
 	}
 	payload.WorkerID = workerID
@@ -1513,7 +1519,7 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 		payload.Name = workerID
 	}
 	if strings.TrimSpace(payload.EventType) == "" {
-		http.Error(w, "event_type is required", http.StatusBadRequest)
+		respondError(w, r, http.StatusBadRequest, nil, "event_type is required")
 		return
 	}
 	observedAt := payload.SentAt
@@ -1523,17 +1529,17 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 	payload.RuntimePayload = payload.RuntimePayload.Normalize(observedAt)
 
 	if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to record worker")
 		return
 	}
 	if err := a.db.UpdateWorkerRuntimeSnapshot(workerID, payload.RuntimePayload); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to record runtime snapshot")
 		return
 	}
 
 	details, err := json.Marshal(payload)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to encode event details")
 		return
 	}
 	message := payload.Message
@@ -1541,7 +1547,7 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 		message = payload.EventType
 	}
 	if err := a.db.RecordEvent(workerID, payload.EventType, message, string(details)); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		respondError(w, r, http.StatusInternalServerError, err, "failed to record event")
 		return
 	}
 
@@ -1590,12 +1596,12 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 			continue
 		}
 		verificationCopy := verification
+		vf := classifyVerification(&verificationCopy)
 		response.LatestFailure = &verificationCopy
-		response.FailureStage = inferFailureStage(&verificationCopy)
-		response.FailureSignature = inferFailureSignature(&verificationCopy)
-		classification := reporting.ClassifyVerificationFailure(verificationCopy.CheckType, verificationCopy.ErrorMessage)
-		response.FailureClassification = &classification
-		response.ProbableSubsystem = inferProbableSubsystem(response.FailureStage, response.FailureSignature)
+		response.FailureStage = vf.Stage
+		response.FailureSignature = vf.Signature
+		response.FailureClassification = vf.Classification
+		response.ProbableSubsystem = vf.probableSubsystem()
 		break
 	}
 
@@ -1642,7 +1648,8 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 	}
 
 	diagnosis := buildDiagnosisSnapshot(summaries)
-	probableSubsystem := inferProbableSubsystem(inferFailureStage(latestFailure), inferFailureSignature(latestFailure))
+	failure := classifyVerification(latestFailure)
+	probableSubsystem := failure.probableSubsystem()
 	reportedRuntime := extractReportedRuntime(detail.Worker, detail.RecentEvents)
 	failureDebug := latestFailureDebugSnapshot(detail.RecentEvents)
 
@@ -1654,15 +1661,15 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 		LatestPlatformEvent:   detail.LatestPlatformEvent,
 		ActiveVerification:    detail.ActiveVerification,
 		ActiveFailure:         activeFailureDetected,
-		FailureStage:          inferFailureStage(latestFailure),
-		FailureSignature:      inferFailureSignature(latestFailure),
-		FailureClassification: failureClassification(latestFailure),
+		FailureStage:          failure.Stage,
+		FailureSignature:      failure.Signature,
+		FailureClassification: failure.Classification,
 		ProbableSubsystem:     probableSubsystem,
 		RuntimeSnapshotStatus: reporting.SnapshotStatus(reportedRuntime),
 		ReportedRuntime:       reportedRuntime,
 		FailureDebug:          failureDebug,
 		Diagnosis:             diagnosis,
-		RelatedClusters:       relatedDiagnosisClusters(diagnosis, detail.Worker.ID, inferFailureSignature(latestFailure), probableSubsystem),
+		RelatedClusters:       relatedDiagnosisClusters(diagnosis, detail.Worker.ID, failure.Signature, probableSubsystem),
 		RecentVerifications:   detail.RecentVerifications,
 		RecentEvents:          detail.RecentEvents,
 		Machine:               detail.Machine,
@@ -1777,26 +1784,40 @@ func mustJSON(v any) string {
 	return string(body)
 }
 
-func inferFailureStage(verification *model.Verification) string {
+// verificationFailure holds the result of classifying a verification failure.
+// Classification is computed once per verification so rules change in one place.
+type verificationFailure struct {
+	Stage          string
+	Signature      string
+	Classification *reporting.FailureClassification
+}
+
+func classifyVerification(verification *model.Verification) verificationFailure {
 	if verification == nil {
-		return ""
+		return verificationFailure{}
 	}
-	return reporting.ClassifyVerificationFailure(verification.CheckType, verification.ErrorMessage).Stage
+	return classifyFailureMessage(verification.CheckType, verification.ErrorMessage)
+}
+
+func classifyFailureMessage(checkType, errorMessage string) verificationFailure {
+	classification := reporting.ClassifyVerificationFailure(checkType, errorMessage)
+	return verificationFailure{
+		Stage:          classification.Stage,
+		Signature:      classification.Signature,
+		Classification: &classification,
+	}
+}
+
+func (f verificationFailure) probableSubsystem() string {
+	return inferProbableSubsystem(f.Stage, f.Signature)
+}
+
+func inferFailureStage(verification *model.Verification) string {
+	return classifyVerification(verification).Stage
 }
 
 func inferFailureSignature(verification *model.Verification) string {
-	if verification == nil {
-		return ""
-	}
-	return reporting.ClassifyVerificationFailure(verification.CheckType, verification.ErrorMessage).Signature
-}
-
-func failureClassification(verification *model.Verification) *reporting.FailureClassification {
-	if verification == nil {
-		return nil
-	}
-	classification := reporting.ClassifyVerificationFailure(verification.CheckType, verification.ErrorMessage)
-	return &classification
+	return classifyVerification(verification).Signature
 }
 
 func inferDeploymentRolloutStatus(rollout DeploymentRolloutResponse) string {
@@ -2204,6 +2225,16 @@ func readBoolQuery(r *http.Request, key string) bool {
 	default:
 		return false
 	}
+}
+
+func respondError(w http.ResponseWriter, r *http.Request, status int, err error, msg string) {
+	if msg == "" {
+		msg = http.StatusText(status)
+	}
+	if err != nil {
+		slog.Error("API request failed", "method", r.Method, "path", r.URL.Path, "status", status, "error", err)
+	}
+	http.Error(w, msg, status)
 }
 
 func writeAPIJSON(w http.ResponseWriter, v any) {

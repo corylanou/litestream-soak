@@ -100,6 +100,77 @@ func TestInferFailureSignatureRestoreS3ListRequestCanceled(t *testing.T) {
 	}
 }
 
+func TestClassifyVerification(t *testing.T) {
+	const syncCheckType = "integrity"
+	const syncErrorMessage = `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`
+
+	tests := []struct {
+		name              string
+		verification      *model.Verification
+		wantStage         string
+		wantSignature     string
+		wantClassification bool
+	}{
+		{
+			name:              "nil verification returns zero value",
+			verification:      nil,
+			wantStage:         "",
+			wantSignature:     "",
+			wantClassification: false,
+		},
+		{
+			name: "sync socket refused failure",
+			verification: &model.Verification{
+				CheckType:    syncCheckType,
+				ErrorMessage: syncErrorMessage,
+			},
+			wantStage:         "sync",
+			wantSignature:     "litestream_sync_socket_refused",
+			wantClassification: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyVerification(tt.verification)
+			if got.Stage != tt.wantStage {
+				t.Fatalf("classifyVerification().Stage=%q want %q", got.Stage, tt.wantStage)
+			}
+			if got.Signature != tt.wantSignature {
+				t.Fatalf("classifyVerification().Signature=%q want %q", got.Signature, tt.wantSignature)
+			}
+			if tt.wantClassification && got.Classification == nil {
+				t.Fatal("classifyVerification().Classification=nil want non-nil")
+			}
+			if !tt.wantClassification && got.Classification != nil {
+				t.Fatalf("classifyVerification().Classification=%v want nil", got.Classification)
+			}
+			if tt.wantClassification {
+				if got.Classification.Stage != got.Stage {
+					t.Fatalf("Classification.Stage=%q != struct Stage=%q", got.Classification.Stage, got.Stage)
+				}
+				if got.Classification.Signature != got.Signature {
+					t.Fatalf("Classification.Signature=%q != struct Signature=%q", got.Classification.Signature, got.Signature)
+				}
+			}
+		})
+	}
+
+	t.Run("classifyFailureMessage produces identical result to classifyVerification", func(t *testing.T) {
+		fromVerification := classifyVerification(&model.Verification{
+			CheckType:    syncCheckType,
+			ErrorMessage: syncErrorMessage,
+		})
+		fromMessage := classifyFailureMessage(syncCheckType, syncErrorMessage)
+		if fromMessage.Stage != fromVerification.Stage {
+			t.Fatalf("classifyFailureMessage().Stage=%q != classifyVerification().Stage=%q", fromMessage.Stage, fromVerification.Stage)
+		}
+		if fromMessage.Signature != fromVerification.Signature {
+			t.Fatalf("classifyFailureMessage().Signature=%q != classifyVerification().Signature=%q", fromMessage.Signature, fromVerification.Signature)
+		}
+	})
+}
+
 func TestBuildIncidentGuideSync(t *testing.T) {
 	bundle := &IncidentBundle{
 		Worker: model.Worker{
