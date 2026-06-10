@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -2115,4 +2116,84 @@ func TestHandlePauseSourceWorkers(t *testing.T) {
 			t.Fatalf("stopped worker Status = %q, want %q", stoppedWorker.Status, model.WorkerStopped)
 		}
 	})
+}
+
+func TestRespondError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		status     int
+		err        error
+		msg        string
+		wantBody   string
+		wantStatus int
+		wantLeak   string
+	}{
+		{
+			name:       "explicit msg with internal error does not leak error text",
+			status:     http.StatusInternalServerError,
+			err:        errors.New("secret-internal-detail"),
+			msg:        "operation failed",
+			wantBody:   "operation failed\n",
+			wantStatus: http.StatusInternalServerError,
+			wantLeak:   "secret-internal-detail",
+		},
+		{
+			name:       "empty msg falls back to status text",
+			status:     http.StatusNotFound,
+			err:        errors.New("sql: no rows"),
+			msg:        "",
+			wantBody:   http.StatusText(http.StatusNotFound) + "\n",
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "nil error with static msg does not panic",
+			status:     http.StatusBadRequest,
+			err:        nil,
+			msg:        "invalid payload",
+			wantBody:   "invalid payload\n",
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			respondError(rec, req, tc.status, tc.err, tc.msg)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			body := rec.Body.String()
+			if body != tc.wantBody {
+				t.Fatalf("body = %q, want %q", body, tc.wantBody)
+			}
+			if tc.wantLeak != "" && strings.Contains(body, tc.wantLeak) {
+				t.Fatalf("body leaks internal error text %q: %s", tc.wantLeak, body)
+			}
+		})
+	}
+}
+
+func TestHandleGetWorkerSanitizesNotFound(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workers/missing", nil)
+	req.SetPathValue("id", "missing")
+	rec := httptest.NewRecorder()
+
+	api.handleGetWorker(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	want := http.StatusText(http.StatusNotFound) + "\n"
+	if got := rec.Body.String(); got != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
 }
