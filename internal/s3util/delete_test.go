@@ -45,7 +45,9 @@ func TestDeletePrefixDeletesListedObjects(t *testing.T) {
 			}
 			var req deleteObjectsRequest
 			if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode delete request: %v", err)
+				t.Errorf("decode delete request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
 			}
 			for _, object := range req.Objects {
 				deleted = append(deleted, object.Key)
@@ -121,7 +123,9 @@ func newFakeS3Server(t *testing.T, allKeys []string) (*httptest.Server, func() [
 			}
 			var req deleteObjectsRequest
 			if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode delete request: %v", err)
+				t.Errorf("decode delete request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
 			}
 			for _, object := range req.Objects {
 				deletedKeys = append(deletedKeys, object.Key)
