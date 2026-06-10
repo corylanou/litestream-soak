@@ -275,7 +275,7 @@ func extractReportedRuntime(worker model.Worker, events []model.Event) *reportin
 			continue
 		}
 
-		runtime := payload.RuntimePayload.Normalize(event.CreatedAt.UTC())
+		runtime := payload.Normalize(event.CreatedAt.UTC())
 		return &runtime
 	}
 

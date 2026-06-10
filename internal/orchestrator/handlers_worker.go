@@ -22,7 +22,7 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if payload.Name == "" {
 		payload.Name = workerID
 	}
-	payload.RuntimePayload = payload.RuntimePayload.Normalize(payload.SentAt)
+	payload.RuntimePayload = payload.Normalize(payload.SentAt)
 
 	if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to record worker")
@@ -57,7 +57,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	if observedAt.IsZero() {
 		observedAt = time.Now().UTC()
 	}
-	payload.RuntimePayload = payload.RuntimePayload.Normalize(observedAt)
+	payload.RuntimePayload = payload.Normalize(observedAt)
 	var vf verificationFailure
 	if !payload.Passed {
 		vf = classifyFailureMessage(payload.CheckType, payload.ErrorMessage)
@@ -178,7 +178,7 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 	if observedAt.IsZero() {
 		observedAt = time.Now().UTC()
 	}
-	payload.RuntimePayload = payload.RuntimePayload.Normalize(observedAt)
+	payload.RuntimePayload = payload.Normalize(observedAt)
 
 	if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to record worker")

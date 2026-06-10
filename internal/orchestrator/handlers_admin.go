@@ -267,7 +267,7 @@ func (a *API) handlePauseSourceWorkers(w http.ResponseWriter, r *http.Request) {
 func readDeploymentReadyRequest(r *http.Request) (deploymentReadyRequest, error) {
 	var request deploymentReadyRequest
 	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			return deploymentReadyRequest{}, fmt.Errorf("decode request: %w", err)
 		}

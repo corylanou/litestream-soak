@@ -172,7 +172,7 @@ func buildIncidentGuide(bundle *IncidentBundle) incidentGuide {
 		recommendedMode = promptModeTriage
 		subsystem = "Pending verification"
 	} else if bundle.LatestFailure != nil {
-		headline = fmt.Sprintf("Worker recovered; use this as the current healthy baseline")
+		headline = "Worker recovered; use this as the current healthy baseline"
 		summary = fmt.Sprintf("This worker is running now, but its latest recorded failure happened during %s with signature %s.", valueOrUnknown(stage), valueOrUnknown(signature))
 		recommendedMode = promptModeHealthy
 		subsystem = "Healthy baseline"
@@ -758,7 +758,7 @@ func buildPromptEventSummaries(events []model.Event) []promptEventSummary {
 			if err := json.Unmarshal([]byte(event.Details), &payload); err == nil {
 				summary.RunID = payload.RunID
 				summary.ActiveVerification = payload.ActiveVerification
-				runtime := payload.RuntimePayload.Normalize(event.CreatedAt.UTC())
+				runtime := payload.Normalize(event.CreatedAt.UTC())
 				summary.RuntimeSnapshotStatus = reporting.SnapshotStatus(&runtime)
 				summary.RuntimeSnapshotError = runtime.LitestreamSnapshotError
 			}
@@ -769,7 +769,7 @@ func buildPromptEventSummaries(events []model.Event) []promptEventSummary {
 				summary.VerificationStatus = payload.Status
 				summary.Passed = boolPtr(payload.Passed)
 
-				runtime := payload.RuntimePayload.Normalize(event.CreatedAt.UTC())
+				runtime := payload.Normalize(event.CreatedAt.UTC())
 				summary.RuntimeSnapshotStatus = reporting.SnapshotStatus(&runtime)
 				summary.RuntimeSnapshotError = runtime.LitestreamSnapshotError
 				summary.RunID = payload.RunID
@@ -790,7 +790,7 @@ func buildPromptEventSummaries(events []model.Event) []promptEventSummary {
 			if err := json.Unmarshal([]byte(event.Details), &payload); err == nil {
 				summary.RunID = payload.RunID
 				summary.FailureDebugCaptured = payload.FailureDebug != nil
-				runtime := payload.RuntimePayload.Normalize(event.CreatedAt.UTC())
+				runtime := payload.Normalize(event.CreatedAt.UTC())
 				summary.RuntimeSnapshotStatus = reporting.SnapshotStatus(&runtime)
 				summary.RuntimeSnapshotError = runtime.LitestreamSnapshotError
 			}
@@ -1218,24 +1218,6 @@ func uniqueSortedStrings(values []string) []string {
 	}
 	sort.Strings(items)
 	return items
-}
-
-func topCurrentFailure(summaries []WorkerSummaryResponse, key func(WorkerSummaryResponse) string) (string, int) {
-	counts := make(map[string]int)
-	topValue := ""
-	topCount := 0
-	for _, summary := range summaries {
-		value := strings.TrimSpace(key(summary))
-		if value == "" {
-			continue
-		}
-		counts[value]++
-		if counts[value] > topCount {
-			topValue = value
-			topCount = counts[value]
-		}
-	}
-	return topValue, topCount
 }
 
 func bulletLines(values []string) string {
