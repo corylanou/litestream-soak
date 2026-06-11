@@ -15,6 +15,14 @@ func mustJSON(v any) string {
 	return string(body)
 }
 
+func jsonCompact(v any) string {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(body)
+}
+
 func firstMeaningfulLine(text string) string {
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)

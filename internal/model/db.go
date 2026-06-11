@@ -109,6 +109,7 @@ CREATE INDEX IF NOT EXISTS idx_verifications_worker ON verifications(worker_id);
 CREATE INDEX IF NOT EXISTS idx_verifications_worker_started ON verifications(worker_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_verifications_worker_failed_started ON verifications(worker_id, passed, status, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_verifications_passed_status_started ON verifications(passed, status, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_verifications_started ON verifications(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_worker ON events(worker_id);
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_events_worker_created ON events(worker_id, created_at DESC);

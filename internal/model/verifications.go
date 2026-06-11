@@ -2,7 +2,80 @@ package model
 
 import (
 	"database/sql"
+	"time"
 )
+
+type VerificationTick struct {
+	WorkerID   string    `json:"worker_id"`
+	StartedAt  time.Time `json:"started_at"`
+	Status     string    `json:"status"`
+	Passed     bool      `json:"passed"`
+	DurationMS int       `json:"duration_ms"`
+}
+
+type VerificationStat struct {
+	StartedAt  time.Time `json:"started_at"`
+	Status     string    `json:"status"`
+	Passed     bool      `json:"passed"`
+	DurationMS int       `json:"duration_ms"`
+}
+
+func (d *DB) ListVerificationTicks(perWorker int, since time.Time) (map[string][]VerificationTick, error) {
+	rows, err := d.db.Query(`
+		SELECT worker_id, started_at, status, passed, duration_ms FROM (
+			SELECT worker_id, started_at, status, passed, duration_ms,
+				ROW_NUMBER() OVER (PARTITION BY worker_id ORDER BY started_at DESC) AS rank
+			FROM verifications
+			WHERE started_at >= ?
+		) WHERE rank <= ? ORDER BY worker_id, started_at ASC`,
+		since, perWorker,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	ticks := make(map[string][]VerificationTick)
+	for rows.Next() {
+		var tick VerificationTick
+		if err := rows.Scan(&tick.WorkerID, &tick.StartedAt, &tick.Status, &tick.Passed, &tick.DurationMS); err != nil {
+			return nil, err
+		}
+		ticks[tick.WorkerID] = append(ticks[tick.WorkerID], tick)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ticks, nil
+}
+
+func (d *DB) ListVerificationStatsSince(source string, since time.Time) ([]VerificationStat, error) {
+	rows, err := d.db.Query(`
+		SELECT v.started_at, v.status, v.passed, v.duration_ms
+		FROM verifications v
+		JOIN workers w ON w.id = v.worker_id
+		WHERE w.source = ? AND v.started_at >= ?
+		ORDER BY v.started_at ASC`,
+		source, since,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	stats := make([]VerificationStat, 0)
+	for rows.Next() {
+		var stat VerificationStat
+		if err := rows.Scan(&stat.StartedAt, &stat.Status, &stat.Passed, &stat.DurationMS); err != nil {
+			return nil, err
+		}
+		stats = append(stats, stat)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return stats, nil
+}
 
 func (d *DB) RecordVerification(v *Verification) error {
 	result, err := d.db.Exec(`

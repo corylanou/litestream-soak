@@ -1,147 +1,255 @@
 {{define "home_body"}}
-    <div class="status-strip">
-      <span><span class="ss-label">Workers</span> <span class="ss-value">{{.Summary.TotalWorkers}}</span></span>
-      <span><span class="ss-label">Healthy</span> <span class="ss-value ss-good">{{.Summary.HealthyWorkers}}</span></span>
-      <span><span class="ss-label">Attention</span> <span class="ss-value{{if gt .Summary.AttentionWorkers 0}} ss-warn{{end}}">{{.Summary.AttentionWorkers}}</span></span>
-      <span><span class="ss-label">Running Checks</span> <span class="ss-value{{if gt .Summary.ActiveVerifications 0}} ss-warn{{end}}">{{.Summary.ActiveVerifications}}</span></span>
-      <span><span class="ss-label">Failures</span> <span class="ss-value{{if gt .Summary.RecentFailures 0}} ss-bad{{end}}">{{.Summary.RecentFailures}}</span></span>
-    </div>
-    <div class="freshness-strip" aria-label="Data freshness">
-      <div class="freshness-item">
-        <span class="freshness-label">Page generated</span>
-        <span class="freshness-value status-good">{{timeAgoValue .GeneratedAt}}</span>
-        <span class="freshness-time">{{formatTime .GeneratedAt}}</span>
-      </div>
-      <div class="freshness-item">
-        <span class="freshness-label">Latest heartbeat</span>
-        <span class="freshness-value {{heartbeatClass .Summary.LatestHeartbeatAt}}">{{timeAgo .Summary.LatestHeartbeatAt}}</span>
-        <span class="freshness-time">{{formatTimePtr .Summary.LatestHeartbeatAt}}</span>
-      </div>
-      <div class="freshness-item">
-        <span class="freshness-label">Stalest runtime</span>
-        <span class="freshness-value {{heartbeatClass .Summary.StalestRuntimeAt}}">{{timeAgo .Summary.StalestRuntimeAt}}</span>
-        <span class="freshness-time">{{formatTimePtr .Summary.StalestRuntimeAt}}</span>
-      </div>
-      <div class="freshness-item">
-        <span class="freshness-label">Stalest heartbeat</span>
-        <span class="freshness-value {{heartbeatClass .Summary.StalestHeartbeatAt}}">{{timeAgo .Summary.StalestHeartbeatAt}}</span>
-        <span class="freshness-time">{{formatTimePtr .Summary.StalestHeartbeatAt}}</span>
-      </div>
-      <div class="freshness-item">
-        <span class="freshness-label">Latest verification</span>
-        <span class="freshness-value status-neutral">{{timeAgo .Summary.LatestVerificationAt}}</span>
-        <span class="freshness-time">{{formatTimePtr .Summary.LatestVerificationAt}}</span>
-      </div>
+    <div class="source-tabs" aria-label="Fleet sources">
+      {{range .ActiveSources}}
+      <a class="source-tab{{if .Selected}} active{{end}}" href="{{.ViewURL}}" title="{{.Summary}}">
+        {{.Label}}
+        <span class="tab-count">{{.Total}}</span>
+        {{if gt .Attention 0}}<span class="tab-alert">{{.Attention}}!</span>{{end}}
+      </a>
+      {{end}}
+      {{template "info_start" "How to read this page, top to bottom: the banner is what needs action now, the KPI band is current state, the charts are the 24h trend, and the table is per-worker detail. Color rules: red = act now (PR regressions, new failures), amber = attention (main-fleet baseline failures, stalled rollouts), quiet green/gray = healthy. Each tab is a fleet running a different build - main is the baseline, PR tabs are candidate builds; a red count on a tab means workers there need attention."}}
     </div>
 
-    <div class="guide-grid">
-      <div class="guide-card">
-        <h2>Viewing</h2>
-        <p class="lead">This page is scoped to {{.SelectedSourceLabel}}.</p>
-        <p>{{.ScopeSummary}}</p>
-        {{if .ActiveSources}}
-        <div class="detail-list">
-          {{range .ActiveSources}}
-          <div class="detail-row">
-            <div class="detail-label">{{.Label}}</div>
-            <div class="detail-value">
-              <div class="detail-main">{{.Summary}}</div>
-              <div class="chip-row">
-                {{if .Status}}<span class="badge badge-{{if eq (deploymentClass .Status) "status-good"}}good{{else if eq (deploymentClass .Status) "status-warn"}}warn{{else if eq (deploymentClass .Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Status}}</span>{{end}}
-                {{if .Selected}}<span class="badge badge-info">viewing</span>{{else}}<a class="btn" href="{{.ViewURL}}">View</a>{{end}}
-                {{if .CompareURL}}<a class="btn" href="{{.CompareURL}}">Compare to main</a>{{end}}
-              </div>
-            </div>
-          </div>
+    {{if .Attention}}
+    <div class="attention-stack" aria-label="Needs attention">
+      {{range .Attention}}
+      <div class="attention-item att-{{.Severity}}">
+        <span class="attention-icon">{{if eq .Severity "bad"}}&#10005;{{else if eq .Severity "warn"}}!{{else}}i{{end}}</span>
+        <div class="attention-body">
+          <span class="attention-title">{{.Title}}</span>
+          <span class="attention-detail">{{.Detail}}</span>
+        </div>
+        {{if .Actions}}
+        <div class="attention-actions">
+          {{range .Actions}}
+          {{if .CopyURL}}<button type="button" class="btn btn-sm{{if eq .Kind "primary"}} btn-primary{{end}}" data-copy-url="{{.CopyURL}}">{{.Label}}</button>
+          {{else}}<a class="btn btn-sm{{if eq .Kind "primary"}} btn-primary{{else if eq .Kind "danger"}} btn-danger{{end}}" href="{{.URL}}">{{.Label}}</a>{{end}}
           {{end}}
         </div>
         {{end}}
-      </div>
-
-      {{if .HomeAction}}
-      <div class="guide-card">
-        <h2>Do This Now</h2>
-        <p class="lead">{{.HomeAction.Headline}}</p>
-        <p>{{.HomeAction.Summary}}</p>
-        <ul>
-          {{range .HomeAction.Steps}}
-          <li>{{.}}</li>
-          {{end}}
-        </ul>
-        <div class="chip-row">
-          <a class="btn btn-primary" href="{{.HomeAction.WorkerURL}}">Open {{.HomeAction.WorkerName}}</a>
-          <button type="button" class="btn" data-copy-url="{{.HomeAction.PromptURL}}">Copy AI prompt</button>
-          <a class="btn" href="{{.HomeAction.IncidentURL}}">Incident JSON</a>
-          {{if .HomeAction.CompareURL}}<a class="btn" href="{{.HomeAction.CompareURL}}">Compare to main</a>{{end}}
-        </div>
       </div>
       {{end}}
+    </div>
+    {{else}}
+    <div class="all-clear">
+      <span class="ok-mark">&#10003;</span>
+      {{if gt .Summary.ActiveVerifications 0}}
+      All clear in {{.SelectedSourceLabel}} &mdash; {{.Summary.HealthyWorkers}}/{{.Summary.TotalWorkers}} workers healthy, {{.Summary.ActiveVerifications}} check(s) running.
+      {{else}}
+      All clear in {{.SelectedSourceLabel}} &mdash; {{.Summary.HealthyWorkers}}/{{.Summary.TotalWorkers}} workers healthy and passing verification.
+      {{end}}
+      {{if .LatestRolloutPromptURL}}<a class="topbar-link" href="{{.LatestRolloutPromptURL}}">{{.LatestRolloutPromptLabel}}</a>{{end}}
+    </div>
+    {{end}}
 
-      <div class="guide-card">
-        <h2>Current Diagnosis</h2>
-        <p class="lead">{{.Diagnosis.Headline}}</p>
-        <p style="margin-top:8px;">{{.Diagnosis.Summary}}</p>
-        {{if .Diagnosis.ProbableSubsystem}}
-        <div class="diag-meta">
-          {{if .Diagnosis.Confidence}}<span class="badge badge-{{if eq (confidenceClass .Diagnosis.Confidence) "status-good"}}good{{else if eq (confidenceClass .Diagnosis.Confidence) "status-warn"}}warn{{else}}neutral{{end}}">confidence: {{.Diagnosis.Confidence}}</span>{{end}}
-          <span class="badge badge-warn">{{.Diagnosis.ProbableSubsystem}}</span>
-          {{if .Diagnosis.DominantStage}}<span class="badge badge-neutral">stage: {{.Diagnosis.DominantStage}}</span>{{end}}
-          {{if .Diagnosis.DominantSignature}}<span class="badge badge-bad">{{shorten .Diagnosis.DominantSignature 80}}</span>{{end}}
+    <div class="kpi-band" aria-label="Key metrics">
+      <div class="kpi">
+        <div class="kpi-label">Fleet health{{template "info" "Share of workers in this fleet that are healthy right now (not degraded, dormant, probing, or reporting an unhealthy runtime snapshot). If health falls while the pass rate stays flat, suspect infrastructure (machines, heartbeats) rather than data correctness."}}</div>
+        <div class="kpi-value {{if ge .KPIs.FleetHealthPct 100}}kpi-good{{else if ge .KPIs.FleetHealthPct 80}}kpi-warn{{else}}kpi-bad{{end}}">{{.KPIs.FleetHealthPct}}<span class="kpi-unit">%</span></div>
+        <div class="kpi-sub">{{.SelectedSourceLabel}}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Workers{{template "info" "Healthy workers out of the total fleet. Each worker soaks Litestream under a different workload profile, so one unhealthy worker can mean a load-shape-specific bug - open it to see which profile is affected."}}</div>
+        <div class="kpi-value">{{.KPIs.HealthyWorkers}}<span class="kpi-unit">/ {{.KPIs.TotalWorkers}} healthy</span></div>
+        <div class="kpi-sub">{{if gt .Summary.AttentionWorkers 0}}{{.Summary.AttentionWorkers}} need attention{{else}}none need attention{{end}}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Pass rate 24h{{template "info" "Share of verification checks (replicate, restore, checksum-compare) that passed in the last 24 hours, with the change versus the prior 24 hours. This is the core correctness signal for Litestream itself - a negative delta is the earliest sign a build introduced a regression."}}</div>
+        {{if .KPIs.HasPassRate}}
+        <div class="kpi-value {{if ge .KPIs.PassRatePct 99.5}}kpi-good{{else if ge .KPIs.PassRatePct 90.0}}kpi-warn{{else}}kpi-bad{{end}}">{{printf "%.1f" .KPIs.PassRatePct}}<span class="kpi-unit">%</span>
+          {{if .KPIs.HasPassRateDelta}}<span class="kpi-delta {{if gt .KPIs.PassRateDelta 0.05}}up{{else if lt .KPIs.PassRateDelta -0.05}}down{{else}}flat{{end}}">{{printf "%+.1f" .KPIs.PassRateDelta}}</span>{{end}}
         </div>
-        {{end}}
-        {{if .Diagnosis.WhyLikely}}
-        <ul>
-          {{range .Diagnosis.WhyLikely}}
-          <li>{{.}}</li>
-          {{end}}
-        </ul>
+        <div class="kpi-sub">{{.KPIs.Checks24h}} checks{{if .KPIs.HasPassRateDelta}} &middot; vs prior 24h{{end}}</div>
+        {{else}}
+        <div class="kpi-value kpi-value-sm">--</div>
+        <div class="kpi-sub">no checks in 24h</div>
         {{end}}
       </div>
-
-      <div class="guide-card">
-        <h2>Start Here</h2>
-        <p>Use the control plane for incident context and Grafana for cluster shape.</p>
-        <ul>
-          <li>Open a worker marked <strong>degraded</strong>, <strong>dormant</strong>, <strong>probing</strong>, or <strong>snapshot unhealthy</strong>.</li>
-          <li>Check failure stage, signature, and probable subsystem.</li>
-          <li>If the worker is <strong>dormant</strong>, the control plane already paused compute after sustained same-signature failures.</li>
-          <li>Copy the AI prompt or incident JSON.</li>
-          <li>Run the listed Fly triage commands before changing code.</li>
-        </ul>
-        <div class="chip-row">
-          <a class="btn btn-primary" href="/ui/help">Operator Help</a>
-          <a class="btn" href="/api/worker-summaries">Worker Summaries</a>
-        </div>
+      <div class="kpi">
+        <div class="kpi-label">Failures 24h{{template "info" "Failed checks in the last 24 hours. A small steady number on main is the known baseline - what matters is a sudden burst, or a failure signature you have not seen before. Compare against the failures-per-hour chart to see whether they cluster."}}</div>
+        <div class="kpi-value {{if gt .KPIs.Failures24h 0}}kpi-bad{{end}}">{{.KPIs.Failures24h}}</div>
+        <div class="kpi-sub">{{if gt .Summary.ActiveVerifications 0}}{{.Summary.ActiveVerifications}} check(s) running{{else}}no checks running{{end}}</div>
       </div>
-
-      <div class="guide-card">
-        <h2>Coverage</h2>
-        <p>The active fleet should span multiple load modes and data shapes.</p>
-        {{if .Coverage.LoadModes}}
-        <div class="chip-row">
-          {{range .Coverage.LoadModes}}
-          <span class="chip"><strong>{{.Count}}</strong> {{.Label}}</span>
-          {{end}}
-        </div>
-        {{end}}
-        {{if .Coverage.ReplayDatasets}}
-        <div class="chip-row">
-          {{range .Coverage.ReplayDatasets}}
-          <span class="chip"><strong>{{.Count}}</strong> {{.Label}}</span>
-          {{end}}
-        </div>
-        {{end}}
-        {{if .Coverage.RuntimeStates}}
-        <div class="chip-row">
-          {{range .Coverage.RuntimeStates}}
-          <span class="chip"><strong>{{.Count}}</strong> {{runtimeLabel .Label}}</span>
-          {{end}}
-        </div>
+      <div class="kpi">
+        <div class="kpi-label">Rollout{{template "info_end" "Progress of the latest deployment to this fleet. Until every worker is updated, the pass rate mixes old-build and new-build results. A rollout stuck past the 45m grace window means workers are pinned on the old build - check the rollout details below the fold."}}</div>
+        {{if .KPIs.HasRollout}}
+        <div class="kpi-value">{{.KPIs.RolloutUpdated}}<span class="kpi-unit">/ {{.KPIs.RolloutTotal}} updated</span></div>
+        <div class="kpi-sub {{deploymentClass .KPIs.RolloutStatus}}">{{.KPIs.RolloutStatus}}</div>
+        {{else}}
+        <div class="kpi-value kpi-value-sm">--</div>
+        <div class="kpi-sub">no deployments yet</div>
         {{end}}
       </div>
+      <div class="kpi">
+        <div class="kpi-label">Stalest heartbeat{{template "info_end" "How long since the quietest worker last reported in. Stale heartbeats mean the numbers on this page are based on old data - restore visibility first, because you cannot trust a green dashboard fed by silent workers."}}</div>
+        <div class="kpi-value kpi-value-sm"><span class="{{heartbeatClass .KPIs.StalestHeartbeatAt}}">{{timeAgo .KPIs.StalestHeartbeatAt}}</span></div>
+        <div class="kpi-sub" title="Stalest runtime snapshot across the fleet">Stalest runtime <span class="{{heartbeatClass .KPIs.StalestRuntimeAt}}">{{timeAgo .KPIs.StalestRuntimeAt}}</span></div>
+      </div>
+    </div>
 
-      <div class="guide-card">
-        <h2>Latest Rollout</h2>
+    <div id="chart-data" data-chart="{{jsonCompact .ChartData}}" hidden></div>
+    <div class="chart-row" aria-label="24 hour trends">
+      <div class="chart-card">
+        <div class="chart-title">Pass rate &middot; 24h{{template "info" "Hourly verification pass rate. On PR views the main fleet overlays as a second line - the PR should track main, and a dip that main does not share is a regression in the candidate build even if the absolute numbers still look high. Gaps mean no checks ran that hour."}}</div>
+        <div class="chart-body">{{if .ChartData.HasData}}<canvas id="chart-passrate"></canvas>{{else}}<div class="chart-empty">No verification data yet</div>{{end}}</div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Check duration p50 / p95 &middot; 24h{{template "info" "Median and 95th-percentile verification durations per hour. This is the early-warning chart: a rising p95 while checks still pass usually means replication or S3 is getting slower - the kind of degradation that becomes timeouts and failures later."}}</div>
+        <div class="chart-body">{{if .ChartData.HasSourceData}}<canvas id="chart-duration"></canvas>{{else}}<div class="chart-empty">No verification data yet</div>{{end}}</div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Failures per hour &middot; 24h{{template "info_end" "When failures happen, not just how many. A spike in one hour points at an event (deploy, platform incident, S3 outage); a steady trickle across hours points at a workload-specific or data-shape bug. Correlate spikes with the rollout time and the event feed."}}</div>
+        <div class="chart-body">{{if .ChartData.HasSourceData}}<canvas id="chart-failures"></canvas>{{else}}<div class="chart-empty">No verification data yet</div>{{end}}</div>
+      </div>
+    </div>
+
+    {{if .ReleaseComparison}}
+    <div class="compare-strip" aria-label="Release comparison">
+      <span class="compare-verdict {{if eq .ReleaseComparison.Verdict "better"}}v-better{{else if eq .ReleaseComparison.Verdict "worse"}}v-worse{{else if eq .ReleaseComparison.Verdict "mixed"}}v-mixed{{else if eq .ReleaseComparison.Verdict "insufficient_data"}}v-insufficient{{else}}v-neutral{{end}}">{{.ReleaseComparison.Verdict}}</span>
+      <span class="compare-fact">{{comparisonHeadLabel .ReleaseComparison}} vs {{comparisonBaseLabel .ReleaseComparison}}</span>
+      {{template "info" "The release verdict: pass/fail deltas for the candidate build versus its baseline. WORSE means the candidate is regressing and should not merge; INSUFFICIENT_DATA means too few completed checks to judge yet - let it soak longer before drawing conclusions. Full breakdown is in the comparison details below the fold."}}
+      <span class="compare-fact">pass <strong>{{.ReleaseComparison.PassDelta}}</strong></span>
+      <span class="compare-fact">fail <strong>{{.ReleaseComparison.FailDelta}}</strong></span>
+      <span class="compare-fact">awaiting <strong>{{.ReleaseComparison.Head.AwaitingWorkers}}</strong></span>
+      {{if .ReleaseComparison.RegressedWorkers}}
+      <span class="compare-fact">regressed:
+        {{range $index, $worker := .ReleaseComparison.RegressedWorkers}}{{if $index}}, {{end}}<a href="/ui/workers/{{pathEscape $worker.WorkerID}}">{{$worker.Name}}</a>{{end}}
+      </span>
+      {{end}}
+      <div class="compare-actions">
+        {{if .ComparisonPromptURL}}<button type="button" class="btn btn-sm" data-copy-url="{{.ComparisonPromptURL}}">{{.ComparisonPromptLabel}}</button>{{end}}
+        <a class="btn btn-sm" href="{{.ComparisonJSONURL}}">JSON</a>
+      </div>
+    </div>
+    {{end}}
+
+    <div class="section-head">
+      <span class="section-title">Fleet</span>
+      <span class="panel-note">Updated {{timeAgoValue .GeneratedAt}} &middot; failures sort first &middot; click a row to open</span>
+    </div>
+
+    {{if .Workers}}
+    <div class="panel" style="padding:0; overflow-x:auto;">
+      <table class="worker-table">
+        <thead>
+          <tr>
+            <th style="width:28px;"></th>
+            <th>Worker{{template "info" "One worker per row, each soaking Litestream under a distinct workload profile (shown muted under the name). Healthy rows stay deliberately quiet; problems get color and sort to the top, so a calm-looking table really is calm."}}</th>
+            <th>Last 20 checks{{template "info" "Verification history, oldest to newest. Short green ticks are passes, tall red ticks are failures, gray means aborted. The pattern matters: a solid red run on the right is an active problem, scattered red is flakiness, all-green is sustained correctness. Hover any tick for details."}}</th>
+            <th>Heartbeat{{template "info" "Time since this worker last reported in. Amber or red means its data here is stale - the worker may be wedged or its machine gone, which is a different problem than failing checks."}}</th>
+            <th>Last check{{template "info" "Outcome and age of the most recent verification. If this is old while heartbeats are fresh, the worker is alive but checks are not being scheduled or completing - worth investigating on its own."}}</th>
+            <th>Signal{{template "info" "The worker's current failure signature - the first meaningful error line from its latest failure. Identical signatures across several workers almost always mean one shared root cause, not several separate bugs."}}</th>
+            <th style="width:70px;"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Workers}}
+          <tr class="clickable-row {{if or (eq (statusClass .Worker.Status) "status-bad") (eq (runtimeClass .RuntimeSnapshotStatus) "status-bad")}}row-bad{{else if or (eq (statusClass .Worker.Status) "status-warn") (eq (runtimeClass .RuntimeSnapshotStatus) "status-warn")}}row-warn{{end}}" data-href="/ui/workers/{{pathEscape .Worker.ID}}">
+            <td><span class="dot dot-{{if or (eq (statusClass .Worker.Status) "status-bad") (eq (runtimeClass .RuntimeSnapshotStatus) "status-bad")}}bad{{else if or (eq (statusClass .Worker.Status) "status-warn") (eq (runtimeClass .RuntimeSnapshotStatus) "status-warn")}}warn{{else if eq (statusClass .Worker.Status) "status-good"}}good{{else}}neutral{{end}}"></span></td>
+            <td>
+              <div class="worker-name">{{.Worker.Name}}{{if ne (statusClass .Worker.Status) "status-good"}} <span class="badge badge-{{if eq (statusClass .Worker.Status) "status-warn"}}warn{{else if eq (statusClass .Worker.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Worker.Status}}</span>{{end}}</div>
+              <div class="worker-sub">{{.Worker.ProfileName}} &middot; {{.Workload.MetricLoadMode}}{{if ne .Workload.MetricReplayDataset "none"}} &middot; {{.Workload.MetricReplayDataset}}{{end}}{{if ne (runtimeClass .RuntimeSnapshotStatus) "status-good"}} &middot; {{runtimeLabel .RuntimeSnapshotStatus}}{{end}}</div>
+            </td>
+            <td>
+              {{if .Ticks}}
+              <span class="ticks">{{range .Ticks}}<span class="tick {{tickClass .}}" title="{{tickLabel .}} &middot; {{timeAgoValue .StartedAt}} &middot; {{formatDuration .DurationMS}}"></span>{{end}}</span>
+              {{else}}
+              <span class="ticks-none">no checks in 7d</span>
+              {{end}}
+            </td>
+            <td><span class="{{heartbeatClass .Worker.LastHeartbeatAt}}" title="{{formatTimePtr .Worker.LastHeartbeatAt}}">{{timeAgo .Worker.LastHeartbeatAt}}</span></td>
+            <td>
+              {{if .ActiveVerification}}<span class="signal-info" title="{{formatTime .ActiveVerification.StartedAt}}">&#9679; {{if .ActiveVerification.Stale}}stale check{{else}}running{{end}} &middot; {{timeAgoValue .ActiveVerification.StartedAt}}</span>
+              {{else if .LatestVerification}}<span class="cell-muted {{if eq (verificationClass .LatestVerification) "status-bad"}}status-bad{{end}}" title="{{formatTime .LatestVerification.StartedAt}}">{{verificationLabel .LatestVerification}} &middot; {{timeAgoValue .LatestVerification.StartedAt}}</span>
+              {{else}}<span class="ticks-none">none</span>{{end}}
+            </td>
+            <td>
+              {{if .CurrentFailureSignature}}
+              <span class="badge badge-bad" title="{{.CurrentFailureSignature}}">{{shorten .CurrentFailureSignature 48}}</span>
+              {{else if .ActiveVerification}}
+              <span class="signal-info">checking&hellip;</span>
+              {{else}}
+              <span class="signal-ok">&#10003; healthy</span>
+              {{end}}
+            </td>
+            <td><a href="{{workerPromptURL .Worker .CurrentFailureSignature .RuntimeSnapshotStatus}}" class="btn btn-sm">Prompt</a></td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="panel"><p class="empty">No workers have reported to the control plane yet.</p></div>
+    {{end}}
+
+    <div class="panel" style="margin-top:16px;">
+      <div class="tabs">
+        <button type="button" class="tab active" data-tab="failures">Failure queue<span class="tab-badge{{if gt .Summary.RecentFailures 0}} has-items{{end}}">{{.Summary.RecentFailures}}</span></button>
+        <button type="button" class="tab" data-tab="events">Event feed<span class="tab-badge">{{len .Events}}</span></button>
+        {{template "info_end" "Forensic detail, deliberately below the fold. The failure queue is every recent failed check with its raw error; the event feed is platform and lifecycle events (deploys, machine restarts). Use these to investigate after the banner and charts tell you something is wrong - matching a failure time to a machine restart here often closes the case."}}
+      </div>
+      <div data-tab-panel="failures" class="active">
+        {{if .Spotlight}}
+        <div class="feed-item">
+          <div class="feed-row">
+            <div class="feed-body">
+              <div class="feed-title">{{workerName .Spotlight.Worker .Spotlight.Verification.WorkerID}}</div>
+              <div class="feed-meta">{{.Spotlight.FailureStage}} &middot; {{.Spotlight.ProbableSubsystem}} &middot; {{formatDuration .Spotlight.Verification.DurationMS}}</div>
+              <div class="feed-msg">{{shorten (failureText .Spotlight.Verification) 140}}</div>
+              <div class="feed-actions">
+                <a href="/ui/workers/{{pathEscape .Spotlight.Verification.WorkerID}}">Open</a>
+                <a href="/api/workers/{{pathEscape .Spotlight.Verification.WorkerID}}/prompt">Prompt</a>
+              </div>
+            </div>
+            <span class="feed-time">{{timeAgoValue .Spotlight.Verification.StartedAt}}</span>
+          </div>
+        </div>
+        {{end}}
+        {{if .FailureQueue}}
+        {{range .FailureQueue}}
+        <div class="feed-item">
+          <div class="feed-row">
+            <div class="feed-body">
+              <div class="feed-title">{{workerName .Worker .Verification.WorkerID}}</div>
+              <div class="feed-meta">{{.FailureStage}} &middot; {{.ProbableSubsystem}} &middot; {{formatDuration .Verification.DurationMS}}</div>
+              <div class="feed-msg">{{shorten (failureText .Verification) 140}}</div>
+              <div class="feed-actions">
+                <a href="/ui/workers/{{pathEscape .Verification.WorkerID}}">Open</a>
+                <a href="/api/workers/{{pathEscape .Verification.WorkerID}}/prompt">Prompt</a>
+              </div>
+            </div>
+            <span class="feed-time">{{timeAgoValue .Verification.StartedAt}}</span>
+          </div>
+        </div>
+        {{end}}
+        {{end}}
+        {{if and (not .Spotlight) (not .FailureQueue)}}
+        <p class="empty">No failed verifications queued</p>
+        {{end}}
+      </div>
+      <div data-tab-panel="events">
+        {{if .Events}}
+        {{range .Events}}
+        <div class="feed-item">
+          <div class="feed-row">
+            <div class="feed-body">
+              <span class="badge badge-{{if eq (eventClass .EventType) "status-good"}}good{{else if eq (eventClass .EventType) "status-bad"}}bad{{else}}neutral{{end}}">{{.EventType}}</span>
+              <div class="feed-msg">{{shorten .Message 140}}</div>
+              {{if .WorkerID}}<div class="feed-meta"><code class="mono">{{.WorkerID}}</code></div>{{end}}
+            </div>
+            <span class="feed-time">{{timeAgoValue .CreatedAt}}</span>
+          </div>
+        </div>
+        {{end}}
+        {{else}}
+        <p class="empty">No events recorded</p>
+        {{end}}
+      </div>
+    </div>
+
+    <details class="section-details">
+      <summary>Latest rollout details</summary>
+      <div class="details-body guide-card">
         {{if .LatestDeployment}}
         <p class="lead">{{.LatestDeployment.Summary}}</p>
         <div class="diag-meta">
@@ -173,7 +281,6 @@
           <div class="detail-row">
             <div class="detail-label">Code Links</div>
             <div class="detail-value">
-              <div class="detail-subtle">Open the exact soak build or Litestream commit only when you need to investigate or hand off to AI.</div>
               <div class="action-row">
                 <a class="btn" href="{{soakCommitURL .LatestDeployment.Deployment.GitSHA}}" target="_blank" rel="noreferrer">Open soak commit</a>
                 <a class="btn" href="{{litestreamCommitURL .LatestDeployment.Deployment.LitestreamSHA}}" target="_blank" rel="noreferrer">Open Litestream commit</a>
@@ -210,9 +317,11 @@
         <p class="empty">No deployments have been recorded yet.</p>
         {{end}}
       </div>
+    </details>
 
-      <div class="guide-card">
-        <h2>{{comparisonTitle .ReleaseComparison}}</h2>
+    <details class="section-details">
+      <summary>{{comparisonTitle .ReleaseComparison}} details</summary>
+      <div class="details-body guide-card">
         {{if .ReleaseComparison}}
         <p class="detail-subtle">{{comparisonModeSummary .ReleaseComparison}}</p>
         <p class="lead">{{.ReleaseComparison.Summary}}</p>
@@ -271,176 +380,106 @@
         <p class="empty">No release comparison is available yet.</p>
         {{end}}
       </div>
-    </div>
+    </details>
 
-    {{if .Diagnosis.Clusters}}
-    <div class="section-head">
-      <span class="section-title">Active Clusters</span>
-    </div>
-    <div class="cluster-grid">
-      {{range .Diagnosis.Clusters}}
-      <div class="panel cluster-card">
-        <div class="cluster-head">
-          <div>
-            <div class="cluster-title">{{.Headline}}</div>
-            <div class="cluster-summary">{{.Summary}}</div>
-          </div>
-          <span class="badge badge-{{if eq (confidenceClass .Confidence) "status-good"}}good{{else if eq (confidenceClass .Confidence) "status-warn"}}warn{{else}}neutral{{end}}">confidence: {{.Confidence}}</span>
-        </div>
+    <details class="section-details">
+      <summary>Diagnosis &amp; failure clusters</summary>
+      <div class="details-body guide-card">
+        <p class="lead">{{.Diagnosis.Headline}}</p>
+        <p style="margin-top:8px;">{{.Diagnosis.Summary}}</p>
+        {{if .Diagnosis.ProbableSubsystem}}
         <div class="diag-meta">
-          <span class="badge badge-neutral">{{.WorkerCount}} workers</span>
-          {{if .ProbableSubsystem}}<span class="badge badge-warn">{{.ProbableSubsystem}}</span>{{end}}
-          {{if .Stage}}<span class="badge badge-neutral">stage: {{.Stage}}</span>{{end}}
-          {{if .Signature}}<span class="badge badge-bad">{{shorten .Signature 80}}</span>{{end}}
+          {{if .Diagnosis.Confidence}}<span class="badge badge-{{if eq (confidenceClass .Diagnosis.Confidence) "status-good"}}good{{else if eq (confidenceClass .Diagnosis.Confidence) "status-warn"}}warn{{else}}neutral{{end}}">confidence: {{.Diagnosis.Confidence}}</span>{{end}}
+          <span class="badge badge-warn">{{.Diagnosis.ProbableSubsystem}}</span>
+          {{if .Diagnosis.DominantStage}}<span class="badge badge-neutral">stage: {{.Diagnosis.DominantStage}}</span>{{end}}
+          {{if .Diagnosis.DominantSignature}}<span class="badge badge-bad">{{shorten .Diagnosis.DominantSignature 80}}</span>{{end}}
         </div>
-        {{if .WhyLikely}}
+        {{end}}
+        {{if .Diagnosis.WhyLikely}}
         <ul>
-          {{range .WhyLikely}}
+          {{range .Diagnosis.WhyLikely}}
           <li>{{.}}</li>
           {{end}}
         </ul>
         {{end}}
-        {{if .Workers}}
-        <div class="cluster-workers">
-          {{range $index, $worker := .Workers}}{{if $index}}, {{end}}<a href="/ui/workers/{{pathEscape $worker.ID}}">{{$worker.Name}}</a>{{end}}
+        {{if .Diagnosis.Clusters}}
+        <div class="cluster-grid">
+          {{range .Diagnosis.Clusters}}
+          <div class="panel cluster-card">
+            <div class="cluster-head">
+              <div>
+                <div class="cluster-title">{{.Headline}}</div>
+                <div class="cluster-summary">{{.Summary}}</div>
+              </div>
+              <span class="badge badge-{{if eq (confidenceClass .Confidence) "status-good"}}good{{else if eq (confidenceClass .Confidence) "status-warn"}}warn{{else}}neutral{{end}}">confidence: {{.Confidence}}</span>
+            </div>
+            <div class="diag-meta">
+              <span class="badge badge-neutral">{{.WorkerCount}} workers</span>
+              {{if .ProbableSubsystem}}<span class="badge badge-warn">{{.ProbableSubsystem}}</span>{{end}}
+              {{if .Stage}}<span class="badge badge-neutral">stage: {{.Stage}}</span>{{end}}
+              {{if .Signature}}<span class="badge badge-bad">{{shorten .Signature 80}}</span>{{end}}
+            </div>
+            {{if .WhyLikely}}
+            <ul>
+              {{range .WhyLikely}}
+              <li>{{.}}</li>
+              {{end}}
+            </ul>
+            {{end}}
+            {{if .Workers}}
+            <div class="cluster-workers">
+              {{range $index, $worker := .Workers}}{{if $index}}, {{end}}<a href="/ui/workers/{{pathEscape $worker.ID}}">{{$worker.Name}}</a>{{end}}
+            </div>
+            {{end}}
+            <div class="feed-actions">
+              <a href="/ui/workers/{{pathEscape .RepresentativeWorker.ID}}">Open {{.RepresentativeWorker.Name}}</a>
+              <a href="/api/workers/{{pathEscape .RepresentativeWorker.ID}}/prompt?mode=triage">Prompt</a>
+            </div>
+          </div>
+          {{end}}
         </div>
         {{end}}
-        <div class="feed-actions">
-          <a href="/ui/workers/{{pathEscape .RepresentativeWorker.ID}}">Open {{.RepresentativeWorker.Name}}</a>
-          <a href="/api/workers/{{pathEscape .RepresentativeWorker.ID}}/prompt?mode=triage">Prompt</a>
-        </div>
       </div>
-      {{end}}
-    </div>
-    {{end}}
+    </details>
 
-    {{if .Spotlight}}
-    <div class="incident-alert">
-      <div class="incident-alert-body">
-        <div class="incident-alert-title">{{workerName .Spotlight.Worker .Spotlight.Verification.WorkerID}}: {{shorten (failureText .Spotlight.Verification) 120}}</div>
-        <div class="incident-alert-meta">{{timeAgoValue .Spotlight.Verification.StartedAt}} · {{.Spotlight.FailureStage}} · {{.Spotlight.ProbableSubsystem}} · {{formatDuration .Spotlight.Verification.DurationMS}}</div>
-      </div>
-      <div class="incident-alert-actions">
-        <a class="btn btn-danger" href="/ui/workers/{{pathEscape .Spotlight.Verification.WorkerID}}">Open</a>
-        <a class="btn" href="/api/workers/{{pathEscape .Spotlight.Verification.WorkerID}}/prompt">Copy Prompt</a>
-      </div>
-    </div>
-    {{else}}
-    {{if gt .Summary.ActiveVerifications 0}}
-    <div class="clear-banner">No failures recorded; {{.Summary.ActiveVerifications}} verification check(s) still running{{if .LatestRolloutPromptURL}} <a class="btn" href="{{.LatestRolloutPromptURL}}">{{.LatestRolloutPromptLabel}}</a>{{end}}</div>
-    {{else}}
-    <div class="clear-banner">All workers passing verification{{if .LatestRolloutPromptURL}} <a class="btn" href="{{.LatestRolloutPromptURL}}">{{.LatestRolloutPromptLabel}}</a>{{end}}</div>
-    {{end}}
-    {{end}}
-
-    <div class="section-head">
-      <span class="section-title">Fleet</span>
-    </div>
-
-    {{if .Workers}}
-    <div class="panel" style="padding:0; overflow-x:auto;">
-      <table class="worker-table">
-        <thead>
-          <tr>
-            <th style="width:32px;"></th>
-            <th>Name</th>
-            <th>Status</th>
-            <th>Heartbeat</th>
-            <th>Last Check</th>
-            <th>Profile</th>
-            <th>Workload</th>
-            <th>Telemetry</th>
-            <th>Signal</th>
-            <th style="width:80px;"></th>
-          </tr>
-        </thead>
-        <tbody>
-          {{range .Workers}}
-          <tr class="clickable-row {{if or (eq (statusClass .Worker.Status) "status-bad") (eq (runtimeClass .RuntimeSnapshotStatus) "status-bad")}}row-bad{{else if or (eq (statusClass .Worker.Status) "status-warn") (eq (runtimeClass .RuntimeSnapshotStatus) "status-warn")}}row-warn{{end}}" data-href="/ui/workers/{{pathEscape .Worker.ID}}">
-            <td><span class="dot dot-{{if or (eq (statusClass .Worker.Status) "status-bad") (eq (runtimeClass .RuntimeSnapshotStatus) "status-bad")}}bad{{else if or (eq (statusClass .Worker.Status) "status-warn") (eq (runtimeClass .RuntimeSnapshotStatus) "status-warn")}}warn{{else if eq (statusClass .Worker.Status) "status-good"}}good{{else}}neutral{{end}}"></span></td>
-            <td><strong>{{.Worker.Name}}</strong></td>
-            <td><span class="badge badge-{{if eq (statusClass .Worker.Status) "status-good"}}good{{else if eq (statusClass .Worker.Status) "status-warn"}}warn{{else if eq (statusClass .Worker.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Worker.Status}}</span></td>
-            <td><span class="{{heartbeatClass .Worker.LastHeartbeatAt}}" title="{{formatTimePtr .Worker.LastHeartbeatAt}}">{{timeAgo .Worker.LastHeartbeatAt}}</span></td>
-            <td>
-              {{if .ActiveVerification}}<span class="badge badge-info">{{if .ActiveVerification.Stale}}stale check{{else}}running{{end}}</span> <span style="color:var(--muted); font-size:12px;" title="{{formatTime .ActiveVerification.StartedAt}}">{{timeAgoValue .ActiveVerification.StartedAt}}</span>
-              {{else if .LatestVerification}}<span class="badge badge-{{if eq (verificationClass .LatestVerification) "status-good"}}good{{else if eq (verificationClass .LatestVerification) "status-bad"}}bad{{else}}neutral{{end}}">{{verificationLabel .LatestVerification}}</span> <span style="color:var(--muted); font-size:12px;" title="{{formatTime .LatestVerification.StartedAt}}">{{timeAgoValue .LatestVerification.StartedAt}}</span>
-              {{else}}<span style="color:var(--faint);">none</span>{{end}}
-            </td>
-            <td>{{.Worker.ProfileName}}</td>
-            <td>{{.Workload.MetricLoadMode}}{{if ne .Workload.MetricReplayDataset "none"}} · {{.Workload.MetricReplayDataset}}{{end}}</td>
-            <td><span class="badge badge-{{if eq (runtimeClass .RuntimeSnapshotStatus) "status-good"}}good{{else if eq (runtimeClass .RuntimeSnapshotStatus) "status-warn"}}warn{{else if eq (runtimeClass .RuntimeSnapshotStatus) "status-bad"}}bad{{else}}neutral{{end}}">{{runtimeLabel .RuntimeSnapshotStatus}}</span></td>
-            <td>
-              {{if .CurrentFailureSignature}}
-              <span class="badge badge-bad">{{shorten .CurrentFailureSignature 48}}</span>
-              {{else if .ActiveVerification}}
-              <span class="badge badge-info">verification running</span>
-              {{else}}
-              <span class="badge badge-good">healthy</span>
-              {{end}}
-            </td>
-            <td><a href="{{workerPromptURL .Worker .CurrentFailureSignature .RuntimeSnapshotStatus}}" onclick="event.stopPropagation();" class="btn" style="padding:2px 8px;">Prompt</a></td>
-          </tr>
-          {{end}}
-        </tbody>
-      </table>
-    </div>
-    {{else}}
-    <div class="panel"><p class="empty">No workers have reported to the control plane yet.</p></div>
-    {{end}}
-
-    <div class="bottom-grid">
-      <div>
-        <div class="section-head">
-          <span class="section-title">Failure Queue</span>
-        </div>
-        <div class="panel">
-          {{if .FailureQueue}}
-          {{range .FailureQueue}}
-          <div class="feed-item">
-            <div class="feed-row">
-              <div class="feed-body">
-                <div class="feed-title">{{workerName .Worker .Verification.WorkerID}}</div>
-                <div class="feed-meta">{{.FailureStage}} · {{.ProbableSubsystem}} · {{formatDuration .Verification.DurationMS}}</div>
-                <div class="feed-msg">{{shorten (failureText .Verification) 140}}</div>
-                <div class="feed-actions">
-                  <a href="/ui/workers/{{pathEscape .Verification.WorkerID}}">Open</a>
-                  <a href="/api/workers/{{pathEscape .Verification.WorkerID}}/prompt">Prompt</a>
-                </div>
-              </div>
-              <span class="feed-time">{{timeAgoValue .Verification.StartedAt}}</span>
-            </div>
-          </div>
-          {{end}}
-          {{else}}
-          <p class="empty">No failed verifications queued</p>
+    <details class="section-details">
+      <summary>Coverage &amp; operator guide</summary>
+      <div class="details-body guide-card">
+        <p>The active fleet should span multiple load modes and data shapes.</p>
+        {{if .Coverage.LoadModes}}
+        <div class="chip-row">
+          {{range .Coverage.LoadModes}}
+          <span class="chip"><strong>{{.Count}}</strong> {{.Label}}</span>
           {{end}}
         </div>
-      </div>
-
-      <div>
-        <div class="section-head">
-          <span class="section-title">Event Feed</span>
-        </div>
-        <div class="panel">
-          {{if .Events}}
-          {{range .Events}}
-          <div class="feed-item">
-            <div class="feed-row">
-              <div class="feed-body">
-                <span class="badge badge-{{if eq (eventClass .EventType) "status-good"}}good{{else if eq (eventClass .EventType) "status-bad"}}bad{{else}}neutral{{end}}">{{.EventType}}</span>
-                <div class="feed-msg">{{shorten .Message 140}}</div>
-                {{if .WorkerID}}<div class="feed-meta"><code class="mono">{{.WorkerID}}</code></div>{{end}}
-              </div>
-              <span class="feed-time">{{timeAgoValue .CreatedAt}}</span>
-            </div>
-          </div>
-          {{end}}
-          {{else}}
-          <p class="empty">No events recorded</p>
+        {{end}}
+        {{if .Coverage.ReplayDatasets}}
+        <div class="chip-row">
+          {{range .Coverage.ReplayDatasets}}
+          <span class="chip"><strong>{{.Count}}</strong> {{.Label}}</span>
           {{end}}
         </div>
+        {{end}}
+        {{if .Coverage.RuntimeStates}}
+        <div class="chip-row">
+          {{range .Coverage.RuntimeStates}}
+          <span class="chip"><strong>{{.Count}}</strong> {{runtimeLabel .Label}}</span>
+          {{end}}
+        </div>
+        {{end}}
+        <p style="margin-top:12px;">{{.ScopeSummary}}</p>
+        <ul>
+          <li>Open a worker marked <strong>degraded</strong>, <strong>dormant</strong>, <strong>probing</strong>, or <strong>snapshot unhealthy</strong>.</li>
+          <li>Check failure stage, signature, and probable subsystem.</li>
+          <li>If the worker is <strong>dormant</strong>, the control plane already paused compute after sustained same-signature failures.</li>
+          <li>Copy the AI prompt or incident JSON, then run the listed Fly triage commands before changing code.</li>
+        </ul>
+        <div class="chip-row">
+          <a class="btn btn-primary" href="/ui/help">Operator Help</a>
+          <a class="btn" href="/api/worker-summaries">Worker Summaries</a>
+        </div>
       </div>
-    </div>
+    </details>
 
     <div class="footer">Generated {{formatTime .GeneratedAt}}</div>
 {{end}}

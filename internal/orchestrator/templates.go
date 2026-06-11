@@ -12,6 +12,7 @@ import (
 var templateFS embed.FS
 
 var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
+	"assetVersion":            func() string { return assetVersion },
 	"confidenceClass":         confidenceClass,
 	"comparisonBaseLabel":     comparisonBaseLabel,
 	"comparisonCopyText":      comparisonCopyText,
@@ -31,6 +32,7 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"formatTimePtr":           formatUITimePtr,
 	"heartbeatClass":          heartbeatClass,
 	"json":                    mustJSON,
+	"jsonCompact":             jsonCompact,
 	"joinList":                strings.Join,
 	"pathEscape":              url.PathEscape,
 	"queryEscape":             url.QueryEscape,
@@ -41,6 +43,8 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"sourceLabel":             sourceLabel,
 	"sourceURL":               sourceURL,
 	"statusClass":             statusClass,
+	"tickClass":               tickClass,
+	"tickLabel":               tickLabel,
 	"timeAgo":                 formatTimeAgoPtr,
 	"timeAgoValue":            formatTimeAgo,
 	"litestreamCommitURL":     litestreamCommitURL,

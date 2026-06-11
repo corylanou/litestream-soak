@@ -201,6 +201,7 @@ func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *A
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /favicon.svg", a.handleFavicon)
 	mux.HandleFunc("GET /favicon.ico", a.handleFavicon)
+	mux.Handle("GET /assets/", http.StripPrefix("/assets/", assetsHandler()))
 	mux.HandleFunc("GET /", a.handleHome)
 	mux.HandleFunc("GET /ui", a.handleHome)
 	mux.HandleFunc("GET /ui/partials/home", a.handleHomePartial)
