@@ -111,6 +111,8 @@ h1, h2, h3, p { margin: 0; }
 .source-tab.active { background: var(--blue-dim); border-color: rgba(88,166,255,0.4); color: var(--blue); font-weight: 600; }
 .source-tab .tab-count { font-size: 11px; color: var(--faint); }
 .source-tab .tab-alert { color: var(--red); font-weight: 700; font-size: 11px; }
+.source-tab-external { margin-left: auto; border-style: dashed; color: var(--blue); }
+.source-tab-external:hover { color: var(--blue); border-color: rgba(88,166,255,0.4); }
 
 /* Comparison strip */
 .compare-strip { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 10px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); margin-bottom: 16px; font-size: 13px; }

@@ -7,6 +7,7 @@
         {{if gt .Attention 0}}<span class="tab-alert">{{.Attention}}!</span>{{end}}
       </a>
       {{end}}
+      <a class="source-tab source-tab-external" href="{{sourceURL .SelectedSource}}" target="_blank" rel="noreferrer">{{.SelectedSourceLabel}} on GitHub &#8599;</a>
       {{template "info_start" "How to read this page, top to bottom: the banner is what needs action now, the KPI band is current state, the charts are the 24h trend, and the table is per-worker detail. Color rules: red = act now (PR regressions, new failures), amber = attention (main-fleet baseline failures, stalled rollouts), quiet green/gray = healthy. Each tab is a fleet running a different build - main is the baseline, PR tabs are candidate builds; a red count on a tab means workers there need attention."}}
     </div>
 
