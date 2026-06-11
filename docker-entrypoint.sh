@@ -15,4 +15,6 @@ if needs_chown "$DATA_DIR" || { [ -n "$DB_PATH" ] && needs_chown "$DB_PATH"; }; 
 	chown -R soak:soak "$DATA_DIR"
 fi
 
+export HOME=/data
+
 exec setpriv --reuid soak --regid soak --init-groups "$@"
