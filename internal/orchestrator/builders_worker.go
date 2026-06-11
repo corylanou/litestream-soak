@@ -88,7 +88,7 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 		return nil, http.StatusNotFound, err
 	}
 
-	verifications, err := a.db.ListVerifications(workerID, 10)
+	verifications, err := a.db.ListVerifications(workerID, 20)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}

@@ -53,6 +53,7 @@ type homeChartData struct {
 	P95            []*int         `json:"p95"`
 	Failures       []int          `json:"failures"`
 	HasData        bool           `json:"-"`
+	HasSourceData  bool           `json:"-"`
 }
 
 const homeChartHours = 24
@@ -99,11 +100,12 @@ func buildHomeChartData(selectedSource string, chartFrom time.Time, selectedStat
 	selected := buildChartSeries(selectedStats, chartFrom, homeChartHours)
 
 	data := homeChartData{
-		Labels:   selected.Labels,
-		P50:      selected.P50,
-		P95:      selected.P95,
-		Failures: selected.Failures,
-		HasData:  len(selectedStats) > 0,
+		Labels:        selected.Labels,
+		P50:           selected.P50,
+		P95:           selected.P95,
+		Failures:      selected.Failures,
+		HasData:       len(selectedStats) > 0,
+		HasSourceData: len(selectedStats) > 0,
 	}
 	data.PassRateSeries = []passRateLine{{Label: sourceHumanLabel(selectedSource), Data: selected.PassRate}}
 	if selectedSource != "main" {

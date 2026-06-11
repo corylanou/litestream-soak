@@ -230,11 +230,11 @@
     }, 1000);
   }
 
-  window.toggleRefresh = function () {
+  function toggleRefresh() {
     paused = !paused;
     if (!paused && countdown <= 0) countdown = REFRESH_INTERVAL;
     updateRefreshIndicator();
-  };
+  }
 
   function selectTab(name) {
     document.querySelectorAll(".tab[data-tab]").forEach(function (tab) {
@@ -250,6 +250,20 @@
       var tab = e.target.closest(".tab[data-tab]");
       if (tab) {
         selectTab(tab.dataset.tab);
+        return;
+      }
+      if (e.target.closest('[data-action="toggle-refresh"]')) {
+        toggleRefresh();
+        return;
+      }
+      var copyBtn = e.target.closest('[data-action="copy-prompt"]');
+      if (copyBtn) {
+        copyPrompt(copyBtn);
+        return;
+      }
+      var modeBtn = e.target.closest(".mode-btn");
+      if (modeBtn) {
+        loadPromptMode(modeBtn);
         return;
       }
       if (e.target.closest("a,button,summary,textarea,details")) return;
@@ -280,7 +294,7 @@
     });
   }
 
-  window.copyPrompt = async function (btn) {
+  async function copyPrompt(btn) {
     var box = document.getElementById("prompt-box");
     if (!box) return;
     try {
@@ -296,9 +310,9 @@
       btn.textContent = "Copy AI Prompt";
       btn.classList.remove("copied");
     }, 1800);
-  };
+  }
 
-  window.loadPromptMode = async function (btn) {
+  async function loadPromptMode(btn) {
     var box = document.getElementById("prompt-box");
     var endpointBase = document.body.dataset.promptEndpoint;
     if (!box || !endpointBase) return;
@@ -311,7 +325,7 @@
     if (summary) summary.textContent = btn.dataset.summary;
     document.querySelectorAll(".mode-btn").forEach(function (el) { el.classList.remove("active"); });
     btn.classList.add("active");
-  };
+  }
 
   document.addEventListener("DOMContentLoaded", function () {
     bindGlobalInteractions();

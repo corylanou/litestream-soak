@@ -95,11 +95,11 @@
       </div>
       <div class="chart-card">
         <div class="chart-title">Check duration p50 / p95 &middot; 24h{{template "info" "Median and 95th-percentile verification durations per hour. This is the early-warning chart: a rising p95 while checks still pass usually means replication or S3 is getting slower - the kind of degradation that becomes timeouts and failures later."}}</div>
-        <div class="chart-body">{{if .ChartData.HasData}}<canvas id="chart-duration"></canvas>{{else}}<div class="chart-empty">No verification data yet</div>{{end}}</div>
+        <div class="chart-body">{{if .ChartData.HasSourceData}}<canvas id="chart-duration"></canvas>{{else}}<div class="chart-empty">No verification data yet</div>{{end}}</div>
       </div>
       <div class="chart-card">
         <div class="chart-title">Failures per hour &middot; 24h{{template "info_end" "When failures happen, not just how many. A spike in one hour points at an event (deploy, platform incident, S3 outage); a steady trickle across hours points at a workload-specific or data-shape bug. Correlate spikes with the rollout time and the event feed."}}</div>
-        <div class="chart-body">{{if .ChartData.HasData}}<canvas id="chart-failures"></canvas>{{else}}<div class="chart-empty">No verification data yet</div>{{end}}</div>
+        <div class="chart-body">{{if .ChartData.HasSourceData}}<canvas id="chart-failures"></canvas>{{else}}<div class="chart-empty">No verification data yet</div>{{end}}</div>
       </div>
     </div>
 

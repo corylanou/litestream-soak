@@ -91,6 +91,25 @@ func TestPassRateSummaryExcludesAborted(t *testing.T) {
 	}
 }
 
+func TestBuildHomeChartDataBranchViewWithMainOnlyData(t *testing.T) {
+	t.Parallel()
+
+	from := time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC)
+	mainStats := []model.VerificationStat{chartStat(from.Add(time.Hour), true, "completed", 100)}
+
+	data := buildHomeChartData("pr-7", from, nil, mainStats)
+
+	if !data.HasData {
+		t.Fatal("HasData = false, want true (main overlay has data for pass-rate chart)")
+	}
+	if data.HasSourceData {
+		t.Fatal("HasSourceData = true, want false (selected source has no stats; duration/failure charts must show empty state)")
+	}
+	if len(data.PassRateSeries) != 2 {
+		t.Fatalf("len(PassRateSeries) = %d, want 2", len(data.PassRateSeries))
+	}
+}
+
 func TestPercentileEmptyInputReturnsZero(t *testing.T) {
 	t.Parallel()
 

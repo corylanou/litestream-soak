@@ -60,7 +60,11 @@ func assetsHandler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Cache-Control", "public, max-age=300")
+		if info, err := fs.Stat(sub, r.URL.Path); err != nil || info.IsDir() {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		fileServer.ServeHTTP(w, r)
 	})
 }

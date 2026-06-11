@@ -45,7 +45,7 @@
           {{if .Incident.Worker.FlyMachineID}}<span><span class="meta-label">Machine</span> <code class="mono">{{.Incident.Worker.FlyMachineID}}</code></span>{{end}}
         </div>
       </div>
-      <button class="btn btn-copy" type="button" onclick="copyPrompt(this)">Copy AI Prompt</button>
+      <button class="btn btn-copy" type="button" data-action="copy-prompt">Copy AI Prompt</button>
     </div>
 
     {{if or .Incident.LatestFailure .Incident.ActiveVerification .Incident.LatestPlatformEvent}}
@@ -224,11 +224,11 @@
           </div>
           <div class="mode-row">
             {{range .Incident.PromptModes}}
-            <button class="btn mode-btn{{if .Recommended}} active{{end}}" type="button" data-mode="{{.ID}}" data-label="{{.Label}}" data-summary="{{.Summary}}" onclick="loadPromptMode(this)">{{.Label}}</button>
+            <button class="btn mode-btn{{if .Recommended}} active{{end}}" type="button" data-mode="{{.ID}}" data-label="{{.Label}}" data-summary="{{.Summary}}">{{.Label}}</button>
             {{end}}
           </div>
           <div class="mode-summary"><strong id="prompt-mode-label">{{range .Incident.PromptModes}}{{if .Recommended}}{{.Label}}{{end}}{{end}}</strong> <span id="prompt-mode-summary">{{range .Incident.PromptModes}}{{if .Recommended}}{{.Summary}}{{end}}{{end}}</span></div>
-          <button class="btn btn-copy" type="button" onclick="copyPrompt(this)" style="width:100%; justify-content:center; margin-bottom:10px;">Copy AI Prompt</button>
+          <button class="btn btn-copy" type="button" data-action="copy-prompt" style="width:100%; justify-content:center; margin-bottom:10px;">Copy AI Prompt</button>
           <details>
             <summary>Inspect prompt text</summary>
             <div class="details-body">
