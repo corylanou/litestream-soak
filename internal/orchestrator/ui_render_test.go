@@ -40,8 +40,10 @@ func TestHomePageRendersStalestRuntimeLabel(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body: %s", recorder.Code, recorder.Body.String()[:min(500, recorder.Body.Len())])
 	}
 	body := recorder.Body.String()
-	if !strings.Contains(body, "Stalest runtime") {
-		t.Fatalf("home page body missing %q label", "Stalest runtime")
+	for _, label := range []string{"Stalest runtime", "Stalest heartbeat", "Fleet health", "Pass rate 24h", "chart-data"} {
+		if !strings.Contains(body, label) {
+			t.Fatalf("home page body missing %q", label)
+		}
 	}
 	if strings.Contains(body, "Latest runtime") {
 		t.Fatalf("home page body still contains old %q label", "Latest runtime")

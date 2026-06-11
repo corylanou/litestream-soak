@@ -6,181 +6,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <title>{{.Incident.Worker.Name}} · Litestream Soak</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #0d1117;
-      --surface: #161b22;
-      --surface-raised: #1c2129;
-      --border: #30363d;
-      --border-subtle: #21262d;
-      --text: #e6edf3;
-      --muted: #8b949e;
-      --faint: #484f58;
-      --green: #3fb950;
-      --green-dim: rgba(63,185,80,0.15);
-      --amber: #d29922;
-      --amber-dim: rgba(210,153,34,0.15);
-      --red: #f85149;
-      --red-dim: rgba(248,81,73,0.12);
-      --blue: #58a6ff;
-      --blue-dim: rgba(88,166,255,0.1);
-      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      --mono: "SF Mono", "Cascadia Code", "Fira Code", Consolas, "Liberation Mono", monospace;
-      --radius: 6px;
-      --radius-lg: 8px;
-    }
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 1.5; }
-    a { color: var(--blue); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-    code, pre, textarea, .mono { font-family: var(--mono); font-size: 12px; }
-    h1, h2, h3, p { margin: 0; }
-
-    .shell { max-width: 1280px; margin: 0 auto; padding: 0 16px; }
-
-    /* Top bar */
-    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; font-size: 13px; }
-    .topbar-nav { display: flex; align-items: center; gap: 6px; color: var(--muted); }
-    .topbar-nav a { color: var(--muted); }
-    .topbar-nav a:hover { color: var(--text); }
-    .topbar-sep { color: var(--faint); }
-    .topbar-right { display: flex; align-items: center; gap: 10px; }
-    .topbar-link { color: var(--muted); font-size: 12px; }
-    .topbar-link:hover { color: var(--text); }
-
-    /* Buttons */
-    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 12px; font-family: inherit; font-weight: 500; cursor: pointer; text-decoration: none; white-space: nowrap; }
-    .btn:hover { background: var(--surface-raised); text-decoration: none; border-color: var(--faint); }
-    .btn-primary { background: rgba(88,166,255,0.15); border-color: rgba(88,166,255,0.3); color: var(--blue); }
-    .btn-primary:hover { background: rgba(88,166,255,0.25); }
-    .btn-copy { background: rgba(63,185,80,0.15); border-color: rgba(63,185,80,0.3); color: var(--green); font-weight: 600; padding: 6px 16px; }
-    .btn-copy:hover { background: rgba(63,185,80,0.25); }
-    .btn-copy.copied { background: var(--green); color: var(--bg); border-color: var(--green); }
-    .mode-btn.active { background: rgba(88,166,255,0.2); border-color: rgba(88,166,255,0.35); color: var(--blue); }
-
-    /* Worker header */
-    .worker-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
-    .worker-header-left { flex: 1; min-width: 0; }
-    .worker-title { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-    .worker-meta-strip { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--muted); }
-    .worker-meta-strip code { color: var(--text); }
-    .meta-label { color: var(--faint); }
-
-    /* Badges */
-    .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
-    .badge-good { background: var(--green-dim); color: var(--green); }
-    .badge-warn { background: var(--amber-dim); color: var(--amber); }
-    .badge-bad { background: var(--red-dim); color: var(--red); }
-    .badge-neutral { background: rgba(139,148,158,0.15); color: var(--muted); }
-
-    /* Incident alert */
-    .incident-alert { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 16px; background: var(--red-dim); border: 1px solid rgba(248,81,73,0.3); border-radius: var(--radius-lg); margin-bottom: 16px; }
-    .incident-alert-body { flex: 1; min-width: 0; }
-    .incident-alert-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
-    .incident-alert-meta { color: var(--muted); font-size: 12px; }
-    .guide-banner { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; margin-bottom: 16px; }
-    .guide-copy { color: var(--muted); font-size: 13px; }
-    .guide-copy p + p { margin-top: 8px; }
-    .guide-copy ul { margin: 10px 0 0 18px; }
-    .guide-copy li + li { margin-top: 6px; }
-    .guide-facts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-    .chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
-    .mode-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-    .mode-summary { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
-
-    /* Layout */
-    .layout { display: grid; grid-template-columns: 1fr 340px; gap: 16px; align-items: start; }
-    .main-stack { display: grid; gap: 16px; }
-    .sidebar { display: grid; gap: 16px; position: sticky; top: 16px; }
-
-    /* Panels */
-    .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; }
-    .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-    .panel-title { font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: 0.02em; text-transform: uppercase; }
-
-    /* Timeline */
-    .tl-item { padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
-    .tl-item:last-child { border-bottom: none; }
-    .tl-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
-    .tl-left { display: flex; align-items: center; gap: 8px; }
-    .tl-time { color: var(--faint); font-size: 11px; white-space: nowrap; }
-    .tl-facts { display: flex; gap: 16px; font-size: 12px; color: var(--muted); }
-    .tl-fact-label { color: var(--faint); }
-
-    /* Details/disclosure */
-    details { border-radius: var(--radius); border: 1px solid var(--border-subtle); background: var(--surface-raised); margin-top: 8px; }
-    details + details { margin-top: 6px; }
-    summary { cursor: pointer; list-style: none; padding: 8px 12px; font-size: 12px; font-weight: 500; color: var(--muted); }
-    summary::-webkit-details-marker { display: none; }
-    summary::before { content: "\25B6\FE0E "; font-size: 10px; margin-right: 4px; }
-    details[open] > summary::before { content: "\25BC\FE0E "; }
-    .details-body { padding: 0 12px 12px; }
-    pre { margin: 0; white-space: pre-wrap; word-break: break-word; overflow: auto; background: var(--bg); border: 1px solid var(--border-subtle); border-radius: var(--radius); padding: 10px 12px; font-size: 11px; line-height: 1.5; color: var(--muted); max-height: 400px; }
-    textarea { width: 100%; min-height: 240px; resize: vertical; background: var(--bg); border: 1px solid var(--border-subtle); border-radius: var(--radius); padding: 10px 12px; font-size: 11px; line-height: 1.5; color: var(--text); }
-
-    /* Key-value list */
-    .kv-list { font-size: 13px; }
-    .kv-row { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border-subtle); }
-    .kv-row:last-child { border-bottom: none; }
-    .kv-label { color: var(--muted); flex-shrink: 0; }
-    .kv-value { text-align: right; word-break: break-all; }
-    .kv-value code { color: var(--text); }
-
-    /* Dot */
-    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-    .dot-good { background: var(--green); }
-    .dot-warn { background: var(--amber); }
-    .dot-bad { background: var(--red); }
-    .dot-neutral { background: var(--faint); }
-
-    /* Empty */
-    .empty { padding: 12px 0; color: var(--faint); font-size: 13px; }
-
-    /* Footer */
-    .footer { padding: 16px 0; margin-top: 24px; border-top: 1px solid var(--border-subtle); color: var(--faint); font-size: 11px; text-align: center; }
-
-    @media (max-width: 960px) {
-      .guide-banner { grid-template-columns: 1fr; }
-      .layout { grid-template-columns: 1fr; }
-      .sidebar { position: static; }
-      .worker-header { flex-direction: column; }
-    }
-    @media (max-width: 640px) {
-      .topbar { flex-direction: column; align-items: flex-start; gap: 6px; }
-      .incident-alert { flex-direction: column; }
-    }
-  </style>
-  <script>
-    async function copyPrompt(btn) {
-      var box = document.getElementById("prompt-box");
-      try {
-        await navigator.clipboard.writeText(box.value);
-      } catch(e) {
-        box.focus(); box.select(); document.execCommand("copy");
-      }
-      btn.textContent = "Copied"; btn.classList.add("copied");
-      setTimeout(function() { btn.textContent = "Copy AI Prompt"; btn.classList.remove("copied"); }, 1800);
-    }
-
-    async function loadPromptMode(btn) {
-      var mode = btn.dataset.mode;
-      var summary = btn.dataset.summary;
-      var label = btn.dataset.label;
-      var box = document.getElementById("prompt-box");
-      var endpoint = window.location.origin + "/api/workers/{{pathEscape .Incident.Worker.ID}}/prompt?mode=" + encodeURIComponent(mode);
-      var resp = await fetch(endpoint);
-      if (!resp.ok) return;
-      box.value = await resp.text();
-      document.getElementById("prompt-mode-label").textContent = label;
-      document.getElementById("prompt-mode-summary").textContent = summary;
-      document.querySelectorAll(".mode-btn").forEach(function(el) { el.classList.remove("active"); });
-      btn.classList.add("active");
-    }
-  </script>
+  <link rel="stylesheet" href="/assets/dashboard.css">
+  <script src="/assets/chart.umd.min.js" defer></script>
+  <script src="/assets/dashboard.js" defer></script>
 </head>
-<body>
+<body data-prompt-endpoint="/api/workers/{{pathEscape .Incident.Worker.ID}}/prompt">
   <div class="shell">
     <div class="topbar">
       <div class="topbar-nav">
@@ -203,6 +33,9 @@
           {{.Incident.Worker.Name}}
           <span class="badge badge-{{if eq (statusClass .Incident.Worker.Status) "status-good"}}good{{else if eq (statusClass .Incident.Worker.Status) "status-warn"}}warn{{else if eq (statusClass .Incident.Worker.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Incident.Worker.Status}}</span>
           <span class="badge badge-{{if eq (heartbeatClass .Incident.Worker.LastHeartbeatAt) "status-good"}}good{{else if eq (heartbeatClass .Incident.Worker.LastHeartbeatAt) "status-warn"}}warn{{else if eq (heartbeatClass .Incident.Worker.LastHeartbeatAt) "status-bad"}}bad{{else}}neutral{{end}}">{{timeAgo .Incident.Worker.LastHeartbeatAt}}</span>
+          {{if .Ticks}}
+          <span class="ticks">{{range .Ticks}}<span class="tick {{tickClass .}}" title="{{tickLabel .}} &middot; {{timeAgoValue .StartedAt}} &middot; {{formatDuration .DurationMS}}"></span>{{end}}</span>
+          {{end}}
         </div>
         <div class="worker-meta-strip">
           <span><span class="meta-label">Profile</span> {{.Incident.Worker.ProfileName}}</span>
@@ -215,33 +48,38 @@
       <button class="btn btn-copy" type="button" onclick="copyPrompt(this)">Copy AI Prompt</button>
     </div>
 
-    {{if .Incident.ActiveVerification}}
-    <div class="incident-alert">
-      <div class="incident-alert-body">
-        <div class="incident-alert-title">{{if .Incident.ActiveVerification.Stale}}Verification start signal is stale{{else}}Verification currently running{{end}}</div>
-        <div class="incident-alert-meta">{{formatTime .Incident.ActiveVerification.StartedAt}} · {{.Incident.ActiveVerification.CheckType}} · {{.Incident.ActiveVerification.Status}}</div>
+    {{if or .Incident.LatestFailure .Incident.ActiveVerification .Incident.LatestPlatformEvent}}
+    <div class="attention-stack">
+      {{if .Incident.LatestFailure}}
+      <div class="attention-item att-bad">
+        <span class="attention-icon">&#10005;</span>
+        <div class="attention-body">
+          <span class="attention-title">{{failureText .Incident.LatestFailure}}</span>
+          <span class="attention-detail">{{timeAgoValue .Incident.LatestFailure.StartedAt}} &middot; {{.Incident.FailureStage}} &middot; {{.Incident.Guide.ProbableSubsystem}} &middot; {{formatDuration .Incident.LatestFailure.DurationMS}}</span>
+        </div>
+        <div class="attention-actions"><span class="badge badge-bad">failed</span></div>
       </div>
-      <span class="badge badge-info">{{if .Incident.ActiveVerification.Stale}}stale{{else}}running{{end}}</span>
-    </div>
-    {{end}}
-
-    {{if .Incident.LatestFailure}}
-    <div class="incident-alert">
-      <div class="incident-alert-body">
-        <div class="incident-alert-title">{{failureText .Incident.LatestFailure}}</div>
-        <div class="incident-alert-meta">{{formatTime .Incident.LatestFailure.StartedAt}} · {{.Incident.FailureStage}} · {{.Incident.Guide.ProbableSubsystem}} · {{formatDuration .Incident.LatestFailure.DurationMS}}</div>
+      {{end}}
+      {{if .Incident.ActiveVerification}}
+      <div class="attention-item att-info">
+        <span class="attention-icon">i</span>
+        <div class="attention-body">
+          <span class="attention-title">{{if .Incident.ActiveVerification.Stale}}Verification start signal is stale{{else}}Verification currently running{{end}}</span>
+          <span class="attention-detail">{{formatTime .Incident.ActiveVerification.StartedAt}} &middot; {{.Incident.ActiveVerification.CheckType}} &middot; {{.Incident.ActiveVerification.Status}}</span>
+        </div>
+        <div class="attention-actions"><span class="badge badge-info">{{if .Incident.ActiveVerification.Stale}}stale{{else}}running{{end}}</span></div>
       </div>
-      <span class="badge badge-bad">failed</span>
-    </div>
-    {{end}}
-
-    {{if .Incident.LatestPlatformEvent}}
-    <div class="incident-alert">
-      <div class="incident-alert-body">
-        <div class="incident-alert-title">{{.Incident.LatestPlatformEvent.EventType}}</div>
-        <div class="incident-alert-meta">{{formatTime .Incident.LatestPlatformEvent.CreatedAt}} · {{.Incident.LatestPlatformEvent.Message}}</div>
+      {{end}}
+      {{if .Incident.LatestPlatformEvent}}
+      <div class="attention-item att-{{if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-bad"}}bad{{else if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-good"}}info{{else}}warn{{end}}">
+        <span class="attention-icon">!</span>
+        <div class="attention-body">
+          <span class="attention-title">{{.Incident.LatestPlatformEvent.EventType}}</span>
+          <span class="attention-detail">{{timeAgoValue .Incident.LatestPlatformEvent.CreatedAt}} &middot; {{.Incident.LatestPlatformEvent.Message}}</span>
+        </div>
+        <div class="attention-actions"><span class="badge badge-neutral">platform</span></div>
       </div>
-      <span class="badge badge-{{if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-good"}}good{{else if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-warn"}}warn{{else if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-bad"}}bad{{else}}neutral{{end}}">platform</span>
+      {{end}}
     </div>
     {{end}}
 
@@ -256,7 +94,6 @@
           {{if .Incident.Guide.ProbableSubsystem}}<span class="badge badge-warn">{{.Incident.Guide.ProbableSubsystem}}</span>{{end}}
           {{if .Incident.FailureStage}}<span class="badge badge-neutral">stage: {{.Incident.FailureStage}}</span>{{end}}
           {{if .Incident.FailureSignature}}<span class="badge badge-bad">{{shorten .Incident.FailureSignature 96}}</span>{{end}}
-          {{if .Incident.LatestPlatformEvent}}<span class="badge badge-{{if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-good"}}good{{else if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-warn"}}warn{{else if eq (eventClass .Incident.LatestPlatformEvent.EventType) "status-bad"}}bad{{else}}neutral{{end}}">{{.Incident.LatestPlatformEvent.EventType}}</span>{{end}}
           {{if .Incident.ActiveVerification}}<span class="badge badge-info">verification running</span>{{end}}
           <span class="badge badge-{{if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-good"}}good{{else if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-warn"}}warn{{else if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-bad"}}bad{{else}}neutral{{end}}">{{runtimeLabel .Incident.RuntimeSnapshotStatus}}</span>
         </div>
@@ -287,10 +124,21 @@
 
     <div class="layout">
       <div class="main-stack">
+        {{if .ChartData.WorkerDurations}}
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">Check Durations</span>
+            <span class="panel-note">green = pass, red = fail</span>
+          </div>
+          <div id="chart-data" data-chart="{{jsonCompact .ChartData}}" hidden></div>
+          <div class="chart-body" style="height:120px;"><canvas id="chart-worker-durations"></canvas></div>
+        </div>
+        {{end}}
+
         <div class="panel">
           <div class="panel-head">
             <span class="panel-title">Verification Timeline</span>
-            <span style="color:var(--faint); font-size:12px;">{{len .Incident.RecentVerifications}} recent</span>
+            <span class="panel-note">{{len .Incident.RecentVerifications}} recent</span>
           </div>
           {{if .Incident.ActiveVerification}}
           <div class="tl-item">
@@ -340,7 +188,7 @@
         <div class="panel">
           <div class="panel-head">
             <span class="panel-title">Event Timeline</span>
-            <span style="color:var(--faint); font-size:12px;">{{len .Incident.RecentEvents}} recent</span>
+            <span class="panel-note">{{len .Incident.RecentEvents}} recent</span>
           </div>
           {{if .Incident.RecentEvents}}
           {{range .Incident.RecentEvents}}

@@ -35,6 +35,9 @@ type homePageData struct {
 	FailureQueue             []FailureResponse
 	Workers                  []homeWorker
 	Events                   []model.Event
+	Attention                []attentionItem
+	KPIs                     homeKPIs
+	ChartData                homeChartData
 }
 
 type homeSummary struct {
@@ -58,6 +61,7 @@ type homeWorker struct {
 	CurrentFailureStage      string
 	CurrentFailureSignature  string
 	CurrentProbableSubsystem string
+	Ticks                    []model.VerificationTick
 }
 
 type homeSourceCard struct {
@@ -68,6 +72,8 @@ type homeSourceCard struct {
 	Selected   bool
 	ViewURL    string
 	CompareURL string
+	Total      int
+	Attention  int
 }
 
 type homeActionPlan struct {
@@ -84,6 +90,8 @@ type homeActionPlan struct {
 type workerPageData struct {
 	GeneratedAt time.Time
 	Incident    *IncidentBundle
+	Ticks       []model.VerificationTick
+	ChartData   workerChartData
 }
 
 type helpPageData struct {
@@ -148,6 +156,25 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		return homePageData{}, err
 	}
 
+	now := time.Now().UTC()
+	chartFrom := now.Truncate(time.Hour).Add(-(homeChartHours - 1) * time.Hour)
+	sourceStats, err := a.db.ListVerificationStatsSince(requestedSource, now.Add(-48*time.Hour))
+	if err != nil {
+		return homePageData{}, err
+	}
+	previousStats, windowStats := splitStatsAt(sourceStats, now.Add(-24*time.Hour))
+	var mainStats []model.VerificationStat
+	if requestedSource != "main" {
+		mainStats, err = a.db.ListVerificationStatsSince("main", chartFrom)
+		if err != nil {
+			return homePageData{}, err
+		}
+	}
+	ticksByWorker, err := a.db.ListVerificationTicks(20)
+	if err != nil {
+		return homePageData{}, err
+	}
+
 	latestDeployment, err := a.db.GetLatestDeployment(rolloutSource)
 	if err != nil {
 		return homePageData{}, err
@@ -180,6 +207,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 			CurrentFailureStage:      workerSummary.CurrentFailureStage,
 			CurrentFailureSignature:  workerSummary.CurrentFailureSignature,
 			CurrentProbableSubsystem: workerSummary.CurrentProbableSubsystem,
+			Ticks:                    ticksByWorker[workerSummary.Worker.ID],
 		}
 
 		if workerNeedsAttention(workerSummary.Worker.Status, workerSummary.RuntimeSnapshotStatus) {
@@ -269,8 +297,12 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 
 	diagnosis := buildDiagnosisSnapshot(summaries)
 
+	attention := buildAttentionItems(requestedSource, diagnosis, summary, workerCards, rollout, releaseComparison, comparisonPromptURL, comparisonJSONURL)
+	kpis := buildHomeKPIs(summary, windowStats, previousStats, rollout)
+	chartData := buildHomeChartData(requestedSource, chartFrom, filterStatsSince(sourceStats, chartFrom), mainStats)
+
 	return homePageData{
-		GeneratedAt:              time.Now().UTC(),
+		GeneratedAt:              now,
 		SelectedSource:           requestedSource,
 		SelectedSourceLabel:      sourceHumanLabel(requestedSource),
 		ScopeSummary:             buildHomeScopeSummary(requestedSource, rolloutSource, releaseComparison),
@@ -291,6 +323,9 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		FailureQueue:             queue,
 		Workers:                  workerCards,
 		Events:                   events,
+		Attention:                attention,
+		KPIs:                     kpis,
+		ChartData:                chartData,
 	}, nil
 }
 
@@ -320,11 +355,13 @@ func (a *API) buildHomeSourceCards(selectedSource string) ([]homeSourceCard, err
 	cards := make([]homeSourceCard, 0, len(countsBySource))
 	for source, counts := range countsBySource {
 		card := homeSourceCard{
-			Source:   source,
-			Label:    sourceHumanLabel(source),
-			Summary:  fmt.Sprintf("%d workers, %d need attention", counts.total, counts.attention),
-			Selected: source == selectedSource,
-			ViewURL:  "/ui?source=" + url.QueryEscape(source),
+			Source:    source,
+			Label:     sourceHumanLabel(source),
+			Summary:   fmt.Sprintf("%d workers, %d need attention", counts.total, counts.attention),
+			Selected:  source == selectedSource,
+			ViewURL:   "/ui?source=" + url.QueryEscape(source),
+			Total:     counts.total,
+			Attention: counts.attention,
 		}
 		if source != "main" {
 			card.CompareURL = fmt.Sprintf("/ui?source=%s&base_source=main&head_source=%s", url.QueryEscape(source), url.QueryEscape(source))
@@ -469,6 +506,8 @@ func (a *API) handleWorkerPage(w http.ResponseWriter, r *http.Request) {
 	renderHTML(w, "worker", workerPageData{
 		GeneratedAt: time.Now().UTC(),
 		Incident:    bundle,
+		Ticks:       buildWorkerTicks(bundle.RecentVerifications),
+		ChartData:   buildWorkerChartData(bundle.RecentVerifications),
 	})
 }
 
