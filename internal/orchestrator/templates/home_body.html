@@ -154,7 +154,7 @@
               {{if .Ticks}}
               <span class="ticks">{{range .Ticks}}<span class="tick {{tickClass .}}" title="{{tickLabel .}} &middot; {{timeAgoValue .StartedAt}} &middot; {{formatDuration .DurationMS}}"></span>{{end}}</span>
               {{else}}
-              <span class="ticks-none">no checks yet</span>
+              <span class="ticks-none">no checks in 7d</span>
               {{end}}
             </td>
             <td><span class="{{heartbeatClass .Worker.LastHeartbeatAt}}" title="{{formatTimePtr .Worker.LastHeartbeatAt}}">{{timeAgo .Worker.LastHeartbeatAt}}</span></td>
@@ -172,7 +172,7 @@
               <span class="signal-ok">&#10003; healthy</span>
               {{end}}
             </td>
-            <td><a href="{{workerPromptURL .Worker .CurrentFailureSignature .RuntimeSnapshotStatus}}" onclick="event.stopPropagation();" class="btn btn-sm">Prompt</a></td>
+            <td><a href="{{workerPromptURL .Worker .CurrentFailureSignature .RuntimeSnapshotStatus}}" class="btn btn-sm">Prompt</a></td>
           </tr>
           {{end}}
         </tbody>

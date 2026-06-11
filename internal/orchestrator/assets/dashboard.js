@@ -18,6 +18,10 @@
     blue: css.getPropertyValue("--blue").trim() || "#58a6ff"
   };
 
+  function absoluteURL(path) {
+    return path.charAt(0) === "/" ? window.location.origin + path : path;
+  }
+
   function hourLabel(iso) {
     var d = new Date(iso);
     if (isNaN(d)) return iso;
@@ -282,7 +286,7 @@
         var text = button.getAttribute("data-copy");
         var copyURL = button.getAttribute("data-copy-url");
         if (!text && copyURL) {
-          var resp = await fetch(copyURL, { credentials: "same-origin" });
+          var resp = await fetch(absoluteURL(copyURL), { credentials: "same-origin" });
           if (!resp.ok) return;
           text = await resp.text();
         }
@@ -316,7 +320,7 @@
     var box = document.getElementById("prompt-box");
     var endpointBase = document.body.dataset.promptEndpoint;
     if (!box || !endpointBase) return;
-    var resp = await fetch(endpointBase + "?mode=" + encodeURIComponent(btn.dataset.mode), { credentials: "same-origin" });
+    var resp = await fetch(absoluteURL(endpointBase) + "?mode=" + encodeURIComponent(btn.dataset.mode), { credentials: "same-origin" });
     if (!resp.ok) return;
     box.value = await resp.text();
     var label = document.getElementById("prompt-mode-label");

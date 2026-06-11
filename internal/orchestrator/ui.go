@@ -18,7 +18,6 @@ type homePageData struct {
 	SelectedSource           string
 	SelectedSourceLabel      string
 	ScopeSummary             string
-	HomeAction               *homeActionPlan
 	Summary                  homeSummary
 	Diagnosis                diagnosisSnapshot
 	Coverage                 coverageSnapshot
@@ -76,16 +75,6 @@ type homeSourceCard struct {
 	Attention  int
 }
 
-type homeActionPlan struct {
-	Headline    string
-	Summary     string
-	WorkerName  string
-	WorkerURL   string
-	PromptURL   string
-	IncidentURL string
-	CompareURL  string
-	Steps       []string
-}
 
 type workerPageData struct {
 	GeneratedAt time.Time
@@ -306,7 +295,6 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		SelectedSource:           requestedSource,
 		SelectedSourceLabel:      sourceHumanLabel(requestedSource),
 		ScopeSummary:             buildHomeScopeSummary(requestedSource, rolloutSource, releaseComparison),
-		HomeAction:               buildHomeActionPlan(requestedSource, diagnosis),
 		Summary:                  summary,
 		Diagnosis:                diagnosis,
 		Coverage:                 buildCoverageSnapshot(summaries),
@@ -403,36 +391,6 @@ func buildHomeScopeSummary(selectedSource, rolloutSource string, comparison *Dep
 	return fmt.Sprintf("You are viewing %s. Latest Rollout below is the latest %s rollout. Release Comparison shows the current %s rollout versus the previous %s rollout.", selectedLabel, rolloutLabel, selectedLabel, selectedLabel)
 }
 
-func buildHomeActionPlan(selectedSource string, diagnosis diagnosisSnapshot) *homeActionPlan {
-	if len(diagnosis.Clusters) == 0 {
-		return nil
-	}
-
-	cluster := diagnosis.Clusters[0]
-	workerID := cluster.RepresentativeWorker.ID
-	if strings.TrimSpace(workerID) == "" {
-		return nil
-	}
-
-	plan := &homeActionPlan{
-		Headline:    fmt.Sprintf("Open %s and hand that incident to AI.", cluster.RepresentativeWorker.Name),
-		Summary:     fmt.Sprintf("This is the fastest path to debug %s in %s.", valueOrUnknown(cluster.Signature), sourceHumanLabel(selectedSource)),
-		WorkerName:  cluster.RepresentativeWorker.Name,
-		WorkerURL:   "/ui/workers/" + url.PathEscape(workerID),
-		PromptURL:   "/api/workers/" + url.PathEscape(workerID) + "/prompt?mode=triage",
-		IncidentURL: "/api/workers/" + url.PathEscape(workerID) + "/incident",
-		Steps: []string{
-			fmt.Sprintf("Open %s.", cluster.RepresentativeWorker.Name),
-			"Copy the AI prompt and give it to your debugging agent.",
-			fmt.Sprintf("Ask the agent to explain %s during %s and propose the next commands to run.", valueOrUnknown(cluster.Signature), valueOrUnknown(cluster.Stage)),
-		},
-	}
-	if selectedSource != "main" {
-		plan.CompareURL = fmt.Sprintf("/ui?source=%s&base_source=main&head_source=%s", url.QueryEscape(selectedSource), url.QueryEscape(selectedSource))
-		plan.Steps = append(plan.Steps, "Check the Source Comparison card against main before deciding whether the PR is better or worse.")
-	}
-	return plan
-}
 
 func rolloutPromptURL(source string, rollout *DeploymentRolloutResponse) string {
 	query := url.Values{}

@@ -19,21 +19,24 @@ var assetsFS embed.FS
 var assetVersion = computeAssetVersion()
 
 func computeAssetVersion() string {
-	entries, err := assetsFS.ReadDir("assets")
+	names := make([]string, 0, 8)
+	err := fs.WalkDir(assetsFS, "assets", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			names = append(names, path)
+		}
+		return nil
+	})
 	if err != nil {
 		return "dev"
-	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			names = append(names, entry.Name())
-		}
 	}
 	sort.Strings(names)
 
 	hasher := fnv.New64a()
 	for _, name := range names {
-		body, err := assetsFS.ReadFile("assets/" + name)
+		body, err := assetsFS.ReadFile(name)
 		if err != nil {
 			return "dev"
 		}
