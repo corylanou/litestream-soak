@@ -127,7 +127,7 @@
         {{if .ChartData.WorkerDurations}}
         <div class="panel">
           <div class="panel-head">
-            <span class="panel-title">Check Durations</span>
+            <span class="panel-title">Check Durations{{template "info" "Each bar is one verification run, green for pass and red for fail. Bars creeping taller before the failures started usually means replication or S3 was slowing down first - that points at throughput or network, not data corruption."}}</span>
             <span class="panel-note">green = pass, red = fail</span>
           </div>
           <div id="chart-data" data-chart="{{jsonCompact .ChartData}}" hidden></div>
@@ -137,7 +137,7 @@
 
         <div class="panel">
           <div class="panel-head">
-            <span class="panel-title">Verification Timeline</span>
+            <span class="panel-title">Verification Timeline{{template "info" "Full recent check history with raw error output behind each failure. Look for the boundary where passes turned into failures and match it against the event timeline and the deploy time - that boundary is usually the incident start."}}</span>
             <span class="panel-note">{{len .Incident.RecentVerifications}} recent</span>
           </div>
           {{if .Incident.ActiveVerification}}
@@ -187,7 +187,7 @@
 
         <div class="panel">
           <div class="panel-head">
-            <span class="panel-title">Event Timeline</span>
+            <span class="panel-title">Event Timeline{{template "info" "Lifecycle and platform events for this worker (machine restarts, deploys, alerts). A failure that lines up with a machine restart here is a platform event, not a Litestream bug - check this before reading code."}}</span>
             <span class="panel-note">{{len .Incident.RecentEvents}} recent</span>
           </div>
           {{if .Incident.RecentEvents}}
@@ -220,7 +220,7 @@
       <div class="sidebar">
         <div class="panel">
           <div class="panel-head">
-            <span class="panel-title">AI Debugging</span>
+            <span class="panel-title">AI Debugging{{template "info_end" "A ready-made prompt carrying this worker's full incident context (failure, runtime, machine, history). Pick the mode that matches your situation, copy, and paste into your debugging agent - it is the fastest handoff from this page to a fix."}}</span>
           </div>
           <div class="mode-row">
             {{range .Incident.PromptModes}}
@@ -239,7 +239,7 @@
 
         <div class="panel">
           <div class="panel-head">
-            <span class="panel-title">Workload Shape</span>
+            <span class="panel-title">Workload Shape{{template "info_end" "What this worker is doing to its database - write rate, payload size, replay dataset. Failures confined to one shape (say, burst writes or a large-payload replay) point at a load-specific bug that calmer profiles will never reproduce."}}</span>
           </div>
           <div class="kv-list">
             <div class="kv-row"><span class="kv-label">Load mode</span><span class="kv-value">{{.Incident.Workload.MetricLoadMode}}</span></div>
@@ -255,7 +255,7 @@
 
         <div class="panel">
           <div class="panel-head">
-            <span class="panel-title">Worker Details</span>
+            <span class="panel-title">Worker Details{{template "info_end" "Identity and build provenance: exactly which soak and Litestream commits this worker runs, plus its Fly machine and volume. Use the SHAs to confirm a failing worker is actually on the build you think it is before debugging."}}</span>
           </div>
           <div class="kv-list">
             <div class="kv-row"><span class="kv-label">Worker ID</span><span class="kv-value"><code class="mono">{{.Incident.Worker.ID}}</code></span></div>

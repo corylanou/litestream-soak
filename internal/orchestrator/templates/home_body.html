@@ -7,6 +7,7 @@
         {{if gt .Attention 0}}<span class="tab-alert">{{.Attention}}!</span>{{end}}
       </a>
       {{end}}
+      {{template "info_start" "How to read this page, top to bottom: the banner is what needs action now, the KPI band is current state, the charts are the 24h trend, and the table is per-worker detail. Color rules: red = act now (PR regressions, new failures), amber = attention (main-fleet baseline failures, stalled rollouts), quiet green/gray = healthy. Each tab is a fleet running a different build - main is the baseline, PR tabs are candidate builds; a red count on a tab means workers there need attention."}}
     </div>
 
     {{if .Attention}}
@@ -43,17 +44,17 @@
 
     <div class="kpi-band" aria-label="Key metrics">
       <div class="kpi">
-        <div class="kpi-label">Fleet health</div>
+        <div class="kpi-label">Fleet health{{template "info" "Share of workers in this fleet that are healthy right now (not degraded, dormant, probing, or reporting an unhealthy runtime snapshot). If health falls while the pass rate stays flat, suspect infrastructure (machines, heartbeats) rather than data correctness."}}</div>
         <div class="kpi-value {{if ge .KPIs.FleetHealthPct 100}}kpi-good{{else if ge .KPIs.FleetHealthPct 80}}kpi-warn{{else}}kpi-bad{{end}}">{{.KPIs.FleetHealthPct}}<span class="kpi-unit">%</span></div>
         <div class="kpi-sub">{{.SelectedSourceLabel}}</div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">Workers</div>
+        <div class="kpi-label">Workers{{template "info" "Healthy workers out of the total fleet. Each worker soaks Litestream under a different workload profile, so one unhealthy worker can mean a load-shape-specific bug - open it to see which profile is affected."}}</div>
         <div class="kpi-value">{{.KPIs.HealthyWorkers}}<span class="kpi-unit">/ {{.KPIs.TotalWorkers}} healthy</span></div>
         <div class="kpi-sub">{{if gt .Summary.AttentionWorkers 0}}{{.Summary.AttentionWorkers}} need attention{{else}}none need attention{{end}}</div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">Pass rate 24h</div>
+        <div class="kpi-label">Pass rate 24h{{template "info" "Share of verification checks (replicate, restore, checksum-compare) that passed in the last 24 hours, with the change versus the prior 24 hours. This is the core correctness signal for Litestream itself - a negative delta is the earliest sign a build introduced a regression."}}</div>
         {{if .KPIs.HasPassRate}}
         <div class="kpi-value {{if ge .KPIs.PassRatePct 99.5}}kpi-good{{else if ge .KPIs.PassRatePct 90.0}}kpi-warn{{else}}kpi-bad{{end}}">{{printf "%.1f" .KPIs.PassRatePct}}<span class="kpi-unit">%</span>
           {{if .KPIs.HasPassRateDelta}}<span class="kpi-delta {{if gt .KPIs.PassRateDelta 0.05}}up{{else if lt .KPIs.PassRateDelta -0.05}}down{{else}}flat{{end}}">{{printf "%+.1f" .KPIs.PassRateDelta}}</span>{{end}}
@@ -65,12 +66,12 @@
         {{end}}
       </div>
       <div class="kpi">
-        <div class="kpi-label">Failures 24h</div>
+        <div class="kpi-label">Failures 24h{{template "info" "Failed checks in the last 24 hours. A small steady number on main is the known baseline - what matters is a sudden burst, or a failure signature you have not seen before. Compare against the failures-per-hour chart to see whether they cluster."}}</div>
         <div class="kpi-value {{if gt .KPIs.Failures24h 0}}kpi-bad{{end}}">{{.KPIs.Failures24h}}</div>
         <div class="kpi-sub">{{if gt .Summary.ActiveVerifications 0}}{{.Summary.ActiveVerifications}} check(s) running{{else}}no checks running{{end}}</div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">Rollout</div>
+        <div class="kpi-label">Rollout{{template "info_end" "Progress of the latest deployment to this fleet. Until every worker is updated, the pass rate mixes old-build and new-build results. A rollout stuck past the 45m grace window means workers are pinned on the old build - check the rollout details below the fold."}}</div>
         {{if .KPIs.HasRollout}}
         <div class="kpi-value">{{.KPIs.RolloutUpdated}}<span class="kpi-unit">/ {{.KPIs.RolloutTotal}} updated</span></div>
         <div class="kpi-sub {{deploymentClass .KPIs.RolloutStatus}}">{{.KPIs.RolloutStatus}}</div>
@@ -80,7 +81,7 @@
         {{end}}
       </div>
       <div class="kpi">
-        <div class="kpi-label">Stalest heartbeat</div>
+        <div class="kpi-label">Stalest heartbeat{{template "info_end" "How long since the quietest worker last reported in. Stale heartbeats mean the numbers on this page are based on old data - restore visibility first, because you cannot trust a green dashboard fed by silent workers."}}</div>
         <div class="kpi-value kpi-value-sm"><span class="{{heartbeatClass .KPIs.StalestHeartbeatAt}}">{{timeAgo .KPIs.StalestHeartbeatAt}}</span></div>
         <div class="kpi-sub" title="Stalest runtime snapshot across the fleet">Stalest runtime <span class="{{heartbeatClass .KPIs.StalestRuntimeAt}}">{{timeAgo .KPIs.StalestRuntimeAt}}</span></div>
       </div>
@@ -89,15 +90,15 @@
     <div id="chart-data" data-chart="{{jsonCompact .ChartData}}" hidden></div>
     <div class="chart-row" aria-label="24 hour trends">
       <div class="chart-card">
-        <div class="chart-title">Pass rate &middot; 24h</div>
+        <div class="chart-title">Pass rate &middot; 24h{{template "info" "Hourly verification pass rate. On PR views the main fleet overlays as a second line - the PR should track main, and a dip that main does not share is a regression in the candidate build even if the absolute numbers still look high. Gaps mean no checks ran that hour."}}</div>
         <div class="chart-body">{{if .ChartData.HasData}}<canvas id="chart-passrate"></canvas>{{else}}<div class="chart-empty">No verification data yet</div>{{end}}</div>
       </div>
       <div class="chart-card">
-        <div class="chart-title">Check duration p50 / p95 &middot; 24h</div>
+        <div class="chart-title">Check duration p50 / p95 &middot; 24h{{template "info" "Median and 95th-percentile verification durations per hour. This is the early-warning chart: a rising p95 while checks still pass usually means replication or S3 is getting slower - the kind of degradation that becomes timeouts and failures later."}}</div>
         <div class="chart-body">{{if .ChartData.HasData}}<canvas id="chart-duration"></canvas>{{else}}<div class="chart-empty">No verification data yet</div>{{end}}</div>
       </div>
       <div class="chart-card">
-        <div class="chart-title">Failures per hour &middot; 24h</div>
+        <div class="chart-title">Failures per hour &middot; 24h{{template "info_end" "When failures happen, not just how many. A spike in one hour points at an event (deploy, platform incident, S3 outage); a steady trickle across hours points at a workload-specific or data-shape bug. Correlate spikes with the rollout time and the event feed."}}</div>
         <div class="chart-body">{{if .ChartData.HasData}}<canvas id="chart-failures"></canvas>{{else}}<div class="chart-empty">No verification data yet</div>{{end}}</div>
       </div>
     </div>
@@ -106,6 +107,7 @@
     <div class="compare-strip" aria-label="Release comparison">
       <span class="compare-verdict {{if eq .ReleaseComparison.Verdict "better"}}v-better{{else if eq .ReleaseComparison.Verdict "worse"}}v-worse{{else if eq .ReleaseComparison.Verdict "mixed"}}v-mixed{{else if eq .ReleaseComparison.Verdict "insufficient_data"}}v-insufficient{{else}}v-neutral{{end}}">{{.ReleaseComparison.Verdict}}</span>
       <span class="compare-fact">{{comparisonHeadLabel .ReleaseComparison}} vs {{comparisonBaseLabel .ReleaseComparison}}</span>
+      {{template "info" "The release verdict: pass/fail deltas for the candidate build versus its baseline. WORSE means the candidate is regressing and should not merge; INSUFFICIENT_DATA means too few completed checks to judge yet - let it soak longer before drawing conclusions. Full breakdown is in the comparison details below the fold."}}
       <span class="compare-fact">pass <strong>{{.ReleaseComparison.PassDelta}}</strong></span>
       <span class="compare-fact">fail <strong>{{.ReleaseComparison.FailDelta}}</strong></span>
       <span class="compare-fact">awaiting <strong>{{.ReleaseComparison.Head.AwaitingWorkers}}</strong></span>
@@ -132,11 +134,11 @@
         <thead>
           <tr>
             <th style="width:28px;"></th>
-            <th>Worker</th>
-            <th>Last 20 checks</th>
-            <th>Heartbeat</th>
-            <th>Last check</th>
-            <th>Signal</th>
+            <th>Worker{{template "info" "One worker per row, each soaking Litestream under a distinct workload profile (shown muted under the name). Healthy rows stay deliberately quiet; problems get color and sort to the top, so a calm-looking table really is calm."}}</th>
+            <th>Last 20 checks{{template "info" "Verification history, oldest to newest. Short green ticks are passes, tall red ticks are failures, gray means aborted. The pattern matters: a solid red run on the right is an active problem, scattered red is flakiness, all-green is sustained correctness. Hover any tick for details."}}</th>
+            <th>Heartbeat{{template "info" "Time since this worker last reported in. Amber or red means its data here is stale - the worker may be wedged or its machine gone, which is a different problem than failing checks."}}</th>
+            <th>Last check{{template "info" "Outcome and age of the most recent verification. If this is old while heartbeats are fresh, the worker is alive but checks are not being scheduled or completing - worth investigating on its own."}}</th>
+            <th>Signal{{template "info" "The worker's current failure signature - the first meaningful error line from its latest failure. Identical signatures across several workers almost always mean one shared root cause, not several separate bugs."}}</th>
             <th style="width:70px;"></th>
           </tr>
         </thead>
@@ -184,6 +186,7 @@
       <div class="tabs">
         <button type="button" class="tab active" data-tab="failures">Failure queue<span class="tab-badge{{if gt .Summary.RecentFailures 0}} has-items{{end}}">{{.Summary.RecentFailures}}</span></button>
         <button type="button" class="tab" data-tab="events">Event feed<span class="tab-badge">{{len .Events}}</span></button>
+        {{template "info_end" "Forensic detail, deliberately below the fold. The failure queue is every recent failed check with its raw error; the event feed is platform and lifecycle events (deploys, machine restarts). Use these to investigate after the banner and charts tell you something is wrong - matching a failure time to a machine restart here often closes the case."}}
       </div>
       <div data-tab-panel="failures" class="active">
         {{if .Spotlight}}

@@ -68,7 +68,7 @@ h1, h2, h3, p { margin: 0; }
 /* KPI band */
 .kpi-band { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
 .kpi { background: var(--surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); padding: 10px 12px; min-width: 0; }
-.kpi-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; white-space: nowrap; }
 .kpi-value { display: flex; align-items: baseline; gap: 6px; margin-top: 2px; font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; line-height: 1.2; }
 .kpi-unit { font-size: 13px; font-weight: 500; color: var(--muted); }
 .kpi-sub { margin-top: 2px; color: var(--faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -80,6 +80,16 @@ h1, h2, h3, p { margin: 0; }
 .kpi-delta.down { color: var(--red); }
 .kpi-delta.flat { color: var(--faint); }
 .kpi-value.kpi-value-sm { font-size: 17px; }
+
+/* Info tooltips */
+.info { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface-raised); color: var(--muted); font-size: 9px; font-weight: 700; cursor: help; user-select: none; flex-shrink: 0; vertical-align: middle; }
+.info:hover, .info:focus-visible { color: var(--blue); border-color: rgba(88,166,255,0.4); }
+.info::after { content: attr(data-tip); position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); width: max-content; max-width: 280px; background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; color: var(--text); font-size: 12px; font-weight: 400; line-height: 1.45; text-align: left; white-space: normal; text-transform: none; letter-spacing: 0; box-shadow: 0 8px 24px rgba(0,0,0,0.5); opacity: 0; pointer-events: none; transition: opacity 0.12s ease 0.05s; z-index: 50; }
+.info:hover::after, .info:focus::after { opacity: 1; }
+.info.tip-end::after { left: auto; right: -4px; transform: none; }
+.info.tip-start::after { left: -4px; transform: none; }
+.kpi-label .info, .chart-title .info, .panel-title .info, .section-title .info, .worker-table th .info { margin-left: 5px; }
+.tabs .info { margin-left: auto; align-self: center; }
 
 /* Status text colors (heartbeat/verification/deployment classes) */
 .status-good { color: var(--green-quiet); }
