@@ -362,24 +362,31 @@ func (a *API) buildHomeSourceCards(selectedSource string) ([]homeSourceCard, err
 		cards = append(cards, card)
 	}
 
+	sortHomeSourceCards(cards)
+
+	return cards, nil
+}
+
+// sortHomeSourceCards orders source tabs identically on every page: main
+// first, then PR sources in ascending PR-number order, then anything else
+// alphabetically. Selection never reorders tabs.
+func sortHomeSourceCards(cards []homeSourceCard) {
 	sort.SliceStable(cards, func(i, j int) bool {
 		left := cards[i]
 		right := cards[j]
-		switch {
-		case left.Source == selectedSource && right.Source != selectedSource:
-			return true
-		case right.Source == selectedSource && left.Source != selectedSource:
-			return false
-		case left.Source == "main" && right.Source != "main":
-			return true
-		case right.Source == "main" && left.Source != "main":
-			return false
-		default:
-			return left.Label < right.Label
+		if (left.Source == "main") != (right.Source == "main") {
+			return left.Source == "main"
 		}
+		leftPR := sourcePRNumber(left.Source)
+		rightPR := sourcePRNumber(right.Source)
+		if (leftPR > 0) != (rightPR > 0) {
+			return leftPR > 0
+		}
+		if leftPR > 0 && leftPR != rightPR {
+			return leftPR < rightPR
+		}
+		return left.Label < right.Label
 	})
-
-	return cards, nil
 }
 
 func buildHomeScopeSummary(selectedSource, rolloutSource string, comparison *DeploymentComparisonResponse) string {

@@ -664,8 +664,11 @@ func TestBuildHomePageDataDefaultsPRSourceToMainComparison(t *testing.T) {
 	if len(data.ActiveSources) != 2 {
 		t.Fatalf("len(ActiveSources) = %d, want 2", len(data.ActiveSources))
 	}
-	if !data.ActiveSources[0].Selected || data.ActiveSources[0].Source != "pr-1228" {
-		t.Fatalf("first ActiveSource = %+v, want selected pr-1228", data.ActiveSources[0])
+	if data.ActiveSources[0].Source != "main" || data.ActiveSources[0].Selected {
+		t.Fatalf("first ActiveSource = %+v, want unselected main (stable ordering: main always first)", data.ActiveSources[0])
+	}
+	if data.ActiveSources[1].Source != "pr-1228" || !data.ActiveSources[1].Selected {
+		t.Fatalf("second ActiveSource = %+v, want selected pr-1228", data.ActiveSources[1])
 	}
 }
 

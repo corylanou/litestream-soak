@@ -19,6 +19,7 @@
         <span>{{.Incident.Worker.Name}}</span>
       </div>
       <div class="topbar-right">
+        <a class="topbar-link" href="{{sourceURL .Incident.Worker.Source}}" target="_blank" rel="noreferrer">{{sourceLabel .Incident.Worker.Source}} on GitHub &#8599;</a>
         <a class="topbar-link" href="/ui/help">Help</a>
         <a class="topbar-link" href="/api/workers/{{pathEscape .Incident.Worker.ID}}">JSON</a>
         <a class="topbar-link" href="/api/workers/{{pathEscape .Incident.Worker.ID}}/incident">Incident</a>
@@ -39,7 +40,7 @@
         </div>
         <div class="worker-meta-strip">
           <span><span class="meta-label">Profile</span> {{.Incident.Worker.ProfileName}}</span>
-          <span><span class="meta-label">Source</span> {{.Incident.Worker.Source}}</span>
+          <span><span class="meta-label">Source</span> <a href="{{sourceURL .Incident.Worker.Source}}" target="_blank" rel="noreferrer">{{.Incident.Worker.Source}} &#8599;</a></span>
           <span><span class="meta-label">Soak SHA</span> <code class="mono">{{trimSHA .Incident.Worker.GitSHA}}</code></span>
           <span><span class="meta-label">Litestream SHA</span> <code class="mono">{{trimSHA .Incident.Worker.LitestreamSHA}}</code></span>
           {{if .Incident.Worker.FlyMachineID}}<span><span class="meta-label">Machine</span> <code class="mono">{{.Incident.Worker.FlyMachineID}}</code></span>{{end}}

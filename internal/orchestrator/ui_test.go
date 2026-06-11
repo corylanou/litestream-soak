@@ -164,3 +164,28 @@ func TestBuildHomeScopeSummary(t *testing.T) {
 	}
 }
 
+
+func TestSortHomeSourceCardsStableOrder(t *testing.T) {
+	t.Parallel()
+
+	cards := []homeSourceCard{
+		{Source: "pr-1306", Label: "PR #1306"},
+		{Source: "experimental", Label: "experimental branch"},
+		{Source: "main", Label: "main branch"},
+		{Source: "pr-1302", Label: "PR #1302", Selected: true},
+		{Source: "pr-99", Label: "PR #99"},
+	}
+
+	sortHomeSourceCards(cards)
+
+	got := make([]string, len(cards))
+	for i, card := range cards {
+		got[i] = card.Source
+	}
+	want := []string{"main", "pr-99", "pr-1302", "pr-1306", "experimental"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order = %v, want %v (main first, PRs numeric ascending, others last; selection must not affect order)", got, want)
+		}
+	}
+}
