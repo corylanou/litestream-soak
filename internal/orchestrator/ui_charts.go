@@ -36,8 +36,11 @@ func buildChartSeries(stats []model.VerificationStat, from time.Time, hours int)
 	}
 
 	for _, stat := range stats {
+		if stat.StartedAt.Before(from) {
+			continue
+		}
 		index := int(stat.StartedAt.Sub(from) / time.Hour)
-		if index < 0 || index >= hours {
+		if index >= hours {
 			continue
 		}
 		verification := model.Verification{Status: stat.Status, Passed: stat.Passed}
@@ -70,6 +73,9 @@ func buildChartSeries(stats []model.VerificationStat, from time.Time, hours int)
 }
 
 func percentile(values []int, fraction float64) int {
+	if len(values) == 0 {
+		return 0
+	}
 	sorted := make([]int, len(values))
 	copy(sorted, values)
 	sort.Ints(sorted)

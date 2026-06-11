@@ -20,14 +20,15 @@ type VerificationStat struct {
 	DurationMS int       `json:"duration_ms"`
 }
 
-func (d *DB) ListVerificationTicks(perWorker int) (map[string][]VerificationTick, error) {
+func (d *DB) ListVerificationTicks(perWorker int, since time.Time) (map[string][]VerificationTick, error) {
 	rows, err := d.db.Query(`
 		SELECT worker_id, started_at, status, passed, duration_ms FROM (
 			SELECT worker_id, started_at, status, passed, duration_ms,
 				ROW_NUMBER() OVER (PARTITION BY worker_id ORDER BY started_at DESC) AS rank
 			FROM verifications
+			WHERE started_at >= ?
 		) WHERE rank <= ? ORDER BY worker_id, started_at ASC`,
-		perWorker,
+		since, perWorker,
 	)
 	if err != nil {
 		return nil, err

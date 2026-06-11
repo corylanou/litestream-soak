@@ -183,6 +183,32 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 		})
 	}
 
+	staleNames := make([]string, 0, 3)
+	staleCount := 0
+	for _, worker := range workers {
+		if workerNeedsAttention(worker.Worker.Status, worker.RuntimeSnapshotStatus) {
+			continue
+		}
+		if heartbeatClass(worker.Worker.LastHeartbeatAt) != "status-bad" {
+			continue
+		}
+		staleCount++
+		if len(staleNames) < 3 {
+			staleNames = append(staleNames, worker.Worker.Name)
+		}
+	}
+	if staleCount > 0 {
+		detail := strings.Join(staleNames, ", ")
+		if staleCount > len(staleNames) {
+			detail += fmt.Sprintf(", +%d more", staleCount-len(staleNames))
+		}
+		items = append(items, attentionItem{
+			Severity: "warn",
+			Title:    fmt.Sprintf("%d worker(s) have stale heartbeats", staleCount),
+			Detail:   detail + " — data from these workers is old; restore visibility before trusting this page",
+		})
+	}
+
 	if rollout != nil && rollout.GraceWindowExceeded {
 		items = append(items, attentionItem{
 			Severity: "warn",

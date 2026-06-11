@@ -70,8 +70,9 @@ func TestListVerificationTicksLimitsPerWorkerAndOrdersChronologically(t *testing
 	}
 	recordSeriesVerification(t, db, workerB.ID, base, true, "completed", 500)
 	recordSeriesVerification(t, db, workerB.ID, base.Add(time.Hour), false, "aborted", 600)
+	recordSeriesVerification(t, db, workerB.ID, base.Add(-30*24*time.Hour), false, "failed", 700)
 
-	ticks, err := db.ListVerificationTicks(3)
+	ticks, err := db.ListVerificationTicks(3, base.Add(-7*24*time.Hour))
 	if err != nil {
 		t.Fatalf("ListVerificationTicks() error = %v", err)
 	}
@@ -94,7 +95,7 @@ func TestListVerificationTicksLimitsPerWorkerAndOrdersChronologically(t *testing
 
 	gotB := ticks[workerB.ID]
 	if len(gotB) != 2 {
-		t.Fatalf("len(ticks[%s]) = %d, want 2: %+v", workerB.ID, len(gotB), gotB)
+		t.Fatalf("len(ticks[%s]) = %d, want 2 (verification older than since must be excluded): %+v", workerB.ID, len(gotB), gotB)
 	}
 	if gotB[1].Status != "aborted" {
 		t.Fatalf("ticks[%s][1].Status = %q, want aborted", workerB.ID, gotB[1].Status)

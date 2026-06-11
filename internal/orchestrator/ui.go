@@ -170,7 +170,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 			return homePageData{}, err
 		}
 	}
-	ticksByWorker, err := a.db.ListVerificationTicks(20)
+	ticksByWorker, err := a.db.ListVerificationTicks(20, now.Add(-7*24*time.Hour))
 	if err != nil {
 		return homePageData{}, err
 	}

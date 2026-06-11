@@ -21,6 +21,7 @@ func TestBuildChartSeriesBucketsHourly(t *testing.T) {
 
 	from := time.Date(2026, 6, 10, 6, 0, 0, 0, time.UTC)
 	stats := []model.VerificationStat{
+		chartStat(from.Add(-10*time.Minute), false, "failed", 9999),
 		chartStat(from.Add(10*time.Minute), true, "completed", 100),
 		chartStat(from.Add(20*time.Minute), true, "completed", 300),
 		chartStat(from.Add(30*time.Minute), false, "failed", 900),
@@ -51,7 +52,7 @@ func TestBuildChartSeriesBucketsHourly(t *testing.T) {
 	}
 
 	if series.Failures[0] != 1 || series.Failures[1] != 0 || series.Failures[2] != 0 {
-		t.Fatalf("Failures = %v, want [1 0 0]", series.Failures)
+		t.Fatalf("Failures = %v, want [1 0 0] (stat before from must not land in bucket 0)", series.Failures)
 	}
 
 	if series.P50[0] == nil || *series.P50[0] != 300 {
@@ -87,6 +88,17 @@ func TestPassRateSummaryExcludesAborted(t *testing.T) {
 	emptyRate, emptyTotal := passRateSummary(nil)
 	if emptyTotal != 0 || emptyRate != 0 {
 		t.Fatalf("passRateSummary(nil) = (%v, %d), want (0, 0)", emptyRate, emptyTotal)
+	}
+}
+
+func TestPercentileEmptyInputReturnsZero(t *testing.T) {
+	t.Parallel()
+
+	if got := percentile(nil, 0.95); got != 0 {
+		t.Fatalf("percentile(nil) = %d, want 0", got)
+	}
+	if got := percentile([]int{}, 0.5); got != 0 {
+		t.Fatalf("percentile(empty) = %d, want 0", got)
 	}
 }
 

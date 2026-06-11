@@ -12,6 +12,7 @@ import (
 var templateFS embed.FS
 
 var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
+	"assetVersion":            func() string { return assetVersion },
 	"confidenceClass":         confidenceClass,
 	"comparisonBaseLabel":     comparisonBaseLabel,
 	"comparisonCopyText":      comparisonCopyText,
