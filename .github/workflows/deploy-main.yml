@@ -42,13 +42,13 @@ jobs:
           else
             while IFS= read -r file; do
               case "$file" in
-                cmd/soakctl/*|internal/orchestrator/*|internal/model/*|internal/flyapi/*|fly.control.toml|Dockerfile.control|go.mod|go.sum)
+                cmd/soakctl/*|internal/orchestrator/*|internal/model/*|internal/flyapi/*|fly.control.toml|Dockerfile.control|docker-entrypoint.sh|go.mod|go.sum)
                   control_changed=true
                   ;;
               esac
 
               case "$file" in
-                cmd/soakworker/*|internal/worker/*|internal/replay/*|internal/workload/*|internal/reporting/*|internal/model/*|internal/flyapi/*|fly.toml|Dockerfile.worker|datasets/*|go.mod|go.sum)
+                cmd/soakworker/*|internal/worker/*|internal/replay/*|internal/workload/*|internal/reporting/*|internal/model/*|internal/flyapi/*|fly.toml|Dockerfile.worker|docker-entrypoint.sh|datasets/*|go.mod|go.sum)
                   worker_changed=true
                   ;;
               esac
