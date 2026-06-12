@@ -284,7 +284,7 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid ACTIVE_PERCENT: %w", err)
 		}
 		c.ActivePercent = n
-		if c.ActivePercent < 0 || c.ActivePercent > 100 {
+		if math.IsNaN(c.ActivePercent) || c.ActivePercent < 0 || c.ActivePercent > 100 {
 			return c, fmt.Errorf("invalid ACTIVE_PERCENT: must be between 0 and 100")
 		}
 	}

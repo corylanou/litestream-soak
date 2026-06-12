@@ -36,10 +36,11 @@ func TestPprofCapturerPrunesOldLocalProfiles(t *testing.T) {
 	capturer := newPprofCapturer(&cfg)
 	dir := t.TempDir()
 	names := []string{
-		"20260101T000000Z_hourly_heap.pprof",
+		"20260101T000000Z_baseline_heap.pprof",
 		"20260101T010000Z_hourly_heap.pprof",
 		"20260101T020000Z_hourly_heap.pprof",
 		"20260101T030000Z_hourly_heap.pprof",
+		"20260101T040000Z_hourly_heap.pprof",
 	}
 	for i, name := range names {
 		target := filepath.Join(dir, name)
@@ -65,8 +66,9 @@ func TestPprofCapturerPrunesOldLocalProfiles(t *testing.T) {
 	slices.Sort(got)
 
 	want := []string{
-		"20260101T020000Z_hourly_heap.pprof",
+		"20260101T000000Z_baseline_heap.pprof",
 		"20260101T030000Z_hourly_heap.pprof",
+		"20260101T040000Z_hourly_heap.pprof",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("remaining profiles = %v, want %v", got, want)

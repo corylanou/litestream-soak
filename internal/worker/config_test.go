@@ -74,3 +74,12 @@ func TestConfigFromEnvRejectsTrailingGarbageForManyDBConfig(t *testing.T) {
 		t.Fatal("ConfigFromEnv() error = nil, want non-nil")
 	}
 }
+
+func TestConfigFromEnvRejectsNaNActivePercent(t *testing.T) {
+	t.Setenv("NUM_DATABASES", "100")
+	t.Setenv("ACTIVE_PERCENT", "NaN")
+
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Fatal("ConfigFromEnv() error = nil, want non-nil")
+	}
+}

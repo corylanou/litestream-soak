@@ -129,6 +129,9 @@ func (c *pprofCapturer) pruneLocalProfiles(dir string, keep int) {
 		if entry.IsDir() {
 			continue
 		}
+		if strings.Contains(entry.Name(), "_baseline_") {
+			continue
+		}
 		info, err := entry.Info()
 		if err != nil {
 			slog.Warn("Read pprof file info failed", "file", filepath.Join(dir, entry.Name()), "error", err)
