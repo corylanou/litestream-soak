@@ -58,6 +58,22 @@ func TestInferFailureSignatureDBSyncExecutor(t *testing.T) {
 	}
 }
 
+func TestInferProbableSubsystemS3Transport(t *testing.T) {
+	t.Parallel()
+
+	verification := &model.Verification{
+		CheckType:    "integrity",
+		ErrorMessage: `wait for sync: sync returned 500: sync database: replica sync: operation error S3: PutObject, https response error StatusCode: 0, RequestID: , request send failed: unexpected EOF`,
+	}
+
+	if got := inferFailureSignature(verification); got != "s3_transport" {
+		t.Fatalf("inferFailureSignature()=%q want s3_transport", got)
+	}
+	if got := inferProbableSubsystem(inferFailureStage(verification), inferFailureSignature(verification)); got != "S3 transport" {
+		t.Fatalf("inferProbableSubsystem()=%q want S3 transport", got)
+	}
+}
+
 func TestInferProbableSubsystemDiskCapacity(t *testing.T) {
 	verification := &model.Verification{
 		CheckType:    "integrity",
@@ -105,17 +121,17 @@ func TestClassifyVerification(t *testing.T) {
 	const syncErrorMessage = `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`
 
 	tests := []struct {
-		name              string
-		verification      *model.Verification
-		wantStage         string
-		wantSignature     string
+		name               string
+		verification       *model.Verification
+		wantStage          string
+		wantSignature      string
 		wantClassification bool
 	}{
 		{
-			name:              "nil verification returns zero value",
-			verification:      nil,
-			wantStage:         "",
-			wantSignature:     "",
+			name:               "nil verification returns zero value",
+			verification:       nil,
+			wantStage:          "",
+			wantSignature:      "",
 			wantClassification: false,
 		},
 		{
@@ -124,8 +140,8 @@ func TestClassifyVerification(t *testing.T) {
 				CheckType:    syncCheckType,
 				ErrorMessage: syncErrorMessage,
 			},
-			wantStage:         "sync",
-			wantSignature:     "litestream_sync_socket_refused",
+			wantStage:          "sync",
+			wantSignature:      "litestream_sync_socket_refused",
 			wantClassification: true,
 		},
 	}

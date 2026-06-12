@@ -68,7 +68,7 @@
       </div>
       <div class="kpi">
         <div class="kpi-label">Failures 24h{{template "info" "Failed checks in the last 24 hours. A small steady number on main is the known baseline - what matters is a sudden burst, or a failure signature you have not seen before. Compare against the failures-per-hour chart to see whether they cluster."}}</div>
-        <div class="kpi-value {{if gt .KPIs.Failures24h 0}}kpi-bad{{end}}">{{.KPIs.Failures24h}}</div>
+        <div class="kpi-value {{if gt .KPIs.ActionableFailures24h 0}}kpi-bad{{else if gt .KPIs.Failures24h 0}}kpi-warn{{end}}">{{.KPIs.Failures24h}}{{if or (gt .KPIs.EnvironmentalFailures24h 0) (gt .KPIs.RampUpFailures24h 0)}} <span class="kpi-unit">({{if gt .KPIs.EnvironmentalFailures24h 0}}{{.KPIs.EnvironmentalFailures24h}} environmental{{end}}{{if and (gt .KPIs.EnvironmentalFailures24h 0) (gt .KPIs.RampUpFailures24h 0)}}, {{end}}{{if gt .KPIs.RampUpFailures24h 0}}{{.KPIs.RampUpFailures24h}} ramp-up{{end}})</span>{{end}}</div>
         <div class="kpi-sub">{{if gt .Summary.ActiveVerifications 0}}{{.Summary.ActiveVerifications}} check(s) running{{else}}no checks running{{end}}</div>
       </div>
       <div class="kpi">
@@ -166,7 +166,7 @@
             </td>
             <td>
               {{if .CurrentFailureSignature}}
-              <span class="badge badge-bad" title="{{.CurrentFailureSignature}}">{{shorten .CurrentFailureSignature 48}}</span>
+              <span class="badge badge-{{if eq .CurrentFailureSeverity "warn"}}warn{{else}}bad{{end}}" title="{{.CurrentFailureSignature}}">{{shorten .CurrentFailureSignature 48}}</span>
               {{else if .ActiveVerification}}
               <span class="signal-info">checking&hellip;</span>
               {{else}}
@@ -195,7 +195,7 @@
           <div class="feed-row">
             <div class="feed-body">
               <div class="feed-title">{{workerName .Spotlight.Worker .Spotlight.Verification.WorkerID}}</div>
-              <div class="feed-meta">{{.Spotlight.FailureStage}} &middot; {{.Spotlight.ProbableSubsystem}} &middot; {{formatDuration .Spotlight.Verification.DurationMS}}</div>
+              <div class="feed-meta">{{.Spotlight.FailureStage}} &middot; {{.Spotlight.ProbableSubsystem}}{{if .Spotlight.FailureCategory}} &middot; {{.Spotlight.FailureCategory}}{{end}} &middot; {{formatDuration .Spotlight.Verification.DurationMS}}</div>
               <div class="feed-msg">{{shorten (failureText .Spotlight.Verification) 140}}</div>
               <div class="feed-actions">
                 <a href="/ui/workers/{{pathEscape .Spotlight.Verification.WorkerID}}">Open</a>
@@ -212,7 +212,7 @@
           <div class="feed-row">
             <div class="feed-body">
               <div class="feed-title">{{workerName .Worker .Verification.WorkerID}}</div>
-              <div class="feed-meta">{{.FailureStage}} &middot; {{.ProbableSubsystem}} &middot; {{formatDuration .Verification.DurationMS}}</div>
+              <div class="feed-meta">{{.FailureStage}} &middot; {{.ProbableSubsystem}}{{if .FailureCategory}} &middot; {{.FailureCategory}}{{end}} &middot; {{formatDuration .Verification.DurationMS}}</div>
               <div class="feed-msg">{{shorten (failureText .Verification) 140}}</div>
               <div class="feed-actions">
                 <a href="/ui/workers/{{pathEscape .Verification.WorkerID}}">Open</a>

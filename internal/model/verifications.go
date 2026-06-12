@@ -14,10 +14,17 @@ type VerificationTick struct {
 }
 
 type VerificationStat struct {
-	StartedAt  time.Time `json:"started_at"`
-	Status     string    `json:"status"`
-	Passed     bool      `json:"passed"`
-	DurationMS int       `json:"duration_ms"`
+	ID              int       `json:"id"`
+	WorkerID        string    `json:"worker_id"`
+	Source          string    `json:"source"`
+	WorkerCreatedAt time.Time `json:"worker_created_at"`
+	StartedAt       time.Time `json:"started_at"`
+	Status          string    `json:"status"`
+	CheckType       string    `json:"check_type"`
+	Passed          bool      `json:"passed"`
+	DurationMS      int       `json:"duration_ms"`
+	ErrorMessage    string    `json:"error_message,omitempty"`
+	HasPriorPass    bool      `json:"has_prior_pass"`
 }
 
 func (d *DB) ListVerificationTicks(perWorker int, since time.Time) (map[string][]VerificationTick, error) {
@@ -51,12 +58,31 @@ func (d *DB) ListVerificationTicks(perWorker int, since time.Time) (map[string][
 
 func (d *DB) ListVerificationStatsSince(source string, since time.Time) ([]VerificationStat, error) {
 	rows, err := d.db.Query(`
-		SELECT v.started_at, v.status, v.passed, v.duration_ms
+		SELECT
+			v.id,
+			v.worker_id,
+			w.source,
+			w.created_at,
+			v.started_at,
+			v.status,
+			v.check_type,
+			v.passed,
+			v.duration_ms,
+			COALESCE(v.error_message, ''),
+			EXISTS (
+				SELECT 1
+				FROM verifications prior
+				WHERE prior.worker_id = v.worker_id
+					AND prior.started_at < v.started_at
+					AND prior.passed = 1
+					AND lower(trim(prior.status)) <> 'failed'
+					AND lower(trim(prior.status)) <> 'aborted'
+			)
 		FROM verifications v
 		JOIN workers w ON w.id = v.worker_id
-		WHERE w.source = ? AND v.started_at >= ?
+		WHERE (? = '' OR w.source = ?) AND v.started_at >= ?
 		ORDER BY v.started_at ASC`,
-		source, since,
+		source, source, since,
 	)
 	if err != nil {
 		return nil, err
@@ -66,9 +92,23 @@ func (d *DB) ListVerificationStatsSince(source string, since time.Time) ([]Verif
 	stats := make([]VerificationStat, 0)
 	for rows.Next() {
 		var stat VerificationStat
-		if err := rows.Scan(&stat.StartedAt, &stat.Status, &stat.Passed, &stat.DurationMS); err != nil {
+		var hasPriorPass int
+		if err := rows.Scan(
+			&stat.ID,
+			&stat.WorkerID,
+			&stat.Source,
+			&stat.WorkerCreatedAt,
+			&stat.StartedAt,
+			&stat.Status,
+			&stat.CheckType,
+			&stat.Passed,
+			&stat.DurationMS,
+			&stat.ErrorMessage,
+			&hasPriorPass,
+		); err != nil {
 			return nil, err
 		}
+		stat.HasPriorPass = hasPriorPass != 0
 		stats = append(stats, stat)
 	}
 	if err := rows.Err(); err != nil {

@@ -165,9 +165,9 @@ func finalizeDeploymentComparison(comparison *DeploymentComparisonResponse) {
 			continue
 		}
 		switch {
-		case !baseOutcome.Passed && headOutcome.Passed:
+		case !comparisonOutcomePassed(baseOutcome) && comparisonOutcomePassed(headOutcome):
 			comparison.ImprovedWorkers = append(comparison.ImprovedWorkers, headOutcome)
-		case baseOutcome.Passed && !headOutcome.Passed:
+		case comparisonOutcomePassed(baseOutcome) && comparisonOutcomeFailed(headOutcome):
 			comparison.RegressedWorkers = append(comparison.RegressedWorkers, headOutcome)
 		}
 	}
@@ -176,10 +176,16 @@ func finalizeDeploymentComparison(comparison *DeploymentComparisonResponse) {
 
 	headFailures := make(map[string]DeploymentFailureCount, len(headScorecard.Failures))
 	for _, failure := range headScorecard.Failures {
+		if failureExcludedFromComparison(failure.Category) {
+			continue
+		}
 		headFailures[failure.Signature] = failure
 	}
 	baseFailures := make(map[string]DeploymentFailureCount, len(baseScorecard.Failures))
 	for _, failure := range baseScorecard.Failures {
+		if failureExcludedFromComparison(failure.Category) {
+			continue
+		}
 		baseFailures[failure.Signature] = failure
 	}
 	for signature, failure := range headFailures {
@@ -205,11 +211,31 @@ func finalizeDeploymentComparison(comparison *DeploymentComparisonResponse) {
 		return comparison.ResolvedFailures[i].Signature < comparison.ResolvedFailures[j].Signature
 	})
 
-	comparison.PassDelta = headScorecard.PassedWorkers - baseScorecard.PassedWorkers
-	comparison.FailDelta = headScorecard.FailedWorkers - baseScorecard.FailedWorkers
+	comparison.PassDelta = comparisonPassedWorkers(headScorecard) - comparisonPassedWorkers(baseScorecard)
+	comparison.FailDelta = comparisonFailedWorkers(headScorecard) - comparisonFailedWorkers(baseScorecard)
 	comparison.AwaitingDelta = headScorecard.AwaitingWorkers - baseScorecard.AwaitingWorkers
 	comparison.Verdict = inferDeploymentComparisonVerdict(*comparison)
 	comparison.Summary = summarizeDeploymentComparison(*comparison)
+}
+
+func comparisonOutcomePassed(outcome DeploymentWorkerOutcome) bool {
+	return outcome.Passed || failureExcludedFromComparison(outcome.FailureCategory)
+}
+
+func comparisonOutcomeFailed(outcome DeploymentWorkerOutcome) bool {
+	return !outcome.Passed && !failureExcludedFromComparison(outcome.FailureCategory)
+}
+
+func comparisonPassedWorkers(scorecard DeploymentScorecard) int {
+	return scorecard.PassedWorkers + scorecard.RampUpFailures
+}
+
+func comparisonFailedWorkers(scorecard DeploymentScorecard) int {
+	return scorecard.ActionableFailedWorkers
+}
+
+func failureExcludedFromComparison(category string) bool {
+	return category == failureCategoryRampUp
 }
 
 func comparisonOutcomeKey(outcome DeploymentWorkerOutcome) string {
@@ -298,8 +324,11 @@ func scoreDeploymentWorker(worker model.Worker, deployment model.Deployment, ver
 	}
 	if verification.Failed() {
 		vf := classifyVerification(verification)
+		category := deploymentFailureCategory(worker, *verification, verifications)
 		outcome.FailureStage = vf.Stage
 		outcome.FailureSignature = vf.Signature
+		outcome.FailureCategory = category
+		outcome.FailureSeverity = failureSeverityForCategory(category)
 		outcome.ProbableSubsystem = vf.probableSubsystem()
 	}
 	return outcome, true
@@ -316,13 +345,49 @@ func countDeploymentScorecardOutcome(scorecard *DeploymentScorecard, failureCoun
 		scorecard.PassedWorkers++
 	} else {
 		scorecard.FailedWorkers++
+		switch outcome.FailureCategory {
+		case failureCategoryRampUp:
+			scorecard.RampUpFailures++
+		case failureCategoryEnvironmental:
+			scorecard.EnvironmentalFailures++
+		default:
+			scorecard.ActionableFailedWorkers++
+		}
 		failure := failureCounts[outcome.FailureSignature]
 		failure.Signature = outcome.FailureSignature
 		failure.Stage = outcome.FailureStage
+		failure.Category = firstNonEmpty(outcome.FailureCategory, failureCategoryActionable)
+		failure.Severity = failureSeverityForCategory(failure.Category)
 		failure.Count++
 		failureCounts[outcome.FailureSignature] = failure
 	}
 	scorecard.Outcomes = append(scorecard.Outcomes, outcome)
+}
+
+func deploymentFailureCategory(worker model.Worker, verification model.Verification, verifications []model.Verification) string {
+	if isDeploymentRampUpFailure(worker, verification, verifications) {
+		return failureCategoryRampUp
+	}
+	return failureCategoryActionable
+}
+
+func isDeploymentRampUpFailure(worker model.Worker, verification model.Verification, verifications []model.Verification) bool {
+	if worker.CreatedAt.IsZero() {
+		return false
+	}
+	createdAt := worker.CreatedAt.UTC()
+	if verification.StartedAt.Before(createdAt) || !verification.StartedAt.Before(createdAt.Add(rampUpFailureDeadline)) {
+		return false
+	}
+	for _, candidate := range verifications {
+		if !candidate.StartedAt.Before(verification.StartedAt) {
+			continue
+		}
+		if candidate.Succeeded() {
+			return false
+		}
+	}
+	return true
 }
 
 func finalizeDeploymentScorecard(scorecard *DeploymentScorecard, failureCounts map[string]DeploymentFailureCount) {

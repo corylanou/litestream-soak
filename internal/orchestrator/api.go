@@ -43,6 +43,8 @@ type FailureResponse struct {
 	Verification      model.Verification `json:"verification"`
 	FailureStage      string             `json:"failure_stage,omitempty"`
 	FailureSignature  string             `json:"failure_signature,omitempty"`
+	FailureCategory   string             `json:"failure_category,omitempty"`
+	FailureSeverity   string             `json:"failure_severity,omitempty"`
 	ProbableSubsystem string             `json:"probable_subsystem,omitempty"`
 	TriageCommands    []string           `json:"triage_commands,omitempty"`
 }
@@ -112,6 +114,8 @@ type DeploymentRolloutResponse struct {
 type DeploymentFailureCount struct {
 	Signature string `json:"signature"`
 	Stage     string `json:"stage,omitempty"`
+	Category  string `json:"category,omitempty"`
+	Severity  string `json:"severity,omitempty"`
 	Count     int    `json:"count"`
 }
 
@@ -123,21 +127,26 @@ type DeploymentWorkerOutcome struct {
 	VerifiedAt        *time.Time `json:"verified_at,omitempty"`
 	FailureStage      string     `json:"failure_stage,omitempty"`
 	FailureSignature  string     `json:"failure_signature,omitempty"`
+	FailureCategory   string     `json:"failure_category,omitempty"`
+	FailureSeverity   string     `json:"failure_severity,omitempty"`
 	ProbableSubsystem string     `json:"probable_subsystem,omitempty"`
 }
 
 type DeploymentScorecard struct {
-	Deployment      model.Deployment          `json:"deployment"`
-	WindowStart     time.Time                 `json:"window_start"`
-	WindowEnd       *time.Time                `json:"window_end,omitempty"`
-	TotalWorkers    int                       `json:"total_workers"`
-	VerifiedWorkers int                       `json:"verified_workers"`
-	PassedWorkers   int                       `json:"passed_workers"`
-	FailedWorkers   int                       `json:"failed_workers"`
-	AwaitingWorkers int                       `json:"awaiting_workers"`
-	PassRate        float64                   `json:"pass_rate"`
-	Failures        []DeploymentFailureCount  `json:"failures,omitempty"`
-	Outcomes        []DeploymentWorkerOutcome `json:"outcomes,omitempty"`
+	Deployment              model.Deployment          `json:"deployment"`
+	WindowStart             time.Time                 `json:"window_start"`
+	WindowEnd               *time.Time                `json:"window_end,omitempty"`
+	TotalWorkers            int                       `json:"total_workers"`
+	VerifiedWorkers         int                       `json:"verified_workers"`
+	PassedWorkers           int                       `json:"passed_workers"`
+	FailedWorkers           int                       `json:"failed_workers"`
+	ActionableFailedWorkers int                       `json:"actionable_failed_workers"`
+	EnvironmentalFailures   int                       `json:"environmental_failures"`
+	RampUpFailures          int                       `json:"ramp_up_failures"`
+	AwaitingWorkers         int                       `json:"awaiting_workers"`
+	PassRate                float64                   `json:"pass_rate"`
+	Failures                []DeploymentFailureCount  `json:"failures,omitempty"`
+	Outcomes                []DeploymentWorkerOutcome `json:"outcomes,omitempty"`
 }
 
 type DeploymentComparisonResponse struct {

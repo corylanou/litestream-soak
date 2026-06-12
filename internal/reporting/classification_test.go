@@ -197,6 +197,40 @@ func TestClassifyVerificationFailureDBSyncExecutor(t *testing.T) {
 	}
 }
 
+func TestClassifyVerificationFailureS3Transport(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		msg  string
+	}{
+		{
+			name: "unexpected EOF",
+			msg:  `wait for sync: sync returned 500: sync database: replica sync: operation error S3: PutObject, https response error StatusCode: 0, RequestID: , request send failed, Put "https://fly.storage.tigris.dev/litestream-soak": unexpected EOF`,
+		},
+		{
+			name: "retry quota exceeded",
+			msg:  `wait for sync: sync returned 500: sync database: replica sync: retry quota exceeded, 0 available, 5 requested`,
+		},
+		{
+			name: "replica sync context deadline",
+			msg:  `wait for sync: sync returned 500: sync database: replica sync: context deadline exceeded`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifyVerificationFailure("integrity", tt.msg)
+			if got.Stage != "sync" {
+				t.Fatalf("Stage = %q, want sync", got.Stage)
+			}
+			if got.Signature != "s3_transport" {
+				t.Fatalf("Signature = %q, want s3_transport", got.Signature)
+			}
+		})
+	}
+}
+
 func TestClassifyVerificationFailureDiskCapacity(t *testing.T) {
 	got := ClassifyVerificationFailure("integrity", `checkpoint failed: database or disk is full (13); sync failed: write /data/.test.db-litestream/ltx/0/000000000001.ltx.tmp: no space left on device`)
 	if got.Stage != "disk_capacity" {
