@@ -170,7 +170,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 	e.db.SetMaxOpenConns(1)
 	e.db.SetMaxIdleConns(1)
-	defer e.db.Close()
+	defer func() { _ = e.db.Close() }()
 
 	if err := e.adapter.CreateTables(e.db); err != nil {
 		return fmt.Errorf("create tables: %w", err)
@@ -212,7 +212,7 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("open rows: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	var prevTS time.Time
 	var count int64

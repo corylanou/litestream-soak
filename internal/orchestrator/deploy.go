@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -68,16 +69,25 @@ func (d *Deployer) DeployNewSHA(sha string) error {
 		return fmt.Errorf("create deployment record: %w", err)
 	}
 
-	d.db.RecordEvent("", "deploy_started", fmt.Sprintf("Building image for %s", trimSHA(sha)), "")
+	if err := d.db.RecordEvent("", "deploy_started", fmt.Sprintf("Building image for %s", trimSHA(sha)), ""); err != nil {
+		return fmt.Errorf("record deploy started event: %w", err)
+	}
 
 	imageRef, err := d.buildImage(sha)
 	if err != nil {
-		d.db.UpdateDeployment(depID, "failed", "", err.Error())
-		d.db.RecordEvent("", "deploy_failed", fmt.Sprintf("Build failed for %s: %v", trimSHA(sha), err), "")
-		return fmt.Errorf("build image: %w", err)
+		resultErr := err
+		if updateErr := d.db.UpdateDeployment(depID, "failed", "", err.Error()); updateErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("mark deployment failed: %w", updateErr))
+		}
+		if eventErr := d.db.RecordEvent("", "deploy_failed", fmt.Sprintf("Build failed for %s: %v", trimSHA(sha), err), ""); eventErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("record deploy failed event: %w", eventErr))
+		}
+		return fmt.Errorf("build image: %w", resultErr)
 	}
 
-	d.db.UpdateDeployment(depID, "ready", imageRef, "")
+	if err := d.db.UpdateDeployment(depID, "ready", imageRef, ""); err != nil {
+		return fmt.Errorf("mark deployment ready: %w", err)
+	}
 	_, err = d.NotifyDeploymentReady(context.Background(), "main", sha, litestreamSHA, imageRef, "github_webhook_build")
 	return err
 }

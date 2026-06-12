@@ -347,7 +347,7 @@ func TestExpiresAtRoundTripMatchesExpiryQuery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { _ = db.Close() })
 
 	mgr := &Manager{db: db, appName: "litestream-soak"}
 
@@ -617,7 +617,7 @@ func TestRollingUpdateSourceSkipsUpToDateWorkers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { _ = db.Close() })
 
 	mgr := &Manager{db: db, appName: "litestream-soak"}
 

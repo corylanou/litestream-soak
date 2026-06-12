@@ -115,7 +115,7 @@ func (c *Client) listObjects(ctx context.Context, prefix, continuationToken stri
 	if err != nil {
 		return nil, "", fmt.Errorf("list objects: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -319,7 +319,9 @@ func awsPercentEncode(s string) string {
 			b.WriteByte(c)
 			continue
 		}
-		b.WriteString(fmt.Sprintf("%%%02X", c))
+		b.WriteByte('%')
+		b.WriteByte("0123456789ABCDEF"[c>>4])
+		b.WriteByte("0123456789ABCDEF"[c&0x0f])
 	}
 	return b.String()
 }

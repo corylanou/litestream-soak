@@ -64,7 +64,9 @@ func (m *Manager) checkStaleWorkers(ctx context.Context, timeout time.Duration) 
 			slog.Error("Failed to update stale worker status", "worker_id", w.ID, "error", err)
 			continue
 		}
-		m.db.RecordEvent(w.ID, "worker_stale", "Worker missed heartbeat deadline", "")
+		if err := m.db.RecordEvent(w.ID, "worker_stale", "Worker missed heartbeat deadline", ""); err != nil {
+			slog.Error("Failed to record stale worker event", "worker_id", w.ID, "error", err)
+		}
 		m.observeWorkerByID(w.ID)
 		if m.alerts != nil {
 			latestWorker, err := m.db.GetWorker(w.ID)

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
@@ -136,7 +137,9 @@ func (m *Manager) createWorker(ctx context.Context, req WorkerRequest) (*model.W
 	}
 	m.observeWorkerByID(workerID)
 
-	m.db.RecordEvent(workerID, "worker_creating", fmt.Sprintf("Creating worker %s with profile %s", req.Name, req.ProfileName), "")
+	if err := m.db.RecordEvent(workerID, "worker_creating", fmt.Sprintf("Creating worker %s with profile %s", req.Name, req.ProfileName), ""); err != nil {
+		return nil, fmt.Errorf("record worker creating event: %w", err)
+	}
 
 	volSize := req.VolumeSizeGB
 	if volSize == 0 {
@@ -145,7 +148,9 @@ func (m *Manager) createWorker(ctx context.Context, req WorkerRequest) (*model.W
 
 	vol, err := m.createWorkerVolume(ctx, *worker, volSize)
 	if err != nil {
-		m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error())
+		if updateErr := m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error()); updateErr != nil {
+			return nil, fmt.Errorf("create volume: %w", errors.Join(err, fmt.Errorf("mark worker failed: %w", updateErr)))
+		}
 		m.observeWorkerByID(workerID)
 		return nil, fmt.Errorf("create volume: %w", err)
 	}
@@ -155,15 +160,21 @@ func (m *Manager) createWorker(ctx context.Context, req WorkerRequest) (*model.W
 		if destroyErr := m.fly.DestroyVolume(ctx, vol.ID); destroyErr != nil && !flyapi.IsNotFound(destroyErr) {
 			slog.Warn("Failed to destroy worker volume after replica prefix clear failure", "worker_id", workerID, "volume_id", vol.ID, "error", destroyErr)
 		}
-		m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error())
+		if updateErr := m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error()); updateErr != nil {
+			return nil, fmt.Errorf("clear replica prefix: %w", errors.Join(err, fmt.Errorf("mark worker failed: %w", updateErr)))
+		}
 		m.observeWorkerByID(workerID)
 		return nil, fmt.Errorf("clear replica prefix: %w", err)
 	}
 
 	machine, err := m.createWorkerMachine(ctx, *worker, req.ImageRef, vol.ID, workloadCfg)
 	if err != nil {
-		m.fly.DestroyVolume(ctx, vol.ID)
-		m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error())
+		if destroyErr := m.fly.DestroyVolume(ctx, vol.ID); destroyErr != nil && !flyapi.IsNotFound(destroyErr) {
+			slog.Warn("Failed to destroy worker volume after machine creation failure", "worker_id", workerID, "volume_id", vol.ID, "error", destroyErr)
+		}
+		if updateErr := m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error()); updateErr != nil {
+			return nil, fmt.Errorf("create machine: %w", errors.Join(err, fmt.Errorf("mark worker failed: %w", updateErr)))
+		}
 		m.observeWorkerByID(workerID)
 		return nil, fmt.Errorf("create machine: %w", err)
 	}
@@ -177,9 +188,11 @@ func (m *Manager) createWorker(ctx context.Context, req WorkerRequest) (*model.W
 		}
 		return nil, fmt.Errorf("update worker machine: %w", err)
 	}
-	m.db.UpdateWorkerStatus(workerID, model.WorkerRunning, "")
+	if err := m.db.UpdateWorkerStatus(workerID, model.WorkerRunning, ""); err != nil {
+		return nil, fmt.Errorf("mark worker running: %w", err)
+	}
 	m.observeWorkerByID(workerID)
-	m.db.RecordEvent(workerID, "worker_started", fmt.Sprintf("Worker %s started (machine %s)", req.Name, machine.ID), "")
+	_ = m.db.RecordEvent(workerID, "worker_started", fmt.Sprintf("Worker %s started (machine %s)", req.Name, machine.ID), "")
 
 	slog.Info("Worker created", "name", req.Name, "machine_id", machine.ID, "volume_id", vol.ID, "profile", req.ProfileName)
 
@@ -396,9 +409,11 @@ func (m *Manager) stopWorker(ctx context.Context, workerID string) error {
 		}
 	}
 
-	m.db.UpdateWorkerStatus(workerID, model.WorkerStopped, "")
+	if err := m.db.UpdateWorkerStatus(workerID, model.WorkerStopped, ""); err != nil {
+		return fmt.Errorf("mark worker stopped: %w", err)
+	}
 	m.observeWorkerByID(workerID)
-	m.db.RecordEvent(workerID, "worker_stopped", fmt.Sprintf("Worker %s stopped", worker.Name), "")
+	_ = m.db.RecordEvent(workerID, "worker_stopped", fmt.Sprintf("Worker %s stopped", worker.Name), "")
 	return nil
 }
 
@@ -429,9 +444,11 @@ func (m *Manager) destroyWorker(ctx context.Context, workerID string) error {
 		slog.Warn("Failed to clear worker replica prefix", "worker_id", workerID, "error", err)
 	}
 
-	m.db.UpdateWorkerStatus(workerID, model.WorkerStopped, "")
+	if err := m.db.UpdateWorkerStatus(workerID, model.WorkerStopped, ""); err != nil {
+		return fmt.Errorf("mark worker stopped: %w", err)
+	}
 	m.observeWorkerByID(workerID)
-	m.db.RecordEvent(workerID, "worker_destroyed", fmt.Sprintf("Worker %s destroyed", worker.Name), "")
+	_ = m.db.RecordEvent(workerID, "worker_destroyed", fmt.Sprintf("Worker %s destroyed", worker.Name), "")
 	return nil
 }
 
@@ -531,7 +548,7 @@ func (m *Manager) RollWorker(ctx context.Context, workerID, newImageRef, newSHA,
 
 func (m *Manager) replaceWorker(ctx context.Context, w model.Worker, newImageRef, newSHA, newLitestreamSHA string) (*model.Worker, error) {
 	slog.Info("Updating worker", "name", w.Name, "old_sha", w.GitSHA, "new_sha", newSHA, "old_litestream_sha", w.LitestreamSHA, "new_litestream_sha", newLitestreamSHA)
-	m.db.RecordEvent(w.ID, "rolling_update", fmt.Sprintf("Updating %s from soak %s / litestream %s to soak %s / litestream %s", w.Name, shortVersionValue(w.GitSHA), shortVersionValue(w.LitestreamSHA), shortVersionValue(newSHA), shortVersionValue(newLitestreamSHA)), "")
+	_ = m.db.RecordEvent(w.ID, "rolling_update", fmt.Sprintf("Updating %s from soak %s / litestream %s to soak %s / litestream %s", w.Name, shortVersionValue(w.GitSHA), shortVersionValue(w.LitestreamSHA), shortVersionValue(newSHA), shortVersionValue(newLitestreamSHA)), "")
 
 	if w.FlyMachineID != "" {
 		if err := m.fly.StopMachine(ctx, w.FlyMachineID); err != nil {
