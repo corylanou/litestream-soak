@@ -319,7 +319,9 @@ func awsPercentEncode(s string) string {
 			b.WriteByte(c)
 			continue
 		}
-		b.WriteString(fmt.Sprintf("%%%02X", c))
+		b.WriteByte('%')
+		b.WriteByte("0123456789ABCDEF"[c>>4])
+		b.WriteByte("0123456789ABCDEF"[c&0x0f])
 	}
 	return b.String()
 }
