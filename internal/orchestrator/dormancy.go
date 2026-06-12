@@ -49,6 +49,17 @@ func normalizeWorkloadConfig(cfg workload.Config) workload.Config {
 	if cfg.MemoryMB == 0 {
 		cfg.MemoryMB = 1024
 	}
+	if cfg.NumDatabases > 0 {
+		if cfg.ActivePercent == 0 && !cfg.ActivePercentSet {
+			cfg.ActivePercent = 2
+		}
+		if strings.TrimSpace(cfg.ConfigMode) == "" {
+			cfg.ConfigMode = "list"
+		}
+		if cfg.VerifySampleSize == 0 {
+			cfg.VerifySampleSize = 5
+		}
+	}
 	return cfg
 }
 
@@ -110,6 +121,19 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	}
 	if workloadCfg.S3Concurrency > 0 {
 		env["LITESTREAM_S3_CONCURRENCY"] = fmt.Sprintf("%d", workloadCfg.S3Concurrency)
+	}
+	if workloadCfg.NumDatabases > 0 {
+		env["NUM_DATABASES"] = fmt.Sprintf("%d", workloadCfg.NumDatabases)
+		env["ACTIVE_PERCENT"] = fmt.Sprintf("%.2f", workloadCfg.ActivePercent)
+	}
+	if strings.TrimSpace(workloadCfg.ConfigMode) != "" {
+		env["CONFIG_MODE"] = workloadCfg.ConfigMode
+	}
+	if workloadCfg.VerifySampleSize > 0 {
+		env["VERIFY_SAMPLE_SIZE"] = fmt.Sprintf("%d", workloadCfg.VerifySampleSize)
+	}
+	if workloadCfg.ReplicationLagThreshold > 0 {
+		env["REPLICATION_LAG_THRESHOLD"] = fmt.Sprintf("%d", workloadCfg.ReplicationLagThreshold)
 	}
 	if workloadCfg.ReplayDataset != "" {
 		env["REPLAY_DATASET"] = workloadCfg.ReplayDataset

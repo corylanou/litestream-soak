@@ -41,11 +41,26 @@ type RuntimePayload struct {
 	DataDiskUsedPercent       float64   `json:"data_disk_used_percent,omitempty"`
 	DBSizeBytes               int64     `json:"db_size_bytes,omitempty"`
 	WALSizeBytes              int64     `json:"wal_size_bytes,omitempty"`
+	DBCount                   int       `json:"db_count,omitempty"`
+	DBTotalSizeBytes          int64     `json:"db_total_size_bytes,omitempty"`
+	WALTotalSizeBytes         int64     `json:"wal_total_size_bytes,omitempty"`
 	LitestreamDirSizeBytes    int64     `json:"litestream_dir_size_bytes,omitempty"`
 	LitestreamLTXSizeBytes    int64     `json:"litestream_ltx_size_bytes,omitempty"`
 	DBTXID                    uint64    `json:"db_txid,omitempty"`
 	DBStatus                  string    `json:"db_status,omitempty"`
 	LastSyncAgeSeconds        float64   `json:"last_sync_age_seconds,omitempty"`
+	LastSyncAgeP50Seconds     float64   `json:"last_sync_age_p50_seconds,omitempty"`
+	LastSyncAgeP95Seconds     float64   `json:"last_sync_age_p95_seconds,omitempty"`
+	LastSyncAgeMaxSeconds     float64   `json:"last_sync_age_max_seconds,omitempty"`
+	ReplicationLagP95         uint64    `json:"replication_lag_p95,omitempty"`
+	ReplicationLagMax         uint64    `json:"replication_lag_max,omitempty"`
+	ReplicationLagOverThreshold int     `json:"replication_lag_over_threshold,omitempty"`
+	LitestreamRSSBytes        int64     `json:"litestream_rss_bytes,omitempty"`
+	LitestreamCPUSecondsTotal float64   `json:"litestream_cpu_seconds_total,omitempty"`
+	LitestreamGoroutines      int       `json:"litestream_goroutines,omitempty"`
+	LitestreamFDs             int       `json:"litestream_fds,omitempty"`
+	WorkerRSSBytes            int64     `json:"worker_rss_bytes,omitempty"`
+	WorkerFDs                 int       `json:"worker_fds,omitempty"`
 	LitestreamUptimeSeconds   float64   `json:"litestream_uptime_seconds,omitempty"`
 	SnapshotCollectedAt       time.Time `json:"snapshot_collected_at,omitempty"`
 	LitestreamSnapshotHealthy bool      `json:"litestream_snapshot_healthy"`
@@ -69,7 +84,7 @@ func (p RuntimePayload) hasSnapshotMetadata() bool {
 }
 
 func (p RuntimePayload) hasLitestreamRuntimeFields() bool {
-	if p.DBTXID > 0 || p.LitestreamUptimeSeconds > 0 {
+	if p.DBTXID > 0 || p.DBCount > 0 || p.LitestreamUptimeSeconds > 0 {
 		return true
 	}
 	status := strings.TrimSpace(p.DBStatus)

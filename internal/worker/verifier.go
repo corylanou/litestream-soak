@@ -106,6 +106,10 @@ func (v *Verifier) SetStartHook(fn func(context.Context, VerificationResult)) {
 }
 
 func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, retErr error) {
+	if v.cfg.ManyDBEnabled() {
+		return v.runManyDBCycle(ctx)
+	}
+
 	start := time.Now()
 	result = VerificationResult{
 		StartedAt: start.UTC(),
@@ -284,8 +288,12 @@ func (v *Verifier) resumeLoad() {
 }
 
 func (v *Verifier) checkpoint(ctx context.Context) (residualBusy bool, _ error) {
+	return v.checkpointDB(ctx, v.cfg.DBPath)
+}
+
+func (v *Verifier) checkpointDB(ctx context.Context, dbPath string) (residualBusy bool, _ error) {
 	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)",
-		v.cfg.DBPath, v.checkpointBusyTimeout.Milliseconds())
+		dbPath, v.checkpointBusyTimeout.Milliseconds())
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return false, fmt.Errorf("open database: %w", err)
@@ -340,6 +348,10 @@ func (v *Verifier) checkpoint(ctx context.Context) (residualBusy bool, _ error) 
 }
 
 func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) error {
+	return v.waitForSyncDB(ctx, result, v.cfg.DBPath)
+}
+
+func (v *Verifier) waitForSyncDB(ctx context.Context, result *VerificationResult, dbPath string) error {
 	slog.Info("Waiting for Litestream sync")
 	if result != nil {
 		result.SyncStatusBeforeSync = v.collectSyncStatus()
@@ -350,7 +362,7 @@ func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) 
 	degradedLogged := false
 	deadline := time.Now().Add(v.cfg.verifySyncTimeout())
 	for {
-		syncResp, err := v.syncOnce(ctx, time.Until(deadline))
+		syncResp, err := v.syncOnceDB(ctx, time.Until(deadline), dbPath)
 		if err != nil {
 			v.captureSyncFailureDiagnostics(result, err)
 			return err
@@ -408,9 +420,9 @@ func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) 
 	}
 }
 
-func (v *Verifier) syncOnce(ctx context.Context, budget time.Duration) (syncResponse, error) {
+func (v *Verifier) syncOnceDB(ctx context.Context, budget time.Duration, dbPath string) (syncResponse, error) {
 	requestBody, err := json.Marshal(map[string]any{
-		"path":    v.cfg.DBPath,
+		"path":    dbPath,
 		"wait":    true,
 		"timeout": timeoutSeconds(budget),
 	})
@@ -576,11 +588,15 @@ func isSyncTimeout(err error) bool {
 }
 
 func (v *Verifier) validate(ctx context.Context, txid uint64) (bool, error) {
+	return v.validateDB(ctx, v.cfg.DBPath, v.cfg.DBPath+".restored", txid)
+}
+
+func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath string, txid uint64) (bool, error) {
 	args := []string{
 		"validate",
-		"-source-db", v.cfg.DBPath,
+		"-source-db", sourcePath,
 		"-config", v.cfg.ConfigPath,
-		"-restored-db", v.cfg.DBPath + ".restored",
+		"-restored-db", restoredPath,
 		"-check-type", v.cfg.VerifyType,
 	}
 	if txid > 0 {
@@ -591,7 +607,7 @@ func (v *Verifier) validate(ctx context.Context, txid uint64) (bool, error) {
 	output, err := cmd.CombinedOutput()
 	if err != nil && txid > 0 && validateUnsupportedTXID(output) {
 		slog.Warn("litestream-test validate does not support -txid; retrying validation without pinned restore txid")
-		return v.validate(ctx, 0)
+		return v.validateDB(ctx, sourcePath, restoredPath, 0)
 	}
 
 	slog.Info("Validate output", "output", string(output))
@@ -680,6 +696,13 @@ func validationStepMetadata(ctx context.Context, cmd *exec.Cmd, output []byte, e
 func (v *Verifier) finalizeResult(result *VerificationResult) {
 	result.CompletedAt = time.Now().UTC()
 	result.DurationMS = int(result.CompletedAt.Sub(result.StartedAt).Milliseconds())
+	if v.cfg.ManyDBEnabled() {
+		for _, dbPath := range v.cfg.ManyDBPaths() {
+			result.DBSizeBytes += fileSize(dbPath)
+			result.WALSizeBytes += fileSize(dbPath + "-wal")
+		}
+		return
+	}
 	result.DBSizeBytes = fileSize(v.cfg.DBPath)
 	result.WALSizeBytes = fileSize(v.cfg.DBPath + "-wal")
 }

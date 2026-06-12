@@ -341,6 +341,67 @@ func TestWorkerEnvIncludesOptionalWorkloadFields(t *testing.T) {
 	}
 }
 
+func TestWorkerEnvIncludesManyDBWorkloadFields(t *testing.T) {
+	t.Parallel()
+
+	mgr := &Manager{
+		replica:        ReplicaConfig{Bucket: "bucket", Endpoint: "endpoint"},
+		controlBaseURL: "https://litestream-soak-ctl.fly.dev",
+	}
+
+	env := mgr.workerEnv(model.Worker{
+		ID:   "worker-main-many-dbs-100-dir",
+		Name: "worker-main-many-dbs-100-dir",
+	}, workload.Config{
+		LoadMode:                "many-db",
+		NumDatabases:            100,
+		ActivePercent:           2,
+		ConfigMode:              "dir",
+		VerifySampleSize:        5,
+		ReplicationLagThreshold: 3,
+	})
+
+	want := map[string]string{
+		"LOAD_MODE":                 "many-db",
+		"NUM_DATABASES":             "100",
+		"ACTIVE_PERCENT":            "2.00",
+		"CONFIG_MODE":               "dir",
+		"VERIFY_SAMPLE_SIZE":        "5",
+		"REPLICATION_LAG_THRESHOLD": "3",
+	}
+	for key, wantValue := range want {
+		if got := env[key]; got != wantValue {
+			t.Fatalf("%s=%q, want %q", key, got, wantValue)
+		}
+	}
+}
+
+func TestWorkerEnvIncludesZeroActivePercentForManyDBWorkload(t *testing.T) {
+	t.Parallel()
+
+	mgr := &Manager{
+		replica:        ReplicaConfig{Bucket: "bucket", Endpoint: "endpoint"},
+		controlBaseURL: "https://litestream-soak-ctl.fly.dev",
+	}
+
+	workloadCfg := normalizeWorkloadConfig(workload.Config{
+		LoadMode:         "many-db",
+		NumDatabases:     100,
+		ActivePercent:    0,
+		ActivePercentSet: true,
+		ConfigMode:       "dir",
+		VerifySampleSize: 5,
+	})
+	env := mgr.workerEnv(model.Worker{
+		ID:   "worker-main-many-dbs-100-dir-idle",
+		Name: "worker-main-many-dbs-100-dir-idle",
+	}, workloadCfg)
+
+	if got := env["ACTIVE_PERCENT"]; got != "0.00" {
+		t.Fatalf("ACTIVE_PERCENT=%q, want 0.00", got)
+	}
+}
+
 func failedVerificationAt(completedAt time.Time, errorMessage string) model.Verification {
 	startedAt := completedAt.Add(-10 * time.Second)
 	return model.Verification{
@@ -378,6 +439,34 @@ func TestNormalizeWorkloadConfigDefaults(t *testing.T) {
 	}
 	if got.MemoryMB != 1024 {
 		t.Fatalf("MemoryMB=%d want 1024", got.MemoryMB)
+	}
+}
+
+func TestNormalizeWorkloadConfigDefaultsManyDBActivePercent(t *testing.T) {
+	t.Parallel()
+
+	got := normalizeWorkloadConfig(workload.Config{
+		LoadMode:     "many-db",
+		NumDatabases: 100,
+	})
+
+	if got.ActivePercent != 2 {
+		t.Fatalf("ActivePercent=%v want 2", got.ActivePercent)
+	}
+}
+
+func TestNormalizeWorkloadConfigPreservesExplicitZeroActivePercent(t *testing.T) {
+	t.Parallel()
+
+	got := normalizeWorkloadConfig(workload.Config{
+		LoadMode:         "many-db",
+		NumDatabases:     100,
+		ActivePercent:    0,
+		ActivePercentSet: true,
+	})
+
+	if got.ActivePercent != 0 {
+		t.Fatalf("ActivePercent=%v want 0", got.ActivePercent)
 	}
 }
 

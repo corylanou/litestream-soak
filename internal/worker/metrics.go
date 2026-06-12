@@ -64,6 +64,21 @@ var (
 		Help: "Current WAL file size in bytes.",
 	}, []string{"worker_id", "profile", "source", "region"})
 
+	dbCount = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_db_count",
+		Help: "Number of databases tracked by this worker.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	dbTotalSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_db_total_size_bytes",
+		Help: "Total database file size in bytes across this worker.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	walTotalSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_wal_total_size_bytes",
+		Help: "Total WAL file size in bytes across this worker.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
 	dataDiskTotalSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_data_disk_total_bytes",
 		Help: "Total size of the worker data filesystem in bytes.",
@@ -112,6 +127,66 @@ var (
 	lastSyncAge = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_last_sync_age_seconds",
 		Help: "Seconds since last successful replica sync.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	lastSyncAgeP50 = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_last_sync_age_p50_seconds",
+		Help: "p50 seconds since last successful replica sync across this worker.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	lastSyncAgeP95 = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_last_sync_age_p95_seconds",
+		Help: "p95 seconds since last successful replica sync across this worker.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	lastSyncAgeMax = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_last_sync_age_max_seconds",
+		Help: "Maximum seconds since last successful replica sync across this worker.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	replicationLagP95 = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_replication_lag_p95_txids",
+		Help: "p95 replication lag in transaction IDs across this worker.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	replicationLagMax = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_replication_lag_max_txids",
+		Help: "Maximum replication lag in transaction IDs across this worker.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	replicationLagOverThreshold = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_replication_lag_over_threshold",
+		Help: "Databases with replication lag above the configured threshold.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	litestreamRSSBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_rss_bytes",
+		Help: "Litestream process resident memory in bytes.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	litestreamCPUSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_cpu_seconds_total",
+		Help: "Litestream process CPU seconds.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	litestreamGoroutines = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_goroutines",
+		Help: "Litestream goroutine count from the IPC pprof endpoint.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	litestreamFDs = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_fds",
+		Help: "Open file descriptor count for the Litestream process.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	workerRSSBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_worker_rss_bytes",
+		Help: "Soak worker process resident memory in bytes.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	workerFDs = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_worker_fds",
+		Help: "Open file descriptor count for the soak worker process.",
 	}, []string{"worker_id", "profile", "source", "region"})
 
 	litestreamUptime = promauto.NewGaugeVec(prometheus.GaugeOpts{
@@ -179,6 +254,13 @@ func SetWALSize(bytes int64) {
 	walSize.WithLabelValues(currentMetricLabels()...).Set(float64(bytes))
 }
 
+func SetDBAggregateStats(count int, dbBytes, walBytes int64) {
+	labels := currentMetricLabels()
+	dbCount.WithLabelValues(labels...).Set(float64(count))
+	dbTotalSize.WithLabelValues(labels...).Set(float64(dbBytes))
+	walTotalSize.WithLabelValues(labels...).Set(float64(walBytes))
+}
+
 func SetDataDiskStats(total, used, free uint64, usedPercent float64) {
 	labels := currentMetricLabels()
 	dataDiskTotalSize.WithLabelValues(labels...).Set(float64(total))
@@ -207,6 +289,30 @@ func SetReplicationLag(lag float64) {
 
 func SetLastSyncAge(seconds float64) {
 	lastSyncAge.WithLabelValues(currentMetricLabels()...).Set(seconds)
+}
+
+func SetLastSyncAgeAggregates(p50, p95, max float64) {
+	labels := currentMetricLabels()
+	lastSyncAgeP50.WithLabelValues(labels...).Set(p50)
+	lastSyncAgeP95.WithLabelValues(labels...).Set(p95)
+	lastSyncAgeMax.WithLabelValues(labels...).Set(max)
+}
+
+func SetReplicationLagAggregates(p95, max uint64, overThreshold int) {
+	labels := currentMetricLabels()
+	replicationLagP95.WithLabelValues(labels...).Set(float64(p95))
+	replicationLagMax.WithLabelValues(labels...).Set(float64(max))
+	replicationLagOverThreshold.WithLabelValues(labels...).Set(float64(overThreshold))
+}
+
+func SetProcessStats(snapshot processStatsSnapshot) {
+	labels := currentMetricLabels()
+	litestreamRSSBytes.WithLabelValues(labels...).Set(float64(snapshot.LitestreamRSSBytes))
+	litestreamCPUSeconds.WithLabelValues(labels...).Set(snapshot.LitestreamCPUSecondsTotal)
+	litestreamGoroutines.WithLabelValues(labels...).Set(float64(snapshot.LitestreamGoroutines))
+	litestreamFDs.WithLabelValues(labels...).Set(float64(snapshot.LitestreamFDs))
+	workerRSSBytes.WithLabelValues(labels...).Set(float64(snapshot.WorkerRSSBytes))
+	workerFDs.WithLabelValues(labels...).Set(float64(snapshot.WorkerFDs))
 }
 
 func SetLitestreamUptime(seconds float64) {

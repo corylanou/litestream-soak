@@ -132,6 +132,81 @@ var (
 		Help: "Current WAL file size in bytes from the latest runtime snapshot.",
 	}, []string{"worker_id", "profile", "source", "app_name", "region"})
 
+	controlWorkerDBCount = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_db_count",
+		Help: "Number of databases tracked by the worker from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerDBTotalSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_db_total_size_bytes",
+		Help: "Total database file size in bytes from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerWALTotalSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_wal_total_size_bytes",
+		Help: "Total WAL file size in bytes from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerLastSyncAgeP50 = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_last_sync_age_p50_seconds",
+		Help: "p50 seconds since last successful replica sync from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerLastSyncAgeP95 = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_last_sync_age_p95_seconds",
+		Help: "p95 seconds since last successful replica sync from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerLastSyncAgeMax = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_last_sync_age_max_seconds",
+		Help: "Maximum seconds since last successful replica sync from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerReplicationLagP95 = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_replication_lag_p95_txids",
+		Help: "p95 replication lag in transaction IDs from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerReplicationLagMax = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_replication_lag_max_txids",
+		Help: "Maximum replication lag in transaction IDs from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerReplicationLagOverThreshold = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_replication_lag_over_threshold",
+		Help: "Databases with replication lag above the configured threshold from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerLitestreamRSSBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_litestream_rss_bytes",
+		Help: "Litestream process resident memory in bytes from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerLitestreamCPUSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_litestream_cpu_seconds_total",
+		Help: "Litestream process CPU seconds from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerLitestreamGoroutines = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_litestream_goroutines",
+		Help: "Litestream goroutine count from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerLitestreamFDs = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_litestream_fds",
+		Help: "Litestream open file descriptor count from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerRSSBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_rss_bytes",
+		Help: "Soak worker process resident memory in bytes from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerFDs = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_fds",
+		Help: "Soak worker open file descriptor count from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
 	controlWorkerLitestreamLocalStateSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_control_worker_litestream_local_state_bytes",
 		Help: "Recursive size of the local Litestream state directory in bytes from the latest runtime snapshot.",
@@ -382,6 +457,21 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 		controlWorkerDataDiskUsedPercent.WithLabelValues(labels...).Set(runtime.DataDiskUsedPercent)
 		controlWorkerDBSize.WithLabelValues(labels...).Set(float64(runtime.DBSizeBytes))
 		controlWorkerWALSize.WithLabelValues(labels...).Set(float64(runtime.WALSizeBytes))
+		controlWorkerDBCount.WithLabelValues(labels...).Set(float64(runtime.DBCount))
+		controlWorkerDBTotalSize.WithLabelValues(labels...).Set(float64(runtime.DBTotalSizeBytes))
+		controlWorkerWALTotalSize.WithLabelValues(labels...).Set(float64(runtime.WALTotalSizeBytes))
+		controlWorkerLastSyncAgeP50.WithLabelValues(labels...).Set(runtime.LastSyncAgeP50Seconds)
+		controlWorkerLastSyncAgeP95.WithLabelValues(labels...).Set(runtime.LastSyncAgeP95Seconds)
+		controlWorkerLastSyncAgeMax.WithLabelValues(labels...).Set(runtime.LastSyncAgeMaxSeconds)
+		controlWorkerReplicationLagP95.WithLabelValues(labels...).Set(float64(runtime.ReplicationLagP95))
+		controlWorkerReplicationLagMax.WithLabelValues(labels...).Set(float64(runtime.ReplicationLagMax))
+		controlWorkerReplicationLagOverThreshold.WithLabelValues(labels...).Set(float64(runtime.ReplicationLagOverThreshold))
+		controlWorkerLitestreamRSSBytes.WithLabelValues(labels...).Set(float64(runtime.LitestreamRSSBytes))
+		controlWorkerLitestreamCPUSeconds.WithLabelValues(labels...).Set(runtime.LitestreamCPUSecondsTotal)
+		controlWorkerLitestreamGoroutines.WithLabelValues(labels...).Set(float64(runtime.LitestreamGoroutines))
+		controlWorkerLitestreamFDs.WithLabelValues(labels...).Set(float64(runtime.LitestreamFDs))
+		controlWorkerRSSBytes.WithLabelValues(labels...).Set(float64(runtime.WorkerRSSBytes))
+		controlWorkerFDs.WithLabelValues(labels...).Set(float64(runtime.WorkerFDs))
 		controlWorkerLitestreamLocalStateSize.WithLabelValues(labels...).Set(float64(runtime.LitestreamDirSizeBytes))
 		controlWorkerLitestreamLocalLTXSize.WithLabelValues(labels...).Set(float64(runtime.LitestreamLTXSizeBytes))
 	}
