@@ -59,6 +59,8 @@ type homeWorker struct {
 	RuntimeSnapshotStatus    string
 	CurrentFailureStage      string
 	CurrentFailureSignature  string
+	CurrentFailureCategory   string
+	CurrentFailureSeverity   string
 	CurrentProbableSubsystem string
 	Ticks                    []model.VerificationTick
 }
@@ -74,7 +76,6 @@ type homeSourceCard struct {
 	Total      int
 	Attention  int
 }
-
 
 type workerPageData struct {
 	GeneratedAt time.Time
@@ -152,6 +153,11 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		return homePageData{}, err
 	}
 	previousStats, windowStats := splitStatsAt(sourceStats, now.Add(-24*time.Hour))
+	allWindowStats, err := a.db.ListVerificationStatsSince("", now.Add(-24*time.Hour))
+	if err != nil {
+		return homePageData{}, err
+	}
+	failureContext := buildFailureClassificationContext(allWindowStats)
 	var mainStats []model.VerificationStat
 	if requestedSource != "main" {
 		mainStats, err = a.db.ListVerificationStatsSince("main", chartFrom)
@@ -198,6 +204,16 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 			CurrentProbableSubsystem: workerSummary.CurrentProbableSubsystem,
 			Ticks:                    ticksByWorker[workerSummary.Worker.ID],
 		}
+		if card.CurrentFailureSignature != "" {
+			failureID := 0
+			if workerSummary.LastVerification != nil && workerSummary.LastVerification.Failed() {
+				failureID = workerSummary.LastVerification.ID
+			} else if workerSummary.LatestFailure != nil {
+				failureID = workerSummary.LatestFailure.ID
+			}
+			card.CurrentFailureCategory = failureContext.categoryForVerificationID(failureID)
+			card.CurrentFailureSeverity = failureSeverityForCategory(card.CurrentFailureCategory)
+		}
 
 		if workerNeedsAttention(workerSummary.Worker.Status, workerSummary.RuntimeSnapshotStatus) {
 			summary.AttentionWorkers++
@@ -234,11 +250,15 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 
 	failureCards := make([]FailureResponse, 0, len(failures))
 	for _, verification := range failures {
+		vf := classifyVerification(&verification)
+		category := failureContext.categoryForVerificationID(verification.ID)
 		card := FailureResponse{
 			Verification:      verification,
-			FailureStage:      inferFailureStage(&verification),
-			FailureSignature:  inferFailureSignature(&verification),
-			ProbableSubsystem: inferProbableSubsystem(inferFailureStage(&verification), inferFailureSignature(&verification)),
+			FailureStage:      vf.Stage,
+			FailureSignature:  vf.Signature,
+			FailureCategory:   category,
+			FailureSeverity:   failureSeverityForCategory(category),
+			ProbableSubsystem: vf.probableSubsystem(),
 		}
 		worker, err := a.db.GetWorker(verification.WorkerID)
 		if err == nil {
@@ -286,8 +306,8 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 
 	diagnosis := buildDiagnosisSnapshot(summaries)
 
-	attention := buildAttentionItems(requestedSource, diagnosis, summary, workerCards, rollout, releaseComparison, comparisonPromptURL, comparisonJSONURL)
-	kpis := buildHomeKPIs(summary, windowStats, previousStats, rollout)
+	attention := buildAttentionItems(requestedSource, diagnosis, summary, workerCards, rollout, releaseComparison, comparisonPromptURL, comparisonJSONURL, failureContext)
+	kpis := buildHomeKPIs(summary, windowStats, previousStats, rollout, failureContext)
 	chartData := buildHomeChartData(requestedSource, chartFrom, filterStatsSince(sourceStats, chartFrom), mainStats)
 
 	return homePageData{
@@ -397,7 +417,6 @@ func buildHomeScopeSummary(selectedSource, rolloutSource string, comparison *Dep
 	}
 	return fmt.Sprintf("You are viewing %s. Latest Rollout below is the latest %s rollout. Release Comparison shows the current %s rollout versus the previous %s rollout.", selectedLabel, rolloutLabel, selectedLabel, selectedLabel)
 }
-
 
 func rolloutPromptURL(source string, rollout *DeploymentRolloutResponse) string {
 	query := url.Values{}

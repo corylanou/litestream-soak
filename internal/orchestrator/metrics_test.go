@@ -479,8 +479,18 @@ func TestControlMetricsObserveSourceComparisonsEmitsMetricsAndZeroesRemovedSourc
 		ProfileConfig: "{}",
 	})
 
-	baseFailedAt := time.Now().UTC().Add(time.Second)
+	baseFailedAt := time.Now().UTC().Add(3 * time.Second)
+	basePassedAt := baseFailedAt.Add(-1500 * time.Millisecond)
 	headPassedAt := baseFailedAt.Add(time.Second)
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-source-main",
+		StartedAt:   basePassedAt.Add(-100 * time.Millisecond),
+		CompletedAt: &basePassedAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  100,
+	})
 	mustRecordVerification(t, db, &model.Verification{
 		WorkerID:     "worker-source-main",
 		StartedAt:    baseFailedAt.Add(-time.Second),

@@ -345,6 +345,9 @@ func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) 
 		result.SyncStatusBeforeSync = v.collectSyncStatus()
 	}
 
+	startedAt := time.Now()
+	degradedAfter := v.cfg.verifySyncDegradedAfter()
+	degradedLogged := false
 	deadline := time.Now().Add(v.cfg.verifySyncTimeout())
 	for {
 		syncResp, err := v.syncOnce(ctx, time.Until(deadline))
@@ -364,6 +367,12 @@ func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) 
 		SetReplicationLag(float64(lag))
 
 		if syncResp.ReplicatedTXID >= syncResp.TXID {
+			if degradedAfter > 0 && time.Since(startedAt) > degradedAfter {
+				slog.Warn("Litestream sync completed after degraded threshold",
+					"elapsed", time.Since(startedAt).Round(time.Second),
+					"degraded_after", degradedAfter,
+					"hard_timeout", v.cfg.verifySyncTimeout())
+			}
 			slog.Info("Litestream sync complete",
 				"status", syncResp.Status,
 				"txid", formatTXID(syncResp.TXID),
@@ -382,6 +391,13 @@ func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) 
 			"txid", formatTXID(syncResp.TXID),
 			"replicated_txid", formatTXID(syncResp.ReplicatedTXID),
 			"lag", lag)
+		if !degradedLogged && degradedAfter > 0 && time.Since(startedAt) > degradedAfter {
+			degradedLogged = true
+			slog.Warn("Litestream sync exceeded degraded threshold; continuing until hard timeout",
+				"elapsed", time.Since(startedAt).Round(time.Second),
+				"degraded_after", degradedAfter,
+				"hard_timeout", v.cfg.verifySyncTimeout())
+		}
 		select {
 		case <-ctx.Done():
 			syncErr := fmt.Errorf("sync retry wait: %w", ctx.Err())
@@ -605,6 +621,13 @@ func (c Config) verifySyncTimeout() time.Duration {
 		return c.VerifySyncTimeout
 	}
 	return DefaultConfig().VerifySyncTimeout
+}
+
+func (c Config) verifySyncDegradedAfter() time.Duration {
+	if c.VerifySyncDegradedAfter > 0 {
+		return c.VerifySyncDegradedAfter
+	}
+	return DefaultConfig().VerifySyncDegradedAfter
 }
 
 func timeoutSeconds(budget time.Duration) int {

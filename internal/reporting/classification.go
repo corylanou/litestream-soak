@@ -29,11 +29,14 @@ func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassifi
 	if objectStore != nil && classification.Stage != "sync" && classification.Stage != "restore" {
 		classification.Stage = "restore"
 	}
+	s3Transport := classification.Stage == "sync" && isS3TransportFailure(text)
 	classification.Signature = inferFailureSignature(classification.Stage, text, errorMessage)
 	if objectStore != nil {
 		objectStore.Phase = firstNonEmpty(objectStore.Phase, inferRestorePhase(text))
 		classification.ObjectStore = objectStore
-		if signature := objectStoreSignature(classification.Stage, *objectStore); signature != "" {
+		if s3Transport {
+			classification.Signature = "s3_transport"
+		} else if signature := objectStoreSignature(classification.Stage, *objectStore); signature != "" {
 			classification.Signature = signature
 		}
 	}
@@ -155,6 +158,8 @@ func inferFailureSignature(stage, text, original string) string {
 	switch {
 	case isDiskCapacityFailure(text):
 		return "disk_capacity_full"
+	case stage == "sync" && isS3TransportFailure(text):
+		return "s3_transport"
 	case strings.Contains(text, "wait for db sync executor"):
 		return "litestream_db_sync_executor_timeout"
 	case strings.Contains(text, "litestream.sock") && strings.Contains(text, "too many open files"):
@@ -178,6 +183,16 @@ func inferFailureSignature(stage, text, original string) string {
 	default:
 		return firstMeaningfulLine(original)
 	}
+}
+
+func isS3TransportFailure(text string) bool {
+	if !strings.Contains(text, "replica sync") && !strings.Contains(text, "replica_sync") {
+		return false
+	}
+	return strings.Contains(text, "unexpected eof") ||
+		strings.Contains(text, "statuscode: 0") ||
+		strings.Contains(text, "retry quota exceeded") ||
+		strings.Contains(text, "context deadline exceeded")
 }
 
 func isDiskCapacityFailure(text string) bool {

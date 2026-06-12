@@ -228,6 +228,8 @@ func (a *API) handleListFailures(w http.ResponseWriter, r *http.Request) {
 			Verification:      verification,
 			FailureStage:      vf.Stage,
 			FailureSignature:  vf.Signature,
+			FailureCategory:   failureCategoryActionable,
+			FailureSeverity:   failureSeverityBad,
 			ProbableSubsystem: vf.probableSubsystem(),
 		}
 		worker, err := a.db.GetWorker(verification.WorkerID)

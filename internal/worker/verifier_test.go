@@ -239,6 +239,18 @@ func findStep(t *testing.T, steps []reporting.VerificationStep, name string) rep
 	return reporting.VerificationStep{}
 }
 
+func TestDefaultConfigSyncHealthThresholds(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	if cfg.VerifySyncDegradedAfter != 5*time.Minute {
+		t.Fatalf("VerifySyncDegradedAfter = %s, want 5m", cfg.VerifySyncDegradedAfter)
+	}
+	if cfg.VerifySyncTimeout != 15*time.Minute {
+		t.Fatalf("VerifySyncTimeout = %s, want 15m", cfg.VerifySyncTimeout)
+	}
+}
+
 func TestWaitForSyncRejectsEmptyBody(t *testing.T) {
 	dir := t.TempDir()
 	cfg := DefaultConfig()

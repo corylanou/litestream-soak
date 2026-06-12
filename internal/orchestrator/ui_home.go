@@ -24,21 +24,24 @@ type attentionItem struct {
 }
 
 type homeKPIs struct {
-	TotalWorkers       int
-	HealthyWorkers     int
-	FleetHealthPct     int
-	PassRatePct        float64
-	HasPassRate        bool
-	PassRateDelta      float64
-	HasPassRateDelta   bool
-	Checks24h          int
-	Failures24h        int
-	RolloutUpdated     int
-	RolloutTotal       int
-	RolloutStatus      string
-	HasRollout         bool
-	StalestHeartbeatAt *time.Time
-	StalestRuntimeAt   *time.Time
+	TotalWorkers             int
+	HealthyWorkers           int
+	FleetHealthPct           int
+	PassRatePct              float64
+	HasPassRate              bool
+	PassRateDelta            float64
+	HasPassRateDelta         bool
+	Checks24h                int
+	Failures24h              int
+	ActionableFailures24h    int
+	EnvironmentalFailures24h int
+	RampUpFailures24h        int
+	RolloutUpdated           int
+	RolloutTotal             int
+	RolloutStatus            string
+	HasRollout               bool
+	StalestHeartbeatAt       *time.Time
+	StalestRuntimeAt         *time.Time
 }
 
 type passRateLine struct {
@@ -58,7 +61,7 @@ type homeChartData struct {
 
 const homeChartHours = 24
 
-func buildHomeKPIs(summary homeSummary, windowStats, previousStats []model.VerificationStat, rollout *DeploymentRolloutResponse) homeKPIs {
+func buildHomeKPIs(summary homeSummary, windowStats, previousStats []model.VerificationStat, rollout *DeploymentRolloutResponse, failureContext failureClassificationContext) homeKPIs {
 	kpis := homeKPIs{
 		TotalWorkers:       summary.TotalWorkers,
 		HealthyWorkers:     summary.HealthyWorkers,
@@ -84,6 +87,14 @@ func buildHomeKPIs(summary homeSummary, windowStats, previousStats []model.Verif
 		verification := model.Verification{Status: stat.Status, Passed: stat.Passed}
 		if verification.Failed() {
 			kpis.Failures24h++
+			switch failureContext.categoryForVerificationID(stat.ID) {
+			case failureCategoryEnvironmental:
+				kpis.EnvironmentalFailures24h++
+			case failureCategoryRampUp:
+				kpis.RampUpFailures24h++
+			default:
+				kpis.ActionableFailures24h++
+			}
 		}
 	}
 
@@ -118,7 +129,7 @@ func buildHomeChartData(selectedSource string, chartFrom time.Time, selectedStat
 	return data
 }
 
-func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, summary homeSummary, workers []homeWorker, rollout *DeploymentRolloutResponse, comparison *DeploymentComparisonResponse, comparisonPromptURL, comparisonJSONURL string) []attentionItem {
+func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, summary homeSummary, workers []homeWorker, rollout *DeploymentRolloutResponse, comparison *DeploymentComparisonResponse, comparisonPromptURL, comparisonJSONURL string, failureContext failureClassificationContext) []attentionItem {
 	items := make([]attentionItem, 0, 4)
 	clusterSeverity := "warn"
 	if selectedSource != "main" {
@@ -134,6 +145,14 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 				{Label: "Copy comparison prompt", CopyURL: comparisonPromptURL, Kind: "primary"},
 				{Label: "Comparison JSON", URL: comparisonJSONURL},
 			},
+		})
+	}
+
+	if sources := failureContext.environmentalSourceLabels("s3_transport"); len(sources) >= 2 {
+		items = append(items, attentionItem{
+			Severity: "warn",
+			Title:    "S3 degraded across fleets",
+			Detail:   fmt.Sprintf("%s share s3_transport failures in the correlation window", strings.Join(sources, " and ")),
 		})
 	}
 

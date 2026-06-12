@@ -862,6 +862,116 @@ func TestBuildRequestedDeploymentComparisonCrossSource(t *testing.T) {
 	}
 }
 
+func TestBuildRequestedDeploymentComparisonExcludesRampUpFailuresFromVerdict(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-main",
+		LitestreamSHA: "litestream-main",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-main",
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment(main) error = %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-pr",
+		LitestreamSHA: "litestream-pr",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-pr",
+		Source:        "pr-1305",
+		PRNumber:      1305,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment(pr) error = %v", err)
+	}
+
+	mainDeployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment(main) error = %v", err)
+	}
+	prDeployment, err := db.GetLatestDeployment("pr-1305")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment(pr-1305) error = %v", err)
+	}
+
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-low",
+		Name:          "worker-main-low",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        mainDeployment.GitSHA,
+		LitestreamSHA: mainDeployment.LitestreamSHA,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-1305-low",
+		Name:          "worker-pr-1305-low",
+		Status:        model.WorkerRunning,
+		Source:        "pr-1305",
+		GitSHA:        prDeployment.GitSHA,
+		LitestreamSHA: prDeployment.LitestreamSHA,
+		PRNumber:      1305,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+
+	mainPassAt := mainDeployment.StartedAt.Add(3 * time.Minute).UTC()
+	prWorker, err := db.GetWorker("worker-pr-1305-low")
+	if err != nil {
+		t.Fatalf("GetWorker(pr) error = %v", err)
+	}
+	prFailAt := prWorker.CreatedAt.Add(30 * time.Minute).UTC()
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-main-low",
+		StartedAt:   mainPassAt.Add(-15 * time.Second),
+		CompletedAt: &mainPassAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  15000,
+	})
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:     "worker-pr-1305-low",
+		StartedAt:    prFailAt.Add(-15 * time.Second),
+		CompletedAt:  &prFailAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		Passed:       false,
+		DurationMS:   15000,
+		ErrorMessage: `validation failed (exit 1): unexpected EOF reading stdout`,
+	})
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	comparison, err := api.buildRequestedDeploymentComparison("", "main", "pr-1305")
+	if err != nil {
+		t.Fatalf("buildRequestedDeploymentComparison() error = %v", err)
+	}
+	if comparison == nil {
+		t.Fatal("comparison = nil, want non-nil")
+	}
+	if comparison.Head.RampUpFailures != 1 {
+		t.Fatalf("Head.RampUpFailures = %d, want 1", comparison.Head.RampUpFailures)
+	}
+	if comparison.Head.ActionableFailedWorkers != 0 {
+		t.Fatalf("Head.ActionableFailedWorkers = %d, want 0", comparison.Head.ActionableFailedWorkers)
+	}
+	if comparison.FailDelta != 0 {
+		t.Fatalf("FailDelta = %d, want 0", comparison.FailDelta)
+	}
+	if comparison.PassDelta != 0 {
+		t.Fatalf("PassDelta = %d, want 0", comparison.PassDelta)
+	}
+	if comparison.Verdict == "worse" {
+		t.Fatalf("Verdict = %q, want non-worse for ramp-up failure", comparison.Verdict)
+	}
+	if len(comparison.RegressedWorkers) != 0 {
+		t.Fatalf("RegressedWorkers = %+v, want none", comparison.RegressedWorkers)
+	}
+}
+
 func TestHandleListAlertsIncludesDeploymentTriage(t *testing.T) {
 	t.Parallel()
 
