@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -268,17 +269,21 @@ func ConfigFromEnv() (Config, error) {
 		c.InitialSize = v
 	}
 	if v := os.Getenv("NUM_DATABASES"); v != "" {
-		if _, err := fmt.Sscanf(v, "%d", &c.NumDatabases); err != nil {
+		n, err := strconv.Atoi(v)
+		if err != nil {
 			return c, fmt.Errorf("invalid NUM_DATABASES: %w", err)
 		}
+		c.NumDatabases = n
 		if c.NumDatabases < 0 {
 			return c, fmt.Errorf("invalid NUM_DATABASES: must be non-negative")
 		}
 	}
 	if v := os.Getenv("ACTIVE_PERCENT"); v != "" {
-		if _, err := fmt.Sscanf(v, "%f", &c.ActivePercent); err != nil {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil {
 			return c, fmt.Errorf("invalid ACTIVE_PERCENT: %w", err)
 		}
+		c.ActivePercent = n
 		if c.ActivePercent < 0 || c.ActivePercent > 100 {
 			return c, fmt.Errorf("invalid ACTIVE_PERCENT: must be between 0 and 100")
 		}
@@ -287,17 +292,21 @@ func ConfigFromEnv() (Config, error) {
 		c.ConfigMode = v
 	}
 	if v := os.Getenv("VERIFY_SAMPLE_SIZE"); v != "" {
-		if _, err := fmt.Sscanf(v, "%d", &c.VerifySampleSize); err != nil {
+		n, err := strconv.Atoi(v)
+		if err != nil {
 			return c, fmt.Errorf("invalid VERIFY_SAMPLE_SIZE: %w", err)
 		}
+		c.VerifySampleSize = n
 		if c.VerifySampleSize <= 0 {
 			return c, fmt.Errorf("invalid VERIFY_SAMPLE_SIZE: must be positive")
 		}
 	}
 	if v := os.Getenv("REPLICATION_LAG_THRESHOLD"); v != "" {
-		if _, err := fmt.Sscanf(v, "%d", &c.ReplicationLagThreshold); err != nil {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
 			return c, fmt.Errorf("invalid REPLICATION_LAG_THRESHOLD: %w", err)
 		}
+		c.ReplicationLagThreshold = n
 	}
 
 	if v := os.Getenv("VERIFY_INTERVAL"); v != "" {
@@ -532,6 +541,7 @@ func (c Config) WorkloadConfig() workload.Config {
 		S3Concurrency:           c.S3Concurrency,
 		NumDatabases:            c.NumDatabases,
 		ActivePercent:           c.ActivePercent,
+		ActivePercentSet:        c.ManyDBEnabled(),
 		ConfigMode:              c.manyDBConfigMode(),
 		VerifySampleSize:        c.VerifySampleSize,
 		ReplicationLagThreshold: c.ReplicationLagThreshold,

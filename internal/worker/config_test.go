@@ -49,3 +49,28 @@ func TestConfigFromEnvReadsManyDBConfig(t *testing.T) {
 		t.Fatalf("ReplicationLagThreshold = %d, want 3", cfg.ReplicationLagThreshold)
 	}
 }
+
+func TestConfigFromEnvReadsZeroActivePercent(t *testing.T) {
+	t.Setenv("NUM_DATABASES", "100")
+	t.Setenv("ACTIVE_PERCENT", "0")
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v", err)
+	}
+
+	if cfg.ActivePercent != 0 {
+		t.Fatalf("ActivePercent = %v, want 0", cfg.ActivePercent)
+	}
+	if got := len(cfg.ManyDBActivePaths()); got != 0 {
+		t.Fatalf("ManyDBActivePaths() len = %d, want 0", got)
+	}
+}
+
+func TestConfigFromEnvRejectsTrailingGarbageForManyDBConfig(t *testing.T) {
+	t.Setenv("NUM_DATABASES", "100abc")
+
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Fatal("ConfigFromEnv() error = nil, want non-nil")
+	}
+}

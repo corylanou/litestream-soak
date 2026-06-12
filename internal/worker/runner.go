@@ -75,7 +75,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := r.waitForFirstSync(runCtx); err != nil {
 		return fmt.Errorf("wait for first sync: %w", err)
 	}
-	go newPprofCapturer(&r.cfg).Run(runCtx)
+	if r.cfg.ManyDBEnabled() {
+		go newPprofCapturer(&r.cfg).Run(runCtx)
+	}
 
 	if r.cfg.ManyDBEnabled() {
 		if err := r.startManyDBLoad(runCtx); err != nil {

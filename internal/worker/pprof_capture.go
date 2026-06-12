@@ -11,9 +11,12 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
+
+const pprofLocalRetentionFiles = 96
 
 type pprofCapturer struct {
 	cfg *Config
@@ -24,6 +27,10 @@ func newPprofCapturer(cfg *Config) *pprofCapturer {
 }
 
 func (c *pprofCapturer) Run(ctx context.Context) {
+	if !c.cfg.ManyDBEnabled() {
+		return
+	}
+
 	c.captureSet(ctx, "baseline")
 
 	hourly := time.NewTicker(time.Hour)
@@ -98,6 +105,54 @@ func (c *pprofCapturer) captureEndpoint(ctx context.Context, label, name, endpoi
 	}
 	slog.Info("Captured Litestream pprof", "profile", name, "path", target)
 	c.upload(ctx, target, filename)
+	c.pruneLocalProfiles(dir, pprofLocalRetentionFiles)
+}
+
+type pprofProfileFile struct {
+	name    string
+	modTime time.Time
+}
+
+func (c *pprofCapturer) pruneLocalProfiles(dir string, keep int) {
+	if keep <= 0 {
+		return
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		slog.Warn("Read pprof directory failed", "dir", dir, "error", err)
+		return
+	}
+
+	files := make([]pprofProfileFile, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			slog.Warn("Read pprof file info failed", "file", filepath.Join(dir, entry.Name()), "error", err)
+			continue
+		}
+		files = append(files, pprofProfileFile{name: entry.Name(), modTime: info.ModTime()})
+	}
+	if len(files) <= keep {
+		return
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].modTime.Equal(files[j].modTime) {
+			return files[i].name < files[j].name
+		}
+		return files[i].modTime.Before(files[j].modTime)
+	})
+
+	for _, file := range files[:len(files)-keep] {
+		target := filepath.Join(dir, file.name)
+		if err := os.Remove(target); err != nil {
+			slog.Warn("Remove old pprof file failed", "file", target, "error", err)
+		}
+	}
 }
 
 func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) {

@@ -50,7 +50,7 @@ func normalizeWorkloadConfig(cfg workload.Config) workload.Config {
 		cfg.MemoryMB = 1024
 	}
 	if cfg.NumDatabases > 0 {
-		if cfg.ActivePercent == 0 {
+		if cfg.ActivePercent == 0 && !cfg.ActivePercentSet {
 			cfg.ActivePercent = 2
 		}
 		if strings.TrimSpace(cfg.ConfigMode) == "" {
@@ -124,8 +124,6 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	}
 	if workloadCfg.NumDatabases > 0 {
 		env["NUM_DATABASES"] = fmt.Sprintf("%d", workloadCfg.NumDatabases)
-	}
-	if workloadCfg.ActivePercent > 0 {
 		env["ACTIVE_PERCENT"] = fmt.Sprintf("%.2f", workloadCfg.ActivePercent)
 	}
 	if strings.TrimSpace(workloadCfg.ConfigMode) != "" {
