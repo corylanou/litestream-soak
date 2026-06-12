@@ -52,11 +52,13 @@ type Config struct {
 	ReplicaPath string // for file:// replicas (local directory)
 
 	// S3/Tigris config (only used when ReplicaType == "s3")
-	S3Bucket    string
-	S3Endpoint  string
-	S3AccessKey string
-	S3SecretKey string
-	S3Path      string
+	S3Bucket      string
+	S3Endpoint    string
+	S3AccessKey   string
+	S3SecretKey   string
+	S3Path        string
+	S3PartSize    string
+	S3Concurrency int
 
 	// Litestream config
 	SnapshotInterval time.Duration
@@ -268,6 +270,17 @@ func ConfigFromEnv() (Config, error) {
 	if v := os.Getenv("S3_PATH"); v != "" {
 		c.S3Path = v
 	}
+	if v := strings.TrimSpace(os.Getenv("LITESTREAM_S3_PART_SIZE")); v != "" {
+		c.S3PartSize = v
+	}
+	if v := os.Getenv("LITESTREAM_S3_CONCURRENCY"); v != "" {
+		if _, err := fmt.Sscanf(v, "%d", &c.S3Concurrency); err != nil {
+			return c, fmt.Errorf("invalid LITESTREAM_S3_CONCURRENCY: %w", err)
+		}
+		if c.S3Concurrency <= 0 {
+			return c, fmt.Errorf("invalid LITESTREAM_S3_CONCURRENCY: must be positive")
+		}
+	}
 
 	if v := os.Getenv("SNAPSHOT_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -361,6 +374,8 @@ func (c Config) WorkloadConfig() workload.Config {
 		VerifyType:       c.VerifyType,
 		SnapshotInterval: c.SnapshotInterval.String(),
 		SyncInterval:     c.SyncInterval.String(),
+		S3PartSize:       c.S3PartSize,
+		S3Concurrency:    c.S3Concurrency,
 		ReplayDataset:    c.ReplayDataset,
 		ReplayDataPath:   c.ReplayDataPath,
 		ReplayDataURL:    c.ReplayDataURL,

@@ -316,19 +316,23 @@ func TestWorkerEnvIncludesOptionalWorkloadFields(t *testing.T) {
 		ReplayDataURL:  "https://example.com/taxi.csv",
 		ReplaySpeed:    1.5,
 		ReplayLoop:     false,
+		S3PartSize:     "16MB",
+		S3Concurrency:  8,
 	})
 
 	want := map[string]string{
-		"WRITE_RATE":       "250",
-		"PATTERN":          "burst",
-		"PAYLOAD_SIZE":     "512",
-		"READ_RATIO":       "0.25",
-		"LOAD_WORKERS":     "4",
-		"REPLAY_DATASET":   "taxi",
-		"REPLAY_DATA_PATH": "/data/taxi.csv",
-		"REPLAY_DATA_URL":  "https://example.com/taxi.csv",
-		"REPLAY_SPEED":     "1.50",
-		"REPLAY_LOOP":      "false",
+		"WRITE_RATE":                "250",
+		"PATTERN":                   "burst",
+		"PAYLOAD_SIZE":              "512",
+		"READ_RATIO":                "0.25",
+		"LOAD_WORKERS":              "4",
+		"REPLAY_DATASET":            "taxi",
+		"REPLAY_DATA_PATH":          "/data/taxi.csv",
+		"REPLAY_DATA_URL":           "https://example.com/taxi.csv",
+		"REPLAY_SPEED":              "1.50",
+		"REPLAY_LOOP":               "false",
+		"LITESTREAM_S3_PART_SIZE":   "16MB",
+		"LITESTREAM_S3_CONCURRENCY": "8",
 	}
 	for key, value := range want {
 		if got := env[key]; got != value {

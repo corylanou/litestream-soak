@@ -53,6 +53,12 @@ dbs:
         sync-interval: {{.SyncInterval}}
         endpoint: {{.S3Endpoint}}
         force-path-style: true
+{{- if .S3PartSize}}
+        part-size: {{.S3PartSize}}
+{{- end}}
+{{- if gt .S3Concurrency 0}}
+        concurrency: {{.S3Concurrency}}
+{{- end}}
 {{- end}}
 `))
 
@@ -83,6 +89,8 @@ func (m *litestreamManager) writeLitestreamConfig() error {
 		S3Path           string
 		SyncInterval     string
 		S3Endpoint       string
+		S3PartSize       string
+		S3Concurrency    int
 	}{
 		SocketPath:       m.cfg.SocketPath,
 		DBPath:           m.cfg.DBPath,
@@ -93,6 +101,8 @@ func (m *litestreamManager) writeLitestreamConfig() error {
 		S3Path:           m.cfg.S3Path,
 		SyncInterval:     m.cfg.SyncInterval.String(),
 		S3Endpoint:       m.cfg.S3Endpoint,
+		S3PartSize:       m.cfg.S3PartSize,
+		S3Concurrency:    m.cfg.S3Concurrency,
 	}
 
 	if err := litestreamConfigTmpl.Execute(f, data); err != nil {

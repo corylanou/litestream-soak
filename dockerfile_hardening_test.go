@@ -81,6 +81,13 @@ func TestRuntimeStagesDropPrivilegesWithEntrypoint(t *testing.T) {
 	}
 }
 
+func TestWorkerDockerfileDisablesLitestreamTestWALAutocheckpoint(t *testing.T) {
+	content := string(readFile(t, "Dockerfile.worker"))
+	if !strings.Contains(content, "SQLITE_DEFAULT_WAL_AUTOCHECKPOINT=0") {
+		t.Fatal("Dockerfile.worker must build litestream-test with WAL autocheckpoint disabled")
+	}
+}
+
 func TestDockerEntrypointRepairsDataBeforeDroppingPrivileges(t *testing.T) {
 	content := string(readFile(t, "docker-entrypoint.sh"))
 	for _, want := range []string{

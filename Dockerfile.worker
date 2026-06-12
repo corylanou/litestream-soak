@@ -11,7 +11,7 @@ RUN go build \
     -ldflags "-s -w -X 'main.Version=${LITESTREAM_SHA}'" \
     -tags osusergo,netgo,sqlite_omit_load_extension \
     -o /usr/local/bin/litestream ./cmd/litestream
-RUN go build \
+RUN CGO_CFLAGS="-DSQLITE_DEFAULT_WAL_AUTOCHECKPOINT=0" go build \
     -ldflags "-s -w -X 'main.Version=${LITESTREAM_SHA}'" \
     -o /usr/local/bin/litestream-test ./cmd/litestream-test
 

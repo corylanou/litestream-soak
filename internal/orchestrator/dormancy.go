@@ -105,6 +105,12 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	if workloadCfg.Workers > 0 {
 		env["LOAD_WORKERS"] = fmt.Sprintf("%d", workloadCfg.Workers)
 	}
+	if workloadCfg.S3PartSize != "" {
+		env["LITESTREAM_S3_PART_SIZE"] = workloadCfg.S3PartSize
+	}
+	if workloadCfg.S3Concurrency > 0 {
+		env["LITESTREAM_S3_CONCURRENCY"] = fmt.Sprintf("%d", workloadCfg.S3Concurrency)
+	}
 	if workloadCfg.ReplayDataset != "" {
 		env["REPLAY_DATASET"] = workloadCfg.ReplayDataset
 	}

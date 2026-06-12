@@ -147,7 +147,7 @@ func (e *Engine) waitIfPaused(ctx context.Context) error {
 }
 
 func replayDSN(dbPath string) string {
-	return dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	return dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=wal_autocheckpoint(0)"
 }
 
 func (e *Engine) Run(ctx context.Context) error {
