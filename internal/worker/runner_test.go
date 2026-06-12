@@ -651,6 +651,36 @@ func TestWriteLitestreamConfigRemovesStateForInheritedReplicaTarget(t *testing.T
 	}
 }
 
+func TestWriteLitestreamConfigIncludesS3UploadTuning(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.ReplicaType = "s3"
+	cfg.S3Bucket = "bucket"
+	cfg.S3Path = "soak/worker-main-high-vol"
+	cfg.S3PartSize = "16MB"
+	cfg.S3Concurrency = 8
+
+	runner := NewRunner(cfg)
+	if err := runner.writeLitestreamConfig(); err != nil {
+		t.Fatalf("writeLitestreamConfig() error = %v", err)
+	}
+
+	body, err := os.ReadFile(cfg.ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	config := string(body)
+	if !strings.Contains(config, "part-size: 16MB") {
+		t.Fatalf("config missing part-size:\n%s", config)
+	}
+	if !strings.Contains(config, "concurrency: 8") {
+		t.Fatalf("config missing concurrency:\n%s", config)
+	}
+}
+
 func TestWriteLitestreamConfigKeepsStateForSameReplicaTarget(t *testing.T) {
 	dir := t.TempDir()
 	cfg := DefaultConfig()

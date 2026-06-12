@@ -18,6 +18,8 @@ type Config struct {
 	VerifyType       string  `json:"verify_type,omitempty"`
 	SnapshotInterval string  `json:"snapshot_interval,omitempty"`
 	SyncInterval     string  `json:"sync_interval,omitempty"`
+	S3PartSize       string  `json:"s3_part_size,omitempty"`
+	S3Concurrency    int     `json:"s3_concurrency,omitempty"`
 	ReplayDataset    string  `json:"replay_dataset,omitempty"`
 	ReplayDataPath   string  `json:"replay_data_path,omitempty"`
 	ReplayDataURL    string  `json:"replay_data_url,omitempty"`

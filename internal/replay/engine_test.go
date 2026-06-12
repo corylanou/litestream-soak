@@ -85,6 +85,14 @@ func TestReplayDSNSetsBusyTimeout(t *testing.T) {
 	if journalMode != "wal" {
 		t.Fatalf("journal_mode=%q, want \"wal\"", journalMode)
 	}
+
+	var autoCheckpoint int
+	if err := db.QueryRow(`PRAGMA wal_autocheckpoint`).Scan(&autoCheckpoint); err != nil {
+		t.Fatalf("query wal_autocheckpoint: %v", err)
+	}
+	if autoCheckpoint != 0 {
+		t.Fatalf("wal_autocheckpoint=%d, want 0", autoCheckpoint)
+	}
 }
 
 type failingInsertAdapter struct{}

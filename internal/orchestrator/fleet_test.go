@@ -129,6 +129,32 @@ func TestDefaultMainFleetIncludesRegionalWorkers(t *testing.T) {
 	}
 }
 
+func TestDefaultMainFleetTunesHighVolumeS3Uploads(t *testing.T) {
+	t.Parallel()
+
+	spec := DefaultMainFleet()
+	highVolume := map[string]DesiredWorker{}
+	for _, worker := range spec.Workers {
+		switch worker.ProfileName {
+		case "high-volume", "high-vol-ams":
+			highVolume[worker.ProfileName] = worker
+		}
+	}
+
+	for _, profile := range []string{"high-volume", "high-vol-ams"} {
+		worker, ok := highVolume[profile]
+		if !ok {
+			t.Fatalf("DefaultMainFleet() missing %s", profile)
+		}
+		if worker.Workload.S3PartSize != "16MB" {
+			t.Fatalf("%s S3PartSize = %q, want 16MB", profile, worker.Workload.S3PartSize)
+		}
+		if worker.Workload.S3Concurrency != 8 {
+			t.Fatalf("%s S3Concurrency = %d, want 8", profile, worker.Workload.S3Concurrency)
+		}
+	}
+}
+
 func TestDefaultFleetForSourceRewritesRegionalWorkers(t *testing.T) {
 	t.Parallel()
 
