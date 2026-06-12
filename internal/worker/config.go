@@ -2,7 +2,10 @@ package worker
 
 import (
 	"fmt"
+	"math"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -37,6 +40,12 @@ type Config struct {
 	ReadRatio   float64
 	Workers     int
 	InitialSize string
+
+	NumDatabases            int
+	ActivePercent           float64
+	ConfigMode              string
+	VerifySampleSize        int
+	ReplicationLagThreshold uint64
 
 	// Load duration — set very high for continuous operation.
 	LoadDuration time.Duration
@@ -97,6 +106,11 @@ func DefaultConfig() Config {
 		ReadRatio:   0.2,
 		Workers:     1,
 		InitialSize: "5MB",
+
+		ActivePercent:           2,
+		ConfigMode:              "list",
+		VerifySampleSize:        5,
+		ReplicationLagThreshold: 0,
 
 		LoadDuration: 87600 * time.Hour, // ~10 years
 
@@ -194,6 +208,36 @@ func ConfigFromEnv() (Config, error) {
 			c.ReadRatio = 0.95
 			c.Workers = 6
 			c.InitialSize = "10MB"
+		case "many-dbs-100-list":
+			c.LoadMode = "many-db"
+			c.WriteRate = 20
+			c.Pattern = "constant"
+			c.PayloadSize = 512
+			c.Workers = 2
+			c.NumDatabases = 100
+			c.ActivePercent = 2
+			c.ConfigMode = "list"
+			c.VerifySampleSize = 5
+		case "many-dbs-100-dir":
+			c.LoadMode = "many-db"
+			c.WriteRate = 20
+			c.Pattern = "constant"
+			c.PayloadSize = 512
+			c.Workers = 2
+			c.NumDatabases = 100
+			c.ActivePercent = 2
+			c.ConfigMode = "dir"
+			c.VerifySampleSize = 5
+		case "many-dbs-1000-dir":
+			c.LoadMode = "many-db"
+			c.WriteRate = 20
+			c.Pattern = "constant"
+			c.PayloadSize = 512
+			c.Workers = 4
+			c.NumDatabases = 1000
+			c.ActivePercent = 2
+			c.ConfigMode = "dir"
+			c.VerifySampleSize = 5
 		}
 	}
 
@@ -222,6 +266,38 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if v := os.Getenv("INITIAL_SIZE"); v != "" {
 		c.InitialSize = v
+	}
+	if v := os.Getenv("NUM_DATABASES"); v != "" {
+		if _, err := fmt.Sscanf(v, "%d", &c.NumDatabases); err != nil {
+			return c, fmt.Errorf("invalid NUM_DATABASES: %w", err)
+		}
+		if c.NumDatabases < 0 {
+			return c, fmt.Errorf("invalid NUM_DATABASES: must be non-negative")
+		}
+	}
+	if v := os.Getenv("ACTIVE_PERCENT"); v != "" {
+		if _, err := fmt.Sscanf(v, "%f", &c.ActivePercent); err != nil {
+			return c, fmt.Errorf("invalid ACTIVE_PERCENT: %w", err)
+		}
+		if c.ActivePercent < 0 || c.ActivePercent > 100 {
+			return c, fmt.Errorf("invalid ACTIVE_PERCENT: must be between 0 and 100")
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("CONFIG_MODE")); v != "" {
+		c.ConfigMode = v
+	}
+	if v := os.Getenv("VERIFY_SAMPLE_SIZE"); v != "" {
+		if _, err := fmt.Sscanf(v, "%d", &c.VerifySampleSize); err != nil {
+			return c, fmt.Errorf("invalid VERIFY_SAMPLE_SIZE: %w", err)
+		}
+		if c.VerifySampleSize <= 0 {
+			return c, fmt.Errorf("invalid VERIFY_SAMPLE_SIZE: must be positive")
+		}
+	}
+	if v := os.Getenv("REPLICATION_LAG_THRESHOLD"); v != "" {
+		if _, err := fmt.Sscanf(v, "%d", &c.ReplicationLagThreshold); err != nil {
+			return c, fmt.Errorf("invalid REPLICATION_LAG_THRESHOLD: %w", err)
+		}
 	}
 
 	if v := os.Getenv("VERIFY_INTERVAL"); v != "" {
@@ -328,6 +404,13 @@ func ConfigFromEnv() (Config, error) {
 	if c.WorkerName == "" {
 		c.WorkerName = c.WorkerID
 	}
+	if c.ManyDBEnabled() {
+		switch c.manyDBConfigMode() {
+		case "list", "dir":
+		default:
+			return c, fmt.Errorf("invalid CONFIG_MODE: must be list or dir")
+		}
+	}
 
 	if c.ReplicaType == "s3" && c.S3Bucket == "" {
 		return c, fmt.Errorf("S3_BUCKET is required when REPLICA_TYPE=s3")
@@ -361,25 +444,101 @@ func (c Config) ReplicaURL() string {
 	return fmt.Sprintf("s3://%s/%s", c.S3Bucket, c.S3Path)
 }
 
+func (c Config) ReplicaURLForDB(dbPath string) string {
+	if !c.ManyDBEnabled() || strings.TrimSpace(dbPath) == "" || dbPath == c.DBPath {
+		return c.ReplicaURL()
+	}
+	name := filepath.Base(dbPath)
+	if c.ReplicaType == "file" {
+		return "file://" + filepath.Join(c.ReplicaPath, name)
+	}
+	return fmt.Sprintf("s3://%s/%s", c.S3Bucket, path.Join(strings.Trim(c.S3Path, "/"), name))
+}
+
+func (c Config) ManyDBEnabled() bool {
+	return c.NumDatabases > 0
+}
+
+func (c Config) ManyDBDir() string {
+	return filepath.Join(c.DataDir, "dbs")
+}
+
+func (c Config) ManyDBPaths() []string {
+	if c.NumDatabases <= 0 {
+		return nil
+	}
+	paths := make([]string, 0, c.NumDatabases)
+	for i := 1; i <= c.NumDatabases; i++ {
+		paths = append(paths, filepath.Join(c.ManyDBDir(), fmt.Sprintf("db-%05d.db", i)))
+	}
+	return paths
+}
+
+func (c Config) ManyDBActiveCount() int {
+	if c.NumDatabases <= 0 || c.ActivePercent <= 0 {
+		return 0
+	}
+	count := int(math.Ceil(float64(c.NumDatabases) * c.ActivePercent / 100))
+	if count < 1 {
+		return 1
+	}
+	if count > c.NumDatabases {
+		return c.NumDatabases
+	}
+	return count
+}
+
+func (c Config) ManyDBActivePaths() []string {
+	paths := c.ManyDBPaths()
+	count := c.ManyDBActiveCount()
+	if count > len(paths) {
+		count = len(paths)
+	}
+	return paths[:count]
+}
+
+func (c Config) manyDBConfigMode() string {
+	mode := strings.TrimSpace(c.ConfigMode)
+	if mode == "" {
+		return "list"
+	}
+	return mode
+}
+
+func (c Config) manyDBVerifySampleSize() int {
+	if c.VerifySampleSize <= 0 {
+		return 5
+	}
+	if c.NumDatabases > 0 && c.VerifySampleSize > c.NumDatabases {
+		return c.NumDatabases
+	}
+	return c.VerifySampleSize
+}
+
 func (c Config) WorkloadConfig() workload.Config {
 	return workload.Config{
-		LoadMode:         c.LoadMode,
-		WriteRate:        c.WriteRate,
-		Pattern:          c.Pattern,
-		PayloadSize:      c.PayloadSize,
-		ReadRatio:        c.ReadRatio,
-		Workers:          c.Workers,
-		InitialSize:      c.InitialSize,
-		VerifyInterval:   c.VerifyInterval.String(),
-		VerifyType:       c.VerifyType,
-		SnapshotInterval: c.SnapshotInterval.String(),
-		SyncInterval:     c.SyncInterval.String(),
-		S3PartSize:       c.S3PartSize,
-		S3Concurrency:    c.S3Concurrency,
-		ReplayDataset:    c.ReplayDataset,
-		ReplayDataPath:   c.ReplayDataPath,
-		ReplayDataURL:    c.ReplayDataURL,
-		ReplaySpeed:      c.ReplaySpeed,
-		ReplayLoop:       c.ReplayLoop,
+		LoadMode:                c.LoadMode,
+		WriteRate:               c.WriteRate,
+		Pattern:                 c.Pattern,
+		PayloadSize:             c.PayloadSize,
+		ReadRatio:               c.ReadRatio,
+		Workers:                 c.Workers,
+		InitialSize:             c.InitialSize,
+		VerifyInterval:          c.VerifyInterval.String(),
+		VerifyType:              c.VerifyType,
+		SnapshotInterval:        c.SnapshotInterval.String(),
+		SyncInterval:            c.SyncInterval.String(),
+		S3PartSize:              c.S3PartSize,
+		S3Concurrency:           c.S3Concurrency,
+		NumDatabases:            c.NumDatabases,
+		ActivePercent:           c.ActivePercent,
+		ConfigMode:              c.manyDBConfigMode(),
+		VerifySampleSize:        c.VerifySampleSize,
+		ReplicationLagThreshold: c.ReplicationLagThreshold,
+		ReplayDataset:           c.ReplayDataset,
+		ReplayDataPath:          c.ReplayDataPath,
+		ReplayDataURL:           c.ReplayDataURL,
+		ReplaySpeed:             c.ReplaySpeed,
+		ReplayLoop:              c.ReplayLoop,
 	}
 }

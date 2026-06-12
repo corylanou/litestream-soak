@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/corylanou/litestream-soak/internal/model"
@@ -152,6 +153,70 @@ func TestDefaultMainFleetTunesHighVolumeS3Uploads(t *testing.T) {
 		if worker.Workload.S3Concurrency != 8 {
 			t.Fatalf("%s S3Concurrency = %d, want 8", profile, worker.Workload.S3Concurrency)
 		}
+	}
+}
+
+func TestDefaultMainFleetIncludesManyDBProfilesWhenEnabled(t *testing.T) {
+	t.Setenv("SOAK_ENABLE_MANY_DB_FLEET", "true")
+
+	spec := DefaultMainFleet()
+	many := map[string]DesiredWorker{}
+	for _, worker := range spec.Workers {
+		if strings.HasPrefix(worker.ProfileName, "many-dbs-") {
+			many[worker.ProfileName] = worker
+		}
+	}
+
+	tests := []struct {
+		profile      string
+		numDatabases int
+		configMode   string
+		volumeGB     int
+		memoryMB     int
+		cpus         int
+	}{
+		{profile: "many-dbs-100-list", numDatabases: 100, configMode: "list", volumeGB: 10, memoryMB: 2048, cpus: 1},
+		{profile: "many-dbs-100-dir", numDatabases: 100, configMode: "dir", volumeGB: 10, memoryMB: 2048, cpus: 1},
+		{profile: "many-dbs-1000-dir", numDatabases: 1000, configMode: "dir", volumeGB: 20, memoryMB: 4096, cpus: 2},
+	}
+
+	for _, tc := range tests {
+		worker, ok := many[tc.profile]
+		if !ok {
+			t.Fatalf("DefaultMainFleet() missing %s", tc.profile)
+		}
+		if worker.Workload.NumDatabases != tc.numDatabases {
+			t.Fatalf("%s NumDatabases = %d, want %d", tc.profile, worker.Workload.NumDatabases, tc.numDatabases)
+		}
+		if worker.Workload.ActivePercent != 2 {
+			t.Fatalf("%s ActivePercent = %v, want 2", tc.profile, worker.Workload.ActivePercent)
+		}
+		if worker.Workload.ConfigMode != tc.configMode {
+			t.Fatalf("%s ConfigMode = %q, want %q", tc.profile, worker.Workload.ConfigMode, tc.configMode)
+		}
+		if worker.Workload.VerifySampleSize != 5 {
+			t.Fatalf("%s VerifySampleSize = %d, want 5", tc.profile, worker.Workload.VerifySampleSize)
+		}
+		if worker.VolumeSizeGB != tc.volumeGB || worker.Workload.VolumeSizeGB != tc.volumeGB {
+			t.Fatalf("%s volume = %d/%d, want %d", tc.profile, worker.VolumeSizeGB, worker.Workload.VolumeSizeGB, tc.volumeGB)
+		}
+		if worker.Workload.MemoryMB != tc.memoryMB {
+			t.Fatalf("%s MemoryMB = %d, want %d", tc.profile, worker.Workload.MemoryMB, tc.memoryMB)
+		}
+		if worker.Workload.CPUs != tc.cpus {
+			t.Fatalf("%s CPUs = %d, want %d", tc.profile, worker.Workload.CPUs, tc.cpus)
+		}
+	}
+}
+
+func TestManyDBProfilesExcludedFromReleaseQuality(t *testing.T) {
+	t.Parallel()
+
+	if workerIncludedInReleaseQuality(model.Worker{ProfileName: "many-dbs-100-dir", Region: "ord"}) {
+		t.Fatal("many-dbs-100-dir should be excluded from release quality")
+	}
+	if !workerIncludedInReleaseQuality(model.Worker{ProfileName: "low-volume", Region: "ord"}) {
+		t.Fatal("low-volume in ord should be included in release quality")
 	}
 }
 

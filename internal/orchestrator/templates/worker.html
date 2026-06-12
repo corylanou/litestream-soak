@@ -251,6 +251,10 @@
             <div class="kv-row"><span class="kv-label">Workers</span><span class="kv-value">{{if .Incident.Workload.Workers}}{{.Incident.Workload.Workers}}{{else}}--{{end}}</span></div>
             <div class="kv-row"><span class="kv-label">Replay speed</span><span class="kv-value">{{if .Incident.Workload.ReplaySpeed}}{{.Incident.Workload.ReplaySpeed}}{{else}}--{{end}}</span></div>
             <div class="kv-row"><span class="kv-label">Sync interval</span><span class="kv-value">{{if .Incident.Workload.SyncInterval}}{{.Incident.Workload.SyncInterval}}{{else}}--{{end}}</span></div>
+            <div class="kv-row"><span class="kv-label">Databases</span><span class="kv-value">{{if .Incident.Workload.NumDatabases}}{{.Incident.Workload.NumDatabases}}{{else}}--{{end}}</span></div>
+            <div class="kv-row"><span class="kv-label">Active percent</span><span class="kv-value">{{if .Incident.Workload.ActivePercent}}{{printf "%.2f" .Incident.Workload.ActivePercent}}{{else}}--{{end}}</span></div>
+            <div class="kv-row"><span class="kv-label">Config mode</span><span class="kv-value">{{if .Incident.Workload.ConfigMode}}{{.Incident.Workload.ConfigMode}}{{else}}--{{end}}</span></div>
+            <div class="kv-row"><span class="kv-label">Verify sample</span><span class="kv-value">{{if .Incident.Workload.VerifySampleSize}}{{.Incident.Workload.VerifySampleSize}}{{else}}--{{end}}</span></div>
           </div>
         </div>
 

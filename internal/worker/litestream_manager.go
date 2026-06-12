@@ -41,23 +41,31 @@ var litestreamConfigTmpl = template.Must(template.New("config").Parse(`socket:
   path: {{.SocketPath}}
 
 dbs:
-  - path: {{.DBPath}}
+{{- range .Databases}}
+  - {{if .Dir}}dir: {{.Dir}}{{else}}path: {{.Path}}{{end}}
+{{- if .Pattern}}
+    pattern: "{{.Pattern}}"
+{{- end}}
+{{- if .Watch}}
+    watch: true
+{{- end}}
     snapshot:
       interval: {{.SnapshotInterval}}
     replicas:
-{{- if eq .ReplicaType "file"}}
-      - path: {{.ReplicaPath}}
-        sync-interval: {{.SyncInterval}}
+{{- if eq .Replica.Type "file"}}
+      - path: {{.Replica.Path}}
+        sync-interval: {{.Replica.SyncInterval}}
 {{- else}}
-      - url: s3://{{.S3Bucket}}/{{.S3Path}}
-        sync-interval: {{.SyncInterval}}
-        endpoint: {{.S3Endpoint}}
+      - url: s3://{{.Replica.S3Bucket}}/{{.Replica.S3Path}}
+        sync-interval: {{.Replica.SyncInterval}}
+        endpoint: {{.Replica.S3Endpoint}}
         force-path-style: true
-{{- if .S3PartSize}}
-        part-size: {{.S3PartSize}}
+{{- if .Replica.S3PartSize}}
+        part-size: {{.Replica.S3PartSize}}
 {{- end}}
-{{- if gt .S3Concurrency 0}}
-        concurrency: {{.S3Concurrency}}
+{{- if gt .Replica.S3Concurrency 0}}
+        concurrency: {{.Replica.S3Concurrency}}
+{{- end}}
 {{- end}}
 {{- end}}
 `))
@@ -79,33 +87,7 @@ func (m *litestreamManager) writeLitestreamConfig() error {
 	}
 	defer func() { _ = f.Close() }()
 
-	data := struct {
-		SocketPath       string
-		DBPath           string
-		SnapshotInterval string
-		ReplicaType      string
-		ReplicaPath      string
-		S3Bucket         string
-		S3Path           string
-		SyncInterval     string
-		S3Endpoint       string
-		S3PartSize       string
-		S3Concurrency    int
-	}{
-		SocketPath:       m.cfg.SocketPath,
-		DBPath:           m.cfg.DBPath,
-		SnapshotInterval: m.cfg.SnapshotInterval.String(),
-		ReplicaType:      m.cfg.ReplicaType,
-		ReplicaPath:      m.cfg.ReplicaPath,
-		S3Bucket:         m.cfg.S3Bucket,
-		S3Path:           m.cfg.S3Path,
-		SyncInterval:     m.cfg.SyncInterval.String(),
-		S3Endpoint:       m.cfg.S3Endpoint,
-		S3PartSize:       m.cfg.S3PartSize,
-		S3Concurrency:    m.cfg.S3Concurrency,
-	}
-
-	if err := litestreamConfigTmpl.Execute(f, data); err != nil {
+	if err := litestreamConfigTmpl.Execute(f, m.litestreamConfigData()); err != nil {
 		return err
 	}
 	if err := m.writeLitestreamReplicaTarget(); err != nil {
@@ -114,34 +96,125 @@ func (m *litestreamManager) writeLitestreamConfig() error {
 	return nil
 }
 
-func (m *litestreamManager) cleanupStaleLitestreamState() error {
-	current := strings.TrimSpace(m.cfg.ReplicaURL())
-	if current == "" {
-		return nil
+type litestreamConfigData struct {
+	SocketPath string
+	Databases  []litestreamConfigDB
+}
+
+type litestreamConfigDB struct {
+	Path             string
+	Dir              string
+	Pattern          string
+	Watch            bool
+	SnapshotInterval string
+	Replica          litestreamConfigReplica
+}
+
+type litestreamConfigReplica struct {
+	Type          string
+	Path          string
+	S3Bucket      string
+	S3Path        string
+	SyncInterval  string
+	S3Endpoint    string
+	S3PartSize    string
+	S3Concurrency int
+}
+
+func (m *litestreamManager) litestreamConfigData() litestreamConfigData {
+	if !m.cfg.ManyDBEnabled() {
+		return litestreamConfigData{
+			SocketPath: m.cfg.SocketPath,
+			Databases: []litestreamConfigDB{{
+				Path:             m.cfg.DBPath,
+				SnapshotInterval: m.cfg.SnapshotInterval.String(),
+				Replica:          m.litestreamConfigReplica(m.cfg.DBPath),
+			}},
+		}
 	}
 
-	targets, err := m.previousLitestreamReplicaTargets()
-	if err != nil {
-		return err
+	if m.cfg.manyDBConfigMode() == "dir" {
+		return litestreamConfigData{
+			SocketPath: m.cfg.SocketPath,
+			Databases: []litestreamConfigDB{{
+				Dir:              m.cfg.ManyDBDir(),
+				Pattern:          "*.db",
+				Watch:            true,
+				SnapshotInterval: m.cfg.SnapshotInterval.String(),
+				Replica:          m.litestreamConfigReplica(""),
+			}},
+		}
 	}
-	for _, target := range targets {
-		if target == "" || target == current {
+
+	paths := m.cfg.ManyDBPaths()
+	dbs := make([]litestreamConfigDB, 0, len(paths))
+	for _, dbPath := range paths {
+		dbs = append(dbs, litestreamConfigDB{
+			Path:             dbPath,
+			SnapshotInterval: m.cfg.SnapshotInterval.String(),
+			Replica:          m.litestreamConfigReplica(dbPath),
+		})
+	}
+	return litestreamConfigData{
+		SocketPath: m.cfg.SocketPath,
+		Databases:  dbs,
+	}
+}
+
+func (m *litestreamManager) litestreamConfigReplica(dbPath string) litestreamConfigReplica {
+	replica := litestreamConfigReplica{
+		Type:          m.cfg.ReplicaType,
+		SyncInterval:  m.cfg.SyncInterval.String(),
+		S3Bucket:      m.cfg.S3Bucket,
+		S3Endpoint:    m.cfg.S3Endpoint,
+		S3PartSize:    m.cfg.S3PartSize,
+		S3Concurrency: m.cfg.S3Concurrency,
+	}
+	if m.cfg.ReplicaType == "file" {
+		replica.Path = strings.TrimPrefix(m.cfg.ReplicaURLForDB(dbPath), "file://")
+		return replica
+	}
+	replicaURL := strings.TrimPrefix(m.cfg.ReplicaURLForDB(dbPath), "s3://")
+	parts := strings.SplitN(replicaURL, "/", 2)
+	if len(parts) == 2 {
+		replica.S3Bucket = parts[0]
+		replica.S3Path = parts[1]
+	} else {
+		replica.S3Bucket = replicaURL
+	}
+	return replica
+}
+
+func (m *litestreamManager) cleanupStaleLitestreamState() error {
+	for _, dbPath := range m.replicaTargetDBPaths() {
+		current := strings.TrimSpace(m.replicaTargetMarker(dbPath))
+		if current == "" {
 			continue
 		}
-		stateDir := litestreamStateDir(m.cfg.DBPath)
-		slog.Info("Removing stale Litestream local state", "state_dir", stateDir, "previous_replica", target, "current_replica", current)
-		if err := os.RemoveAll(stateDir); err != nil {
-			return fmt.Errorf("remove stale litestream state: %w", err)
+
+		targets, err := m.previousLitestreamReplicaTargets(dbPath)
+		if err != nil {
+			return err
 		}
-		return nil
+		for _, target := range targets {
+			if target == "" || target == current || target == strings.TrimSpace(m.cfg.ReplicaURL()) {
+				continue
+			}
+			stateDir := litestreamStateDir(dbPath)
+			slog.Info("Removing stale Litestream local state", "state_dir", stateDir, "previous_replica", target, "current_replica", current)
+			if err := os.RemoveAll(stateDir); err != nil {
+				return fmt.Errorf("remove stale litestream state: %w", err)
+			}
+			break
+		}
 	}
 	return nil
 }
 
-func (m *litestreamManager) previousLitestreamReplicaTargets() ([]string, error) {
+func (m *litestreamManager) previousLitestreamReplicaTargets(dbPath string) ([]string, error) {
 	var targets []string
 
-	marker, err := os.ReadFile(litestreamReplicaTargetPath(m.cfg.DBPath))
+	marker, err := os.ReadFile(litestreamReplicaTargetPath(dbPath))
 	if err == nil {
 		if target := strings.TrimSpace(string(marker)); target != "" {
 			targets = append(targets, target)
@@ -161,15 +234,34 @@ func (m *litestreamManager) previousLitestreamReplicaTargets() ([]string, error)
 }
 
 func (m *litestreamManager) writeLitestreamReplicaTarget() error {
-	target := strings.TrimSpace(m.cfg.ReplicaURL())
-	if target == "" {
-		return nil
+	for _, dbPath := range m.replicaTargetDBPaths() {
+		target := strings.TrimSpace(m.replicaTargetMarker(dbPath))
+		if target == "" {
+			continue
+		}
+		stateDir := litestreamStateDir(dbPath)
+		if err := os.MkdirAll(stateDir, 0755); err != nil {
+			return fmt.Errorf("create litestream state dir: %w", err)
+		}
+		if err := os.WriteFile(litestreamReplicaTargetPath(dbPath), []byte(target+"\n"), 0644); err != nil {
+			return err
+		}
 	}
-	stateDir := litestreamStateDir(m.cfg.DBPath)
-	if err := os.MkdirAll(stateDir, 0755); err != nil {
-		return fmt.Errorf("create litestream state dir: %w", err)
+	return nil
+}
+
+func (m *litestreamManager) replicaTargetDBPaths() []string {
+	if m.cfg.ManyDBEnabled() {
+		return m.cfg.ManyDBPaths()
 	}
-	return os.WriteFile(litestreamReplicaTargetPath(m.cfg.DBPath), []byte(target+"\n"), 0644)
+	return []string{m.cfg.DBPath}
+}
+
+func (m *litestreamManager) replicaTargetMarker(dbPath string) string {
+	if m.cfg.ManyDBEnabled() && m.cfg.manyDBConfigMode() == "list" {
+		return m.cfg.ReplicaURLForDB(dbPath)
+	}
+	return m.cfg.ReplicaURL()
 }
 
 func litestreamReplicaTargetPath(dbPath string) string {
@@ -286,6 +378,15 @@ func (m *litestreamManager) litestreamExitError() error {
 	m.litestreamMu.Lock()
 	defer m.litestreamMu.Unlock()
 	return m.litestreamErr
+}
+
+func (m *litestreamManager) litestreamPID() int {
+	m.litestreamMu.Lock()
+	defer m.litestreamMu.Unlock()
+	if m.litestreamCmd == nil || m.litestreamCmd.Process == nil {
+		return 0
+	}
+	return m.litestreamCmd.Process.Pid
 }
 
 func (m *litestreamManager) waitForFirstSync(ctx context.Context) error {

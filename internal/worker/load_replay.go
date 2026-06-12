@@ -22,6 +22,7 @@ type loadReplayManager struct {
 
 	loadSup      *loadSupervisor
 	replayEngine *replay.Engine
+	manyDBLoad   *manyDBLoad
 	loadLog      *lineBuffer
 }
 
@@ -37,6 +38,23 @@ func (r *Runner) startLoad(ctx context.Context) error {
 		return err
 	}
 	r.sendHeartbeat(ctx)
+	return nil
+}
+
+func (r *Runner) startManyDBLoad(ctx context.Context) error {
+	if err := r.loadReplayManager.startManyDBLoad(ctx); err != nil {
+		return err
+	}
+	r.sendHeartbeat(ctx)
+	return nil
+}
+
+func (m *loadReplayManager) startManyDBLoad(ctx context.Context) error {
+	load := newManyDBLoad(m.cfg)
+	if err := load.Start(ctx); err != nil {
+		return err
+	}
+	m.manyDBLoad = load
 	return nil
 }
 
@@ -233,6 +251,10 @@ func (r *Runner) stopLoad() {
 
 func (m *loadReplayManager) stopLoad() {
 	if m.loadSup == nil {
+		if m.manyDBLoad != nil {
+			slog.Info("Stopping many database load")
+			m.manyDBLoad.Stop()
+		}
 		return
 	}
 	slog.Info("Stopping load generator")

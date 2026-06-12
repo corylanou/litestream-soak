@@ -69,6 +69,13 @@ Regional workers measure cross-region behavior and are excluded from release
 quality scoring. The release-quality code only scores `ord` workers and
 explicitly excludes `low-vol-syd` and `high-vol-ams`.
 
+Many-database profiles are opt-in with `SOAK_ENABLE_MANY_DB_FLEET=true`.
+When enabled, the main and PR fleets also reconcile `many-dbs-100-list`,
+`many-dbs-100-dir`, and `many-dbs-1000-dir`. These profiles seed databases
+under `/data/dbs`, drive writes into the configured active subset with an
+in-process writer, report aggregate runtime/process metrics only, and verify a
+sample of databases per cycle. They are excluded from release-quality scoring.
+
 ## Fleet Sources
 
 The `main` source is the long-running baseline fleet. Failures there are

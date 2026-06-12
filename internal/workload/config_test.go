@@ -35,6 +35,19 @@ func TestParseConfig(t *testing.T) {
 			wantError: false,
 		},
 		{
+			name:  "many database knobs",
+			input: `{"load_mode":"many-db","num_databases":1000,"active_percent":2,"config_mode":"dir","verify_sample_size":5,"replication_lag_threshold":3}`,
+			want: Config{
+				LoadMode:                "many-db",
+				NumDatabases:            1000,
+				ActivePercent:           2,
+				ConfigMode:              "dir",
+				VerifySampleSize:        5,
+				ReplicationLagThreshold: 3,
+			},
+			wantError: false,
+		},
+		{
 			name:      "corrupt JSON truncated",
 			input:     `{"write_rate":`,
 			want:      Config{},

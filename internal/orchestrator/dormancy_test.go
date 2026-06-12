@@ -341,6 +341,41 @@ func TestWorkerEnvIncludesOptionalWorkloadFields(t *testing.T) {
 	}
 }
 
+func TestWorkerEnvIncludesManyDBWorkloadFields(t *testing.T) {
+	t.Parallel()
+
+	mgr := &Manager{
+		replica:        ReplicaConfig{Bucket: "bucket", Endpoint: "endpoint"},
+		controlBaseURL: "https://litestream-soak-ctl.fly.dev",
+	}
+
+	env := mgr.workerEnv(model.Worker{
+		ID:   "worker-main-many-dbs-100-dir",
+		Name: "worker-main-many-dbs-100-dir",
+	}, workload.Config{
+		LoadMode:                "many-db",
+		NumDatabases:            100,
+		ActivePercent:           2,
+		ConfigMode:              "dir",
+		VerifySampleSize:        5,
+		ReplicationLagThreshold: 3,
+	})
+
+	want := map[string]string{
+		"LOAD_MODE":                 "many-db",
+		"NUM_DATABASES":             "100",
+		"ACTIVE_PERCENT":            "2.00",
+		"CONFIG_MODE":               "dir",
+		"VERIFY_SAMPLE_SIZE":        "5",
+		"REPLICATION_LAG_THRESHOLD": "3",
+	}
+	for key, wantValue := range want {
+		if got := env[key]; got != wantValue {
+			t.Fatalf("%s=%q, want %q", key, got, wantValue)
+		}
+	}
+}
+
 func failedVerificationAt(completedAt time.Time, errorMessage string) model.Verification {
 	startedAt := completedAt.Add(-10 * time.Second)
 	return model.Verification{

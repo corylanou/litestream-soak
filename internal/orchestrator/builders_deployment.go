@@ -303,7 +303,7 @@ func workerIncludedInReleaseQuality(worker model.Worker) bool {
 	case "low-vol-syd", "high-vol-ams":
 		return false
 	default:
-		return true
+		return !strings.HasPrefix(worker.ProfileName, "many-dbs-")
 	}
 }
 

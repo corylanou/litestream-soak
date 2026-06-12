@@ -28,6 +28,7 @@ func NewRunner(cfg Config) *Runner {
 	}
 	runner.litestreamManager = newLitestreamManager(&runner.cfg)
 	runner.statsPoller = newStatsPoller(&runner.cfg)
+	runner.statsPoller.litestreamPID = runner.litestreamManager.litestreamPID
 	runner.loadReplayManager = newLoadReplayManager(&runner.cfg)
 	return runner
 }
@@ -74,8 +75,14 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := r.waitForFirstSync(runCtx); err != nil {
 		return fmt.Errorf("wait for first sync: %w", err)
 	}
+	go newPprofCapturer(&r.cfg).Run(runCtx)
 
-	if r.cfg.LoadMode == "synthetic" || r.cfg.LoadMode == "both" {
+	if r.cfg.ManyDBEnabled() {
+		if err := r.startManyDBLoad(runCtx); err != nil {
+			return fmt.Errorf("start many database load: %w", err)
+		}
+		defer r.stopLoad()
+	} else if r.cfg.LoadMode == "synthetic" || r.cfg.LoadMode == "both" {
 		if err := r.startLoad(runCtx); err != nil {
 			return fmt.Errorf("start load: %w", err)
 		}
@@ -95,6 +102,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	if r.replayEngine != nil {
 		pausers = append(pausers, r.replayEngine)
 	}
+	if r.manyDBLoad != nil {
+		pausers = append(pausers, r.manyDBLoad)
+	}
 	r.verifier = NewVerifier(r.cfg, pausers...)
 	r.verifier.SetStartHook(r.sendVerificationStarted)
 
@@ -106,6 +116,10 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 func (r *Runner) populate(ctx context.Context) error {
+	if r.cfg.ManyDBEnabled() {
+		return populateManyDBs(ctx, r.cfg)
+	}
+
 	if _, err := os.Stat(r.cfg.DBPath); err == nil {
 		slog.Info("Database already exists, skipping populate", "path", r.cfg.DBPath)
 		return nil
