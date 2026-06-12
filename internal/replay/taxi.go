@@ -56,7 +56,7 @@ func (a *TaxiAdapter) Rows() (RowIterator, error) {
 	r := csv.NewReader(f)
 	header, err := r.Read()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("read header: %w", err)
 	}
 

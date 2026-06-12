@@ -141,7 +141,7 @@ func (it *ordersIterator) Insert(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	createdAt := it.row.CreatedAt.Format(time.RFC3339)
 	if _, err := tx.Exec(`

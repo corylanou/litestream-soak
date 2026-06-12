@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -98,7 +99,7 @@ func (a *GHArchiveAdapter) Rows() (RowIterator, error) {
 	if len(a.dataPath) > 3 && a.dataPath[len(a.dataPath)-3:] == ".gz" {
 		gz, err := gzip.NewReader(f)
 		if err != nil {
-			f.Close()
+			_ = f.Close()
 			return nil, fmt.Errorf("gzip reader: %w", err)
 		}
 		reader = gz
@@ -155,7 +156,7 @@ func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	res, err := tx.Exec(`INSERT OR IGNORE INTO gh_events (id, type, actor_login, repo_name, created_at, payload) VALUES (?, ?, ?, ?, ?, ?)`,
 		e.ID, e.Type, e.Actor.Login, e.Repo.Name, ts, string(e.Payload))
@@ -231,6 +232,8 @@ func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 func (it *ghArchiveIterator) Err() error { return it.err }
 
 func (it *ghArchiveIterator) Close() error {
-	it.reader.Close()
-	return it.file.Close()
+	if it.reader == it.file {
+		return it.file.Close()
+	}
+	return errors.Join(it.reader.Close(), it.file.Close())
 }

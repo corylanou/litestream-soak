@@ -59,7 +59,9 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handlePush(w, body)
 	case "ping":
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "pong")
+		if _, err := fmt.Fprintln(w, "pong"); err != nil {
+			slog.Debug("Failed to write webhook response", "error", err)
+		}
 	default:
 		slog.Info("Ignoring webhook event", "event", event)
 		w.WriteHeader(http.StatusOK)
@@ -87,7 +89,9 @@ func (h *WebhookHandler) handlePush(w http.ResponseWriter, body []byte) {
 	if payload.Ref != "refs/heads/main" {
 		slog.Info("Ignoring push to non-main branch", "ref", payload.Ref)
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "ignored: not main branch")
+		if _, err := fmt.Fprintln(w, "ignored: not main branch"); err != nil {
+			slog.Debug("Failed to write webhook response", "error", err)
+		}
 		return
 	}
 
@@ -107,7 +111,9 @@ func (h *WebhookHandler) handlePush(w http.ResponseWriter, body []byte) {
 			_ = h.deployer.db.RecordEvent("", "github_push_awaiting_ci", "Push acknowledged; awaiting external deploy automation", sha)
 		}
 		w.WriteHeader(http.StatusAccepted)
-		fmt.Fprintln(w, "acknowledged: awaiting external deploy automation")
+		if _, err := fmt.Fprintln(w, "acknowledged: awaiting external deploy automation"); err != nil {
+			slog.Debug("Failed to write webhook response", "error", err)
+		}
 		return
 	}
 
@@ -118,7 +124,9 @@ func (h *WebhookHandler) handlePush(w http.ResponseWriter, body []byte) {
 	}()
 
 	w.WriteHeader(http.StatusAccepted)
-	fmt.Fprintf(w, "deploying %s\n", sha)
+	if _, err := fmt.Fprintf(w, "deploying %s\n", sha); err != nil {
+		slog.Debug("Failed to write webhook response", "error", err)
+	}
 }
 
 func (h *WebhookHandler) verifySignature(body []byte, signature string) bool {

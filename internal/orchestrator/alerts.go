@@ -356,7 +356,7 @@ func (d *AlertDispatcher) sendAlert(id int64, workerID, alertType string, payloa
 		slog.Error("Alert delivery failed", "alert_id", id, "worker_id", workerID, "alert_type", alertType, "error", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= http.StatusBadRequest {
 		errMsg := fmt.Sprintf("unexpected webhook status %d", resp.StatusCode)

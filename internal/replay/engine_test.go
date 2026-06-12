@@ -158,28 +158,30 @@ func TestEngineRunWaitsForTransientWriterLock(t *testing.T) {
 	if _, err := bootstrapDB.Exec(`CREATE TABLE replay_rows (id INTEGER PRIMARY KEY, value TEXT NOT NULL)`); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
-	bootstrapDB.Close()
+	if err := bootstrapDB.Close(); err != nil {
+		t.Fatalf("close bootstrap db: %v", err)
+	}
 
 	lockDB, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatalf("open lock db: %v", err)
 	}
-	defer lockDB.Close()
+	defer func() { _ = lockDB.Close() }()
 
 	conn, err := lockDB.Conn(context.Background())
 	if err != nil {
 		t.Fatalf("acquire lock conn: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
 		t.Fatalf("begin immediate: %v", err)
 	}
-	defer conn.ExecContext(context.Background(), `ROLLBACK`)
+	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
 
 	go func() {
 		time.Sleep(200 * time.Millisecond)
-		conn.ExecContext(context.Background(), `ROLLBACK`)
+		_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 	}()
 
 	engine := NewEngine(Config{
@@ -197,7 +199,7 @@ func TestEngineRunWaitsForTransientWriterLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open verify db: %v", err)
 	}
-	defer verifyDB.Close()
+	defer func() { _ = verifyDB.Close() }()
 
 	var count int
 	if err := verifyDB.QueryRow(`SELECT count(*) FROM replay_rows`).Scan(&count); err != nil {
