@@ -40,6 +40,26 @@ func buildLatestDeploymentRollout(db *model.DB, source string) (*DeploymentRollo
 	return &rollout, nil
 }
 
+func listSuccessArchivesBySource(db *model.DB) (map[string]model.RunArchive, error) {
+	archives, err := db.ListRunArchives("", runArchiveTypeSuccess, 10000)
+	if err != nil {
+		return nil, err
+	}
+
+	bySource := make(map[string]model.RunArchive)
+	for _, archive := range archives {
+		source := strings.TrimSpace(archive.Source)
+		if source == "" {
+			source = "main"
+		}
+		if _, ok := bySource[source]; ok {
+			continue
+		}
+		bySource[source] = archive
+	}
+	return bySource, nil
+}
+
 func buildLatestDeploymentComparison(db *model.DB, source string) (*DeploymentComparisonResponse, error) {
 	deployments, err := db.ListDeployments(strings.TrimSpace(source), 2)
 	if err != nil {

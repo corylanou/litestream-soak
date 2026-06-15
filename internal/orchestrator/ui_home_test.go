@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,6 +40,154 @@ func TestBuildAttentionItemsFlagsStaleHeartbeats(t *testing.T) {
 	}
 	if strings.Contains(staleItem.Detail, "w-fresh") {
 		t.Fatalf("stale heartbeat detail %q must not name w-fresh", staleItem.Detail)
+	}
+}
+
+func TestBuildHomePageDataTreatsStoppedSuccessArchiveAsPassed(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	source := "pr-1312"
+	completedAt := time.Now().UTC().Add(-30 * time.Minute)
+	for _, workerID := range []string{"worker-pr-1312-low", "worker-pr-1312-high"} {
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        model.WorkerStopped,
+			Source:        source,
+			GitSHA:        "sha-pr",
+			LitestreamSHA: "litestream-pr",
+			PRNumber:      1312,
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+		mustRecordVerification(t, db, &model.Verification{
+			WorkerID:    workerID,
+			StartedAt:   completedAt.Add(-15 * time.Second),
+			CompletedAt: &completedAt,
+			Status:      "passed",
+			CheckType:   "integrity",
+			Passed:      true,
+		})
+	}
+	if _, err := db.RecordRunArchive(&model.RunArchive{
+		DeploymentID:  1312,
+		Source:        source,
+		ArchiveType:   "success",
+		GitSHA:        "sha-pr",
+		LitestreamSHA: "litestream-pr",
+		Status:        "stable",
+		Summary:       "PR #1312 completed a clean soak.",
+		Payload:       `{"rollout":{"status":"stable"}}`,
+		ArchivedAt:    completedAt,
+	}); err != nil {
+		t.Fatalf("RecordRunArchive() error = %v", err)
+	}
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/ui?source=pr-1312", nil)
+	data, err := api.buildHomePageData(request)
+	if err != nil {
+		t.Fatalf("buildHomePageData() error = %v", err)
+	}
+
+	if data.Summary.AttentionWorkers != 0 {
+		t.Fatalf("AttentionWorkers = %d, want 0", data.Summary.AttentionWorkers)
+	}
+	if data.Summary.HealthyWorkers != 2 {
+		t.Fatalf("HealthyWorkers = %d, want 2", data.Summary.HealthyWorkers)
+	}
+	if data.KPIs.FleetHealthPct != 100 {
+		t.Fatalf("FleetHealthPct = %d, want 100", data.KPIs.FleetHealthPct)
+	}
+	if !data.KPIs.FleetPassed {
+		t.Fatal("FleetPassed = false, want true")
+	}
+	if len(data.Attention) != 0 {
+		t.Fatalf("Attention = %+v, want none", data.Attention)
+	}
+	for _, worker := range data.Workers {
+		if !worker.CompletedSuccess {
+			t.Fatalf("worker %s CompletedSuccess = false, want true", worker.Worker.ID)
+		}
+		if homeWorkerNeedsAttention(worker) {
+			t.Fatalf("worker %s needs attention, want passed", worker.Worker.ID)
+		}
+	}
+	foundSourceCard := false
+	for _, card := range data.ActiveSources {
+		if card.Source != source {
+			continue
+		}
+		foundSourceCard = true
+		if card.Attention != 0 {
+			t.Fatalf("source card attention = %d, want 0", card.Attention)
+		}
+		if !card.Passed {
+			t.Fatal("source card Passed = false, want true")
+		}
+	}
+	if !foundSourceCard {
+		t.Fatalf("source card for %s not found in %+v", source, data.ActiveSources)
+	}
+
+	var body bytes.Buffer
+	if err := uiTemplates.ExecuteTemplate(&body, "home_body", data); err != nil {
+		t.Fatalf("ExecuteTemplate(home_body) error = %v", err)
+	}
+	rendered := body.String()
+	if !strings.Contains(rendered, "Passed") || !strings.Contains(rendered, "clean soak, torn down") {
+		t.Fatalf("rendered home body missing passed state: %s", rendered[:min(500, len(rendered))])
+	}
+	if strings.Contains(rendered, "row-bad") {
+		t.Fatalf("rendered home body includes row-bad for completed success: %s", rendered[:min(500, len(rendered))])
+	}
+}
+
+func TestBuildHomePageDataKeepsStoppedWorkersWithoutSuccessAttention(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	source := "pr-1313"
+	completedAt := time.Now().UTC().Add(-30 * time.Minute)
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-1313-low",
+		Name:          "worker-pr-1313-low",
+		Status:        model.WorkerStopped,
+		Source:        source,
+		GitSHA:        "sha-pr",
+		LitestreamSHA: "litestream-pr",
+		PRNumber:      1313,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-pr-1313-low",
+		StartedAt:   completedAt.Add(-15 * time.Second),
+		CompletedAt: &completedAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+	})
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/ui?source=pr-1313", nil)
+	data, err := api.buildHomePageData(request)
+	if err != nil {
+		t.Fatalf("buildHomePageData() error = %v", err)
+	}
+
+	if data.Summary.AttentionWorkers != 1 {
+		t.Fatalf("AttentionWorkers = %d, want 1", data.Summary.AttentionWorkers)
+	}
+	if data.Summary.HealthyWorkers != 0 {
+		t.Fatalf("HealthyWorkers = %d, want 0", data.Summary.HealthyWorkers)
+	}
+	if data.KPIs.FleetHealthPct != 0 {
+		t.Fatalf("FleetHealthPct = %d, want 0", data.KPIs.FleetHealthPct)
+	}
+	if len(data.Attention) == 0 {
+		t.Fatal("Attention is empty, want stopped worker attention item")
 	}
 }
 

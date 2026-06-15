@@ -43,6 +43,7 @@ type homeSummary struct {
 	TotalWorkers         int
 	HealthyWorkers       int
 	AttentionWorkers     int
+	CompletedSuccess     bool
 	ActiveVerifications  int
 	RecentFailures       int
 	LatestHeartbeatAt    *time.Time
@@ -62,6 +63,7 @@ type homeWorker struct {
 	CurrentFailureCategory   string
 	CurrentFailureSeverity   string
 	CurrentProbableSubsystem string
+	CompletedSuccess         bool
 	Ticks                    []model.VerificationTick
 }
 
@@ -75,6 +77,7 @@ type homeSourceCard struct {
 	CompareURL string
 	Total      int
 	Attention  int
+	Passed     bool
 }
 
 type workerPageData struct {
@@ -186,10 +189,18 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 	}
 	events = coalesceEventFeed(events)
 
+	successArchivesBySource, err := listSuccessArchivesBySource(a.db)
+	if err != nil {
+		return homePageData{}, err
+	}
+	_, sourceHasSuccessArchive := successArchivesBySource[requestedSource]
+	sourceCompletedSuccess := sourceHasSuccessArchive && allWorkerSummariesStopped(summaries)
+
 	workerCards := make([]homeWorker, 0, len(summaries))
 	summary := homeSummary{
-		TotalWorkers:   len(summaries),
-		RecentFailures: len(failures),
+		TotalWorkers:     len(summaries),
+		CompletedSuccess: sourceCompletedSuccess,
+		RecentFailures:   len(failures),
 	}
 
 	for _, workerSummary := range summaries {
@@ -202,6 +213,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 			CurrentFailureStage:      workerSummary.CurrentFailureStage,
 			CurrentFailureSignature:  workerSummary.CurrentFailureSignature,
 			CurrentProbableSubsystem: workerSummary.CurrentProbableSubsystem,
+			CompletedSuccess:         sourceHasSuccessArchive && workerSummary.Worker.Status == model.WorkerStopped,
 			Ticks:                    ticksByWorker[workerSummary.Worker.ID],
 		}
 		if card.CurrentFailureSignature != "" {
@@ -215,7 +227,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 			card.CurrentFailureSeverity = failureSeverityForCategory(card.CurrentFailureCategory)
 		}
 
-		if workerNeedsAttention(workerSummary.Worker.Status, workerSummary.RuntimeSnapshotStatus) {
+		if homeWorkerNeedsAttention(card) {
 			summary.AttentionWorkers++
 		} else {
 			summary.HealthyWorkers++
@@ -299,7 +311,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 	comparisonPromptURL := comparisonPromptURL(requestedSource, baseSource, headSource, releaseComparison)
 	comparisonPromptLabel := comparisonPromptActionLabelForMode(defaultPromptModeForComparisonValue(releaseComparison))
 
-	activeSources, err := a.buildHomeSourceCards(requestedSource)
+	activeSources, err := a.buildHomeSourceCards(requestedSource, successArchivesBySource)
 	if err != nil {
 		return homePageData{}, err
 	}
@@ -337,7 +349,42 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 	}, nil
 }
 
-func (a *API) buildHomeSourceCards(selectedSource string) ([]homeSourceCard, error) {
+func allWorkerSummariesStopped(summaries []WorkerSummaryResponse) bool {
+	if len(summaries) == 0 {
+		return false
+	}
+	for _, summary := range summaries {
+		if summary.Worker.Status != model.WorkerStopped {
+			return false
+		}
+	}
+	return true
+}
+
+func allWorkersStopped(workers []model.Worker) bool {
+	if len(workers) == 0 {
+		return false
+	}
+	for _, worker := range workers {
+		if worker.Status != model.WorkerStopped {
+			return false
+		}
+	}
+	return true
+}
+
+func homeWorkerNeedsAttention(worker homeWorker) bool {
+	return workerNeedsAttentionForSuccess(worker.Worker.Status, worker.RuntimeSnapshotStatus, worker.CompletedSuccess)
+}
+
+func workerNeedsAttentionForSuccess(status model.WorkerStatus, runtimeStatus string, completedSuccess bool) bool {
+	if completedSuccess && status == model.WorkerStopped {
+		return false
+	}
+	return workerNeedsAttention(status, runtimeStatus)
+}
+
+func (a *API) buildHomeSourceCards(selectedSource string, successArchivesBySource map[string]model.RunArchive) ([]homeSourceCard, error) {
 	workers, err := a.db.ListWorkersFiltered("", "")
 	if err != nil {
 		return nil, err
@@ -348,28 +395,44 @@ func (a *API) buildHomeSourceCards(selectedSource string) ([]homeSourceCard, err
 		attention int
 	}
 
-	countsBySource := make(map[string]sourceCounts)
+	workersBySource := make(map[string][]model.Worker)
 	for _, worker := range workers {
 		source := firstNonEmpty(strings.TrimSpace(worker.Source), "main")
-		runtimeStatus := reporting.SnapshotStatus(extractReportedRuntime(worker, nil))
-		counts := countsBySource[source]
-		counts.total++
-		if workerNeedsAttention(worker.Status, runtimeStatus) {
-			counts.attention++
+		workersBySource[source] = append(workersBySource[source], worker)
+	}
+
+	countsBySource := make(map[string]sourceCounts)
+	for source, sourceWorkers := range workersBySource {
+		_, sourceHasSuccessArchive := successArchivesBySource[source]
+		for _, worker := range sourceWorkers {
+			runtimeStatus := reporting.SnapshotStatus(extractReportedRuntime(worker, nil))
+			workerCompletedSuccess := sourceHasSuccessArchive && worker.Status == model.WorkerStopped
+			counts := countsBySource[source]
+			counts.total++
+			if workerNeedsAttentionForSuccess(worker.Status, runtimeStatus, workerCompletedSuccess) {
+				counts.attention++
+			}
+			countsBySource[source] = counts
 		}
-		countsBySource[source] = counts
 	}
 
 	cards := make([]homeSourceCard, 0, len(countsBySource))
 	for source, counts := range countsBySource {
+		_, sourceHasSuccessArchive := successArchivesBySource[source]
+		sourcePassed := sourceHasSuccessArchive && allWorkersStopped(workersBySource[source])
+		summary := fmt.Sprintf("%d workers, %d need attention", counts.total, counts.attention)
+		if sourcePassed {
+			summary = fmt.Sprintf("%d workers, passed clean soak", counts.total)
+		}
 		card := homeSourceCard{
 			Source:    source,
 			Label:     sourceHumanLabel(source),
-			Summary:   fmt.Sprintf("%d workers, %d need attention", counts.total, counts.attention),
+			Summary:   summary,
 			Selected:  source == selectedSource,
 			ViewURL:   "/ui?source=" + url.QueryEscape(source),
 			Total:     counts.total,
 			Attention: counts.attention,
+			Passed:    sourcePassed,
 		}
 		if source != "main" {
 			card.CompareURL = fmt.Sprintf("/ui?source=%s&base_source=main&head_source=%s", url.QueryEscape(source), url.QueryEscape(source))
