@@ -27,6 +27,7 @@ type homeKPIs struct {
 	TotalWorkers             int
 	HealthyWorkers           int
 	FleetHealthPct           int
+	FleetPassed              bool
 	PassRatePct              float64
 	HasPassRate              bool
 	PassRateDelta            float64
@@ -70,6 +71,10 @@ func buildHomeKPIs(summary homeSummary, windowStats, previousStats []model.Verif
 	}
 	if summary.TotalWorkers > 0 {
 		kpis.FleetHealthPct = int(100.0*float64(summary.HealthyWorkers)/float64(summary.TotalWorkers) + 0.5)
+	}
+	if summary.CompletedSuccess && summary.AttentionWorkers == 0 {
+		kpis.FleetPassed = true
+		kpis.FleetHealthPct = 100
 	}
 
 	rate, total := passRateSummary(windowStats)
@@ -186,7 +191,7 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 	if len(diagnosis.Clusters) == 0 && summary.AttentionWorkers > 0 {
 		names := make([]string, 0, 3)
 		for _, worker := range workers {
-			if !workerNeedsAttention(worker.Worker.Status, worker.RuntimeSnapshotStatus) {
+			if !homeWorkerNeedsAttention(worker) {
 				continue
 			}
 			if len(names) < 3 {
@@ -207,7 +212,10 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 	staleNames := make([]string, 0, 3)
 	staleCount := 0
 	for _, worker := range workers {
-		if workerNeedsAttention(worker.Worker.Status, worker.RuntimeSnapshotStatus) {
+		if worker.CompletedSuccess {
+			continue
+		}
+		if homeWorkerNeedsAttention(worker) {
 			continue
 		}
 		if heartbeatClass(worker.Worker.LastHeartbeatAt) != "status-bad" {

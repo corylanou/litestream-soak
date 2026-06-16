@@ -34,10 +34,14 @@
     {{else}}
     <div class="all-clear">
       <span class="ok-mark">&#10003;</span>
+      {{if .Summary.CompletedSuccess}}
+      Passed in {{.SelectedSourceLabel}} &mdash; clean soak, torn down after success.
+      {{else}}
       {{if gt .Summary.ActiveVerifications 0}}
       All clear in {{.SelectedSourceLabel}} &mdash; {{.Summary.HealthyWorkers}}/{{.Summary.TotalWorkers}} workers healthy, {{.Summary.ActiveVerifications}} check(s) running.
       {{else}}
       All clear in {{.SelectedSourceLabel}} &mdash; {{.Summary.HealthyWorkers}}/{{.Summary.TotalWorkers}} workers healthy and passing verification.
+      {{end}}
       {{end}}
       {{if .LatestRolloutPromptURL}}<a class="topbar-link" href="{{.LatestRolloutPromptURL}}">{{.LatestRolloutPromptLabel}}</a>{{end}}
     </div>
@@ -46,8 +50,13 @@
     <div class="kpi-band" aria-label="Key metrics">
       <div class="kpi">
         <div class="kpi-label">Fleet health{{template "info" "Share of workers in this fleet that are healthy right now (not degraded, dormant, probing, or reporting an unhealthy runtime snapshot). If health falls while the pass rate stays flat, suspect infrastructure (machines, heartbeats) rather than data correctness."}}</div>
+        {{if .KPIs.FleetPassed}}
+        <div class="kpi-value kpi-good kpi-value-sm">&#10003; Passed</div>
+        <div class="kpi-sub">clean soak, torn down</div>
+        {{else}}
         <div class="kpi-value {{if ge .KPIs.FleetHealthPct 100}}kpi-good{{else if ge .KPIs.FleetHealthPct 80}}kpi-warn{{else}}kpi-bad{{end}}">{{.KPIs.FleetHealthPct}}<span class="kpi-unit">%</span></div>
         <div class="kpi-sub">{{.SelectedSourceLabel}}</div>
+        {{end}}
       </div>
       <div class="kpi">
         <div class="kpi-label">Workers{{template "info" "Healthy workers out of the total fleet. Each worker soaks Litestream under a different workload profile, so one unhealthy worker can mean a load-shape-specific bug - open it to see which profile is affected."}}</div>
@@ -145,11 +154,11 @@
         </thead>
         <tbody>
           {{range .Workers}}
-          <tr class="clickable-row {{if or (eq (statusClass .Worker.Status) "status-bad") (eq (runtimeClass .RuntimeSnapshotStatus) "status-bad")}}row-bad{{else if or (eq (statusClass .Worker.Status) "status-warn") (eq (runtimeClass .RuntimeSnapshotStatus) "status-warn")}}row-warn{{end}}" data-href="/ui/workers/{{pathEscape .Worker.ID}}">
-            <td><span class="dot dot-{{if or (eq (statusClass .Worker.Status) "status-bad") (eq (runtimeClass .RuntimeSnapshotStatus) "status-bad")}}bad{{else if or (eq (statusClass .Worker.Status) "status-warn") (eq (runtimeClass .RuntimeSnapshotStatus) "status-warn")}}warn{{else if eq (statusClass .Worker.Status) "status-good"}}good{{else}}neutral{{end}}"></span></td>
+          <tr class="clickable-row {{if .CompletedSuccess}}{{else if or (eq (statusClass .Worker.Status) "status-bad") (eq (runtimeClass .RuntimeSnapshotStatus) "status-bad")}}row-bad{{else if or (eq (statusClass .Worker.Status) "status-warn") (eq (runtimeClass .RuntimeSnapshotStatus) "status-warn")}}row-warn{{end}}" data-href="/ui/workers/{{pathEscape .Worker.ID}}">
+            <td><span class="dot dot-{{if .CompletedSuccess}}good{{else if or (eq (statusClass .Worker.Status) "status-bad") (eq (runtimeClass .RuntimeSnapshotStatus) "status-bad")}}bad{{else if or (eq (statusClass .Worker.Status) "status-warn") (eq (runtimeClass .RuntimeSnapshotStatus) "status-warn")}}warn{{else if eq (statusClass .Worker.Status) "status-good"}}good{{else}}neutral{{end}}"></span></td>
             <td>
-              <div class="worker-name">{{.Worker.Name}}{{if ne (statusClass .Worker.Status) "status-good"}} <span class="badge badge-{{if eq (statusClass .Worker.Status) "status-warn"}}warn{{else if eq (statusClass .Worker.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Worker.Status}}</span>{{end}}</div>
-              <div class="worker-sub">{{.Worker.ProfileName}} &middot; {{.Workload.MetricLoadMode}}{{if ne .Workload.MetricReplayDataset "none"}} &middot; {{.Workload.MetricReplayDataset}}{{end}}{{if ne (runtimeClass .RuntimeSnapshotStatus) "status-good"}} &middot; {{runtimeLabel .RuntimeSnapshotStatus}}{{end}}</div>
+              <div class="worker-name">{{.Worker.Name}}{{if .CompletedSuccess}} <span class="badge badge-good">passed</span>{{else if ne (statusClass .Worker.Status) "status-good"}} <span class="badge badge-{{if eq (statusClass .Worker.Status) "status-warn"}}warn{{else if eq (statusClass .Worker.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Worker.Status}}</span>{{end}}</div>
+              <div class="worker-sub">{{.Worker.ProfileName}} &middot; {{.Workload.MetricLoadMode}}{{if ne .Workload.MetricReplayDataset "none"}} &middot; {{.Workload.MetricReplayDataset}}{{end}}{{if .CompletedSuccess}} &middot; clean soak, torn down{{else if ne (runtimeClass .RuntimeSnapshotStatus) "status-good"}} &middot; {{runtimeLabel .RuntimeSnapshotStatus}}{{end}}</div>
             </td>
             <td>
               {{if .Ticks}}
@@ -167,6 +176,8 @@
             <td>
               {{if .CurrentFailureSignature}}
               <span class="badge badge-{{if eq .CurrentFailureSeverity "warn"}}warn{{else}}bad{{end}}" title="{{.CurrentFailureSignature}}">{{shorten .CurrentFailureSignature 48}}</span>
+              {{else if .CompletedSuccess}}
+              <span class="signal-ok">&#10003; passed</span>
               {{else if .ActiveVerification}}
               <span class="signal-info">checking&hellip;</span>
               {{else}}
