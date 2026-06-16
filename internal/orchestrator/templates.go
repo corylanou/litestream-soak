@@ -16,6 +16,8 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"confidenceClass":         confidenceClass,
 	"comparisonBaseLabel":     comparisonBaseLabel,
 	"comparisonCopyText":      comparisonCopyText,
+	"comparisonVerdictBadge":  comparisonVerdictBadgeClass,
+	"comparisonVerdictClass":  comparisonVerdictClass,
 	"comparisonHeadLabel":     comparisonHeadLabel,
 	"comparisonModeSummary":   comparisonModeSummary,
 	"comparisonTitle":         comparisonTitle,

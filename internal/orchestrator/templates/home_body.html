@@ -115,12 +115,19 @@
 
     {{if .ReleaseComparison}}
     <div class="compare-strip" aria-label="Release comparison">
-      <span class="compare-verdict {{if eq .ReleaseComparison.Verdict "better"}}v-better{{else if eq .ReleaseComparison.Verdict "worse"}}v-worse{{else if eq .ReleaseComparison.Verdict "mixed"}}v-mixed{{else if eq .ReleaseComparison.Verdict "insufficient_data"}}v-insufficient{{else}}v-neutral{{end}}">{{.ReleaseComparison.Verdict}}</span>
+      {{if eq .ReleaseComparison.Verdict "passed"}}
+      <span class="compare-verdict {{comparisonVerdictClass .ReleaseComparison.Verdict}}">&#10003; passed</span>
+      <span class="compare-fact">{{deploymentSourceLabel .ReleaseComparison.Head.Deployment}} passed its soak &mdash; completed &amp; torn down</span>
+      {{else}}
+      <span class="compare-verdict {{comparisonVerdictClass .ReleaseComparison.Verdict}}">{{.ReleaseComparison.Verdict}}</span>
       <span class="compare-fact">{{comparisonHeadLabel .ReleaseComparison}} vs {{comparisonBaseLabel .ReleaseComparison}}</span>
-      {{template "info" "The release verdict: pass/fail deltas for the candidate build versus its baseline. WORSE means the candidate is regressing and should not merge; INSUFFICIENT_DATA means too few completed checks to judge yet - let it soak longer before drawing conclusions. Full breakdown is in the comparison details below the fold."}}
+      {{end}}
+      {{template "info" "The release verdict: pass/fail deltas for the candidate build versus its baseline. PASSED means the candidate completed a clean soak and was torn down, so live-worker deltas are intentionally hidden. WORSE means the candidate is regressing and should not merge; INSUFFICIENT_DATA means too few completed checks to judge yet - let it soak longer before drawing conclusions. Full breakdown is in the comparison details below the fold."}}
+      {{if ne .ReleaseComparison.Verdict "passed"}}
       <span class="compare-fact">pass <strong>{{.ReleaseComparison.PassDelta}}</strong></span>
       <span class="compare-fact">fail <strong>{{.ReleaseComparison.FailDelta}}</strong></span>
       <span class="compare-fact">awaiting <strong>{{.ReleaseComparison.Head.AwaitingWorkers}}</strong></span>
+      {{end}}
       {{if .ReleaseComparison.RegressedWorkers}}
       <span class="compare-fact">regressed:
         {{range $index, $worker := .ReleaseComparison.RegressedWorkers}}{{if $index}}, {{end}}<a href="/ui/workers/{{pathEscape $worker.WorkerID}}">{{$worker.Name}}</a>{{end}}
@@ -338,10 +345,12 @@
         <p class="detail-subtle">{{comparisonModeSummary .ReleaseComparison}}</p>
         <p class="lead">{{.ReleaseComparison.Summary}}</p>
         <div class="diag-meta">
-          <span class="badge badge-{{if eq .ReleaseComparison.Verdict "better"}}good{{else if eq .ReleaseComparison.Verdict "worse"}}bad{{else if or (eq .ReleaseComparison.Verdict "mixed") (eq .ReleaseComparison.Verdict "insufficient_data")}}warn{{else}}neutral{{end}}">{{.ReleaseComparison.Verdict}}</span>
+          <span class="badge badge-{{comparisonVerdictBadge .ReleaseComparison.Verdict}}">{{if eq .ReleaseComparison.Verdict "passed"}}passed &middot; completed &amp; torn down{{else}}{{.ReleaseComparison.Verdict}}{{end}}</span>
+          {{if ne .ReleaseComparison.Verdict "passed"}}
           <span class="badge badge-neutral">pass delta: {{.ReleaseComparison.PassDelta}}</span>
           <span class="badge badge-neutral">fail delta: {{.ReleaseComparison.FailDelta}}</span>
           <span class="badge badge-neutral">awaiting: {{.ReleaseComparison.Head.AwaitingWorkers}}</span>
+          {{end}}
         </div>
         <div class="detail-list">
           <div class="detail-row">
