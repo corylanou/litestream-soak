@@ -92,8 +92,13 @@
       </div>
       <div class="kpi">
         <div class="kpi-label">Stalest heartbeat{{template "info_end" "How long since the quietest worker last reported in. Stale heartbeats mean the numbers on this page are based on old data - restore visibility first, because you cannot trust a green dashboard fed by silent workers."}}</div>
+        {{if .KPIs.FleetPassed}}
+        <div class="kpi-value kpi-value-sm"><span class="status-neutral">torn down</span></div>
+        <div class="kpi-sub" title="Stalest runtime snapshot across the fleet">Stalest runtime <span class="status-neutral">torn down</span></div>
+        {{else}}
         <div class="kpi-value kpi-value-sm"><span class="{{heartbeatClass .KPIs.StalestHeartbeatAt}}">{{timeAgo .KPIs.StalestHeartbeatAt}}</span></div>
         <div class="kpi-sub" title="Stalest runtime snapshot across the fleet">Stalest runtime <span class="{{heartbeatClass .KPIs.StalestRuntimeAt}}">{{timeAgo .KPIs.StalestRuntimeAt}}</span></div>
+        {{end}}
       </div>
     </div>
 

@@ -43,6 +43,75 @@ func TestBuildAttentionItemsFlagsStaleHeartbeats(t *testing.T) {
 	}
 }
 
+func TestHomeBodyRendersStalestHeartbeatState(t *testing.T) {
+	t.Parallel()
+
+	staleHeartbeatAt := time.Now().UTC().Add(-24 * time.Hour)
+	staleRuntimeAt := staleHeartbeatAt.Add(-time.Hour)
+	cases := []struct {
+		name         string
+		kpis         homeKPIs
+		wantBad      bool
+		wantTornDown bool
+	}{
+		{
+			name: "passed fleet",
+			kpis: homeKPIs{
+				FleetPassed:        true,
+				StalestHeartbeatAt: &staleHeartbeatAt,
+				StalestRuntimeAt:   &staleRuntimeAt,
+			},
+			wantTornDown: true,
+		},
+		{
+			name: "running stale fleet",
+			kpis: homeKPIs{
+				StalestHeartbeatAt: &staleHeartbeatAt,
+				StalestRuntimeAt:   &staleRuntimeAt,
+			},
+			wantBad: true,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var body bytes.Buffer
+			if err := uiTemplates.ExecuteTemplate(&body, "home_body", homePageData{KPIs: tc.kpis}); err != nil {
+				t.Fatalf("ExecuteTemplate(home_body) error = %v", err)
+			}
+			rendered := body.String()
+			tile := homeKPITile(t, rendered, "Stalest heartbeat")
+			if tc.wantBad && !strings.Contains(tile, "status-bad") {
+				t.Fatalf("stalest-heartbeat tile = %q, want status-bad", tile)
+			}
+			if !tc.wantBad && strings.Contains(tile, "status-bad") {
+				t.Fatalf("stalest-heartbeat tile = %q, want no status-bad", tile)
+			}
+			if tc.wantTornDown && !strings.Contains(tile, "torn down") {
+				t.Fatalf("stalest-heartbeat tile = %q, want torn-down note", tile)
+			}
+		})
+	}
+}
+
+func homeKPITile(t *testing.T, rendered, label string) string {
+	t.Helper()
+
+	start := strings.Index(rendered, `<div class="kpi-label">`+label)
+	if start < 0 {
+		t.Fatalf("rendered home body missing KPI label %q", label)
+	}
+	rest := rendered[start:]
+	end := strings.Index(rest, "\n      </div>")
+	if end < 0 {
+		t.Fatalf("rendered home body missing end of KPI %q: %s", label, rest[:min(500, len(rest))])
+	}
+	return rest[:end+len("\n      </div>")]
+}
+
 func TestBuildHomePageDataTreatsStoppedSuccessArchiveAsPassed(t *testing.T) {
 	t.Parallel()
 
