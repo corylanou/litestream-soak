@@ -94,7 +94,7 @@ func buildLatestDeploymentComparison(db *model.DB, source string) (*DeploymentCo
 		return nil, err
 	}
 	comparison.Base = &baseScorecard
-	finalizeDeploymentComparison(comparison)
+	finalizeDeploymentComparison(comparison, false)
 	return comparison, nil
 }
 
@@ -158,11 +158,47 @@ func buildLatestCrossSourceDeploymentComparison(db *model.DB, baseSource, headSo
 	}
 	comparison.Base = &baseScorecard
 
-	finalizeDeploymentComparison(comparison)
+	headCompletedSuccess, err := deploymentComparisonHeadCompletedSuccess(db, *head)
+	if err != nil {
+		return nil, err
+	}
+	finalizeDeploymentComparison(comparison, headCompletedSuccess)
 	return comparison, nil
 }
 
-func finalizeDeploymentComparison(comparison *DeploymentComparisonResponse) {
+func deploymentComparisonHeadCompletedSuccess(db *model.DB, head model.Deployment) (bool, error) {
+	successArchivesBySource, err := listSuccessArchivesBySource(db)
+	if err != nil {
+		return false, err
+	}
+
+	source := deploymentScorecardSource(head)
+	archive, ok := successArchivesBySource[source]
+	if !ok || !runArchiveMatchesDeployment(archive, head) {
+		return false, nil
+	}
+
+	workers, err := db.ListWorkersFiltered("", source)
+	if err != nil {
+		return false, err
+	}
+	return allWorkersStopped(workers), nil
+}
+
+func runArchiveMatchesDeployment(archive model.RunArchive, deployment model.Deployment) bool {
+	if archive.DeploymentID > 0 && deployment.ID > 0 && archive.DeploymentID != deployment.ID {
+		return false
+	}
+	if strings.TrimSpace(archive.GitSHA) != "" && strings.TrimSpace(archive.GitSHA) != strings.TrimSpace(deployment.GitSHA) {
+		return false
+	}
+	if strings.TrimSpace(archive.LitestreamSHA) != "" && strings.TrimSpace(archive.LitestreamSHA) != strings.TrimSpace(deployment.LitestreamSHA) {
+		return false
+	}
+	return true
+}
+
+func finalizeDeploymentComparison(comparison *DeploymentComparisonResponse, headCompletedSuccess bool) {
 	if comparison == nil || comparison.Base == nil {
 		return
 	}
@@ -234,7 +270,12 @@ func finalizeDeploymentComparison(comparison *DeploymentComparisonResponse) {
 	comparison.PassDelta = comparisonPassedWorkers(headScorecard) - comparisonPassedWorkers(baseScorecard)
 	comparison.FailDelta = comparisonFailedWorkers(headScorecard) - comparisonFailedWorkers(baseScorecard)
 	comparison.AwaitingDelta = headScorecard.AwaitingWorkers - baseScorecard.AwaitingWorkers
-	comparison.Verdict = inferDeploymentComparisonVerdict(*comparison)
+	comparison.Verdict = inferDeploymentComparisonVerdict(*comparison, headCompletedSuccess)
+	if headCompletedSuccess {
+		comparison.PassDelta = 0
+		comparison.FailDelta = 0
+		comparison.AwaitingDelta = 0
+	}
 	comparison.Summary = summarizeDeploymentComparison(*comparison)
 }
 
@@ -602,10 +643,12 @@ func summarizeDeploymentRollout(rollout DeploymentRolloutResponse) string {
 	}
 }
 
-func inferDeploymentComparisonVerdict(comparison DeploymentComparisonResponse) string {
+func inferDeploymentComparisonVerdict(comparison DeploymentComparisonResponse, headCompletedSuccess bool) string {
 	switch {
 	case comparison.Base == nil:
 		return "no_baseline"
+	case headCompletedSuccess:
+		return "passed"
 	case comparison.Base.VerifiedWorkers == 0 || comparison.Head.VerifiedWorkers == 0:
 		return "insufficient_data"
 	case len(comparison.RegressedWorkers) > 0 && len(comparison.ImprovedWorkers) == 0:
@@ -632,6 +675,8 @@ func summarizeDeploymentComparison(comparison DeploymentComparisonResponse) stri
 
 	baseVersion := comparisonSubjectSummary(comparison.Base.Deployment, includeSources)
 	switch comparison.Verdict {
+	case "passed":
+		return fmt.Sprintf("The %s rollout passed a clean soak and was torn down on success.", headVersion)
 	case "insufficient_data":
 		return fmt.Sprintf("The %s rollout cannot be scored against the %s rollout yet because one of the deployment windows does not have enough post-rollout verification data.", headVersion, baseVersion)
 	case "better":

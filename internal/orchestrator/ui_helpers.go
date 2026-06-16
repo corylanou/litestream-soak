@@ -191,6 +191,34 @@ func comparisonCopyText(comparison *DeploymentComparisonResponse) string {
 	return strings.Join(parts, "\n")
 }
 
+func comparisonVerdictClass(verdict string) string {
+	switch strings.ToLower(strings.TrimSpace(verdict)) {
+	case "better", "passed":
+		return "v-better"
+	case "worse":
+		return "v-worse"
+	case "mixed":
+		return "v-mixed"
+	case "insufficient_data":
+		return "v-insufficient"
+	default:
+		return "v-neutral"
+	}
+}
+
+func comparisonVerdictBadgeClass(verdict string) string {
+	switch strings.ToLower(strings.TrimSpace(verdict)) {
+	case "better", "passed":
+		return "good"
+	case "worse":
+		return "bad"
+	case "mixed", "insufficient_data":
+		return "warn"
+	default:
+		return "neutral"
+	}
+}
+
 func comparisonTitle(comparison *DeploymentComparisonResponse) string {
 	if comparison == nil {
 		return "Release Comparison"

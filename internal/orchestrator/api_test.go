@@ -862,6 +862,315 @@ func TestBuildRequestedDeploymentComparisonCrossSource(t *testing.T) {
 	}
 }
 
+func TestBuildRequestedDeploymentComparisonCompletedSuccessHeadPassed(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-main",
+		LitestreamSHA: "litestream-main",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-main",
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment(main) error = %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-pr",
+		LitestreamSHA: "litestream-pr",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-pr",
+		Source:        "pr-1312",
+		PRNumber:      1312,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment(pr) error = %v", err)
+	}
+
+	mainDeployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment(main) error = %v", err)
+	}
+	prDeployment, err := db.GetLatestDeployment("pr-1312")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment(pr-1312) error = %v", err)
+	}
+
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-low",
+		Name:          "worker-main-low",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        mainDeployment.GitSHA,
+		LitestreamSHA: mainDeployment.LitestreamSHA,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-high",
+		Name:          "worker-main-high",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        mainDeployment.GitSHA,
+		LitestreamSHA: mainDeployment.LitestreamSHA,
+		ProfileName:   "high-volume",
+		ProfileConfig: "{}",
+	})
+	for _, workerID := range []string{"worker-pr-1312-low", "worker-pr-1312-high"} {
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        model.WorkerStopped,
+			Source:        "pr-1312",
+			GitSHA:        prDeployment.GitSHA,
+			LitestreamSHA: prDeployment.LitestreamSHA,
+			PRNumber:      1312,
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+	}
+
+	mainPassAt := mainDeployment.StartedAt.Add(200 * time.Millisecond).UTC()
+	mainFailAt := mainDeployment.StartedAt.Add(400 * time.Millisecond).UTC()
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-main-low",
+		StartedAt:   mainPassAt.Add(-15 * time.Second),
+		CompletedAt: &mainPassAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  15000,
+	})
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:     "worker-main-high",
+		StartedAt:    mainFailAt.Add(-15 * time.Second),
+		CompletedAt:  &mainFailAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		Passed:       false,
+		DurationMS:   15000,
+		ErrorMessage: `wrong # of entries in index idx_load_test_timestamp`,
+	})
+	if _, err := db.RecordRunArchive(&model.RunArchive{
+		DeploymentID:  prDeployment.ID,
+		Source:        "pr-1312",
+		ArchiveType:   "success",
+		GitSHA:        prDeployment.GitSHA,
+		LitestreamSHA: prDeployment.LitestreamSHA,
+		ImageRef:      prDeployment.ImageRef,
+		Status:        "stable",
+		Summary:       "PR #1312 completed a clean soak.",
+		Payload:       `{"rollout":{"status":"stable"}}`,
+		ArchivedAt:    prDeployment.StartedAt.Add(24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("RecordRunArchive() error = %v", err)
+	}
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	comparison, err := api.buildRequestedDeploymentComparison("", "main", "pr-1312")
+	if err != nil {
+		t.Fatalf("buildRequestedDeploymentComparison() error = %v", err)
+	}
+	if comparison == nil {
+		t.Fatal("comparison = nil, want non-nil")
+	}
+	if comparison.Verdict != "passed" {
+		t.Fatalf("Verdict = %q, want passed", comparison.Verdict)
+	}
+	if comparison.PassDelta != 0 {
+		t.Fatalf("PassDelta = %d, want suppressed zero", comparison.PassDelta)
+	}
+	if comparison.FailDelta != 0 {
+		t.Fatalf("FailDelta = %d, want suppressed zero", comparison.FailDelta)
+	}
+	if !strings.Contains(comparison.Summary, "PR #1312") || !strings.Contains(comparison.Summary, "torn down on success") {
+		t.Fatalf("Summary = %q, want completed-success summary", comparison.Summary)
+	}
+}
+
+func TestBuildRequestedDeploymentComparisonNoArchiveStaysInsufficient(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-main",
+		LitestreamSHA: "litestream-main",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-main",
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment(main) error = %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-pr",
+		LitestreamSHA: "litestream-pr",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-pr",
+		Source:        "pr-1313",
+		PRNumber:      1313,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment(pr) error = %v", err)
+	}
+
+	mainDeployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment(main) error = %v", err)
+	}
+	prDeployment, err := db.GetLatestDeployment("pr-1313")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment(pr-1313) error = %v", err)
+	}
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-low",
+		Name:          "worker-main-low",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        mainDeployment.GitSHA,
+		LitestreamSHA: mainDeployment.LitestreamSHA,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-1313-low",
+		Name:          "worker-pr-1313-low",
+		Status:        model.WorkerRunning,
+		Source:        "pr-1313",
+		GitSHA:        prDeployment.GitSHA,
+		LitestreamSHA: prDeployment.LitestreamSHA,
+		PRNumber:      1313,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+
+	mainPassAt := mainDeployment.StartedAt.Add(200 * time.Millisecond).UTC()
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-main-low",
+		StartedAt:   mainPassAt.Add(-15 * time.Second),
+		CompletedAt: &mainPassAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  15000,
+	})
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	comparison, err := api.buildRequestedDeploymentComparison("", "main", "pr-1313")
+	if err != nil {
+		t.Fatalf("buildRequestedDeploymentComparison() error = %v", err)
+	}
+	if comparison == nil {
+		t.Fatal("comparison = nil, want non-nil")
+	}
+	if comparison.Verdict != "insufficient_data" {
+		t.Fatalf("Verdict = %q, want insufficient_data", comparison.Verdict)
+	}
+}
+
+func TestBuildRequestedDeploymentComparisonSuccessArchiveDoesNotHideActiveWorse(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-main",
+		LitestreamSHA: "litestream-main",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-main",
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment(main) error = %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "sha-pr",
+		LitestreamSHA: "litestream-pr",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-pr",
+		Source:        "pr-1314",
+		PRNumber:      1314,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment(pr) error = %v", err)
+	}
+
+	mainDeployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment(main) error = %v", err)
+	}
+	prDeployment, err := db.GetLatestDeployment("pr-1314")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment(pr-1314) error = %v", err)
+	}
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-low",
+		Name:          "worker-main-low",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        mainDeployment.GitSHA,
+		LitestreamSHA: mainDeployment.LitestreamSHA,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-1314-low",
+		Name:          "worker-pr-1314-low",
+		Status:        model.WorkerRunning,
+		Source:        "pr-1314",
+		GitSHA:        prDeployment.GitSHA,
+		LitestreamSHA: prDeployment.LitestreamSHA,
+		PRNumber:      1314,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+
+	mainPassAt := mainDeployment.StartedAt.Add(200 * time.Millisecond).UTC()
+	prFailAt := prDeployment.StartedAt.Add(200 * time.Millisecond).UTC()
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-main-low",
+		StartedAt:   mainPassAt.Add(-15 * time.Second),
+		CompletedAt: &mainPassAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  15000,
+	})
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:     "worker-pr-1314-low",
+		StartedAt:    prFailAt.Add(-15 * time.Second),
+		CompletedAt:  &prFailAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		Passed:       false,
+		DurationMS:   15000,
+		ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": context deadline exceeded`,
+	})
+	if _, err := db.RecordRunArchive(&model.RunArchive{
+		DeploymentID:  prDeployment.ID,
+		Source:        "pr-1314",
+		ArchiveType:   "success",
+		GitSHA:        prDeployment.GitSHA,
+		LitestreamSHA: prDeployment.LitestreamSHA,
+		ImageRef:      prDeployment.ImageRef,
+		Status:        "stable",
+		Summary:       "Older PR #1314 run completed a clean soak.",
+		Payload:       `{"rollout":{"status":"stable"}}`,
+		ArchivedAt:    prDeployment.StartedAt.Add(-24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("RecordRunArchive() error = %v", err)
+	}
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	comparison, err := api.buildRequestedDeploymentComparison("", "main", "pr-1314")
+	if err != nil {
+		t.Fatalf("buildRequestedDeploymentComparison() error = %v", err)
+	}
+	if comparison == nil {
+		t.Fatal("comparison = nil, want non-nil")
+	}
+	if comparison.Verdict != "worse" {
+		t.Fatalf("Verdict = %q, want worse", comparison.Verdict)
+	}
+}
+
 func TestBuildRequestedDeploymentComparisonExcludesRampUpFailuresFromVerdict(t *testing.T) {
 	t.Parallel()
 

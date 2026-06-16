@@ -144,6 +144,55 @@ func TestBuildHomePageDataTreatsStoppedSuccessArchiveAsPassed(t *testing.T) {
 	}
 }
 
+func TestHomeBodyRendersPassedComparisonWithoutDeltas(t *testing.T) {
+	t.Parallel()
+
+	data := homePageData{
+		ReleaseComparison: &DeploymentComparisonResponse{
+			BaseSource:     "main",
+			HeadSource:     "pr-1312",
+			ComparisonKind: "cross_source",
+			Verdict:        "passed",
+			Summary:        "PR #1312 passed a clean soak and was torn down on success.",
+			PassDelta:      -7,
+			FailDelta:      -2,
+			Head: DeploymentScorecard{
+				Deployment: model.Deployment{Source: "pr-1312", PRNumber: 1312},
+			},
+			Base: &DeploymentScorecard{
+				Deployment: model.Deployment{Source: "main"},
+			},
+		},
+	}
+
+	var body bytes.Buffer
+	if err := uiTemplates.ExecuteTemplate(&body, "home_body", data); err != nil {
+		t.Fatalf("ExecuteTemplate(home_body) error = %v", err)
+	}
+	rendered := body.String()
+	for _, want := range []string{
+		"v-better",
+		"PR #1312 passed its soak",
+		"completed &amp; torn down",
+		"badge-good",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered home body missing %q: %s", want, rendered[:min(700, len(rendered))])
+		}
+	}
+	for _, unwanted := range []string{
+		"insufficient_data",
+		"pass <strong>-7</strong>",
+		"fail <strong>-2</strong>",
+		"pass delta: -7",
+		"fail delta: -2",
+	} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("rendered home body includes %q: %s", unwanted, rendered[:min(1200, len(rendered))])
+		}
+	}
+}
+
 func TestBuildHomePageDataKeepsStoppedWorkersWithoutSuccessAttention(t *testing.T) {
 	t.Parallel()
 
