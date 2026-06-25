@@ -188,20 +188,35 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 }
 
 func (r *Runner) applyS3FaultProxyVerificationGuards(result VerificationResult) VerificationResult {
-	if !r.cfg.S3FaultProxyRequireObservedSourceGet || !result.Passed {
-		return result
-	}
-	if r.s3FaultProxy != nil && r.s3FaultProxy.ObservedSourceGETs() > 0 {
+	if !result.Passed {
 		return result
 	}
 
+	if r.cfg.ReplicaType == "s3" && r.cfg.S3FaultProxyRequireObservedSourceGet {
+		if r.s3FaultProxy == nil || r.s3FaultProxy.ObservedSourceGETs() == 0 {
+			level := strings.Trim(strings.TrimSpace(r.cfg.S3FaultProxySourceLevel), "/")
+			if level == "" {
+				level = defaultS3FaultProxySourceLevel
+			}
+			return failedS3FaultGuardResult(result, "s3 source GET fault guard failed", fmt.Sprintf("s3 source GET fault guard: no remote %s source GET observed by fault proxy; local compactor cache may have bypassed the source-read path", level))
+		}
+	}
+
+	if r.cfg.ReplicaType == "s3" && r.cfg.S3FaultProxyEnabled && r.cfg.S3FaultProxyFailFirstAttempts > 0 {
+		if r.s3FaultProxy != nil && r.s3FaultProxy.TotalFailures() > 0 {
+			return result
+		}
+		mode := firstNonEmpty(r.cfg.S3FaultProxyMode, s3FaultProxyModeUploadPartReset)
+		return failedS3FaultGuardResult(result, "s3 fault guard failed", fmt.Sprintf("s3 fault guard: no induced %s fault observed by fault proxy", mode))
+	}
+
+	return result
+}
+
+func failedS3FaultGuardResult(result VerificationResult, summary string, message string) VerificationResult {
 	result.Status = "failed"
 	result.Passed = false
-	level := strings.Trim(strings.TrimSpace(r.cfg.S3FaultProxySourceLevel), "/")
-	if level == "" {
-		level = defaultS3FaultProxySourceLevel
-	}
-	result.ErrorMessage = fmt.Sprintf("s3 source GET fault guard: no remote %s source GET observed by fault proxy; local compactor cache may have bypassed the source-read path", level)
-	result.Summary = "s3 source GET fault guard failed"
+	result.ErrorMessage = message
+	result.Summary = summary
 	return result
 }

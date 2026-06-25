@@ -104,6 +104,7 @@ func TestRunnerFailsPassingVerificationWhenSourceGETGuardNotObserved(t *testing.
 	t.Parallel()
 
 	cfg := DefaultConfig()
+	cfg.ReplicaType = "s3"
 	cfg.S3FaultProxyRequireObservedSourceGet = true
 	cfg.S3FaultProxySourceLevel = "0001"
 	runner := NewRunner(cfg)
@@ -126,6 +127,134 @@ func TestRunnerFailsPassingVerificationWhenSourceGETGuardNotObserved(t *testing.
 	}
 	if !strings.Contains(got.ErrorMessage, "no remote 0001 source GET observed") {
 		t.Fatalf("ErrorMessage = %q, want source GET guard failure", got.ErrorMessage)
+	}
+	if got.Summary != "s3 source GET fault guard failed" {
+		t.Fatalf("Summary = %q, want source GET guard failure", got.Summary)
+	}
+}
+
+func TestRunnerFailsPassingVerificationWhenS3FaultNotObserved(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.ReplicaType = "s3"
+	cfg.S3FaultProxyEnabled = true
+	cfg.S3FaultProxyMode = "provider-408-requestcanceled"
+	cfg.S3FaultProxyFailFirstAttempts = 1
+	runner := NewRunner(cfg)
+	result := VerificationResult{
+		StartedAt:   time.Now().Add(-time.Second).UTC(),
+		CompletedAt: time.Now().UTC(),
+		CheckType:   "integrity",
+		Status:      "passed",
+		Passed:      true,
+		Summary:     "verification passed",
+	}
+
+	got := runner.applyS3FaultProxyVerificationGuards(result)
+
+	if got.Passed {
+		t.Fatal("Passed = true, want false when S3 fault guard has no induced fault")
+	}
+	if got.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", got.Status)
+	}
+	if !strings.Contains(got.ErrorMessage, "no induced provider-408-requestcanceled fault observed") {
+		t.Fatalf("ErrorMessage = %q, want S3 fault guard failure", got.ErrorMessage)
+	}
+	if got.Summary != "s3 fault guard failed" {
+		t.Fatalf("Summary = %q, want S3 fault guard failure", got.Summary)
+	}
+}
+
+func TestRunnerFailsPassingVerificationWhenSourceGETObservedWithoutFault(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.ReplicaType = "s3"
+	cfg.S3FaultProxyEnabled = true
+	cfg.S3FaultProxyMode = "source-get-reset"
+	cfg.S3FaultProxyFailFirstAttempts = 1
+	cfg.S3FaultProxyRequireObservedSourceGet = true
+	runner := NewRunner(cfg)
+	runner.s3FaultProxy = &s3FaultProxy{observedSourceGET: 1}
+	result := VerificationResult{
+		StartedAt:   time.Now().Add(-time.Second).UTC(),
+		CompletedAt: time.Now().UTC(),
+		CheckType:   "integrity",
+		Status:      "passed",
+		Passed:      true,
+		Summary:     "verification passed",
+	}
+
+	got := runner.applyS3FaultProxyVerificationGuards(result)
+
+	if got.Passed {
+		t.Fatal("Passed = true, want false when source GET was observed without an induced fault")
+	}
+	if got.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", got.Status)
+	}
+	if !strings.Contains(got.ErrorMessage, "no induced source-get-reset fault observed") {
+		t.Fatalf("ErrorMessage = %q, want S3 fault guard failure", got.ErrorMessage)
+	}
+}
+
+func TestRunnerKeepsPassingVerificationWhenS3FaultObserved(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.ReplicaType = "s3"
+	cfg.S3FaultProxyEnabled = true
+	cfg.S3FaultProxyMode = "uploadpart-reset"
+	cfg.S3FaultProxyFailFirstAttempts = 1
+	runner := NewRunner(cfg)
+	runner.s3FaultProxy = &s3FaultProxy{totalFailures: 1}
+	result := VerificationResult{
+		StartedAt:   time.Now().Add(-time.Second).UTC(),
+		CompletedAt: time.Now().UTC(),
+		CheckType:   "integrity",
+		Status:      "passed",
+		Passed:      true,
+		Summary:     "verification passed",
+	}
+
+	got := runner.applyS3FaultProxyVerificationGuards(result)
+
+	if !got.Passed {
+		t.Fatalf("Passed = false, want true when S3 fault guard observed a fault: %q", got.ErrorMessage)
+	}
+	if got.Status != "passed" {
+		t.Fatalf("Status = %q, want passed", got.Status)
+	}
+}
+
+func TestRunnerSkipsS3FaultGuardForNonS3Replica(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.ReplicaType = "file"
+	cfg.S3FaultProxyEnabled = true
+	cfg.S3FaultProxyMode = "uploadpart-reset"
+	cfg.S3FaultProxyFailFirstAttempts = 1
+	cfg.S3FaultProxyRequireObservedSourceGet = true
+	runner := NewRunner(cfg)
+	result := VerificationResult{
+		StartedAt:   time.Now().Add(-time.Second).UTC(),
+		CompletedAt: time.Now().UTC(),
+		CheckType:   "integrity",
+		Status:      "passed",
+		Passed:      true,
+		Summary:     "verification passed",
+	}
+
+	got := runner.applyS3FaultProxyVerificationGuards(result)
+
+	if !got.Passed {
+		t.Fatalf("Passed = false, want true for non-S3 replica: %q", got.ErrorMessage)
+	}
+	if got.Status != "passed" {
+		t.Fatalf("Status = %q, want passed", got.Status)
 	}
 }
 
