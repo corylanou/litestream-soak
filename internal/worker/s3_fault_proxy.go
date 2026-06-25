@@ -61,6 +61,7 @@ func (p *s3FaultProxy) Start(ctx context.Context) error {
 	p.listener = listener
 	p.endpoint = "http://" + listener.Addr().String()
 	p.proxy = httputil.NewSingleHostReverseProxy(target)
+	p.proxy.Transport = directHTTPTransport()
 	p.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		slog.Warn("S3 fault proxy upstream request failed", "method", r.Method, "path", r.URL.String(), "error", err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -86,8 +87,16 @@ func (p *s3FaultProxy) Start(ctx context.Context) error {
 }
 
 func (p *s3FaultProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodConnect {
+		p.proxyConnect(w, r)
+		return
+	}
 	if p.shouldReset(r) {
 		p.resetConnection(w, r)
+		return
+	}
+	if r.URL.IsAbs() {
+		p.proxyHTTP(w, r)
 		return
 	}
 	p.proxy.ServeHTTP(w, r)
@@ -97,11 +106,60 @@ func (p *s3FaultProxy) Close(ctx context.Context) error {
 	if p.server == nil {
 		return nil
 	}
+	if p.proxy != nil {
+		if transport, ok := p.proxy.Transport.(*http.Transport); ok {
+			transport.CloseIdleConnections()
+		}
+	}
 	return p.server.Shutdown(ctx)
 }
 
 func (p *s3FaultProxy) Endpoint() string {
 	return p.endpoint
+}
+
+func (p *s3FaultProxy) proxyConnect(w http.ResponseWriter, r *http.Request) {
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "connection hijacking unsupported", http.StatusInternalServerError)
+		return
+	}
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		return
+	}
+
+	var dialer net.Dialer
+	upstreamConn, err := dialer.DialContext(r.Context(), "tcp", r.Host)
+	if err != nil {
+		_, _ = clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+		_ = clientConn.Close()
+		return
+	}
+	_, _ = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+	p.copyTunnel(r.Context(), r.Host, clientConn, upstreamConn)
+}
+
+func (p *s3FaultProxy) proxyHTTP(w http.ResponseWriter, r *http.Request) {
+	out := r.Clone(r.Context())
+	out.RequestURI = ""
+	out.URL = cloneURL(r.URL)
+	out.Host = r.Host
+	transport := p.proxy.Transport
+	if transport == nil {
+		transport = directHTTPTransport()
+	}
+	resp, err := transport.RoundTrip(out)
+	if err != nil {
+		slog.Warn("S3 fault proxy HTTP request failed", "method", r.Method, "url", r.URL.String(), "error", err)
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	copyHeader(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 func (p *s3FaultProxy) shouldReset(r *http.Request) bool {
@@ -145,6 +203,55 @@ func (p *s3FaultProxy) resetConnection(w http.ResponseWriter, r *http.Request) {
 	_ = conn.Close()
 }
 
+func (p *s3FaultProxy) copyTunnel(ctx context.Context, host string, clientConn net.Conn, upstreamConn net.Conn) {
+	done := make(chan struct{})
+	closeOnce := sync.OnceFunc(func() {
+		_ = clientConn.Close()
+		_ = upstreamConn.Close()
+		close(done)
+	})
+	go func() {
+		_, _ = io.Copy(clientConn, upstreamConn)
+		closeOnce()
+	}()
+	go func() {
+		defer closeOnce()
+		if p.cfg.FailFirstAttempts <= 0 {
+			_, _ = io.Copy(upstreamConn, clientConn)
+			return
+		}
+		threshold := p.cfg.ResetAfterBytes
+		if threshold <= 0 {
+			threshold = 1
+		}
+		copied, err := io.CopyN(upstreamConn, clientConn, threshold)
+		if err != nil {
+			return
+		}
+		if copied >= threshold && p.recordReset(host) {
+			slog.Warn("S3 fault proxy reset CONNECT tunnel", "host", host)
+			return
+		}
+		_, _ = io.Copy(upstreamConn, clientConn)
+	}()
+
+	select {
+	case <-ctx.Done():
+		closeOnce()
+	case <-done:
+	}
+}
+
+func (p *s3FaultProxy) recordReset(key string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.attempts) > maxS3FaultProxyAttemptKeys {
+		p.attempts = make(map[string]int)
+	}
+	p.attempts[key]++
+	return p.attempts[key] <= p.cfg.FailFirstAttempts
+}
+
 func parseProxyTargetEndpoint(endpoint string) (*url.URL, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
@@ -180,7 +287,7 @@ func (r *Runner) startS3FaultProxy(ctx context.Context) error {
 	}
 	r.s3FaultProxy = proxy
 	r.cfg.S3FaultProxyTargetEndpoint = targetEndpoint
-	r.cfg.S3Endpoint = proxy.Endpoint()
+	r.s3FaultProxyEndpoint = proxy.Endpoint()
 	return nil
 }
 
@@ -193,4 +300,26 @@ func (r *Runner) stopS3FaultProxy() {
 	if err := r.s3FaultProxy.Close(ctx); err != nil {
 		slog.Warn("Failed to stop S3 fault proxy", "error", err)
 	}
+}
+
+func cloneURL(input *url.URL) *url.URL {
+	if input == nil {
+		return nil
+	}
+	clone := *input
+	return &clone
+}
+
+func copyHeader(dst, src http.Header) {
+	for key, values := range src {
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+func directHTTPTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return transport
 }
