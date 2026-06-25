@@ -351,6 +351,42 @@ func TestWorkerEnvIncludesOptionalWorkloadFields(t *testing.T) {
 	}
 }
 
+func TestWorkerEnvIncludesS3FaultProxyWorkloadFields(t *testing.T) {
+	t.Parallel()
+
+	mgr := &Manager{
+		replica:        ReplicaConfig{Bucket: "bucket", Endpoint: "https://fly.storage.tigris.dev"},
+		controlBaseURL: "https://litestream-soak-ctl.fly.dev",
+	}
+
+	env := mgr.workerEnv(model.Worker{
+		ID:   "worker-main-s3-flap",
+		Name: "worker-main-s3-flap",
+	}, workload.Config{
+		S3FaultProxyEnabled:           true,
+		S3FaultProxyListenAddr:        "127.0.0.1:19000",
+		S3FaultProxyMinContentLength:  8 * 1024 * 1024,
+		S3FaultProxyResetAfterBytes:   2 * 1024 * 1024,
+		S3FaultProxyFailFirstAttempts: 2,
+		ReplicaLevelReporting:         true,
+	})
+
+	want := map[string]string{
+		"S3_FAULT_PROXY_ENABLED":             "true",
+		"S3_FAULT_PROXY_TARGET_ENDPOINT":     "https://fly.storage.tigris.dev",
+		"S3_FAULT_PROXY_LISTEN_ADDR":         "127.0.0.1:19000",
+		"S3_FAULT_PROXY_MIN_CONTENT_LENGTH":  "8388608",
+		"S3_FAULT_PROXY_RESET_AFTER_BYTES":   "2097152",
+		"S3_FAULT_PROXY_FAIL_FIRST_ATTEMPTS": "2",
+		"REPLICA_LEVEL_REPORTING":            "true",
+	}
+	for key, wantValue := range want {
+		if got := env[key]; got != wantValue {
+			t.Fatalf("%s=%q, want %q", key, got, wantValue)
+		}
+	}
+}
+
 func TestWorkerEnvIncludesManyDBWorkloadFields(t *testing.T) {
 	t.Parallel()
 

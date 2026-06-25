@@ -326,6 +326,30 @@ func collectRestorePlanSnapshot(cfg Config, targetTXID uint64) *reporting.Restor
 	return snapshot
 }
 
+func collectReplicaLevelReport(cfg Config, targetTXID uint64) *reporting.ReplicaLevelReport {
+	command := []string{"litestream", "ltx", "-config", cfg.ConfigPath, "-level", "all", cfg.DBPath}
+	output := runDebugCommand("verification_replica_levels", command[0], command[1:]...)
+	report := &reporting.ReplicaLevelReport{
+		CapturedAt:        time.Now().UTC(),
+		Command:           command,
+		TargetTXID:        formatTXID(targetTXID),
+		TargetTXIDDecimal: targetTXID,
+		Truncated:         output.Truncated,
+	}
+	candidates := parseRestorePlanCandidates(output.Output)
+	report.Levels = replicaLevelSummaries(candidates)
+	if output.Error != "" {
+		report.Error = output.Error
+		report.OutputTail = tailString(output.Output, 8192)
+		return report
+	}
+	if len(candidates) == 0 {
+		report.Error = "no ltx entries parsed"
+		report.OutputTail = tailString(output.Output, 8192)
+	}
+	return report
+}
+
 func parseRestorePlanCandidates(output string) []restorePlanCandidate {
 	candidates := make([]restorePlanCandidate, 0)
 	for _, line := range nonEmptyLines(output) {
@@ -355,6 +379,33 @@ func parseRestorePlanCandidates(output string) []restorePlanCandidate {
 		})
 	}
 	return candidates
+}
+
+func replicaLevelSummaries(candidates []restorePlanCandidate) []reporting.ReplicaLevelSummary {
+	summaries := make([]reporting.ReplicaLevelSummary, 10)
+	for level := 0; level <= 9; level++ {
+		summaries[level] = reporting.ReplicaLevelSummary{
+			Level:     level,
+			LevelName: fmt.Sprintf("%04d", level),
+		}
+	}
+	for _, candidate := range candidates {
+		if candidate.level < 0 || candidate.level >= len(summaries) {
+			continue
+		}
+		summary := &summaries[candidate.level]
+		if summary.ObjectCount == 0 || candidate.minTXID < summary.MinTXIDDecimal {
+			summary.MinTXIDDecimal = candidate.minTXID
+			summary.MinTXID = formatTXID(candidate.minTXID)
+		}
+		if candidate.maxTXID > summary.MaxTXIDDecimal {
+			summary.MaxTXIDDecimal = candidate.maxTXID
+			summary.MaxTXID = formatTXID(candidate.maxTXID)
+		}
+		summary.ObjectCount++
+		summary.TotalBytes += candidate.sizeBytes
+	}
+	return summaries
 }
 
 func selectRestorePlanCandidates(candidates []restorePlanCandidate, targetTXID uint64) []restorePlanCandidate {

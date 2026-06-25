@@ -65,13 +65,20 @@ type Config struct {
 	ReplicaPath string // for file:// replicas (local directory)
 
 	// S3/Tigris config (only used when ReplicaType == "s3")
-	S3Bucket      string
-	S3Endpoint    string
-	S3AccessKey   string
-	S3SecretKey   string
-	S3Path        string
-	S3PartSize    string
-	S3Concurrency int
+	S3Bucket                      string
+	S3Endpoint                    string
+	S3AccessKey                   string
+	S3SecretKey                   string
+	S3Path                        string
+	S3PartSize                    string
+	S3Concurrency                 int
+	S3FaultProxyEnabled           bool
+	S3FaultProxyTargetEndpoint    string
+	S3FaultProxyListenAddr        string
+	S3FaultProxyMinContentLength  int64
+	S3FaultProxyResetAfterBytes   int64
+	S3FaultProxyFailFirstAttempts int
+	ReplicaLevelReporting         bool
 
 	// Litestream config
 	SnapshotInterval time.Duration
@@ -134,6 +141,11 @@ func DefaultConfig() Config {
 
 		S3Endpoint: "https://fly.storage.tigris.dev",
 		S3Path:     "soak",
+
+		S3FaultProxyListenAddr:        "127.0.0.1:19000",
+		S3FaultProxyMinContentLength:  8 * 1024 * 1024,
+		S3FaultProxyResetAfterBytes:   2 * 1024 * 1024,
+		S3FaultProxyFailFirstAttempts: 2,
 
 		SnapshotInterval: 10 * time.Minute,
 		SyncInterval:     1 * time.Second,
@@ -201,6 +213,17 @@ func ConfigFromEnv() (Config, error) {
 			c.PayloadSize = 4096
 			c.Workers = 8
 			c.InitialSize = "50MB"
+		case "s3-flap":
+			c.WriteRate = 750
+			c.Pattern = "wave"
+			c.PayloadSize = 32768
+			c.ReadRatio = 0.1
+			c.Workers = 8
+			c.InitialSize = "256MB"
+			c.S3PartSize = "8MB"
+			c.S3Concurrency = 8
+			c.S3FaultProxyEnabled = true
+			c.ReplicaLevelReporting = true
 		case "burst-volume":
 			c.WriteRate = 1000
 			c.Pattern = "burst"
@@ -411,6 +434,48 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid LITESTREAM_S3_CONCURRENCY: must be positive")
 		}
 	}
+	if parseBoolEnv(os.Getenv("S3_FAULT_PROXY_ENABLED")) {
+		c.S3FaultProxyEnabled = true
+	}
+	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_TARGET_ENDPOINT")); v != "" {
+		c.S3FaultProxyTargetEndpoint = v
+	}
+	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_LISTEN_ADDR")); v != "" {
+		c.S3FaultProxyListenAddr = v
+	}
+	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_MIN_CONTENT_LENGTH")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return c, fmt.Errorf("invalid S3_FAULT_PROXY_MIN_CONTENT_LENGTH: %w", err)
+		}
+		if n < 0 {
+			return c, fmt.Errorf("invalid S3_FAULT_PROXY_MIN_CONTENT_LENGTH: must be non-negative")
+		}
+		c.S3FaultProxyMinContentLength = n
+	}
+	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_RESET_AFTER_BYTES")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return c, fmt.Errorf("invalid S3_FAULT_PROXY_RESET_AFTER_BYTES: %w", err)
+		}
+		if n <= 0 {
+			return c, fmt.Errorf("invalid S3_FAULT_PROXY_RESET_AFTER_BYTES: must be positive")
+		}
+		c.S3FaultProxyResetAfterBytes = n
+	}
+	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_FAIL_FIRST_ATTEMPTS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid S3_FAULT_PROXY_FAIL_FIRST_ATTEMPTS: %w", err)
+		}
+		if n < 0 {
+			return c, fmt.Errorf("invalid S3_FAULT_PROXY_FAIL_FIRST_ATTEMPTS: must be non-negative")
+		}
+		c.S3FaultProxyFailFirstAttempts = n
+	}
+	if parseBoolEnv(os.Getenv("REPLICA_LEVEL_REPORTING")) {
+		c.ReplicaLevelReporting = true
+	}
 
 	if v := os.Getenv("SNAPSHOT_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -489,6 +554,15 @@ func resolveLitestreamSHA() string {
 	}
 
 	return strings.TrimSpace(string(body))
+}
+
+func parseBoolEnv(value string) bool {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c Config) ReplicaURL() string {
@@ -570,7 +644,7 @@ func (c Config) manyDBVerifySampleSize() int {
 }
 
 func (c Config) WorkloadConfig() workload.Config {
-	return workload.Config{
+	cfg := workload.Config{
 		LoadMode:                 c.LoadMode,
 		WriteRate:                c.WriteRate,
 		Pattern:                  c.Pattern,
@@ -589,6 +663,7 @@ func (c Config) WorkloadConfig() workload.Config {
 		SyncInterval:             c.SyncInterval.String(),
 		S3PartSize:               c.S3PartSize,
 		S3Concurrency:            c.S3Concurrency,
+		ReplicaLevelReporting:    c.ReplicaLevelReporting,
 		NumDatabases:             c.NumDatabases,
 		ActivePercent:            c.ActivePercent,
 		ActivePercentSet:         c.ManyDBEnabled(),
@@ -601,4 +676,12 @@ func (c Config) WorkloadConfig() workload.Config {
 		ReplaySpeed:              c.ReplaySpeed,
 		ReplayLoop:               c.ReplayLoop,
 	}
+	if c.S3FaultProxyEnabled {
+		cfg.S3FaultProxyEnabled = true
+		cfg.S3FaultProxyListenAddr = c.S3FaultProxyListenAddr
+		cfg.S3FaultProxyMinContentLength = c.S3FaultProxyMinContentLength
+		cfg.S3FaultProxyResetAfterBytes = c.S3FaultProxyResetAfterBytes
+		cfg.S3FaultProxyFailFirstAttempts = c.S3FaultProxyFailFirstAttempts
+	}
+	return cfg
 }

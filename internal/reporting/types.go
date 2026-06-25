@@ -139,6 +139,7 @@ type VerificationPayload struct {
 	ErrorMessage          string                 `json:"error_message,omitempty"`
 	DurationMS            int                    `json:"duration_ms,omitempty"`
 	Steps                 []VerificationStep     `json:"steps,omitempty"`
+	ReplicaLevels         *ReplicaLevelReport    `json:"replica_levels,omitempty"`
 	FailureClassification *FailureClassification `json:"failure_classification,omitempty"`
 	FailureDebug          *FailureDebugSnapshot  `json:"failure_debug,omitempty"`
 	RuntimePayload
@@ -177,6 +178,28 @@ type VerificationStep struct {
 	ContextCanceled bool       `json:"context_canceled,omitempty"`
 	ContextError    string     `json:"context_error,omitempty"`
 	OutputTail      string     `json:"output_tail,omitempty"`
+}
+
+type ReplicaLevelReport struct {
+	CapturedAt        time.Time             `json:"captured_at"`
+	Command           []string              `json:"command,omitempty"`
+	TargetTXID        string                `json:"target_txid,omitempty"`
+	TargetTXIDDecimal uint64                `json:"target_txid_decimal,omitempty"`
+	Levels            []ReplicaLevelSummary `json:"levels,omitempty"`
+	OutputTail        string                `json:"output_tail,omitempty"`
+	Error             string                `json:"error,omitempty"`
+	Truncated         bool                  `json:"truncated,omitempty"`
+}
+
+type ReplicaLevelSummary struct {
+	Level          int    `json:"level"`
+	LevelName      string `json:"level_name"`
+	ObjectCount    int    `json:"object_count"`
+	TotalBytes     int64  `json:"total_bytes,omitempty"`
+	MinTXID        string `json:"min_txid,omitempty"`
+	MinTXIDDecimal uint64 `json:"min_txid_decimal,omitempty"`
+	MaxTXID        string `json:"max_txid,omitempty"`
+	MaxTXIDDecimal uint64 `json:"max_txid_decimal,omitempty"`
 }
 
 type FailureDebugSnapshot struct {

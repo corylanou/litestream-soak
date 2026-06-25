@@ -75,6 +75,7 @@ func (r *Runner) sendVerification(ctx context.Context, result VerificationResult
 	default:
 		r.resetFailureDebugState()
 	}
+	replicaLevels := r.replicaLevelReport(result)
 	reportCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -88,12 +89,24 @@ func (r *Runner) sendVerification(ctx context.Context, result VerificationResult
 		ErrorMessage:          result.ErrorMessage,
 		DurationMS:            result.DurationMS,
 		Steps:                 result.Steps,
+		ReplicaLevels:         replicaLevels,
 		FailureClassification: r.failureClassification(result),
 		FailureDebug:          failureDebug,
 		RuntimePayload:        snapshot.RuntimePayload,
 	}); err != nil {
 		slog.Warn("Failed to send verification report", "error", err)
 	}
+}
+
+func (r *Runner) replicaLevelReport(result VerificationResult) *reporting.ReplicaLevelReport {
+	if !r.cfg.ReplicaLevelReporting {
+		return nil
+	}
+	report := collectReplicaLevelReport(r.cfg, result.restoreTXID())
+	if report != nil && len(report.Levels) > 0 {
+		SetReplicaLevelSummaries(report.Levels)
+	}
+	return report
 }
 
 func (r *Runner) failureClassification(result VerificationResult) *reporting.FailureClassification {
