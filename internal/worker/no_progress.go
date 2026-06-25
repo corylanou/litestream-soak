@@ -68,9 +68,7 @@ func (r *Runner) observeDiskPressureNoProgress(now time.Time, snapshot runtimeSn
 		return diskPressureNoProgressObservation{Runtime: updated.RuntimePayload}
 	}
 
-	localAdvanced := runtime.DBTXID > r.noProgress.lastDBTXID
-	replicaFrozen := runtime.ReplicatedTXID <= r.noProgress.lastReplicaTXID
-	if !localAdvanced || !replicaFrozen {
+	if runtime.ReplicatedTXID > r.noProgress.lastReplicaTXID || runtime.DBTXID < r.noProgress.lastDBTXID {
 		r.noProgress.activeSince = now
 		r.noProgress.lastDBTXID = runtime.DBTXID
 		r.noProgress.lastReplicaTXID = runtime.ReplicatedTXID

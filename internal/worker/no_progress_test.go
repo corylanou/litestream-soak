@@ -138,6 +138,37 @@ func TestDiskPressureGenericENOSPCWithoutMetricReportsNoProgress(t *testing.T) {
 	}
 }
 
+func TestDiskPressureNoProgressDetectorFiresWhenLocalTXIDStalls(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DiskFullNoProgressWindow = time.Minute
+	runner := NewRunner(cfg)
+	base := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
+
+	pressure := reporting.RuntimePayload{
+		DataDiskTotalBytes:        1024,
+		DataDiskAvailableBytes:    100,
+		DBSizeBytes:               600,
+		DBTXID:                    10,
+		ReplicatedTXID:            8,
+		ReplicationLagMax:         2,
+		LitestreamSnapshotHealthy: true,
+	}
+	if got := runner.observeDiskPressureNoProgress(base, runtimeSnapshot{RuntimePayload: pressure}); got.Detected {
+		t.Fatal("first pressure sample detected no progress")
+	}
+
+	got := runner.observeDiskPressureNoProgress(base.Add(61*time.Second), runtimeSnapshot{RuntimePayload: pressure})
+	if !got.ShouldReport {
+		t.Fatalf("ShouldReport = false, want no-progress event for stalled local and replica TXIDs")
+	}
+	if got.EventType != reporting.WorkerEventDiskFullNoProgress {
+		t.Fatalf("EventType = %q, want %q", got.EventType, reporting.WorkerEventDiskFullNoProgress)
+	}
+	if !got.Runtime.DiskPressureNoProgress {
+		t.Fatal("DiskPressureNoProgress = false, want true")
+	}
+}
+
 func TestDiskPressureSignalFreesReserveAndReportsRecovery(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.DataDir = t.TempDir()
