@@ -46,7 +46,7 @@ func TestPollDBStatsMarksSnapshotHealthy(t *testing.T) {
 			_, _ = w.Write([]byte(`{"uptime_seconds":99}`))
 		case "/list":
 			lastSyncAt := time.Now().Add(-3 * time.Second).UTC().Format(time.RFC3339Nano)
-			_, _ = w.Write([]byte(`{"databases":[{"status":"replicating","last_sync_at":"` + lastSyncAt + `"}]}`))
+			_, _ = w.Write([]byte(`{"databases":[{"status":"replicating","txid":42,"replicated_txid":40,"last_sync_at":"` + lastSyncAt + `"}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -61,6 +61,12 @@ func TestPollDBStatsMarksSnapshotHealthy(t *testing.T) {
 	}
 	if snapshot.DBTXID != 42 {
 		t.Fatalf("db txid=%d want 42", snapshot.DBTXID)
+	}
+	if snapshot.ReplicatedTXID != 40 {
+		t.Fatalf("replicated txid=%d want 40", snapshot.ReplicatedTXID)
+	}
+	if snapshot.ReplicationLagMax != 2 {
+		t.Fatalf("replication lag max=%d want 2", snapshot.ReplicationLagMax)
 	}
 	if snapshot.DBStatus != "replicating" {
 		t.Fatalf("db status=%q want %q", snapshot.DBStatus, "replicating")
@@ -91,6 +97,48 @@ func TestPollDBStatsMarksSnapshotHealthy(t *testing.T) {
 	}
 	if snapshot.LitestreamSnapshotError != "" {
 		t.Fatalf("unexpected snapshot error %q", snapshot.LitestreamSnapshotError)
+	}
+}
+
+func TestPollDBStatsComputesLagFromLocalTXIDWhenListTXIDStale(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkerID = "test-worker-stale-list-txid"
+	cfg.ProfileName = "test-profile"
+	cfg.Source = "test"
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("litestream-soak-stale-list-%d.sock", time.Now().UnixNano()))
+
+	if err := os.WriteFile(cfg.DBPath, []byte("1234567890"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	startTestUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/txid":
+			_, _ = w.Write([]byte(`{"txid":45}`))
+		case "/info":
+			_, _ = w.Write([]byte(`{"uptime_seconds":99}`))
+		case "/list":
+			_, _ = w.Write([]byte(`{"databases":[{"status":"replicating","txid":40,"replicated_txid":40}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	runner := NewRunner(cfg)
+	runner.pollDBStats()
+
+	snapshot := runner.currentSnapshot()
+	if snapshot.DBTXID != 45 {
+		t.Fatalf("DBTXID = %d, want 45", snapshot.DBTXID)
+	}
+	if snapshot.ReplicatedTXID != 40 {
+		t.Fatalf("ReplicatedTXID = %d, want 40", snapshot.ReplicatedTXID)
+	}
+	if snapshot.ReplicationLagMax != 5 {
+		t.Fatalf("ReplicationLagMax = %d, want 5", snapshot.ReplicationLagMax)
 	}
 }
 

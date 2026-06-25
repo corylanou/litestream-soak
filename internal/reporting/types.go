@@ -14,6 +14,12 @@ const (
 	RuntimeSnapshotStatusUnhealthy = "unhealthy"
 )
 
+const (
+	WorkerEventDiskFullNoProgress     = "platform_disk_full_no_progress"
+	WorkerEventDiskFullRecovered      = "platform_disk_full_recovered"
+	WorkerEventDiskFullRecoveryFailed = "platform_disk_full_recovery_failed"
+)
+
 type WorkerIdentity struct {
 	WorkerID      string `json:"worker_id"`
 	Name          string `json:"name"`
@@ -33,38 +39,48 @@ type WorkerIdentity struct {
 }
 
 type RuntimePayload struct {
-	UptimeSeconds             float64   `json:"uptime_seconds,omitempty"`
-	DataDiskTotalBytes        uint64    `json:"data_disk_total_bytes,omitempty"`
-	DataDiskUsedBytes         uint64    `json:"data_disk_used_bytes,omitempty"`
-	DataDiskFreeBytes         uint64    `json:"data_disk_free_bytes,omitempty"`
-	DataDiskAvailableBytes    uint64    `json:"data_disk_available_bytes,omitempty"`
-	DataDiskUsedPercent       float64   `json:"data_disk_used_percent,omitempty"`
-	DBSizeBytes               int64     `json:"db_size_bytes,omitempty"`
-	WALSizeBytes              int64     `json:"wal_size_bytes,omitempty"`
-	DBCount                   int       `json:"db_count,omitempty"`
-	DBTotalSizeBytes          int64     `json:"db_total_size_bytes,omitempty"`
-	WALTotalSizeBytes         int64     `json:"wal_total_size_bytes,omitempty"`
-	LitestreamDirSizeBytes    int64     `json:"litestream_dir_size_bytes,omitempty"`
-	LitestreamLTXSizeBytes    int64     `json:"litestream_ltx_size_bytes,omitempty"`
-	DBTXID                    uint64    `json:"db_txid,omitempty"`
-	DBStatus                  string    `json:"db_status,omitempty"`
-	LastSyncAgeSeconds        float64   `json:"last_sync_age_seconds,omitempty"`
-	LastSyncAgeP50Seconds     float64   `json:"last_sync_age_p50_seconds,omitempty"`
-	LastSyncAgeP95Seconds     float64   `json:"last_sync_age_p95_seconds,omitempty"`
-	LastSyncAgeMaxSeconds     float64   `json:"last_sync_age_max_seconds,omitempty"`
-	ReplicationLagP95         uint64    `json:"replication_lag_p95,omitempty"`
-	ReplicationLagMax         uint64    `json:"replication_lag_max,omitempty"`
-	ReplicationLagOverThreshold int     `json:"replication_lag_over_threshold,omitempty"`
-	LitestreamRSSBytes        int64     `json:"litestream_rss_bytes,omitempty"`
-	LitestreamCPUSecondsTotal float64   `json:"litestream_cpu_seconds_total,omitempty"`
-	LitestreamGoroutines      int       `json:"litestream_goroutines,omitempty"`
-	LitestreamFDs             int       `json:"litestream_fds,omitempty"`
-	WorkerRSSBytes            int64     `json:"worker_rss_bytes,omitempty"`
-	WorkerFDs                 int       `json:"worker_fds,omitempty"`
-	LitestreamUptimeSeconds   float64   `json:"litestream_uptime_seconds,omitempty"`
-	SnapshotCollectedAt       time.Time `json:"snapshot_collected_at,omitempty"`
-	LitestreamSnapshotHealthy bool      `json:"litestream_snapshot_healthy"`
-	LitestreamSnapshotError   string    `json:"litestream_snapshot_error,omitempty"`
+	UptimeSeconds                  float64   `json:"uptime_seconds,omitempty"`
+	DataDiskTotalBytes             uint64    `json:"data_disk_total_bytes,omitempty"`
+	DataDiskUsedBytes              uint64    `json:"data_disk_used_bytes,omitempty"`
+	DataDiskFreeBytes              uint64    `json:"data_disk_free_bytes,omitempty"`
+	DataDiskAvailableBytes         uint64    `json:"data_disk_available_bytes,omitempty"`
+	DataDiskUsedPercent            float64   `json:"data_disk_used_percent,omitempty"`
+	DBSizeBytes                    int64     `json:"db_size_bytes,omitempty"`
+	WALSizeBytes                   int64     `json:"wal_size_bytes,omitempty"`
+	DBCount                        int       `json:"db_count,omitempty"`
+	DBTotalSizeBytes               int64     `json:"db_total_size_bytes,omitempty"`
+	WALTotalSizeBytes              int64     `json:"wal_total_size_bytes,omitempty"`
+	LitestreamDirSizeBytes         int64     `json:"litestream_dir_size_bytes,omitempty"`
+	LitestreamLTXSizeBytes         int64     `json:"litestream_ltx_size_bytes,omitempty"`
+	DBTXID                         uint64    `json:"db_txid,omitempty"`
+	ReplicatedTXID                 uint64    `json:"replicated_txid,omitempty"`
+	DBStatus                       string    `json:"db_status,omitempty"`
+	LastSyncAgeSeconds             float64   `json:"last_sync_age_seconds,omitempty"`
+	LastSyncAgeP50Seconds          float64   `json:"last_sync_age_p50_seconds,omitempty"`
+	LastSyncAgeP95Seconds          float64   `json:"last_sync_age_p95_seconds,omitempty"`
+	LastSyncAgeMaxSeconds          float64   `json:"last_sync_age_max_seconds,omitempty"`
+	ReplicationLagP95              uint64    `json:"replication_lag_p95,omitempty"`
+	ReplicationLagMax              uint64    `json:"replication_lag_max,omitempty"`
+	ReplicationLagOverThreshold    int       `json:"replication_lag_over_threshold,omitempty"`
+	LitestreamRSSBytes             int64     `json:"litestream_rss_bytes,omitempty"`
+	LitestreamCPUSecondsTotal      float64   `json:"litestream_cpu_seconds_total,omitempty"`
+	LitestreamGoroutines           int       `json:"litestream_goroutines,omitempty"`
+	LitestreamFDs                  int       `json:"litestream_fds,omitempty"`
+	WorkerRSSBytes                 int64     `json:"worker_rss_bytes,omitempty"`
+	WorkerFDs                      int       `json:"worker_fds,omitempty"`
+	DiskPressureNoProgress         bool      `json:"disk_pressure_no_progress,omitempty"`
+	DiskPressureNoProgressSeconds  float64   `json:"disk_pressure_no_progress_seconds,omitempty"`
+	DiskFullSignalObserved         bool      `json:"disk_full_signal_observed,omitempty"`
+	DiskFullSignalMessage          string    `json:"disk_full_signal_message,omitempty"`
+	DiskFullRecoveryAttempted      bool      `json:"disk_full_recovery_attempted,omitempty"`
+	DiskFullRecoveryFreedBytes     int64     `json:"disk_full_recovery_freed_bytes,omitempty"`
+	DiskFullRecovered              bool      `json:"disk_full_recovered,omitempty"`
+	DiskFullRecoverySeconds        float64   `json:"disk_full_recovery_seconds,omitempty"`
+	DiskFullRecoveryWithoutRestart bool      `json:"disk_full_recovery_without_restart,omitempty"`
+	LitestreamUptimeSeconds        float64   `json:"litestream_uptime_seconds,omitempty"`
+	SnapshotCollectedAt            time.Time `json:"snapshot_collected_at,omitempty"`
+	LitestreamSnapshotHealthy      bool      `json:"litestream_snapshot_healthy"`
+	LitestreamSnapshotError        string    `json:"litestream_snapshot_error,omitempty"`
 }
 
 func (p RuntimePayload) Normalize(observedAt time.Time) RuntimePayload {
@@ -84,7 +100,7 @@ func (p RuntimePayload) hasSnapshotMetadata() bool {
 }
 
 func (p RuntimePayload) hasLitestreamRuntimeFields() bool {
-	if p.DBTXID > 0 || p.DBCount > 0 || p.LitestreamUptimeSeconds > 0 {
+	if p.DBTXID > 0 || p.ReplicatedTXID > 0 || p.DBCount > 0 || p.LitestreamUptimeSeconds > 0 {
 		return true
 	}
 	status := strings.TrimSpace(p.DBStatus)

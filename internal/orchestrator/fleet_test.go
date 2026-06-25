@@ -85,10 +85,62 @@ func TestDefaultFleetForSource(t *testing.T) {
 	if got := volumeSizes["gharchive-mixed"]; got != 50 {
 		t.Fatalf("gharchive-mixed VolumeSizeGB = %d, want 50", got)
 	}
+	if got := volumeSizes["constrained-disk"]; got != 1 {
+		t.Fatalf("constrained-disk VolumeSizeGB = %d, want 1", got)
+	}
 	if desired, ok := defaultFleetDesiredWorker("pr-1221", "worker-pr-1221-high-vol", "worker-pr-1221-high-vol"); !ok {
 		t.Fatal("defaultFleetDesiredWorker() missing PR high-volume worker")
 	} else if desired.Name != "worker-pr-1221-high-vol" {
 		t.Fatalf("desired.Name = %q, want worker-pr-1221-high-vol", desired.Name)
+	}
+}
+
+func TestDefaultMainFleetIncludesConstrainedDiskProfile(t *testing.T) {
+	t.Parallel()
+
+	spec := DefaultMainFleet()
+	var worker DesiredWorker
+	for _, candidate := range spec.Workers {
+		if candidate.ProfileName == "constrained-disk" {
+			worker = candidate
+			break
+		}
+	}
+	if worker.ProfileName == "" {
+		t.Fatal("DefaultMainFleet() missing constrained-disk profile")
+	}
+	if worker.WorkerID != "worker-main-constrained-disk" {
+		t.Fatalf("WorkerID = %q, want worker-main-constrained-disk", worker.WorkerID)
+	}
+	if worker.Region != "ord" {
+		t.Fatalf("Region = %q, want ord", worker.Region)
+	}
+	if worker.VolumeSizeGB != 1 || worker.Workload.VolumeSizeGB != 1 {
+		t.Fatalf("volume = %d/%d, want 1", worker.VolumeSizeGB, worker.Workload.VolumeSizeGB)
+	}
+	if worker.Workload.InitialSize != "420MB" {
+		t.Fatalf("InitialSize = %q, want 420MB", worker.Workload.InitialSize)
+	}
+	if worker.Workload.SnapshotInterval != "2m" {
+		t.Fatalf("SnapshotInterval = %q, want 2m", worker.Workload.SnapshotInterval)
+	}
+	if worker.Workload.VerifyInterval != "5m" {
+		t.Fatalf("VerifyInterval = %q, want 5m", worker.Workload.VerifyInterval)
+	}
+	if worker.Workload.VerifySyncDegradedAfter != "1m" {
+		t.Fatalf("VerifySyncDegradedAfter = %q, want 1m", worker.Workload.VerifySyncDegradedAfter)
+	}
+	if worker.Workload.VerifySyncTimeout != "3m" {
+		t.Fatalf("VerifySyncTimeout = %q, want 3m", worker.Workload.VerifySyncTimeout)
+	}
+	if worker.Workload.DiskFullNoProgressWindow != "2m" {
+		t.Fatalf("DiskFullNoProgressWindow = %q, want 2m", worker.Workload.DiskFullNoProgressWindow)
+	}
+	if worker.Workload.DiskFullRecoveryReserve != 300*1024*1024 {
+		t.Fatalf("DiskFullRecoveryReserve = %d, want 314572800", worker.Workload.DiskFullRecoveryReserve)
+	}
+	if worker.Workload.DiskFullRecoveryTimeout != "5m" {
+		t.Fatalf("DiskFullRecoveryTimeout = %q, want 5m", worker.Workload.DiskFullRecoveryTimeout)
 	}
 }
 

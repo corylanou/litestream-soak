@@ -361,6 +361,44 @@ func TestWaitForSyncFailsWhenLagPersists(t *testing.T) {
 	}
 }
 
+func TestWaitForSyncReportsDiskPressureWhenLagPersists(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("litestream-soak-stuck-disk-%d.sock", time.Now().UnixNano()))
+	cfg.VerifySyncTimeout = 100 * time.Millisecond
+
+	if err := os.WriteFile(cfg.DBPath, []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(cfg.DBPath, 1<<40); err != nil {
+		t.Skipf("filesystem does not support sparse pressure fixture: %v", err)
+	}
+
+	startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/debug/sync-status":
+			_, _ = w.Write([]byte(`{"active":true,"operation":"replica_sync","phase":"upload"}`))
+		case "/sync":
+			_, _ = w.Write([]byte(`{"status":"ok","txid":12,"replicated_txid":10}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	verifier := NewVerifier(cfg)
+	verifier.syncRetryDelay = 10 * time.Millisecond
+
+	err := verifier.waitForSync(context.Background(), &VerificationResult{})
+	if err == nil {
+		t.Fatal("waitForSync() error = nil, want disk pressure lag error")
+	}
+	if !strings.Contains(err.Error(), "disk is full") {
+		t.Fatalf("waitForSync() error = %q, want disk is full", err.Error())
+	}
+}
+
 func TestWaitForSyncSetsReplicationMetrics(t *testing.T) {
 	dir := t.TempDir()
 	cfg := DefaultConfig()

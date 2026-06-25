@@ -902,10 +902,15 @@ func incidentNextSteps(subsystem string, bundle *IncidentBundle) []string {
 				"Treat the recent OOM as first-class evidence. Check memory pressure and process survival before assuming a logic bug.",
 				"Inspect the worker page event timeline and Fly logs around the OOM timestamp before retrying the workload.",
 			)
-		case "platform_disk_full":
+		case "platform_disk_full", "platform_disk_full_no_progress", "platform_disk_full_recovery_failed":
 			steps = append(steps,
 				"Treat disk pressure as the current blocker. Check volume usage and Litestream temp/LTX growth before changing application logic.",
 				"Compare this worker against other profiles to see whether the failure is tied to dataset or write rate.",
+			)
+		case "platform_disk_full_recovered":
+			steps = append(steps,
+				"Treat the recovered disk-full event as evidence that Litestream stayed loud and resumed after space was freed.",
+				"Check the event details for the signal line, freed reserve size, and replicated TXID recovery before marking the scenario regressed.",
 			)
 		case "platform_restart", "platform_killed":
 			steps = append(steps,

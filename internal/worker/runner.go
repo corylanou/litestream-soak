@@ -18,6 +18,7 @@ type Runner struct {
 	loadReplayManager
 
 	failureDebug failureDebugState
+	noProgress   diskPressureNoProgressState
 	verifier     *Verifier
 	reporter     *Reporter
 }
@@ -53,6 +54,10 @@ func (r *Runner) Run(ctx context.Context) error {
 				SetUptime(uptime)
 				r.setUptime(uptime)
 				r.pollDBStats()
+				pressure := r.observeDiskPressureNoProgress(time.Now().UTC(), r.currentSnapshot())
+				if pressure.ShouldReport {
+					r.sendDiskFullEvent(runCtx, pressure)
+				}
 				r.sendHeartbeat(runCtx)
 			}
 		}
@@ -60,6 +65,9 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	if err := r.populate(runCtx); err != nil {
 		return fmt.Errorf("populate: %w", err)
+	}
+	if err := r.prepareDiskFullRecoveryReserve(); err != nil {
+		return fmt.Errorf("prepare disk-full recovery reserve: %w", err)
 	}
 
 	if err := r.writeLitestreamConfig(); err != nil {

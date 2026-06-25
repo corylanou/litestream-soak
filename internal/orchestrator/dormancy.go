@@ -122,6 +122,21 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	if workloadCfg.S3Concurrency > 0 {
 		env["LITESTREAM_S3_CONCURRENCY"] = fmt.Sprintf("%d", workloadCfg.S3Concurrency)
 	}
+	if strings.TrimSpace(workloadCfg.VerifySyncDegradedAfter) != "" {
+		env["VERIFY_SYNC_DEGRADED_AFTER"] = workloadCfg.VerifySyncDegradedAfter
+	}
+	if strings.TrimSpace(workloadCfg.VerifySyncTimeout) != "" {
+		env["VERIFY_SYNC_TIMEOUT"] = workloadCfg.VerifySyncTimeout
+	}
+	if strings.TrimSpace(workloadCfg.DiskFullNoProgressWindow) != "" {
+		env["DISK_FULL_NO_PROGRESS_WINDOW"] = workloadCfg.DiskFullNoProgressWindow
+	}
+	if workloadCfg.DiskFullRecoveryReserve > 0 {
+		env["DISK_FULL_RECOVERY_RESERVE_BYTES"] = fmt.Sprintf("%d", workloadCfg.DiskFullRecoveryReserve)
+	}
+	if strings.TrimSpace(workloadCfg.DiskFullRecoveryTimeout) != "" {
+		env["DISK_FULL_RECOVERY_TIMEOUT"] = workloadCfg.DiskFullRecoveryTimeout
+	}
 	if workloadCfg.NumDatabases > 0 {
 		env["NUM_DATABASES"] = fmt.Sprintf("%d", workloadCfg.NumDatabases)
 		env["ACTIVE_PERCENT"] = fmt.Sprintf("%.2f", workloadCfg.ActivePercent)

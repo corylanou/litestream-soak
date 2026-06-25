@@ -136,7 +136,7 @@ func (p *statsPoller) collectLitestreamRuntime(client *http.Client, collectedAt 
 	if err != nil {
 		return reporting.RuntimePayload{}, err
 	}
-	dbStatus, lastSyncAgeSeconds, err := p.pollList(client)
+	dbStatus, replicatedTXID, replicationLag, lastSyncAgeSeconds, err := p.pollList(client, txid)
 	if err != nil {
 		return reporting.RuntimePayload{}, err
 	}
@@ -146,11 +146,14 @@ func (p *statsPoller) collectLitestreamRuntime(client *http.Client, collectedAt 
 
 	return reporting.RuntimePayload{
 		DBTXID:                    txid,
+		ReplicatedTXID:            replicatedTXID,
 		DBStatus:                  dbStatus,
 		LastSyncAgeSeconds:        lastSyncAgeSeconds,
 		LastSyncAgeP50Seconds:     lastSyncAgeSeconds,
 		LastSyncAgeP95Seconds:     lastSyncAgeSeconds,
 		LastSyncAgeMaxSeconds:     lastSyncAgeSeconds,
+		ReplicationLagP95:         replicationLag,
+		ReplicationLagMax:         replicationLag,
 		LitestreamRSSBytes:        process.LitestreamRSSBytes,
 		LitestreamCPUSecondsTotal: process.LitestreamCPUSecondsTotal,
 		LitestreamGoroutines:      process.LitestreamGoroutines,
@@ -222,18 +225,27 @@ func (p *statsPoller) pollListDatabases(client *http.Client) ([]litestreamListDa
 	return result.Databases, nil
 }
 
-func (p *statsPoller) pollList(client *http.Client) (string, float64, error) {
+func (p *statsPoller) pollList(client *http.Client, localTXID uint64) (string, uint64, uint64, float64, error) {
 	databases, err := p.pollListDatabases(client)
 	if err != nil {
-		return "", 0, err
+		return "", 0, 0, 0, err
 	}
 
 	db := databases[0]
-	if db.TXID != nil && db.ReplicatedTXID != nil {
-		lag := uint64(0)
-		if *db.TXID > *db.ReplicatedTXID {
-			lag = *db.TXID - *db.ReplicatedTXID
+	replicatedTXID := uint64(0)
+	lag := uint64(0)
+	if db.ReplicatedTXID != nil {
+		lagTXID := localTXID
+		if db.TXID != nil {
+			lagTXID = *db.TXID
+			if lagTXID > 0 && localTXID > lagTXID {
+				lagTXID = localTXID
+			}
 		}
+		if lagTXID > *db.ReplicatedTXID {
+			lag = lagTXID - *db.ReplicatedTXID
+		}
+		replicatedTXID = *db.ReplicatedTXID
 		SetReplicatedTXID(float64(*db.ReplicatedTXID))
 		SetReplicationLag(float64(lag))
 	}
@@ -241,7 +253,7 @@ func (p *statsPoller) pollList(client *http.Client) (string, float64, error) {
 	if db.LastSyncAt != nil {
 		age = time.Since(*db.LastSyncAt).Seconds()
 	}
-	return db.Status, age, nil
+	return db.Status, replicatedTXID, lag, age, nil
 }
 
 func (p *statsPoller) aggregateManyDBRuntime(databases []litestreamListDatabase, uptimeSeconds float64, collectedAt time.Time) reporting.RuntimePayload {
@@ -318,6 +330,7 @@ func (p *statsPoller) aggregateManyDBRuntime(databases []litestreamListDatabase,
 		ReplicationLagMax:           lagMax,
 		ReplicationLagOverThreshold: overThreshold,
 		LitestreamUptimeSeconds:     uptimeSeconds,
+		ReplicatedTXID:              maxReplicatedTXID,
 		SnapshotCollectedAt:         collectedAt,
 		LitestreamSnapshotHealthy:   true,
 	}
@@ -429,6 +442,7 @@ func (p *statsPoller) setLitestreamSnapshot(snapshot reporting.RuntimePayload) {
 	p.snapshotMu.Lock()
 	defer p.snapshotMu.Unlock()
 	p.snapshot.DBTXID = snapshot.DBTXID
+	p.snapshot.ReplicatedTXID = snapshot.ReplicatedTXID
 	if snapshot.DBCount > 0 {
 		p.snapshot.DBCount = snapshot.DBCount
 	}
@@ -452,6 +466,15 @@ func (p *statsPoller) setLitestreamSnapshot(snapshot reporting.RuntimePayload) {
 	p.snapshot.LitestreamFDs = snapshot.LitestreamFDs
 	p.snapshot.WorkerRSSBytes = snapshot.WorkerRSSBytes
 	p.snapshot.WorkerFDs = snapshot.WorkerFDs
+	p.snapshot.DiskPressureNoProgress = snapshot.DiskPressureNoProgress
+	p.snapshot.DiskPressureNoProgressSeconds = snapshot.DiskPressureNoProgressSeconds
+	p.snapshot.DiskFullSignalObserved = snapshot.DiskFullSignalObserved
+	p.snapshot.DiskFullSignalMessage = snapshot.DiskFullSignalMessage
+	p.snapshot.DiskFullRecoveryAttempted = snapshot.DiskFullRecoveryAttempted
+	p.snapshot.DiskFullRecoveryFreedBytes = snapshot.DiskFullRecoveryFreedBytes
+	p.snapshot.DiskFullRecovered = snapshot.DiskFullRecovered
+	p.snapshot.DiskFullRecoverySeconds = snapshot.DiskFullRecoverySeconds
+	p.snapshot.DiskFullRecoveryWithoutRestart = snapshot.DiskFullRecoveryWithoutRestart
 	p.snapshot.LitestreamUptimeSeconds = snapshot.LitestreamUptimeSeconds
 	p.snapshot.SnapshotCollectedAt = snapshot.SnapshotCollectedAt
 	p.snapshot.LitestreamSnapshotHealthy = snapshot.LitestreamSnapshotHealthy

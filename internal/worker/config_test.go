@@ -1,6 +1,9 @@
 package worker
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestConfigFromEnvReadsS3UploadTuning(t *testing.T) {
 	t.Setenv("REPLICA_TYPE", "s3")
@@ -47,6 +50,49 @@ func TestConfigFromEnvReadsManyDBConfig(t *testing.T) {
 	}
 	if cfg.ReplicationLagThreshold != 3 {
 		t.Fatalf("ReplicationLagThreshold = %d, want 3", cfg.ReplicationLagThreshold)
+	}
+}
+
+func TestConfigFromEnvReadsDiskFullNoProgressWindow(t *testing.T) {
+	t.Setenv("DISK_FULL_NO_PROGRESS_WINDOW", "2m")
+	t.Setenv("DISK_FULL_RECOVERY_RESERVE_BYTES", "314572800")
+	t.Setenv("DISK_FULL_RECOVERY_TIMEOUT", "5m")
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v", err)
+	}
+
+	if cfg.DiskFullNoProgressWindow != 2*time.Minute {
+		t.Fatalf("DiskFullNoProgressWindow = %s, want 2m", cfg.DiskFullNoProgressWindow)
+	}
+	if cfg.DiskFullRecoveryReserve != 314572800 {
+		t.Fatalf("DiskFullRecoveryReserve = %d, want 314572800", cfg.DiskFullRecoveryReserve)
+	}
+	if cfg.DiskFullRecoveryTimeout != 5*time.Minute {
+		t.Fatalf("DiskFullRecoveryTimeout = %s, want 5m", cfg.DiskFullRecoveryTimeout)
+	}
+}
+
+func TestConfigFromEnvReadsConstrainedDiskProfile(t *testing.T) {
+	t.Setenv("PROFILE", "constrained-disk")
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v", err)
+	}
+
+	if cfg.InitialSize != "420MB" {
+		t.Fatalf("InitialSize = %q, want 420MB", cfg.InitialSize)
+	}
+	if cfg.DiskFullRecoveryReserve != 300*1024*1024 {
+		t.Fatalf("DiskFullRecoveryReserve = %d, want 314572800", cfg.DiskFullRecoveryReserve)
+	}
+	if cfg.DiskFullRecoveryTimeout != 5*time.Minute {
+		t.Fatalf("DiskFullRecoveryTimeout = %s, want 5m", cfg.DiskFullRecoveryTimeout)
+	}
+	if cfg.SnapshotInterval != 2*time.Minute {
+		t.Fatalf("SnapshotInterval = %s, want 2m", cfg.SnapshotInterval)
 	}
 }
 
