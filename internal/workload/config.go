@@ -45,8 +45,11 @@ type Config struct {
 	NumDatabases                              int     `json:"num_databases,omitempty"`
 	ActivePercent                             float64 `json:"active_percent,omitempty"`
 	ActivePercentSet                          bool    `json:"-"`
+	ActiveRotateInterval                      string  `json:"active_rotate_interval,omitempty"`
+	ActiveSetSeed                             int64   `json:"active_set_seed,omitempty"`
 	ConfigMode                                string  `json:"config_mode,omitempty"`
 	VerifySampleSize                          int     `json:"verify_sample_size,omitempty"`
+	VerifyChangedLimit                        int     `json:"verify_changed_limit,omitempty"`
 	ReplicationLagThreshold                   uint64  `json:"replication_lag_threshold,omitempty"`
 	VolumeSizeGB                              int     `json:"volume_size_gb,omitempty"`
 	MemoryMB                                  int     `json:"memory_mb,omitempty"`

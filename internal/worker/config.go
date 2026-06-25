@@ -2,10 +2,12 @@ package worker
 
 import (
 	"fmt"
+	"hash/fnv"
 	"math"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -44,8 +46,11 @@ type Config struct {
 
 	NumDatabases            int
 	ActivePercent           float64
+	ActiveRotateInterval    time.Duration
+	ActiveSetSeed           int64
 	ConfigMode              string
 	VerifySampleSize        int
+	VerifyChangedLimit      int
 	ReplicationLagThreshold uint64
 
 	// Load duration — set very high for continuous operation.
@@ -126,8 +131,11 @@ func DefaultConfig() Config {
 		InitialSize: "5MB",
 
 		ActivePercent:           2,
+		ActiveRotateInterval:    30 * time.Minute,
+		ActiveSetSeed:           1,
 		ConfigMode:              "list",
 		VerifySampleSize:        5,
+		VerifyChangedLimit:      100,
 		ReplicationLagThreshold: 0,
 
 		LoadDuration: 87600 * time.Hour, // ~10 years
@@ -396,6 +404,23 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid ACTIVE_PERCENT: must be between 0 and 100")
 		}
 	}
+	if v := os.Getenv("ACTIVE_ROTATE_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid ACTIVE_ROTATE_INTERVAL: %w", err)
+		}
+		if d <= 0 {
+			return c, fmt.Errorf("invalid ACTIVE_ROTATE_INTERVAL: must be positive")
+		}
+		c.ActiveRotateInterval = d
+	}
+	if v := strings.TrimSpace(os.Getenv("ACTIVE_SET_SEED")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return c, fmt.Errorf("invalid ACTIVE_SET_SEED: %w", err)
+		}
+		c.ActiveSetSeed = n
+	}
 	if v := strings.TrimSpace(os.Getenv("CONFIG_MODE")); v != "" {
 		c.ConfigMode = v
 	}
@@ -408,6 +433,16 @@ func ConfigFromEnv() (Config, error) {
 		if c.VerifySampleSize <= 0 {
 			return c, fmt.Errorf("invalid VERIFY_SAMPLE_SIZE: must be positive")
 		}
+	}
+	if v := os.Getenv("VERIFY_CHANGED_LIMIT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid VERIFY_CHANGED_LIMIT: %w", err)
+		}
+		if n <= 0 {
+			return c, fmt.Errorf("invalid VERIFY_CHANGED_LIMIT: must be positive")
+		}
+		c.VerifyChangedLimit = n
 	}
 	if v := os.Getenv("REPLICATION_LAG_THRESHOLD"); v != "" {
 		n, err := strconv.ParseUint(v, 10, 64)
@@ -713,12 +748,64 @@ func (c Config) ManyDBActiveCount() int {
 }
 
 func (c Config) ManyDBActivePaths() []string {
+	return c.ManyDBActivePathsAt(time.Now())
+}
+
+func (c Config) ManyDBActivePathsAt(now time.Time) []string {
 	paths := c.ManyDBPaths()
 	count := c.ManyDBActiveCount()
-	if count > len(paths) {
-		count = len(paths)
+	if count <= 0 || len(paths) == 0 {
+		return nil
 	}
-	return paths[:count]
+	if count >= len(paths) {
+		return append([]string(nil), paths...)
+	}
+
+	generation := c.manyDBActiveGeneration(now)
+	ranked := make([]manyDBRankedPath, 0, len(paths))
+	for i, path := range paths {
+		ranked = append(ranked, manyDBRankedPath{
+			path: path,
+			rank: rankManyDBPath(c.ActiveSetSeed, generation, i),
+		})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].rank == ranked[j].rank {
+			return ranked[i].path < ranked[j].path
+		}
+		return ranked[i].rank < ranked[j].rank
+	})
+
+	active := make([]string, 0, count)
+	for _, entry := range ranked[:count] {
+		active = append(active, entry.path)
+	}
+	return active
+}
+
+type manyDBRankedPath struct {
+	path string
+	rank uint64
+}
+
+func rankManyDBPath(seed, generation int64, index int) uint64 {
+	h := fnv.New64a()
+	_, _ = fmt.Fprintf(h, "%d/%d/%d", seed, generation, index)
+	return h.Sum64()
+}
+
+func (c Config) manyDBActiveGeneration(now time.Time) int64 {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return now.UnixNano() / int64(c.manyDBActiveRotateInterval())
+}
+
+func (c Config) manyDBActiveRotateInterval() time.Duration {
+	if c.ActiveRotateInterval <= 0 {
+		return 30 * time.Minute
+	}
+	return c.ActiveRotateInterval
 }
 
 func (c Config) manyDBConfigMode() string {
@@ -729,14 +816,14 @@ func (c Config) manyDBConfigMode() string {
 	return mode
 }
 
-func (c Config) manyDBVerifySampleSize() int {
-	if c.VerifySampleSize <= 0 {
-		return 5
+func (c Config) manyDBVerifyChangedLimit() int {
+	if c.VerifyChangedLimit <= 0 {
+		return 100
 	}
-	if c.NumDatabases > 0 && c.VerifySampleSize > c.NumDatabases {
+	if c.NumDatabases > 0 && c.VerifyChangedLimit > c.NumDatabases {
 		return c.NumDatabases
 	}
-	return c.VerifySampleSize
+	return c.VerifyChangedLimit
 }
 
 func (c Config) WorkloadConfig() workload.Config {
@@ -772,6 +859,11 @@ func (c Config) WorkloadConfig() workload.Config {
 		ReplayDataURL:            c.ReplayDataURL,
 		ReplaySpeed:              c.ReplaySpeed,
 		ReplayLoop:               c.ReplayLoop,
+	}
+	if c.ManyDBEnabled() {
+		cfg.ActiveRotateInterval = c.manyDBActiveRotateInterval().String()
+		cfg.ActiveSetSeed = c.ActiveSetSeed
+		cfg.VerifyChangedLimit = c.manyDBVerifyChangedLimit()
 	}
 	if c.S3FaultProxyEnabled {
 		cfg.S3FaultProxyEnabled = true

@@ -5,9 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,13 +16,16 @@ import (
 )
 
 type manyDBLoad struct {
-	cfg     *Config
-	dbPaths []string
+	cfg *Config
+	now func() time.Time
 
 	cancel context.CancelFunc
 	jobs   chan string
 	wg     sync.WaitGroup
 	next   atomic.Uint64
+
+	changedMu sync.Mutex
+	changed   map[string]struct{}
 
 	mu      sync.Mutex
 	paused  bool
@@ -80,13 +83,15 @@ func manyDBDSN(dbPath string) string {
 func newManyDBLoad(cfg *Config) *manyDBLoad {
 	return &manyDBLoad{
 		cfg:     cfg,
-		dbPaths: cfg.ManyDBActivePaths(),
+		now:     time.Now,
+		changed: make(map[string]struct{}),
 	}
 }
 
 func (l *manyDBLoad) Start(ctx context.Context) error {
-	if len(l.dbPaths) == 0 || l.cfg.WriteRate <= 0 {
-		slog.Info("Many database load idle", "active_databases", len(l.dbPaths), "write_rate", l.cfg.WriteRate)
+	activePaths := l.currentActivePaths()
+	if len(activePaths) == 0 || l.cfg.WriteRate <= 0 {
+		slog.Info("Many database load idle", "active_databases", len(activePaths), "write_rate", l.cfg.WriteRate)
 		SetLoadRunning(false)
 		return nil
 	}
@@ -99,8 +104,8 @@ func (l *manyDBLoad) Start(ctx context.Context) error {
 	if workerCount <= 0 {
 		workerCount = 1
 	}
-	if workerCount > len(l.dbPaths) {
-		workerCount = len(l.dbPaths)
+	if workerCount > len(activePaths) {
+		workerCount = len(activePaths)
 	}
 
 	l.wg.Add(1)
@@ -110,8 +115,24 @@ func (l *manyDBLoad) Start(ctx context.Context) error {
 		go l.writeWorker(runCtx)
 	}
 	SetLoadRunning(true)
-	slog.Info("Started many database load", "active_databases", len(l.dbPaths), "write_rate", l.cfg.WriteRate, "workers", workerCount)
+	slog.Info("Started many database load", "active_databases", len(activePaths), "write_rate", l.cfg.WriteRate, "workers", workerCount)
 	return nil
+}
+
+func (l *manyDBLoad) currentActivePaths() []string {
+	now := time.Now()
+	if l.now != nil {
+		now = l.now()
+	}
+	return l.cfg.ManyDBActivePathsAt(now)
+}
+
+func (l *manyDBLoad) currentActiveGeneration() int64 {
+	now := time.Now()
+	if l.now != nil {
+		now = l.now()
+	}
+	return l.cfg.manyDBActiveGeneration(now)
 }
 
 func (l *manyDBLoad) dispatch(ctx context.Context) {
@@ -125,16 +146,29 @@ func (l *manyDBLoad) dispatch(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	var activePaths []string
+	var activeGeneration int64
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			idx := int(l.next.Add(1)-1) % len(l.dbPaths)
+			generation := l.currentActiveGeneration()
+			if activePaths == nil || generation != activeGeneration {
+				activePaths = l.currentActivePaths()
+				activeGeneration = generation
+				l.next.Store(0)
+				slog.Info("Rotated many database active set", "active_databases", len(activePaths), "generation", generation)
+			}
+			if len(activePaths) == 0 {
+				continue
+			}
+			idx := int(l.next.Add(1)-1) % len(activePaths)
 			select {
 			case <-ctx.Done():
 				return
-			case l.jobs <- l.dbPaths[idx]:
+			case l.jobs <- activePaths[idx]:
 			}
 		}
 	}
@@ -155,6 +189,8 @@ func (l *manyDBLoad) writeWorker(ctx context.Context) {
 			}
 			if err := writeManyDBRow(ctx, dbPath, l.cfg.PayloadSize); err != nil {
 				slog.Warn("Many database write failed", "db", dbPath, "error", err)
+			} else {
+				l.markChanged(dbPath)
 			}
 			l.endWrite()
 		}
@@ -238,7 +274,7 @@ func (l *manyDBLoad) Resume() {
 	stopped := l.stopped
 	l.paused = false
 	l.mu.Unlock()
-	if !stopped && len(l.dbPaths) > 0 && l.cfg.WriteRate > 0 {
+	if !stopped && len(l.currentActivePaths()) > 0 && l.cfg.WriteRate > 0 {
 		SetLoadRunning(true)
 	}
 }
@@ -260,54 +296,62 @@ func (l *manyDBLoad) Stop() {
 	SetLoadRunning(false)
 }
 
-func selectManyDBVerificationSample(cfg Config, rng *rand.Rand) []string {
-	paths := cfg.ManyDBPaths()
-	if len(paths) == 0 {
-		return nil
+func (l *manyDBLoad) markChanged(dbPath string) {
+	if dbPath == "" {
+		return
 	}
-	size := cfg.manyDBVerifySampleSize()
-	if size >= len(paths) {
-		return append([]string(nil), paths...)
+	l.changedMu.Lock()
+	if l.changed == nil {
+		l.changed = make(map[string]struct{})
 	}
-	if rng == nil {
-		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	l.changed[dbPath] = struct{}{}
+	l.changedMu.Unlock()
+}
+
+func (l *manyDBLoad) manyDBChangedPathsAndReset() []string {
+	l.changedMu.Lock()
+	defer l.changedMu.Unlock()
+
+	paths := make([]string, 0, len(l.changed))
+	for path := range l.changed {
+		paths = append(paths, path)
+	}
+	clear(l.changed)
+	sort.Strings(paths)
+	return paths
+}
+
+func selectManyDBVerificationTargets(cfg Config, changed []string) ([]string, int) {
+	if len(changed) == 0 {
+		changed = cfg.ManyDBActivePaths()
+	}
+	if len(changed) == 0 {
+		return nil, 0
 	}
 
-	active := cfg.ManyDBActivePaths()
-	activeSet := make(map[string]bool, len(active))
-	for _, path := range active {
-		activeSet[path] = true
+	allowed := make(map[string]struct{}, cfg.NumDatabases)
+	for _, path := range cfg.ManyDBPaths() {
+		allowed[path] = struct{}{}
 	}
-	idle := make([]string, 0, len(paths)-len(active))
-	for _, path := range paths {
-		if !activeSet[path] {
-			idle = append(idle, path)
+
+	seen := make(map[string]struct{}, len(changed))
+	targets := make([]string, 0, len(changed))
+	for _, path := range changed {
+		if _, ok := allowed[path]; !ok {
+			continue
 		}
-	}
-
-	sample := make([]string, 0, size)
-	seen := make(map[string]bool, size)
-	add := func(path string) {
-		if path == "" || seen[path] || len(sample) >= size {
-			return
+		if _, ok := seen[path]; ok {
+			continue
 		}
-		seen[path] = true
-		sample = append(sample, path)
+		seen[path] = struct{}{}
+		targets = append(targets, path)
 	}
+	sort.Strings(targets)
 
-	if len(active) > 0 {
-		add(active[rng.Intn(len(active))])
+	totalChanged := len(targets)
+	limit := cfg.manyDBVerifyChangedLimit()
+	if limit > 0 && len(targets) > limit {
+		targets = targets[:limit]
 	}
-	if len(idle) > 0 {
-		add(idle[rng.Intn(len(idle))])
-	}
-
-	shuffled := append([]string(nil), paths...)
-	rng.Shuffle(len(shuffled), func(i, j int) {
-		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
-	})
-	for _, path := range shuffled {
-		add(path)
-	}
-	return sample
+	return targets, totalChanged
 }

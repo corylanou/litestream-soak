@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -33,12 +32,93 @@ func TestManyDBPathsAndActiveSubset(t *testing.T) {
 		t.Fatalf("last path = %q, want /data/dbs/db-00010.db", paths[9])
 	}
 
-	active := cfg.ManyDBActivePaths()
+	active := cfg.ManyDBActivePathsAt(time.Unix(0, 0))
 	if len(active) != 2 {
 		t.Fatalf("ManyDBActivePaths() len = %d, want 2", len(active))
 	}
-	if active[0] != paths[0] || active[1] != paths[1] {
-		t.Fatalf("active paths = %v, want first two paths", active)
+	for _, activePath := range active {
+		if !slices.Contains(paths, activePath) {
+			t.Fatalf("active path %q is not in all paths %v", activePath, paths)
+		}
+	}
+}
+
+func TestManyDBActivePathsRotateDeterministically(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = "/data"
+	cfg.NumDatabases = 10
+	cfg.ActivePercent = 30
+	cfg.ActiveRotateInterval = time.Minute
+	cfg.ActiveSetSeed = 42
+
+	base := time.Unix(1700000000, 0)
+	first := cfg.ManyDBActivePathsAt(base)
+	sameInterval := cfg.ManyDBActivePathsAt(base.Add(30 * time.Second))
+	nextInterval := cfg.ManyDBActivePathsAt(base.Add(time.Minute))
+	repeated := cfg.ManyDBActivePathsAt(base.Add(time.Minute))
+
+	if len(first) != 3 {
+		t.Fatalf("first active len = %d, want 3: %v", len(first), first)
+	}
+	if !slices.Equal(first, sameInterval) {
+		t.Fatalf("active paths changed inside one interval: %v vs %v", first, sameInterval)
+	}
+	if slices.Equal(first, nextInterval) {
+		t.Fatalf("active paths did not rotate across intervals: %v", first)
+	}
+	if !slices.Equal(nextInterval, repeated) {
+		t.Fatalf("active paths are not deterministic for same seed and interval: %v vs %v", nextInterval, repeated)
+	}
+	assertUniqueSubset(t, cfg.ManyDBPaths(), first)
+	assertUniqueSubset(t, cfg.ManyDBPaths(), nextInterval)
+}
+
+func TestManyDBLoadCurrentActivePathsRotates(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = "/data"
+	cfg.NumDatabases = 10
+	cfg.ActivePercent = 20
+	cfg.ActiveRotateInterval = time.Minute
+	cfg.ActiveSetSeed = 7
+
+	now := time.Unix(1700000000, 0)
+	load := newManyDBLoad(&cfg)
+	load.now = func() time.Time { return now }
+
+	first := load.currentActivePaths()
+	now = now.Add(time.Minute)
+	next := load.currentActivePaths()
+
+	if !slices.Equal(first, cfg.ManyDBActivePathsAt(time.Unix(1700000000, 0))) {
+		t.Fatalf("currentActivePaths() = %v, want config snapshot", first)
+	}
+	if !slices.Equal(next, cfg.ManyDBActivePathsAt(time.Unix(1700000060, 0))) {
+		t.Fatalf("currentActivePaths() after rotation = %v, want config snapshot", next)
+	}
+	if slices.Equal(first, next) {
+		t.Fatalf("currentActivePaths() did not rotate: %v", first)
+	}
+}
+
+func TestManyDBLoadChangedPathsReset(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = "/data"
+	cfg.NumDatabases = 5
+
+	paths := cfg.ManyDBPaths()
+	load := newManyDBLoad(&cfg)
+	load.markChanged(paths[3])
+	load.markChanged(paths[1])
+	load.markChanged(paths[3])
+
+	got := load.manyDBChangedPathsAndReset()
+	want := []string{paths[1], paths[3]}
+	if !slices.Equal(got, want) {
+		t.Fatalf("changed paths = %v, want %v", got, want)
+	}
+
+	if got := load.manyDBChangedPathsAndReset(); len(got) != 0 {
+		t.Fatalf("changed paths after reset = %v, want empty", got)
 	}
 }
 
@@ -222,32 +302,58 @@ func TestPollDBStatsAggregatesManyDBList(t *testing.T) {
 	}
 }
 
-func TestManyDBVerificationSampleIncludesActiveAndIdle(t *testing.T) {
+func TestManyDBVerificationTargetsUseChangedPaths(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.DataDir = "/data"
 	cfg.NumDatabases = 10
 	cfg.ActivePercent = 20
 	cfg.VerifySampleSize = 5
 
-	sample := selectManyDBVerificationSample(cfg, rand.New(rand.NewSource(1)))
-	if len(sample) != 5 {
-		t.Fatalf("sample len = %d, want 5: %v", len(sample), sample)
+	paths := cfg.ManyDBPaths()
+	changed := []string{paths[7], paths[2], paths[7], paths[4]}
+	targets, totalChanged := selectManyDBVerificationTargets(cfg, changed)
+	want := []string{paths[2], paths[4], paths[7]}
+
+	if totalChanged != len(want) {
+		t.Fatalf("totalChanged = %d, want %d", totalChanged, len(want))
 	}
+	if !slices.Equal(targets, want) {
+		t.Fatalf("targets = %v, want changed paths %v", targets, want)
+	}
+}
+
+func TestManyDBVerificationTargetsTruncateChangedPaths(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = "/data"
+	cfg.NumDatabases = 10
+	cfg.ActivePercent = 60
+	cfg.VerifySampleSize = 2
+	cfg.VerifyChangedLimit = 3
+
+	paths := cfg.ManyDBPaths()
+	changed := []string{paths[6], paths[1], paths[4], paths[8], paths[2]}
+	targets, totalChanged := selectManyDBVerificationTargets(cfg, changed)
+	want := []string{paths[1], paths[2], paths[4]}
+
+	if totalChanged != 5 {
+		t.Fatalf("totalChanged = %d, want 5", totalChanged)
+	}
+	if !slices.Equal(targets, want) {
+		t.Fatalf("targets = %v, want capped changed paths %v", targets, want)
+	}
+}
+
+func assertUniqueSubset(t *testing.T, all []string, subset []string) {
+	t.Helper()
 
 	seen := map[string]bool{}
-	for _, path := range sample {
+	for _, path := range subset {
 		if seen[path] {
-			t.Fatalf("sample contains duplicate path %s: %v", path, sample)
+			t.Fatalf("duplicate path %q in %v", path, subset)
+		}
+		if !slices.Contains(all, path) {
+			t.Fatalf("path %q is not in all paths %v", path, all)
 		}
 		seen[path] = true
-	}
-
-	active := cfg.ManyDBActivePaths()
-	all := cfg.ManyDBPaths()
-	if !slices.ContainsFunc(sample, func(path string) bool { return slices.Contains(active, path) }) {
-		t.Fatalf("sample = %v, want at least one active path from %v", sample, active)
-	}
-	if !slices.ContainsFunc(sample, func(path string) bool { return !slices.Contains(active, path) && slices.Contains(all, path) }) {
-		t.Fatalf("sample = %v, want at least one idle path", sample)
 	}
 }

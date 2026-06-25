@@ -253,8 +253,10 @@
             <div class="kv-row"><span class="kv-label">Sync interval</span><span class="kv-value">{{if .Incident.Workload.SyncInterval}}{{.Incident.Workload.SyncInterval}}{{else}}--{{end}}</span></div>
             <div class="kv-row"><span class="kv-label">Databases</span><span class="kv-value">{{if .Incident.Workload.NumDatabases}}{{.Incident.Workload.NumDatabases}}{{else}}--{{end}}</span></div>
             <div class="kv-row"><span class="kv-label">Active percent</span><span class="kv-value">{{if .Incident.Workload.ActivePercent}}{{printf "%.2f" .Incident.Workload.ActivePercent}}{{else}}--{{end}}</span></div>
+            <div class="kv-row"><span class="kv-label">Active rotate</span><span class="kv-value">{{if .Incident.Workload.ActiveRotateInterval}}{{.Incident.Workload.ActiveRotateInterval}}{{else}}--{{end}}</span></div>
+            <div class="kv-row"><span class="kv-label">Active seed</span><span class="kv-value">{{if .Incident.Workload.ActiveSetSeed}}{{.Incident.Workload.ActiveSetSeed}}{{else}}--{{end}}</span></div>
             <div class="kv-row"><span class="kv-label">Config mode</span><span class="kv-value">{{if .Incident.Workload.ConfigMode}}{{.Incident.Workload.ConfigMode}}{{else}}--{{end}}</span></div>
-            <div class="kv-row"><span class="kv-label">Verify sample</span><span class="kv-value">{{if .Incident.Workload.VerifySampleSize}}{{.Incident.Workload.VerifySampleSize}}{{else}}--{{end}}</span></div>
+            <div class="kv-row"><span class="kv-label">Verify changed cap</span><span class="kv-value">{{if .Incident.Workload.VerifyChangedLimit}}{{.Incident.Workload.VerifyChangedLimit}}{{else}}--{{end}}</span></div>
           </div>
         </div>
 

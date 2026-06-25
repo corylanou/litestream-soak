@@ -44,14 +44,17 @@ func TestParseConfig(t *testing.T) {
 		},
 		{
 			name:  "many database knobs",
-			input: `{"load_mode":"many-db","num_databases":1000,"active_percent":2,"config_mode":"dir","verify_sample_size":5,"replication_lag_threshold":3}`,
+			input: `{"load_mode":"many-db","num_databases":1000,"active_percent":2,"active_rotate_interval":"10m","active_set_seed":42,"config_mode":"dir","verify_sample_size":5,"verify_changed_limit":40,"replication_lag_threshold":3}`,
 			want: Config{
 				LoadMode:                "many-db",
 				NumDatabases:            1000,
 				ActivePercent:           2,
 				ActivePercentSet:        true,
+				ActiveRotateInterval:    "10m",
+				ActiveSetSeed:           42,
 				ConfigMode:              "dir",
 				VerifySampleSize:        5,
+				VerifyChangedLimit:      40,
 				ReplicationLagThreshold: 3,
 			},
 			wantError: false,

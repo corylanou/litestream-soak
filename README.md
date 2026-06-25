@@ -73,8 +73,9 @@ Many-database profiles are opt-in with `SOAK_ENABLE_MANY_DB_FLEET=true`.
 When enabled, the main and PR fleets also reconcile `many-dbs-100-list`,
 `many-dbs-100-dir`, and `many-dbs-1000-dir`. These profiles seed databases
 under `/data/dbs`, drive writes into the configured active subset with an
-in-process writer, report aggregate runtime/process metrics only, and verify a
-sample of databases per cycle. They are excluded from release-quality scoring.
+in-process writer, rotate active membership on a deterministic interval, report
+aggregate runtime/process metrics only, and verify changed databases per cycle.
+They are excluded from release-quality scoring.
 
 ## Fleet Sources
 
