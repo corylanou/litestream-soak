@@ -3,13 +3,21 @@ package worker
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 )
 
 const diskFullRecoveryReserveFile = "soak-disk-full-recovery.reserve"
+const litestreamDiskFullMetricName = "litestream_disk_full"
+const litestreamDiskFullLogMessage = "disk full while staging ltx file"
+const litestreamDiskFullRecoveryLogMessage = "replication paused, will resume automatically when space is freed"
 
 func (r *Runner) prepareDiskFullRecoveryReserve() error {
 	if r.cfg.DiskFullRecoveryReserve <= 0 {
@@ -85,17 +93,53 @@ func litestreamDiskFullSignal(lines []string) (bool, string) {
 			continue
 		}
 		lower := strings.ToLower(line)
-		switch {
-		case strings.Contains(lower, "no space left on device"),
-			strings.Contains(lower, "database or disk is full"),
-			strings.Contains(lower, "database is full"),
-			strings.Contains(lower, "disk is full"),
-			strings.Contains(lower, "enospc"),
-			strings.Contains(lower, "sqlite_full"):
+		if strings.Contains(lower, litestreamDiskFullLogMessage) &&
+			strings.Contains(lower, litestreamDiskFullRecoveryLogMessage) {
 			return true, line
 		}
 	}
 	return false, ""
+}
+
+func parseLitestreamDiskFullMetric(r io.Reader, dbPath string) (bool, bool, error) {
+	parser := expfmt.NewTextParser(model.LegacyValidation)
+	families, err := parser.TextToMetricFamilies(r)
+	if err != nil {
+		return false, false, err
+	}
+
+	family := families[litestreamDiskFullMetricName]
+	if family == nil {
+		return false, false, nil
+	}
+
+	present := false
+	for _, metric := range family.GetMetric() {
+		if !metricMatchesDBPath(metric, dbPath) {
+			continue
+		}
+		gauge := metric.GetGauge()
+		if gauge == nil {
+			continue
+		}
+		present = true
+		if gauge.GetValue() > 0 {
+			return true, true, nil
+		}
+	}
+	return false, present, nil
+}
+
+func metricMatchesDBPath(metric *dto.Metric, dbPath string) bool {
+	if strings.TrimSpace(dbPath) == "" {
+		return true
+	}
+	for _, label := range metric.GetLabel() {
+		if label.GetName() == "db" {
+			return label.GetValue() == dbPath
+		}
+	}
+	return true
 }
 
 func (c Config) diskFullRecoveryTimeout() time.Duration {
