@@ -106,6 +106,7 @@ func newIPCClient(socketPath string, timeout time.Duration) *http.Client {
 }
 
 func (p *statsPoller) collectLitestreamRuntime(client *http.Client, collectedAt time.Time) (reporting.RuntimePayload, error) {
+	diskFull, diskFullMetricPresent := p.pollLitestreamDiskFullMetric(client)
 	if p.cfg.ManyDBEnabled() {
 		uptimeSeconds, err := p.pollInfo(client)
 		if err != nil {
@@ -118,6 +119,8 @@ func (p *statsPoller) collectLitestreamRuntime(client *http.Client, collectedAt 
 		snapshot := p.aggregateManyDBRuntime(databases, uptimeSeconds, collectedAt)
 		process := collectProcessStats(p.currentLitestreamPID())
 		process.LitestreamGoroutines = p.pollLitestreamGoroutineCount(client)
+		snapshot.LitestreamDiskFullMetricPresent = diskFullMetricPresent
+		snapshot.LitestreamDiskFull = diskFull
 		snapshot.LitestreamRSSBytes = process.LitestreamRSSBytes
 		snapshot.LitestreamCPUSecondsTotal = process.LitestreamCPUSecondsTotal
 		snapshot.LitestreamGoroutines = process.LitestreamGoroutines
@@ -145,24 +148,26 @@ func (p *statsPoller) collectLitestreamRuntime(client *http.Client, collectedAt 
 	SetProcessStats(process)
 
 	return reporting.RuntimePayload{
-		DBTXID:                    txid,
-		ReplicatedTXID:            replicatedTXID,
-		DBStatus:                  dbStatus,
-		LastSyncAgeSeconds:        lastSyncAgeSeconds,
-		LastSyncAgeP50Seconds:     lastSyncAgeSeconds,
-		LastSyncAgeP95Seconds:     lastSyncAgeSeconds,
-		LastSyncAgeMaxSeconds:     lastSyncAgeSeconds,
-		ReplicationLagP95:         replicationLag,
-		ReplicationLagMax:         replicationLag,
-		LitestreamRSSBytes:        process.LitestreamRSSBytes,
-		LitestreamCPUSecondsTotal: process.LitestreamCPUSecondsTotal,
-		LitestreamGoroutines:      process.LitestreamGoroutines,
-		LitestreamFDs:             process.LitestreamFDs,
-		WorkerRSSBytes:            process.WorkerRSSBytes,
-		WorkerFDs:                 process.WorkerFDs,
-		LitestreamUptimeSeconds:   uptimeSeconds,
-		SnapshotCollectedAt:       collectedAt,
-		LitestreamSnapshotHealthy: true,
+		DBTXID:                          txid,
+		ReplicatedTXID:                  replicatedTXID,
+		DBStatus:                        dbStatus,
+		LastSyncAgeSeconds:              lastSyncAgeSeconds,
+		LastSyncAgeP50Seconds:           lastSyncAgeSeconds,
+		LastSyncAgeP95Seconds:           lastSyncAgeSeconds,
+		LastSyncAgeMaxSeconds:           lastSyncAgeSeconds,
+		ReplicationLagP95:               replicationLag,
+		ReplicationLagMax:               replicationLag,
+		LitestreamDiskFullMetricPresent: diskFullMetricPresent,
+		LitestreamDiskFull:              diskFull,
+		LitestreamRSSBytes:              process.LitestreamRSSBytes,
+		LitestreamCPUSecondsTotal:       process.LitestreamCPUSecondsTotal,
+		LitestreamGoroutines:            process.LitestreamGoroutines,
+		LitestreamFDs:                   process.LitestreamFDs,
+		WorkerRSSBytes:                  process.WorkerRSSBytes,
+		WorkerFDs:                       process.WorkerFDs,
+		LitestreamUptimeSeconds:         uptimeSeconds,
+		SnapshotCollectedAt:             collectedAt,
+		LitestreamSnapshotHealthy:       true,
 	}, nil
 }
 
@@ -254,6 +259,27 @@ func (p *statsPoller) pollList(client *http.Client, localTXID uint64) (string, u
 		age = time.Since(*db.LastSyncAt).Seconds()
 	}
 	return db.Status, replicatedTXID, lag, age, nil
+}
+
+func (p *statsPoller) pollLitestreamDiskFullMetric(client *http.Client) (bool, bool) {
+	resp, err := client.Get("http://localhost/metrics")
+	if err != nil {
+		return false, false
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, false
+	}
+	dbPath := p.cfg.DBPath
+	if p.cfg.ManyDBEnabled() {
+		dbPath = ""
+	}
+	full, present, err := parseLitestreamDiskFullMetric(resp.Body, dbPath)
+	if err != nil {
+		return false, false
+	}
+	return full, present
 }
 
 func (p *statsPoller) aggregateManyDBRuntime(databases []litestreamListDatabase, uptimeSeconds float64, collectedAt time.Time) reporting.RuntimePayload {
@@ -460,6 +486,8 @@ func (p *statsPoller) setLitestreamSnapshot(snapshot reporting.RuntimePayload) {
 	p.snapshot.ReplicationLagP95 = snapshot.ReplicationLagP95
 	p.snapshot.ReplicationLagMax = snapshot.ReplicationLagMax
 	p.snapshot.ReplicationLagOverThreshold = snapshot.ReplicationLagOverThreshold
+	p.snapshot.LitestreamDiskFullMetricPresent = snapshot.LitestreamDiskFullMetricPresent
+	p.snapshot.LitestreamDiskFull = snapshot.LitestreamDiskFull
 	p.snapshot.LitestreamRSSBytes = snapshot.LitestreamRSSBytes
 	p.snapshot.LitestreamCPUSecondsTotal = snapshot.LitestreamCPUSecondsTotal
 	p.snapshot.LitestreamGoroutines = snapshot.LitestreamGoroutines

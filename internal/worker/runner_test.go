@@ -47,6 +47,11 @@ func TestPollDBStatsMarksSnapshotHealthy(t *testing.T) {
 		case "/list":
 			lastSyncAt := time.Now().Add(-3 * time.Second).UTC().Format(time.RFC3339Nano)
 			_, _ = w.Write([]byte(`{"databases":[{"status":"replicating","txid":42,"replicated_txid":40,"last_sync_at":"` + lastSyncAt + `"}]}`))
+		case "/metrics":
+			_, _ = w.Write([]byte(`# HELP litestream_disk_full Whether replication is paused because the local disk is full
+# TYPE litestream_disk_full gauge
+litestream_disk_full{db="` + cfg.DBPath + `"} 1
+`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -67,6 +72,12 @@ func TestPollDBStatsMarksSnapshotHealthy(t *testing.T) {
 	}
 	if snapshot.ReplicationLagMax != 2 {
 		t.Fatalf("replication lag max=%d want 2", snapshot.ReplicationLagMax)
+	}
+	if !snapshot.LitestreamDiskFullMetricPresent {
+		t.Fatal("LitestreamDiskFullMetricPresent = false, want true")
+	}
+	if !snapshot.LitestreamDiskFull {
+		t.Fatal("LitestreamDiskFull = false, want true")
 	}
 	if snapshot.DBStatus != "replicating" {
 		t.Fatalf("db status=%q want %q", snapshot.DBStatus, "replicating")

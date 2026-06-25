@@ -43,8 +43,11 @@ func (r *Runner) observeDiskPressureNoProgress(now time.Time, snapshot runtimeSn
 		return diskPressureNoProgressObservation{Runtime: updated.RuntimePayload}
 	}
 
-	if ok, message := litestreamDiskFullSignal(r.litestreamLog.Lines()); ok {
-		r.markDiskFullSignal(message)
+	if runtime.LitestreamDiskFullMetricPresent && runtime.LitestreamDiskFull {
+		ok, message := litestreamDiskFullSignal(r.litestreamLog.Lines())
+		if ok {
+			r.markDiskFullSignal(message)
+		}
 	}
 
 	if observation, ok := r.observeDiskFullRecovery(now, runtime); ok {
@@ -65,9 +68,7 @@ func (r *Runner) observeDiskPressureNoProgress(now time.Time, snapshot runtimeSn
 		return diskPressureNoProgressObservation{Runtime: updated.RuntimePayload}
 	}
 
-	localAdvanced := runtime.DBTXID > r.noProgress.lastDBTXID
-	replicaFrozen := runtime.ReplicatedTXID <= r.noProgress.lastReplicaTXID
-	if !localAdvanced || !replicaFrozen {
+	if runtime.ReplicatedTXID > r.noProgress.lastReplicaTXID || runtime.DBTXID < r.noProgress.lastDBTXID {
 		r.noProgress.activeSince = now
 		r.noProgress.lastDBTXID = runtime.DBTXID
 		r.noProgress.lastReplicaTXID = runtime.ReplicatedTXID
@@ -136,7 +137,8 @@ func (r *Runner) observeDiskFullRecovery(now time.Time, runtime reporting.Runtim
 
 	currentPID := r.currentLitestreamPID()
 	sameProcess := r.noProgress.recoveryStartPID == 0 || currentPID == 0 || currentPID == r.noProgress.recoveryStartPID
-	if runtime.ReplicatedTXID > r.noProgress.recoveryStartTXID && sameProcess {
+	metricCleared := runtime.LitestreamDiskFullMetricPresent && !runtime.LitestreamDiskFull
+	if metricCleared && runtime.ReplicatedTXID > r.noProgress.recoveryStartTXID && sameProcess {
 		r.noProgress.recovered = true
 		r.noProgress.withoutRestart = true
 		r.noProgress.recoverySeconds = now.Sub(r.noProgress.recoveryStartedAt).Seconds()
@@ -250,6 +252,8 @@ func (p *statsPoller) setDiskFullRuntime(runtime reporting.RuntimePayload) runti
 	defer p.snapshotMu.Unlock()
 	p.snapshot.DiskPressureNoProgress = runtime.DiskPressureNoProgress
 	p.snapshot.DiskPressureNoProgressSeconds = runtime.DiskPressureNoProgressSeconds
+	p.snapshot.LitestreamDiskFullMetricPresent = runtime.LitestreamDiskFullMetricPresent
+	p.snapshot.LitestreamDiskFull = runtime.LitestreamDiskFull
 	p.snapshot.DiskFullSignalObserved = runtime.DiskFullSignalObserved
 	p.snapshot.DiskFullSignalMessage = runtime.DiskFullSignalMessage
 	p.snapshot.DiskFullRecoveryAttempted = runtime.DiskFullRecoveryAttempted
