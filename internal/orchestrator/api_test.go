@@ -1954,6 +1954,90 @@ func TestHandleHeartbeatRuntimeAtGating(t *testing.T) {
 	})
 }
 
+func TestHandleWorkerEventDiskFullNoProgressDegradesWorker(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	workerID := "worker-disk-no-progress"
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		Name:          workerID,
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "abc123",
+		LitestreamSHA: "ls123",
+		ProfileName:   "constrained-disk",
+		ProfileConfig: "{}",
+	})
+
+	message := "harness detected no replication progress while the data disk cannot stage the current database snapshot"
+	payload := reporting.WorkerEventPayload{
+		WorkerIdentity: reporting.WorkerIdentity{
+			WorkerID:      workerID,
+			Name:          workerID,
+			Source:        "main",
+			GitSHA:        "abc123",
+			LitestreamSHA: "ls123",
+			ProfileName:   "constrained-disk",
+			ProfileConfig: "{}",
+		},
+		EventType: "platform_disk_full_no_progress",
+		Message:   message,
+		SentAt:    time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC),
+		RuntimePayload: reporting.RuntimePayload{
+			DataDiskTotalBytes:            1024,
+			DataDiskAvailableBytes:        100,
+			DBSizeBytes:                   600,
+			DBTXID:                        12,
+			ReplicatedTXID:                8,
+			ReplicationLagMax:             4,
+			DiskPressureNoProgress:        true,
+			DiskPressureNoProgressSeconds: 121,
+			SnapshotCollectedAt:           time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC),
+			LitestreamSnapshotHealthy:     true,
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/workers/"+workerID+"/events", bytes.NewReader(body))
+	request.SetPathValue("id", workerID)
+	recorder := httptest.NewRecorder()
+
+	api.handleWorkerEvent(recorder, request)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+	}
+
+	worker, err := db.GetWorker(workerID)
+	if err != nil {
+		t.Fatalf("GetWorker() error = %v", err)
+	}
+	if worker.Status != model.WorkerDegraded {
+		t.Fatalf("Status = %q, want degraded", worker.Status)
+	}
+	if worker.ErrorMessage != message {
+		t.Fatalf("ErrorMessage = %q, want %q", worker.ErrorMessage, message)
+	}
+
+	runtime := extractReportedRuntime(*worker, nil)
+	if runtime == nil || !runtime.DiskPressureNoProgress {
+		t.Fatalf("runtime = %+v, want disk pressure no-progress", runtime)
+	}
+
+	events, err := db.ListWorkerEvents(workerID, 10)
+	if err != nil {
+		t.Fatalf("ListWorkerEvents() error = %v", err)
+	}
+	if len(events) != 1 || events[0].EventType != "platform_disk_full_no_progress" {
+		t.Fatalf("events = %+v, want disk no-progress event", events)
+	}
+}
+
 func TestBuildHomePageDataStalestRuntimeAt(t *testing.T) {
 	t.Parallel()
 

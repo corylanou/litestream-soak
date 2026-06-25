@@ -28,10 +28,13 @@ func TestParseConfig(t *testing.T) {
 		},
 		{
 			name:  "valid JSON",
-			input: `{"write_rate":100,"load_mode":"synthetic"}`,
+			input: `{"write_rate":100,"load_mode":"synthetic","verify_sync_degraded_after":"1m","verify_sync_timeout":"3m","disk_full_no_progress_window":"2m"}`,
 			want: Config{
-				WriteRate: 100,
-				LoadMode:  "synthetic",
+				WriteRate:                100,
+				LoadMode:                 "synthetic",
+				VerifySyncDegradedAfter:  "1m",
+				VerifySyncTimeout:        "3m",
+				DiskFullNoProgressWindow: "2m",
 			},
 			wantError: false,
 		},

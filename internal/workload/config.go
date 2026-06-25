@@ -7,33 +7,36 @@ import (
 )
 
 type Config struct {
-	LoadMode                string  `json:"load_mode,omitempty"`
-	WriteRate               int     `json:"write_rate,omitempty"`
-	Pattern                 string  `json:"pattern,omitempty"`
-	PayloadSize             int     `json:"payload_size,omitempty"`
-	ReadRatio               float64 `json:"read_ratio,omitempty"`
-	Workers                 int     `json:"workers,omitempty"`
-	InitialSize             string  `json:"initial_size,omitempty"`
-	VerifyInterval          string  `json:"verify_interval,omitempty"`
-	VerifyType              string  `json:"verify_type,omitempty"`
-	SnapshotInterval        string  `json:"snapshot_interval,omitempty"`
-	SyncInterval            string  `json:"sync_interval,omitempty"`
-	S3PartSize              string  `json:"s3_part_size,omitempty"`
-	S3Concurrency           int     `json:"s3_concurrency,omitempty"`
-	ReplayDataset           string  `json:"replay_dataset,omitempty"`
-	ReplayDataPath          string  `json:"replay_data_path,omitempty"`
-	ReplayDataURL           string  `json:"replay_data_url,omitempty"`
-	ReplaySpeed             float64 `json:"replay_speed,omitempty"`
-	ReplayLoop              bool    `json:"replay_loop,omitempty"`
-	NumDatabases            int     `json:"num_databases,omitempty"`
-	ActivePercent           float64 `json:"active_percent,omitempty"`
-	ActivePercentSet        bool    `json:"-"`
-	ConfigMode              string  `json:"config_mode,omitempty"`
-	VerifySampleSize        int     `json:"verify_sample_size,omitempty"`
-	ReplicationLagThreshold uint64  `json:"replication_lag_threshold,omitempty"`
-	VolumeSizeGB            int     `json:"volume_size_gb,omitempty"`
-	MemoryMB                int     `json:"memory_mb,omitempty"`
-	CPUs                    int     `json:"cpus,omitempty"`
+	LoadMode                 string  `json:"load_mode,omitempty"`
+	WriteRate                int     `json:"write_rate,omitempty"`
+	Pattern                  string  `json:"pattern,omitempty"`
+	PayloadSize              int     `json:"payload_size,omitempty"`
+	ReadRatio                float64 `json:"read_ratio,omitempty"`
+	Workers                  int     `json:"workers,omitempty"`
+	InitialSize              string  `json:"initial_size,omitempty"`
+	VerifyInterval           string  `json:"verify_interval,omitempty"`
+	VerifyType               string  `json:"verify_type,omitempty"`
+	VerifySyncDegradedAfter  string  `json:"verify_sync_degraded_after,omitempty"`
+	VerifySyncTimeout        string  `json:"verify_sync_timeout,omitempty"`
+	DiskFullNoProgressWindow string  `json:"disk_full_no_progress_window,omitempty"`
+	SnapshotInterval         string  `json:"snapshot_interval,omitempty"`
+	SyncInterval             string  `json:"sync_interval,omitempty"`
+	S3PartSize               string  `json:"s3_part_size,omitempty"`
+	S3Concurrency            int     `json:"s3_concurrency,omitempty"`
+	ReplayDataset            string  `json:"replay_dataset,omitempty"`
+	ReplayDataPath           string  `json:"replay_data_path,omitempty"`
+	ReplayDataURL            string  `json:"replay_data_url,omitempty"`
+	ReplaySpeed              float64 `json:"replay_speed,omitempty"`
+	ReplayLoop               bool    `json:"replay_loop,omitempty"`
+	NumDatabases             int     `json:"num_databases,omitempty"`
+	ActivePercent            float64 `json:"active_percent,omitempty"`
+	ActivePercentSet         bool    `json:"-"`
+	ConfigMode               string  `json:"config_mode,omitempty"`
+	VerifySampleSize         int     `json:"verify_sample_size,omitempty"`
+	ReplicationLagThreshold  uint64  `json:"replication_lag_threshold,omitempty"`
+	VolumeSizeGB             int     `json:"volume_size_gb,omitempty"`
+	MemoryMB                 int     `json:"memory_mb,omitempty"`
+	CPUs                     int     `json:"cpus,omitempty"`
 }
 
 func (c Config) JSON() string {

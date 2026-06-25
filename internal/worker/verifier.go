@@ -393,8 +393,7 @@ func (v *Verifier) waitForSyncDB(ctx context.Context, result *VerificationResult
 		}
 
 		if time.Now().Add(v.syncRetryDelay).After(deadline) {
-			syncErr := fmt.Errorf("sync lag not resolved: txid=%016x replicated=%016x",
-				syncResp.TXID, syncResp.ReplicatedTXID)
+			syncErr := syncLagNotResolvedError(v.cfg, syncResp.TXID, syncResp.ReplicatedTXID)
 			v.captureSyncFailureDiagnostics(result, syncErr)
 			return syncErr
 		}
@@ -418,6 +417,14 @@ func (v *Verifier) waitForSyncDB(ctx context.Context, result *VerificationResult
 		case <-time.After(v.syncRetryDelay):
 		}
 	}
+}
+
+func syncLagNotResolvedError(cfg Config, txid, replicatedTXID uint64) error {
+	err := fmt.Errorf("sync lag not resolved: txid=%016x replicated=%016x", txid, replicatedTXID)
+	if snapshotUnderDiskPressure(collectDiskPressureRuntime(cfg)) {
+		return fmt.Errorf("disk is full: no replication progress while data disk cannot stage current database snapshot: %w", err)
+	}
+	return err
 }
 
 func (v *Verifier) syncOnceDB(ctx context.Context, budget time.Duration, dbPath string) (syncResponse, error) {

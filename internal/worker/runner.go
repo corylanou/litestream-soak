@@ -18,6 +18,7 @@ type Runner struct {
 	loadReplayManager
 
 	failureDebug failureDebugState
+	noProgress   diskPressureNoProgressState
 	verifier     *Verifier
 	reporter     *Reporter
 }
@@ -53,6 +54,10 @@ func (r *Runner) Run(ctx context.Context) error {
 				SetUptime(uptime)
 				r.setUptime(uptime)
 				r.pollDBStats()
+				pressure := r.observeDiskPressureNoProgress(time.Now().UTC(), r.currentSnapshot())
+				if pressure.ShouldReport {
+					r.sendDiskPressureNoProgressEvent(runCtx, pressure.Runtime)
+				}
 				r.sendHeartbeat(runCtx)
 			}
 		}

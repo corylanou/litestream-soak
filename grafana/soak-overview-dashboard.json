@@ -2073,6 +2073,57 @@
       ],
       "title": "Replication Lag By Region",
       "type": "timeseries"
+    },
+    {
+      "description": "Alert fingerprint: platform_disk_full_no_progress",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "id": 144,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(soak_control_worker_latest_platform_event_info{source=\"$source\",event_type=\"platform_disk_full_no_progress\"} == 1) or on() vector(0)",
+          "legendFormat": "platform_disk_full_no_progress"
+        }
+      ],
+      "title": "Disk-Full No-Progress Guard",
+      "type": "stat"
     }
   ],
   "refresh": "30s",

@@ -1,6 +1,9 @@
 package worker
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestConfigFromEnvReadsS3UploadTuning(t *testing.T) {
 	t.Setenv("REPLICA_TYPE", "s3")
@@ -47,6 +50,19 @@ func TestConfigFromEnvReadsManyDBConfig(t *testing.T) {
 	}
 	if cfg.ReplicationLagThreshold != 3 {
 		t.Fatalf("ReplicationLagThreshold = %d, want 3", cfg.ReplicationLagThreshold)
+	}
+}
+
+func TestConfigFromEnvReadsDiskFullNoProgressWindow(t *testing.T) {
+	t.Setenv("DISK_FULL_NO_PROGRESS_WINDOW", "2m")
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v", err)
+	}
+
+	if cfg.DiskFullNoProgressWindow != 2*time.Minute {
+		t.Fatalf("DiskFullNoProgressWindow = %s, want 2m", cfg.DiskFullNoProgressWindow)
 	}
 }
 

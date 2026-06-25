@@ -52,10 +52,11 @@ type Config struct {
 	LoadDuration time.Duration
 
 	// Verification
-	VerifyInterval          time.Duration
-	VerifyType              string // quick, integrity, checksum, full
-	VerifySyncDegradedAfter time.Duration
-	VerifySyncTimeout       time.Duration
+	VerifyInterval           time.Duration
+	VerifyType               string // quick, integrity, checksum, full
+	VerifySyncDegradedAfter  time.Duration
+	VerifySyncTimeout        time.Duration
+	DiskFullNoProgressWindow time.Duration
 
 	// Replica config
 	ReplicaType string // "file" or "s3"
@@ -119,10 +120,11 @@ func DefaultConfig() Config {
 		ReplaySpeed: 10.0,
 		ReplayLoop:  true,
 
-		VerifyInterval:          30 * time.Minute,
-		VerifyType:              "integrity",
-		VerifySyncDegradedAfter: 5 * time.Minute,
-		VerifySyncTimeout:       15 * time.Minute,
+		VerifyInterval:           30 * time.Minute,
+		VerifyType:               "integrity",
+		VerifySyncDegradedAfter:  5 * time.Minute,
+		VerifySyncTimeout:        15 * time.Minute,
+		DiskFullNoProgressWindow: 10 * time.Minute,
 
 		ReplicaType: "file",
 		ReplicaPath: "/data/replicas",
@@ -333,6 +335,13 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.VerifySyncTimeout = d
 	}
+	if v := os.Getenv("DISK_FULL_NO_PROGRESS_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid DISK_FULL_NO_PROGRESS_WINDOW: %w", err)
+		}
+		c.DiskFullNoProgressWindow = d
+	}
 
 	if v := os.Getenv("REPLICA_TYPE"); v != "" {
 		c.ReplicaType = v
@@ -526,29 +535,32 @@ func (c Config) manyDBVerifySampleSize() int {
 
 func (c Config) WorkloadConfig() workload.Config {
 	return workload.Config{
-		LoadMode:                c.LoadMode,
-		WriteRate:               c.WriteRate,
-		Pattern:                 c.Pattern,
-		PayloadSize:             c.PayloadSize,
-		ReadRatio:               c.ReadRatio,
-		Workers:                 c.Workers,
-		InitialSize:             c.InitialSize,
-		VerifyInterval:          c.VerifyInterval.String(),
-		VerifyType:              c.VerifyType,
-		SnapshotInterval:        c.SnapshotInterval.String(),
-		SyncInterval:            c.SyncInterval.String(),
-		S3PartSize:              c.S3PartSize,
-		S3Concurrency:           c.S3Concurrency,
-		NumDatabases:            c.NumDatabases,
-		ActivePercent:           c.ActivePercent,
-		ActivePercentSet:        c.ManyDBEnabled(),
-		ConfigMode:              c.manyDBConfigMode(),
-		VerifySampleSize:        c.VerifySampleSize,
-		ReplicationLagThreshold: c.ReplicationLagThreshold,
-		ReplayDataset:           c.ReplayDataset,
-		ReplayDataPath:          c.ReplayDataPath,
-		ReplayDataURL:           c.ReplayDataURL,
-		ReplaySpeed:             c.ReplaySpeed,
-		ReplayLoop:              c.ReplayLoop,
+		LoadMode:                 c.LoadMode,
+		WriteRate:                c.WriteRate,
+		Pattern:                  c.Pattern,
+		PayloadSize:              c.PayloadSize,
+		ReadRatio:                c.ReadRatio,
+		Workers:                  c.Workers,
+		InitialSize:              c.InitialSize,
+		VerifyInterval:           c.VerifyInterval.String(),
+		VerifyType:               c.VerifyType,
+		VerifySyncDegradedAfter:  c.VerifySyncDegradedAfter.String(),
+		VerifySyncTimeout:        c.VerifySyncTimeout.String(),
+		DiskFullNoProgressWindow: c.DiskFullNoProgressWindow.String(),
+		SnapshotInterval:         c.SnapshotInterval.String(),
+		SyncInterval:             c.SyncInterval.String(),
+		S3PartSize:               c.S3PartSize,
+		S3Concurrency:            c.S3Concurrency,
+		NumDatabases:             c.NumDatabases,
+		ActivePercent:            c.ActivePercent,
+		ActivePercentSet:         c.ManyDBEnabled(),
+		ConfigMode:               c.manyDBConfigMode(),
+		VerifySampleSize:         c.VerifySampleSize,
+		ReplicationLagThreshold:  c.ReplicationLagThreshold,
+		ReplayDataset:            c.ReplayDataset,
+		ReplayDataPath:           c.ReplayDataPath,
+		ReplayDataURL:            c.ReplayDataURL,
+		ReplaySpeed:              c.ReplaySpeed,
+		ReplayLoop:               c.ReplayLoop,
 	}
 }

@@ -46,7 +46,7 @@ func TestPollDBStatsMarksSnapshotHealthy(t *testing.T) {
 			_, _ = w.Write([]byte(`{"uptime_seconds":99}`))
 		case "/list":
 			lastSyncAt := time.Now().Add(-3 * time.Second).UTC().Format(time.RFC3339Nano)
-			_, _ = w.Write([]byte(`{"databases":[{"status":"replicating","last_sync_at":"` + lastSyncAt + `"}]}`))
+			_, _ = w.Write([]byte(`{"databases":[{"status":"replicating","txid":42,"replicated_txid":40,"last_sync_at":"` + lastSyncAt + `"}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -61,6 +61,12 @@ func TestPollDBStatsMarksSnapshotHealthy(t *testing.T) {
 	}
 	if snapshot.DBTXID != 42 {
 		t.Fatalf("db txid=%d want 42", snapshot.DBTXID)
+	}
+	if snapshot.ReplicatedTXID != 40 {
+		t.Fatalf("replicated txid=%d want 40", snapshot.ReplicatedTXID)
+	}
+	if snapshot.ReplicationLagMax != 2 {
+		t.Fatalf("replication lag max=%d want 2", snapshot.ReplicationLagMax)
 	}
 	if snapshot.DBStatus != "replicating" {
 		t.Fatalf("db status=%q want %q", snapshot.DBStatus, "replicating")
