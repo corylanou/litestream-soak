@@ -1,0 +1,1358 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/benbjohnson/litestream"
+	"github.com/benbjohnson/litestream/file"
+	lss3 "github.com/benbjohnson/litestream/s3"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/superfly/ltx"
+	_ "modernc.org/sqlite"
+)
+
+const (
+	modeUploadPartReset         = "uploadpart-reset"
+	modeSourceGETReset          = "source-get-reset"
+	modeProviderHTTP408         = "provider-http-408"
+	modeProviderRequestCanceled = "provider-request-canceled"
+	requestCanceledResponseBody = `<Error><Code>RequestCanceled</Code><Message>Request is canceled.</Message><RequestId>fault-proxy</RequestId></Error>`
+	requestTimeoutResponseBody  = `<Error><Code>RequestTimeout</Code><Message>Request timeout.</Message><RequestId>fault-proxy</RequestId></Error>`
+)
+
+type config struct {
+	Scenario      string
+	LitestreamRef string
+	LitestreamSHA string
+	Run           int
+	WorkDir       string
+	S3Endpoint    string
+	S3Bucket      string
+	S3Prefix      string
+	FileReplica   string
+}
+
+type result struct {
+	Scenario      string                `json:"scenario"`
+	LitestreamRef string                `json:"litestream_ref"`
+	LitestreamSHA string                `json:"litestream_sha"`
+	Run           int                   `json:"run"`
+	Pass          bool                  `json:"pass"`
+	Operation     string                `json:"operation"`
+	Error         string                `json:"error,omitempty"`
+	Stats         map[string]any        `json:"stats,omitempty"`
+	Files         map[string][]fileInfo `json:"files,omitempty"`
+	Logs          []string              `json:"logs,omitempty"`
+}
+
+type fileInfo struct {
+	Level int    `json:"level"`
+	Min   uint64 `json:"min_txid"`
+	Max   uint64 `json:"max_txid"`
+	Size  int64  `json:"size"`
+}
+
+func main() {
+	var cfg config
+	flag.StringVar(&cfg.Scenario, "scenario", "", "")
+	flag.StringVar(&cfg.LitestreamRef, "litestream-ref", "", "")
+	flag.StringVar(&cfg.LitestreamSHA, "litestream-sha", "", "")
+	flag.IntVar(&cfg.Run, "run", 1, "")
+	flag.StringVar(&cfg.WorkDir, "work-dir", "", "")
+	flag.StringVar(&cfg.S3Endpoint, "s3-endpoint", "", "")
+	flag.StringVar(&cfg.S3Bucket, "s3-bucket", "", "")
+	flag.StringVar(&cfg.S3Prefix, "s3-prefix", "", "")
+	flag.StringVar(&cfg.FileReplica, "file-replica", "", "")
+	flag.Parse()
+
+	if cfg.WorkDir == "" {
+		cfg.WorkDir = filepath.Join(os.TempDir(), "litestream-one-shot")
+	}
+	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
+		fatal(cfg, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), scenarioTimeout(cfg.Scenario))
+	defer cancel()
+
+	var (
+		res result
+		err error
+	)
+	switch cfg.Scenario {
+	case "compaction-source-stream-drop":
+		res, err = runCompactionSourceStreamDrop(ctx, cfg)
+	case "uploadpart-retry-quota":
+		res, err = runUploadPartRetryQuota(ctx, cfg)
+	case "provider-http-408", "provider-request-canceled":
+		res, err = runProviderRestore(ctx, cfg)
+	case "constrained-disk":
+		res, err = runConstrainedDisk(ctx, cfg)
+	default:
+		err = fmt.Errorf("unknown scenario %q", cfg.Scenario)
+	}
+	if err != nil {
+		fatal(cfg, err)
+	}
+	writeResult(res)
+	if !res.Pass {
+		os.Exit(1)
+	}
+}
+
+func scenarioTimeout(scenario string) time.Duration {
+	switch scenario {
+	case "uploadpart-retry-quota":
+		return 8 * time.Minute
+	case "constrained-disk":
+		return 5 * time.Minute
+	default:
+		return 3 * time.Minute
+	}
+}
+
+func fatal(cfg config, err error) {
+	writeResult(result{
+		Scenario:      cfg.Scenario,
+		LitestreamRef: cfg.LitestreamRef,
+		LitestreamSHA: cfg.LitestreamSHA,
+		Run:           cfg.Run,
+		Pass:          false,
+		Error:         err.Error(),
+	})
+	os.Exit(1)
+}
+
+func writeResult(res result) {
+	if res.Stats == nil {
+		res.Stats = make(map[string]any)
+	}
+	b, err := json.Marshal(res)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "marshal result: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(string(b))
+}
+
+func runCompactionSourceStreamDrop(ctx context.Context, cfg config) (result, error) {
+	res := baseResult(cfg, "compact-level-2")
+	client := newS3Client(cfg, cfg.S3Prefix, 0, 0)
+	if err := client.DeleteAll(ctx); err != nil {
+		return res, fmt.Errorf("delete s3 prefix: %w", err)
+	}
+
+	dbPath := filepath.Join(cfg.WorkDir, "source.db")
+	levels := litestream.CompactionLevels{
+		{Level: 0},
+		{Level: 1, Interval: time.Second},
+		{Level: 2, Interval: time.Second},
+	}
+	db, store, sqldb, err := openLitestreamDB(ctx, dbPath, client, levels)
+	if err != nil {
+		return res, err
+	}
+
+	if err := insertRows(ctx, sqldb, 0, 96, 8192); err != nil {
+		return res, err
+	}
+	if err := syncDB(ctx, db); err != nil {
+		return res, err
+	}
+	if err := insertRows(ctx, sqldb, 96, 96, 8192); err != nil {
+		return res, err
+	}
+	if err := syncDB(ctx, db); err != nil {
+		return res, err
+	}
+
+	l1Info, err := store.CompactDB(ctx, db, levels[1])
+	if err != nil {
+		return res, fmt.Errorf("seed level 1 compaction: %w", err)
+	}
+	expectedTXID := uint64(l1Info.MaxTXID)
+	if err := sqldb.Close(); err != nil {
+		return res, err
+	}
+	if err := store.Close(ctx); err != nil {
+		return res, err
+	}
+
+	l2Before, err := listLTXFiles(ctx, client, 2)
+	if err != nil {
+		return res, err
+	}
+
+	proxy := newFaultProxy(faultProxyConfig{
+		TargetEndpoint:    cfg.S3Endpoint,
+		ListenAddr:        "127.0.0.1:0",
+		Mode:              modeSourceGETReset,
+		ResetAfterBytes:   64 * 1024,
+		FailFirstAttempts: 2,
+		SourceLevel:       "0001",
+	})
+	if err := proxy.Start(ctx); err != nil {
+		return res, err
+	}
+	defer proxy.Close(context.Background())
+
+	var opErr error
+	proxyCfg := cfg
+	proxyCfg.S3Endpoint = proxy.Endpoint()
+	proxyClient := newS3Client(proxyCfg, cfg.S3Prefix, 0, 0)
+	_, opErr = litestream.NewCompactor(proxyClient, slog.Default()).Compact(ctx, 2)
+
+	l2After, err := listLTXFiles(ctx, client, 2)
+	if err != nil {
+		return res, err
+	}
+
+	res.Files = map[string][]fileInfo{
+		"l2_before": encodeFiles(l2Before),
+		"l2_after":  encodeFiles(l2After),
+	}
+	stats := proxy.Stats()
+	stats["l1_min_txid"] = uint64(l1Info.MinTXID)
+	stats["l1_max_txid"] = expectedTXID
+	stats["l2_new_files"] = len(l2After) - len(l2Before)
+	stats["l2_covers_expected_txid"] = coversTXID(l2After, ltx.TXID(expectedTXID))
+	res.Stats = stats
+
+	if opErr != nil {
+		res.Error = opErr.Error()
+		res.Pass = proxy.ObservedSourceGETs() > 0 && len(l2After) == len(l2Before) && sourceReadSignature(opErr)
+		return res, nil
+	}
+
+	res.Pass = proxy.ObservedSourceGETs() > 0 && proxy.ObservedSourceRangeGETs() > 0 && len(l2After) > len(l2Before) && coversTXID(l2After, ltx.TXID(expectedTXID))
+	return res, nil
+}
+
+func runUploadPartRetryQuota(ctx context.Context, cfg config) (result, error) {
+	res := baseResult(cfg, "snapshot-upload")
+	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
+		return res, err
+	}
+
+	dbPath := filepath.Join(cfg.WorkDir, "upload.db")
+	sqldb, err := openSQLDB(dbPath)
+	if err != nil {
+		return res, err
+	}
+	if err := createLargeSnapshotDB(ctx, sqldb); err != nil {
+		return res, err
+	}
+	if err := sqldb.Close(); err != nil {
+		return res, err
+	}
+
+	proxy := newFaultProxy(faultProxyConfig{
+		TargetEndpoint:    cfg.S3Endpoint,
+		ListenAddr:        "127.0.0.1:0",
+		Mode:              modeUploadPartReset,
+		MinContentLength:  8 * 1024 * 1024,
+		ResetAfterBytes:   2 * 1024 * 1024,
+		FailFirstAttempts: 2,
+		MaxFailures:       50,
+	})
+	if err := proxy.Start(ctx); err != nil {
+		return res, err
+	}
+	defer proxy.Close(context.Background())
+
+	directClient := newS3Client(cfg, cfg.S3Prefix, 8*1024*1024, 1)
+	if err := directClient.DeleteAll(ctx); err != nil {
+		return res, fmt.Errorf("delete s3 prefix: %w", err)
+	}
+
+	proxyCfg := cfg
+	proxyCfg.S3Endpoint = proxy.Endpoint()
+	client := newS3Client(proxyCfg, cfg.S3Prefix, 8*1024*1024, 1)
+	db := litestream.NewDB(dbPath)
+	db.MonitorInterval = 0
+	db.Replica = litestream.NewReplica(db)
+	db.Replica.Client = directClient
+	db.Replica.MonitorEnabled = false
+	store := litestream.NewStore([]*litestream.DB{db}, litestream.CompactionLevels{{Level: 0}})
+	store.CompactionMonitorEnabled = false
+	store.L0Retention = 0
+	if err := store.Open(ctx); err != nil {
+		return res, err
+	}
+	if err := syncDB(ctx, db); err != nil {
+		return res, fmt.Errorf("initialize litestream db: %w", err)
+	}
+	db.Replica.Client = client
+
+	var opErr error
+	_, opErr = db.Snapshot(ctx)
+	if closeErr := store.Close(ctx); closeErr != nil && opErr == nil {
+		opErr = closeErr
+	}
+
+	res.Stats = proxy.Stats()
+	res.Stats["snapshot_count"] = countLevel(ctx, directClient, litestream.SnapshotLevel)
+	res.Stats["db_size_bytes"] = fileSize(dbPath)
+	if opErr != nil {
+		res.Error = opErr.Error()
+		res.Pass = strings.Contains(strings.ToLower(opErr.Error()), "rate limit token") || strings.Contains(strings.ToLower(opErr.Error()), "retry quota")
+		return res, nil
+	}
+	res.Pass = proxy.TotalFailures() == 50 && proxy.UniqueUploadParts() >= 20
+	return res, nil
+}
+
+func runProviderRestore(ctx context.Context, cfg config) (result, error) {
+	res := baseResult(cfg, "restore")
+	client := newS3Client(cfg, cfg.S3Prefix, 0, 0)
+	if err := client.DeleteAll(ctx); err != nil {
+		return res, fmt.Errorf("delete s3 prefix: %w", err)
+	}
+
+	dbPath := filepath.Join(cfg.WorkDir, "provider-source.db")
+	db, store, sqldb, err := openLitestreamDB(ctx, dbPath, client, litestream.CompactionLevels{{Level: 0}})
+	if err != nil {
+		return res, err
+	}
+	if err := insertRows(ctx, sqldb, 0, 64, 512); err != nil {
+		return res, err
+	}
+	if err := syncDB(ctx, db); err != nil {
+		return res, err
+	}
+	if _, err := db.Snapshot(ctx); err != nil {
+		return res, fmt.Errorf("seed snapshot: %w", err)
+	}
+	if err := sqldb.Close(); err != nil {
+		return res, err
+	}
+	if err := store.Close(ctx); err != nil {
+		return res, err
+	}
+
+	mode := modeProviderHTTP408
+	if cfg.Scenario == "provider-request-canceled" {
+		mode = modeProviderRequestCanceled
+	}
+	proxy := newFaultProxy(faultProxyConfig{
+		TargetEndpoint:    cfg.S3Endpoint,
+		ListenAddr:        "127.0.0.1:0",
+		Mode:              mode,
+		FailFirstAttempts: intEnv("ONE_SHOT_PROVIDER_FAIL_FIRST", 1),
+		MaxFailures:       intEnv("ONE_SHOT_PROVIDER_MAX_FAILURES", 1),
+	})
+	if err := proxy.Start(ctx); err != nil {
+		return res, err
+	}
+	defer proxy.Close(context.Background())
+
+	restorePath := filepath.Join(cfg.WorkDir, "restored.db")
+	var opErr error
+	proxyCfg := cfg
+	proxyCfg.S3Endpoint = proxy.Endpoint()
+	restoreDB := litestream.NewDB(filepath.Join(cfg.WorkDir, "restore-handle.db"))
+	restoreDB.Replica = litestream.NewReplica(restoreDB)
+	restoreDB.Replica.Client = newS3Client(proxyCfg, cfg.S3Prefix, 0, 0)
+	opErr = restoreDB.Replica.Restore(ctx, litestream.RestoreOptions{OutputPath: restorePath})
+
+	res.Stats = proxy.Stats()
+	res.Stats["restore_exists"] = fileExists(restorePath)
+	res.Stats["restored_row_count"] = restoredRowCount(restorePath)
+	if opErr != nil {
+		res.Error = opErr.Error()
+		res.Pass = proxy.TotalFailures() == 1 && providerSignature(cfg.Scenario, opErr)
+		return res, nil
+	}
+	res.Pass = proxy.TotalFailures() == 1 && fileExists(restorePath) && restoredRowCount(restorePath) == 64
+	return res, nil
+}
+
+func runConstrainedDisk(ctx context.Context, cfg config) (result, error) {
+	res := baseResult(cfg, "monitor-sync-staging")
+	workDir := cfg.WorkDir
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		return res, err
+	}
+	replicaDir := cfg.FileReplica
+	if replicaDir == "" {
+		replicaDir = filepath.Join(workDir, "replica")
+	}
+	if err := os.MkdirAll(replicaDir, 0o755); err != nil {
+		return res, err
+	}
+
+	var logBuf safeBuffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	slog.SetDefault(logger)
+
+	metricsURL, closeMetrics, err := startMetricsServer()
+	if err != nil {
+		return res, err
+	}
+	defer closeMetrics()
+
+	dbPath := filepath.Join(workDir, "constrained.db")
+	client := file.NewReplicaClient(replicaDir)
+	db := litestream.NewDB(dbPath)
+	db.MonitorInterval = time.Second
+	db.Logger = logger
+	db.Replica = litestream.NewReplica(db)
+	db.Replica.Client = client
+	db.Replica.MonitorEnabled = false
+	db.ShutdownSyncTimeout = 0
+	store := litestream.NewStore([]*litestream.DB{db}, litestream.CompactionLevels{{Level: 0}})
+	store.CompactionMonitorEnabled = false
+	store.L0Retention = 0
+	store.Logger = logger
+
+	if err := store.Open(ctx); err != nil {
+		return res, err
+	}
+
+	sqldb, err := openSQLDB(dbPath)
+	if err != nil {
+		return res, err
+	}
+	if err := insertRows(ctx, sqldb, 0, 64, 1024); err != nil {
+		return res, err
+	}
+	if err := syncDB(ctx, db); err != nil {
+		return res, err
+	}
+	initialTXID := currentTXID(db)
+
+	if err := insertRows(ctx, sqldb, 64, 8192, 8192); err != nil {
+		return res, err
+	}
+	fillerPath := filepath.Join(workDir, "reserve.fill")
+	fillErr := fillDisk(fillerPath, 4*1024*1024)
+	if fillErr != nil && !errors.Is(fillErr, syscall.ENOSPC) {
+		return res, fillErr
+	}
+
+	frozenTXID := initialTXID
+	deadline := time.Now().Add(35 * time.Second)
+	for time.Now().Before(deadline) {
+		frozenTXID = currentTXID(db)
+		logs := logBuf.Lines()
+		metric, metricOK := diskFullMetric(dbPath)
+		distinctLog := containsSubstring(logs, "disk full while staging LTX file")
+		if metricOK && metric == 1 && distinctLog {
+			break
+		}
+		if !metricOK && containsSubstring(logs, "sync error") && frozenTXID == initialTXID {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	logs := logBuf.Lines()
+	metric, metricOK := diskFullMetric(dbPath)
+	txidDuringDiskFull := currentTXID(db)
+	metricsReachable := httpGetOK(metricsURL)
+	distinctLog := containsSubstring(logs, "disk full while staging LTX file")
+
+	res.Stats = map[string]any{
+		"metrics_url":                    metricsURL,
+		"metrics_reachable":              metricsReachable,
+		"initial_txid":                   initialTXID,
+		"txid_during_disk_full":          txidDuringDiskFull,
+		"txid_frozen":                    txidDuringDiskFull == initialTXID,
+		"disk_full_metric_present":       metricOK,
+		"disk_full_metric_value":         metric,
+		"distinct_disk_full_log_present": distinctLog,
+		"process_alive":                  true,
+		"fill_error":                     errorString(fillErr),
+		"free_bytes_after_fill":          freeBytes(workDir),
+	}
+	res.Logs = tailStrings(logs, 12)
+
+	if metricOK && metric == 1 && distinctLog {
+		if err := os.Remove(fillerPath); err != nil && !os.IsNotExist(err) {
+			return res, err
+		}
+		if err := waitForRecovery(ctx, db, dbPath, initialTXID); err != nil {
+			res.Error = err.Error()
+			res.Pass = false
+			return res, nil
+		}
+		recoveredMetric, recoveredOK := diskFullMetric(dbPath)
+		recoveredTXID := currentTXID(db)
+		res.Stats["disk_full_metric_recovered_present"] = recoveredOK
+		res.Stats["disk_full_metric_recovered_value"] = recoveredMetric
+		res.Stats["recovered_txid"] = recoveredTXID
+		res.Pass = recoveredOK && recoveredMetric == 0 && recoveredTXID > initialTXID
+	} else {
+		res.Pass = metricsReachable && !metricOK && !distinctLog && txidDuringDiskFull == initialTXID
+	}
+
+	_ = sqldb.Close()
+	_ = store.Close(ctx)
+	return res, nil
+}
+
+func baseResult(cfg config, operation string) result {
+	return result{
+		Scenario:      cfg.Scenario,
+		LitestreamRef: cfg.LitestreamRef,
+		LitestreamSHA: cfg.LitestreamSHA,
+		Run:           cfg.Run,
+		Operation:     operation,
+		Stats:         make(map[string]any),
+	}
+}
+
+func openLitestreamDB(ctx context.Context, dbPath string, client litestream.ReplicaClient, levels litestream.CompactionLevels) (*litestream.DB, *litestream.Store, *sql.DB, error) {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		return nil, nil, nil, err
+	}
+	db := litestream.NewDB(dbPath)
+	db.MonitorInterval = 0
+	db.Replica = litestream.NewReplica(db)
+	db.Replica.Client = client
+	db.Replica.MonitorEnabled = false
+	store := litestream.NewStore([]*litestream.DB{db}, levels)
+	store.CompactionMonitorEnabled = false
+	store.L0Retention = 0
+	store.RetentionEnabled = false
+	if err := store.Open(ctx); err != nil {
+		return nil, nil, nil, fmt.Errorf("open store: %w", err)
+	}
+	sqldb, err := openSQLDB(dbPath)
+	if err != nil {
+		_ = store.Close(ctx)
+		return nil, nil, nil, err
+	}
+	return db, store, sqldb, nil
+}
+
+func openSQLDB(dbPath string) (*sql.DB, error) {
+	sqldb, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, stmt := range []string{
+		`PRAGMA journal_mode=WAL`,
+		`PRAGMA synchronous=NORMAL`,
+		`PRAGMA wal_autocheckpoint=0`,
+		`CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, value BLOB)`,
+	} {
+		if _, err := sqldb.Exec(stmt); err != nil {
+			_ = sqldb.Close()
+			return nil, fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	return sqldb, nil
+}
+
+func insertRows(ctx context.Context, db *sql.DB, start, count, blobSize int) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO t (id, value) VALUES (?, randomblob(?))`)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	for i := 0; i < count; i++ {
+		if _, err := stmt.ExecContext(ctx, start+i+1, blobSize); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func createLargeSnapshotDB(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS t`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE t (id INTEGER PRIMARY KEY, value BLOB)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 56000) INSERT INTO t(value) SELECT randomblob(3800) FROM c`); err != nil {
+		return err
+	}
+	_, err := db.ExecContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`)
+	return err
+}
+
+func syncDB(ctx context.Context, db *litestream.DB) error {
+	if err := db.Sync(ctx); err != nil {
+		return err
+	}
+	if db.Replica != nil {
+		if err := db.Replica.Sync(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func newS3Client(cfg config, prefix string, partSize int64, concurrency int) *lss3.ReplicaClient {
+	client := lss3.NewReplicaClient()
+	client.AccessKeyID = firstNonEmpty(os.Getenv("AWS_ACCESS_KEY_ID"), "minioadmin")
+	client.SecretAccessKey = firstNonEmpty(os.Getenv("AWS_SECRET_ACCESS_KEY"), "minioadmin")
+	client.Bucket = cfg.S3Bucket
+	client.Path = strings.Trim(prefix, "/")
+	client.Endpoint = cfg.S3Endpoint
+	client.ForcePathStyle = true
+	client.Region = "us-east-1"
+	client.SignPayload = false
+	if partSize > 0 {
+		client.PartSize = partSize
+	}
+	if concurrency > 0 {
+		client.Concurrency = concurrency
+	}
+	return client
+}
+
+func listLTXFiles(ctx context.Context, client litestream.ReplicaClient, level int) ([]*ltx.FileInfo, error) {
+	itr, err := client.LTXFiles(ctx, level, 0, false)
+	if err != nil {
+		return nil, err
+	}
+	defer itr.Close()
+	var infos []*ltx.FileInfo
+	for itr.Next() {
+		info := *itr.Item()
+		infos = append(infos, &info)
+	}
+	if err := itr.Close(); err != nil {
+		return nil, err
+	}
+	sort.Slice(infos, func(i, j int) bool {
+		if infos[i].MinTXID == infos[j].MinTXID {
+			return infos[i].MaxTXID < infos[j].MaxTXID
+		}
+		return infos[i].MinTXID < infos[j].MinTXID
+	})
+	return infos, nil
+}
+
+func countLevel(ctx context.Context, client litestream.ReplicaClient, level int) int {
+	infos, err := listLTXFiles(ctx, client, level)
+	if err != nil {
+		return -1
+	}
+	return len(infos)
+}
+
+func encodeFiles(infos []*ltx.FileInfo) []fileInfo {
+	out := make([]fileInfo, 0, len(infos))
+	for _, info := range infos {
+		out = append(out, fileInfo{
+			Level: info.Level,
+			Min:   uint64(info.MinTXID),
+			Max:   uint64(info.MaxTXID),
+			Size:  info.Size,
+		})
+	}
+	return out
+}
+
+func coversTXID(infos []*ltx.FileInfo, txid ltx.TXID) bool {
+	for _, info := range infos {
+		if info.MinTXID <= txid && info.MaxTXID >= txid {
+			return true
+		}
+	}
+	return false
+}
+
+func sourceReadSignature(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "read") || strings.Contains(s, "stream") || strings.Contains(s, "unexpected eof") || strings.Contains(s, "connection")
+}
+
+func providerSignature(scenario string, err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	if scenario == "provider-request-canceled" {
+		return strings.Contains(s, "requestcanceled") || strings.Contains(s, "request canceled") || strings.Contains(s, "canceled")
+	}
+	return strings.Contains(s, "requesttimeout") || strings.Contains(s, "408") || strings.Contains(s, "request timeout")
+}
+
+func withProxyEnv(endpoint string, fn func() error) error {
+	keys := []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"}
+	old := make(map[string]*string, len(keys))
+	for _, key := range keys {
+		if value, ok := os.LookupEnv(key); ok {
+			v := value
+			old[key] = &v
+		} else {
+			old[key] = nil
+		}
+	}
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		if err := os.Setenv(key, endpoint); err != nil {
+			return err
+		}
+	}
+	_ = os.Setenv("NO_PROXY", "127.0.0.1,localhost,::1")
+	_ = os.Setenv("no_proxy", "127.0.0.1,localhost,::1")
+	defer func() {
+		for _, key := range keys {
+			if old[key] == nil {
+				_ = os.Unsetenv(key)
+			} else {
+				_ = os.Setenv(key, *old[key])
+			}
+		}
+	}()
+	return fn()
+}
+
+type faultProxyConfig struct {
+	TargetEndpoint    string
+	ListenAddr        string
+	Mode              string
+	MinContentLength  int64
+	ResetAfterBytes   int64
+	FailFirstAttempts int
+	MaxFailures       int
+	SourceLevel       string
+}
+
+type faultProxy struct {
+	cfg      faultProxyConfig
+	server   *http.Server
+	listener net.Listener
+	endpoint string
+	target   *url.URL
+	proxy    *httputil.ReverseProxy
+
+	mu                     sync.Mutex
+	attempts               map[string]int
+	totalFailures          int
+	observedSourceGET      int
+	observedSourceRangeGET int
+	sourceRanges           []string
+	uploadPartAttempts     int
+	uploadPartFailures     int
+	uploadParts            map[string]struct{}
+	injectedPaths          []string
+	totalRequests          int
+	getPaths               []string
+}
+
+func newFaultProxy(cfg faultProxyConfig) *faultProxy {
+	if cfg.ListenAddr == "" {
+		cfg.ListenAddr = "127.0.0.1:0"
+	}
+	if cfg.ResetAfterBytes <= 0 {
+		cfg.ResetAfterBytes = 1
+	}
+	if cfg.SourceLevel == "" {
+		cfg.SourceLevel = "0001"
+	}
+	return &faultProxy{cfg: cfg, attempts: make(map[string]int), uploadParts: make(map[string]struct{})}
+}
+
+func (p *faultProxy) Start(ctx context.Context) error {
+	target, err := parseProxyTargetEndpoint(p.cfg.TargetEndpoint)
+	if err != nil {
+		return err
+	}
+	listener, err := net.Listen("tcp", p.cfg.ListenAddr)
+	if err != nil {
+		return err
+	}
+	p.listener = listener
+	p.endpoint = "http://" + listener.Addr().String()
+	p.target = target
+	p.proxy = httputil.NewSingleHostReverseProxy(target)
+	p.proxy.Transport = directTransport()
+	p.server = &http.Server{Handler: p}
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.server.Serve(listener) }()
+	select {
+	case <-ctx.Done():
+		_ = p.Close(context.Background())
+		return ctx.Err()
+	case err := <-errCh:
+		return err
+	case <-time.After(50 * time.Millisecond):
+		return nil
+	}
+}
+
+func (p *faultProxy) Close(ctx context.Context) error {
+	if p.server == nil {
+		return nil
+	}
+	return p.server.Shutdown(ctx)
+}
+
+func (p *faultProxy) Endpoint() string { return p.endpoint }
+
+func (p *faultProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	p.recordRequest(r)
+	if p.shouldInjectProviderHTTP408(r) {
+		p.injectProviderHTTP408(w, r)
+		return
+	}
+	if p.shouldInjectProviderRequestCanceled(r) {
+		p.injectProviderRequestCanceled(w, r)
+		return
+	}
+	if p.shouldDropSourceGET(r) {
+		p.dropSourceGETResponse(w, r)
+		return
+	}
+	if p.shouldResetUploadPart(r) {
+		p.resetConnection(w, r)
+		return
+	}
+	if r.URL.IsAbs() {
+		p.proxyHTTP(w, r)
+		return
+	}
+	p.proxy.ServeHTTP(w, r)
+}
+
+func (p *faultProxy) shouldResetUploadPart(r *http.Request) bool {
+	if p.cfg.Mode != modeUploadPartReset || r.Method != http.MethodPut {
+		return false
+	}
+	query := r.URL.Query()
+	partNumber := strings.TrimSpace(query.Get("partNumber"))
+	uploadID := strings.TrimSpace(query.Get("uploadId"))
+	if partNumber == "" || uploadID == "" {
+		return false
+	}
+	if p.cfg.MinContentLength > 0 && r.ContentLength >= 0 && r.ContentLength < p.cfg.MinContentLength {
+		return false
+	}
+	key := r.URL.Path + "\x00" + uploadID + "\x00" + partNumber
+	p.observeUploadPart(key)
+	if p.recordFault("uploadpart\x00" + key) {
+		p.mu.Lock()
+		p.uploadPartFailures++
+		p.mu.Unlock()
+		return true
+	}
+	return false
+}
+
+func (p *faultProxy) shouldDropSourceGET(r *http.Request) bool {
+	if p.cfg.Mode != modeSourceGETReset || r.Method != http.MethodGet {
+		return false
+	}
+	if !strings.Contains(r.URL.Path, "/"+strings.Trim(p.cfg.SourceLevel, "/")+"/") {
+		return false
+	}
+	p.recordObservedSourceGET(r.Header.Get("Range"))
+	return p.recordFault("source-get\x00" + r.URL.Path)
+}
+
+func (p *faultProxy) shouldInjectProviderHTTP408(r *http.Request) bool {
+	if p.cfg.Mode != modeProviderHTTP408 || r.Method != http.MethodGet {
+		return false
+	}
+	if !isProviderObjectGET(r) {
+		return false
+	}
+	key := "provider-http-408\x00" + r.URL.Path + "\x00" + r.URL.RawQuery
+	if p.recordFault(key) {
+		p.recordInjectedPath(r)
+		return true
+	}
+	return false
+}
+
+func (p *faultProxy) shouldInjectProviderRequestCanceled(r *http.Request) bool {
+	if p.cfg.Mode != modeProviderRequestCanceled || r.Method != http.MethodGet {
+		return false
+	}
+	if !isProviderObjectGET(r) {
+		return false
+	}
+	key := "provider-request-canceled\x00" + r.URL.Path + "\x00" + r.URL.RawQuery
+	if p.recordFault(key) {
+		p.recordInjectedPath(r)
+		return true
+	}
+	return false
+}
+
+func (p *faultProxy) injectProviderHTTP408(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("X-Amz-Request-Id", "fault-proxy")
+	w.WriteHeader(http.StatusRequestTimeout)
+	_, _ = w.Write([]byte(requestTimeoutResponseBody))
+}
+
+func (p *faultProxy) injectProviderRequestCanceled(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("X-Amz-Request-Id", "fault-proxy")
+	w.WriteHeader(http.StatusBadRequest)
+	_, _ = w.Write([]byte(requestCanceledResponseBody))
+}
+
+func (p *faultProxy) dropSourceGETResponse(w http.ResponseWriter, r *http.Request) {
+	resp, err := p.roundTrip(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	copyHeader(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	dropBytes := p.sourceDropBytes(resp)
+	if dropBytes > 0 {
+		_, _ = io.CopyN(w, resp.Body, dropBytes)
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		return
+	}
+	conn, _, err := hijacker.Hijack()
+	if err != nil {
+		return
+	}
+	_ = conn.Close()
+}
+
+func (p *faultProxy) sourceDropBytes(resp *http.Response) int64 {
+	if resp != nil && resp.ContentLength > 0 && resp.ContentLength <= p.cfg.ResetAfterBytes {
+		n := resp.ContentLength / 2
+		if n < 1 {
+			return 1
+		}
+		return n
+	}
+	return p.cfg.ResetAfterBytes
+}
+
+func (p *faultProxy) resetConnection(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.ResetAfterBytes > 0 {
+		_, _ = io.CopyN(io.Discard, r.Body, p.cfg.ResetAfterBytes)
+	}
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "connection reset by fault proxy", http.StatusServiceUnavailable)
+		return
+	}
+	conn, _, err := hijacker.Hijack()
+	if err != nil {
+		return
+	}
+	_ = conn.Close()
+}
+
+func (p *faultProxy) proxyHTTP(w http.ResponseWriter, r *http.Request) {
+	resp, err := p.roundTrip(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	copyHeader(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+func (p *faultProxy) roundTrip(r *http.Request) (*http.Response, error) {
+	out := r.Clone(r.Context())
+	out.RequestURI = ""
+	out.URL = cloneURL(r.URL)
+	if !out.URL.IsAbs() {
+		out.URL.Scheme = p.target.Scheme
+		out.URL.Host = p.target.Host
+		if r.Host != "" {
+			out.Host = r.Host
+		}
+	}
+	return p.proxy.Transport.RoundTrip(out)
+}
+
+func (p *faultProxy) recordFault(key string) bool {
+	if p.cfg.FailFirstAttempts <= 0 {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cfg.MaxFailures > 0 && p.totalFailures >= p.cfg.MaxFailures {
+		return false
+	}
+	p.attempts[key]++
+	if p.attempts[key] > p.cfg.FailFirstAttempts {
+		return false
+	}
+	p.totalFailures++
+	return true
+}
+
+func (p *faultProxy) observeUploadPart(key string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.uploadPartAttempts++
+	p.uploadParts[key] = struct{}{}
+}
+
+func (p *faultProxy) recordObservedSourceGET(rangeHeader string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.observedSourceGET++
+	if strings.TrimSpace(rangeHeader) != "" {
+		p.sourceRanges = append(p.sourceRanges, rangeHeader)
+	}
+	if isNonzeroRangeHeader(rangeHeader) {
+		p.observedSourceRangeGET++
+	}
+}
+
+func (p *faultProxy) recordInjectedPath(r *http.Request) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	path := r.URL.Path
+	if r.URL.RawQuery != "" {
+		path += "?" + r.URL.RawQuery
+	}
+	p.injectedPaths = append(p.injectedPaths, path)
+}
+
+func (p *faultProxy) recordRequest(r *http.Request) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.totalRequests++
+	if r.Method != http.MethodGet {
+		return
+	}
+	path := r.URL.Path
+	if r.URL.RawQuery != "" {
+		path += "?" + r.URL.RawQuery
+	}
+	p.getPaths = append(p.getPaths, path)
+	if len(p.getPaths) > 30 {
+		p.getPaths = p.getPaths[len(p.getPaths)-30:]
+	}
+}
+
+func (p *faultProxy) TotalFailures() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.totalFailures
+}
+
+func (p *faultProxy) ObservedSourceGETs() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.observedSourceGET
+}
+
+func (p *faultProxy) ObservedSourceRangeGETs() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.observedSourceRangeGET
+}
+
+func (p *faultProxy) UniqueUploadParts() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.uploadParts)
+}
+
+func (p *faultProxy) Stats() map[string]any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return map[string]any{
+		"proxy_failures":                     p.totalFailures,
+		"observed_source_gets":               p.observedSourceGET,
+		"observed_source_nonzero_range_gets": p.observedSourceRangeGET,
+		"source_range_headers":               append([]string(nil), p.sourceRanges...),
+		"upload_part_attempts":               p.uploadPartAttempts,
+		"upload_part_failures":               p.uploadPartFailures,
+		"upload_part_unique_parts":           len(p.uploadParts),
+		"injected_paths":                     append([]string(nil), p.injectedPaths...),
+		"proxy_total_requests":               p.totalRequests,
+		"proxy_get_paths":                    append([]string(nil), p.getPaths...),
+	}
+}
+
+func parseProxyTargetEndpoint(endpoint string) (*url.URL, error) {
+	if endpoint == "" {
+		return nil, fmt.Errorf("target endpoint required")
+	}
+	if !strings.Contains(endpoint, "://") {
+		endpoint = "https://" + endpoint
+	}
+	target, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	if target.Scheme == "" || target.Host == "" {
+		return nil, fmt.Errorf("invalid endpoint %q", endpoint)
+	}
+	return target, nil
+}
+
+func isNonzeroRangeHeader(value string) bool {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if !strings.HasPrefix(value, "bytes=") {
+		return false
+	}
+	value = strings.TrimPrefix(value, "bytes=")
+	value = strings.TrimSpace(strings.SplitN(value, "-", 2)[0])
+	return value != "" && value != "0"
+}
+
+func isProviderObjectGET(r *http.Request) bool {
+	return r.URL.Query().Get("list-type") == "" && strings.HasSuffix(r.URL.Path, ".ltx")
+}
+
+func cloneURL(input *url.URL) *url.URL {
+	clone := *input
+	return &clone
+}
+
+func copyHeader(dst, src http.Header) {
+	for key, values := range src {
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+func directTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return transport
+}
+
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) Lines() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	text := b.buf.String()
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func startMetricsServer() (string, func(), error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", nil, err
+	}
+	server := &http.Server{Handler: promhttp.Handler()}
+	go func() { _ = server.Serve(listener) }()
+	return "http://" + listener.Addr().String() + "/metrics", func() {
+		_ = server.Shutdown(context.Background())
+	}, nil
+}
+
+func diskFullMetric(dbPath string) (float64, bool) {
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		return 0, false
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "litestream_disk_full" {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "db" && label.GetValue() == dbPath && metric.GetGauge() != nil {
+					return metric.GetGauge().GetValue(), true
+				}
+			}
+		}
+		return 0, true
+	}
+	return 0, false
+}
+
+func httpGetOK(rawURL string) bool {
+	resp, err := http.Get(rawURL)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+func currentTXID(db *litestream.DB) uint64 {
+	pos, err := db.Pos()
+	if err != nil {
+		return 0
+	}
+	return uint64(pos.TXID)
+}
+
+func fillDisk(path string, reserveBytes uint64) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	buf := bytes.Repeat([]byte{0xab}, 1024*1024)
+	for {
+		free := freeBytes(filepath.Dir(path))
+		if free <= reserveBytes {
+			return nil
+		}
+		if _, err := f.Write(buf); err != nil {
+			return err
+		}
+	}
+}
+
+func freeBytes(path string) uint64 {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0
+	}
+	return stat.Bavail * uint64(stat.Bsize)
+}
+
+func waitForRecovery(ctx context.Context, db *litestream.DB, dbPath string, initialTXID uint64) error {
+	deadline := time.Now().Add(75 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		metric, ok := diskFullMetric(dbPath)
+		if ok && metric == 0 && currentTXID(db) > initialTXID {
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+	metric, ok := diskFullMetric(dbPath)
+	return fmt.Errorf("recovery not observed: metric_present=%v metric=%v txid=%d initial_txid=%d", ok, metric, currentTXID(db), initialTXID)
+}
+
+func containsSubstring(lines []string, needle string) bool {
+	for _, line := range lines {
+		if strings.Contains(line, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func tailStrings(lines []string, n int) []string {
+	if len(lines) <= n {
+		return lines
+	}
+	return append([]string(nil), lines[len(lines)-n:]...)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func fileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return -1
+	}
+	return info.Size()
+}
+
+func restoredRowCount(path string) int {
+	if !fileExists(path) {
+		return -1
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return -1
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&n); err != nil {
+		return -1
+	}
+	return n
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func intEnv(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errno, ok := err.(syscall.Errno); ok {
+		return errno.Error()
+	}
+	return err.Error()
+}
