@@ -85,9 +85,6 @@ func TestDefaultFleetForSource(t *testing.T) {
 	if got := volumeSizes["gharchive-mixed"]; got != 50 {
 		t.Fatalf("gharchive-mixed VolumeSizeGB = %d, want 50", got)
 	}
-	if got := volumeSizes["constrained-disk"]; got != 1 {
-		t.Fatalf("constrained-disk VolumeSizeGB = %d, want 1", got)
-	}
 	if desired, ok := defaultFleetDesiredWorker("pr-1221", "worker-pr-1221-high-vol", "worker-pr-1221-high-vol"); !ok {
 		t.Fatal("defaultFleetDesiredWorker() missing PR high-volume worker")
 	} else if desired.Name != "worker-pr-1221-high-vol" {
@@ -95,55 +92,55 @@ func TestDefaultFleetForSource(t *testing.T) {
 	}
 }
 
-func TestDefaultMainFleetIncludesConstrainedDiskProfile(t *testing.T) {
+func TestDefaultMainFleetExcludesFixtureSensitiveFaultProfiles(t *testing.T) {
 	t.Parallel()
 
 	spec := DefaultMainFleet()
-	var worker DesiredWorker
-	for _, candidate := range spec.Workers {
-		if candidate.ProfileName == "constrained-disk" {
-			worker = candidate
-			break
+
+	profiles := map[string]bool{}
+	for _, worker := range spec.Workers {
+		profiles[worker.ProfileName] = true
+	}
+
+	for _, profile := range []string{
+		"constrained-disk",
+		"compaction-source-stream-drop",
+		"uploadpart-retry-quota",
+		"provider-http-408",
+		"provider-request-canceled",
+		"s3-flap",
+	} {
+		if profiles[profile] {
+			t.Fatalf("DefaultMainFleet() includes fixture-sensitive profile %q", profile)
 		}
 	}
-	if worker.ProfileName == "" {
-		t.Fatal("DefaultMainFleet() missing constrained-disk profile")
+}
+
+func TestDefaultMainFleetKeepsAlwaysOnLoadProfiles(t *testing.T) {
+	t.Parallel()
+
+	spec := DefaultMainFleet()
+	profiles := map[string]bool{}
+	for _, worker := range spec.Workers {
+		profiles[worker.ProfileName] = true
 	}
-	if worker.WorkerID != "worker-main-constrained-disk" {
-		t.Fatalf("WorkerID = %q, want worker-main-constrained-disk", worker.WorkerID)
-	}
-	if worker.Region != "ord" {
-		t.Fatalf("Region = %q, want ord", worker.Region)
-	}
-	if worker.VolumeSizeGB != 1 || worker.Workload.VolumeSizeGB != 1 {
-		t.Fatalf("volume = %d/%d, want 1", worker.VolumeSizeGB, worker.Workload.VolumeSizeGB)
-	}
-	if worker.Workload.InitialSize != "420MB" {
-		t.Fatalf("InitialSize = %q, want 420MB", worker.Workload.InitialSize)
-	}
-	if worker.Workload.SnapshotInterval != "2m" {
-		t.Fatalf("SnapshotInterval = %q, want 2m", worker.Workload.SnapshotInterval)
-	}
-	if worker.Workload.VerifyInterval != "5m" {
-		t.Fatalf("VerifyInterval = %q, want 5m", worker.Workload.VerifyInterval)
-	}
-	if worker.Workload.MonitorInterval != "1s" {
-		t.Fatalf("MonitorInterval = %q, want 1s", worker.Workload.MonitorInterval)
-	}
-	if worker.Workload.VerifySyncDegradedAfter != "1m" {
-		t.Fatalf("VerifySyncDegradedAfter = %q, want 1m", worker.Workload.VerifySyncDegradedAfter)
-	}
-	if worker.Workload.VerifySyncTimeout != "3m" {
-		t.Fatalf("VerifySyncTimeout = %q, want 3m", worker.Workload.VerifySyncTimeout)
-	}
-	if worker.Workload.DiskFullNoProgressWindow != "7s" {
-		t.Fatalf("DiskFullNoProgressWindow = %q, want 7s", worker.Workload.DiskFullNoProgressWindow)
-	}
-	if worker.Workload.DiskFullRecoveryReserve != 300*1024*1024 {
-		t.Fatalf("DiskFullRecoveryReserve = %d, want 314572800", worker.Workload.DiskFullRecoveryReserve)
-	}
-	if worker.Workload.DiskFullRecoveryTimeout != "5m" {
-		t.Fatalf("DiskFullRecoveryTimeout = %q, want 5m", worker.Workload.DiskFullRecoveryTimeout)
+
+	for _, profile := range []string{
+		"low-volume",
+		"high-volume",
+		"burst-volume",
+		"read-heavy",
+		"gharchive-replay",
+		"gharchive-mixed",
+		"taxi-replay",
+		"taxi-mixed",
+		"orders-replay",
+		"low-vol-syd",
+		"high-vol-ams",
+	} {
+		if !profiles[profile] {
+			t.Fatalf("DefaultMainFleet() missing always-on load profile %q", profile)
+		}
 	}
 }
 
@@ -207,117 +204,6 @@ func TestDefaultMainFleetTunesHighVolumeS3Uploads(t *testing.T) {
 		}
 		if worker.Workload.S3Concurrency != 8 {
 			t.Fatalf("%s S3Concurrency = %d, want 8", profile, worker.Workload.S3Concurrency)
-		}
-	}
-}
-
-func TestDefaultMainFleetSplitsS3FlapIntoDeterministicFaultProfiles(t *testing.T) {
-	t.Parallel()
-
-	spec := DefaultMainFleet()
-	workers := map[string]DesiredWorker{}
-	for _, worker := range spec.Workers {
-		workers[worker.ProfileName] = worker
-	}
-
-	if _, ok := workers["s3-flap"]; ok {
-		t.Fatal("DefaultMainFleet() should split the legacy s3-flap profile into deterministic fault profiles")
-	}
-
-	tests := []struct {
-		profile           string
-		workerID          string
-		mode              string
-		concurrency       int
-		failFirstAttempts int
-		maxFailures       int
-		sourceLevel       string
-		requireSourceGET  bool
-		requireRangeGET   bool
-	}{
-		{
-			profile:           "compaction-source-stream-drop",
-			workerID:          "worker-main-compaction-source-stream-drop",
-			mode:              "source-get-reset",
-			concurrency:       2,
-			failFirstAttempts: 2,
-			maxFailures:       0,
-			sourceLevel:       "0001",
-			requireSourceGET:  true,
-			requireRangeGET:   true,
-		},
-		{
-			profile:           "uploadpart-retry-quota",
-			workerID:          "worker-main-uploadpart-retry-quota",
-			mode:              "uploadpart-reset",
-			concurrency:       1,
-			failFirstAttempts: 3,
-			maxFailures:       51,
-		},
-		{
-			profile:           "provider-http-408",
-			workerID:          "worker-main-provider-http-408",
-			mode:              "provider-http-408",
-			concurrency:       1,
-			failFirstAttempts: 1,
-			maxFailures:       1,
-		},
-		{
-			profile:           "provider-request-canceled",
-			workerID:          "worker-main-provider-request-canceled",
-			mode:              "provider-request-canceled",
-			concurrency:       1,
-			failFirstAttempts: 1,
-			maxFailures:       1,
-		},
-	}
-
-	for _, tc := range tests {
-		worker, ok := workers[tc.profile]
-		if !ok {
-			t.Fatalf("DefaultMainFleet() missing %s", tc.profile)
-		}
-		if worker.WorkerID != tc.workerID {
-			t.Fatalf("%s WorkerID = %q, want %q", tc.profile, worker.WorkerID, tc.workerID)
-		}
-		if worker.VolumeSizeGB != 100 || worker.Workload.VolumeSizeGB != 100 {
-			t.Fatalf("%s volume = %d/%d, want 100", tc.profile, worker.VolumeSizeGB, worker.Workload.VolumeSizeGB)
-		}
-		if worker.Workload.LoadMode != "synthetic" || worker.Workload.Pattern != "wave" {
-			t.Fatalf("%s workload = %+v, want synthetic wave workload", tc.profile, worker.Workload)
-		}
-		if worker.Workload.InitialSize != "256MB" {
-			t.Fatalf("%s InitialSize = %q, want 256MB", tc.profile, worker.Workload.InitialSize)
-		}
-		if worker.Workload.S3PartSize != "8MB" {
-			t.Fatalf("%s S3PartSize = %q, want 8MB", tc.profile, worker.Workload.S3PartSize)
-		}
-		if worker.Workload.S3Concurrency != tc.concurrency {
-			t.Fatalf("%s S3Concurrency = %d, want %d", tc.profile, worker.Workload.S3Concurrency, tc.concurrency)
-		}
-		if !worker.Workload.S3FaultProxyEnabled {
-			t.Fatalf("%s should enable the S3 fault proxy", tc.profile)
-		}
-		if worker.Workload.S3FaultProxyMode != tc.mode {
-			t.Fatalf("%s S3FaultProxyMode = %q, want %q", tc.profile, worker.Workload.S3FaultProxyMode, tc.mode)
-		}
-		if worker.Workload.S3FaultProxyFailFirstAttempts != tc.failFirstAttempts {
-			t.Fatalf("%s S3FaultProxyFailFirstAttempts = %d, want %d", tc.profile, worker.Workload.S3FaultProxyFailFirstAttempts, tc.failFirstAttempts)
-		}
-		if worker.Workload.S3FaultProxyMaxFailures != tc.maxFailures {
-			t.Fatalf("%s S3FaultProxyMaxFailures = %d, want %d", tc.profile, worker.Workload.S3FaultProxyMaxFailures, tc.maxFailures)
-		}
-		if worker.Workload.S3FaultProxySourceLevel != tc.sourceLevel {
-			t.Fatalf("%s S3FaultProxySourceLevel = %q, want %q", tc.profile, worker.Workload.S3FaultProxySourceLevel, tc.sourceLevel)
-		}
-		if worker.Workload.S3FaultProxyRequireObservedSourceGet != tc.requireSourceGET {
-			t.Fatalf("%s S3FaultProxyRequireObservedSourceGet = %v, want %v", tc.profile, worker.Workload.S3FaultProxyRequireObservedSourceGet, tc.requireSourceGET)
-		}
-		if worker.Workload.S3FaultProxyRequireObservedSourceRangeGet != tc.requireRangeGET {
-			t.Fatalf("%s S3FaultProxyRequireObservedSourceRangeGet = %v, want %v", tc.profile, worker.Workload.S3FaultProxyRequireObservedSourceRangeGet, tc.requireRangeGET)
-		}
-		if !worker.Workload.ReplicaLevelReporting {
-			t.Fatalf("%s should enable replica level reporting", tc.profile)
 		}
 	}
 }
