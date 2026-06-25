@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -171,6 +172,7 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			result, err := r.verifier.RunCycle(ctx)
+			result = r.applyS3FaultProxyVerificationGuards(result)
 			r.sendVerification(context.WithoutCancel(ctx), result)
 			if err != nil {
 				slog.Error("Verification cycle error", "error", err)
@@ -183,4 +185,23 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (r *Runner) applyS3FaultProxyVerificationGuards(result VerificationResult) VerificationResult {
+	if !r.cfg.S3FaultProxyRequireObservedSourceGet || !result.Passed {
+		return result
+	}
+	if r.s3FaultProxy != nil && r.s3FaultProxy.ObservedSourceGETs() > 0 {
+		return result
+	}
+
+	result.Status = "failed"
+	result.Passed = false
+	level := strings.Trim(strings.TrimSpace(r.cfg.S3FaultProxySourceLevel), "/")
+	if level == "" {
+		level = defaultS3FaultProxySourceLevel
+	}
+	result.ErrorMessage = fmt.Sprintf("s3 source GET fault guard: no remote %s source GET observed by fault proxy; local compactor cache may have bypassed the source-read path", level)
+	result.Summary = "s3 source GET fault guard failed"
+	return result
 }

@@ -55,7 +55,9 @@ is unsupported.
 | --- | --- | --- |
 | `low-volume` | `worker-main-low-vol` | Constant synthetic writes at low rate with a small initial database. |
 | `high-volume` | `worker-main-high-vol` | Higher-rate wave synthetic writes, larger payloads, more load workers, and a 100 GB volume. |
-| `s3-flap` | `worker-main-s3-flap` | Large wave synthetic writes through an in-worker S3 fault proxy that resets multipart upload-part attempts to exercise L2 compaction retry behavior. |
+| `compaction-source-stream-drop` | `worker-main-compaction-source-stream-drop` | Large wave synthetic writes through an in-worker S3 fault proxy that drops `0001/...` source GET response bodies and requires the proxy to observe those GETs before accepting a pass. |
+| `uploadpart-retry-quota` | `worker-main-uploadpart-retry-quota` | Large wave synthetic writes with bounded UploadPart resets to exercise retry-quota failures separately from source-read compaction faults. |
+| `provider-408-requestcanceled` | `worker-main-provider-408-requestcanceled` | Large wave synthetic writes with HTTP 408 `RequestCanceled` provider responses injected separately from connection resets. |
 | `burst-volume` | `worker-main-burst-vol` | Burst-pattern synthetic writes against a 100 GB volume. |
 | `read-heavy` | `worker-main-read-heavy` | Constant synthetic writes with a high read ratio to exercise read-heavy contention. |
 | `constrained-disk` | `worker-main-constrained-disk` | Synthetic writes on a 1 GB volume with a removable reserve file to exercise disk-full initial snapshot staging, distinct disk-full signaling, and auto-recovery after space is freed. |
@@ -118,10 +120,13 @@ Verification statuses are meaningful:
   canceled. Aborted reports are recorded as events but do not mark the worker
   degraded.
 
-The `s3-flap` profile enables replica-level reporting on each verification.
-Worker metrics include per-level object counts, bytes, and max TXID under
-`soak_litestream_replica_level_*`, so L0/L1/L2/L9 compaction progress can be
-tracked separately from the overall pass/fail result.
+The deterministic S3 fault profiles enable replica-level reporting on each
+verification. Worker metrics include per-level object counts, bytes, and max
+TXID under `soak_litestream_replica_level_*`, so L0/L1/L2/L9 compaction
+progress can be tracked separately from the overall pass/fail result. The
+`compaction-source-stream-drop` profile also fails a passing verification if the
+fault proxy never observed a `0001/...` source GET, which protects against the
+local L1 cache bypassing the source-read path.
 
 Deployments are recorded with soak Git SHA, Litestream SHA, image ref, source,
 and PR number. A deployment-ready notification creates or updates the source

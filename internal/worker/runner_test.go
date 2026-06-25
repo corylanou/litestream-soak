@@ -100,6 +100,35 @@ func TestPollDBStatsMarksSnapshotHealthy(t *testing.T) {
 	}
 }
 
+func TestRunnerFailsPassingVerificationWhenSourceGETGuardNotObserved(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.S3FaultProxyRequireObservedSourceGet = true
+	cfg.S3FaultProxySourceLevel = "0001"
+	runner := NewRunner(cfg)
+	result := VerificationResult{
+		StartedAt:   time.Now().Add(-time.Second).UTC(),
+		CompletedAt: time.Now().UTC(),
+		CheckType:   "integrity",
+		Status:      "passed",
+		Passed:      true,
+		Summary:     "verification passed",
+	}
+
+	got := runner.applyS3FaultProxyVerificationGuards(result)
+
+	if got.Passed {
+		t.Fatal("Passed = true, want false when source GET guard has no observation")
+	}
+	if got.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", got.Status)
+	}
+	if !strings.Contains(got.ErrorMessage, "no remote 0001 source GET observed") {
+		t.Fatalf("ErrorMessage = %q, want source GET guard failure", got.ErrorMessage)
+	}
+}
+
 func TestPollDBStatsComputesLagFromLocalTXIDWhenListTXIDStale(t *testing.T) {
 	dir := t.TempDir()
 	cfg := DefaultConfig()
