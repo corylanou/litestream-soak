@@ -137,6 +137,25 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	if strings.TrimSpace(workloadCfg.DiskFullRecoveryTimeout) != "" {
 		env["DISK_FULL_RECOVERY_TIMEOUT"] = workloadCfg.DiskFullRecoveryTimeout
 	}
+	if workloadCfg.S3FaultProxyEnabled {
+		env["S3_FAULT_PROXY_ENABLED"] = "true"
+		env["S3_FAULT_PROXY_TARGET_ENDPOINT"] = m.replica.Endpoint
+	}
+	if workloadCfg.S3FaultProxyListenAddr != "" {
+		env["S3_FAULT_PROXY_LISTEN_ADDR"] = workloadCfg.S3FaultProxyListenAddr
+	}
+	if workloadCfg.S3FaultProxyMinContentLength > 0 {
+		env["S3_FAULT_PROXY_MIN_CONTENT_LENGTH"] = fmt.Sprintf("%d", workloadCfg.S3FaultProxyMinContentLength)
+	}
+	if workloadCfg.S3FaultProxyResetAfterBytes > 0 {
+		env["S3_FAULT_PROXY_RESET_AFTER_BYTES"] = fmt.Sprintf("%d", workloadCfg.S3FaultProxyResetAfterBytes)
+	}
+	if workloadCfg.S3FaultProxyFailFirstAttempts > 0 {
+		env["S3_FAULT_PROXY_FAIL_FIRST_ATTEMPTS"] = fmt.Sprintf("%d", workloadCfg.S3FaultProxyFailFirstAttempts)
+	}
+	if workloadCfg.ReplicaLevelReporting {
+		env["REPLICA_LEVEL_REPORTING"] = "true"
+	}
 	if workloadCfg.NumDatabases > 0 {
 		env["NUM_DATABASES"] = fmt.Sprintf("%d", workloadCfg.NumDatabases)
 		env["ACTIVE_PERCENT"] = fmt.Sprintf("%.2f", workloadCfg.ActivePercent)

@@ -208,6 +208,56 @@ func TestDefaultMainFleetTunesHighVolumeS3Uploads(t *testing.T) {
 	}
 }
 
+func TestDefaultMainFleetIncludesS3FlapProfile(t *testing.T) {
+	t.Parallel()
+
+	spec := DefaultMainFleet()
+	var s3Flap DesiredWorker
+	for _, worker := range spec.Workers {
+		if worker.ProfileName == "s3-flap" {
+			s3Flap = worker
+			break
+		}
+	}
+
+	if s3Flap.WorkerID == "" {
+		t.Fatal("DefaultMainFleet() missing s3-flap worker")
+	}
+	if s3Flap.WorkerID != "worker-main-s3-flap" {
+		t.Fatalf("s3-flap WorkerID = %q, want worker-main-s3-flap", s3Flap.WorkerID)
+	}
+	if s3Flap.VolumeSizeGB != 100 || s3Flap.Workload.VolumeSizeGB != 100 {
+		t.Fatalf("s3-flap volume = %d/%d, want 100", s3Flap.VolumeSizeGB, s3Flap.Workload.VolumeSizeGB)
+	}
+	if s3Flap.Workload.LoadMode != "synthetic" || s3Flap.Workload.Pattern != "wave" {
+		t.Fatalf("s3-flap workload = %+v, want synthetic wave workload", s3Flap.Workload)
+	}
+	if s3Flap.Workload.InitialSize != "256MB" {
+		t.Fatalf("s3-flap InitialSize = %q, want 256MB", s3Flap.Workload.InitialSize)
+	}
+	if s3Flap.Workload.PayloadSize < 32768 {
+		t.Fatalf("s3-flap PayloadSize = %d, want at least 32768", s3Flap.Workload.PayloadSize)
+	}
+	if s3Flap.Workload.S3PartSize != "8MB" {
+		t.Fatalf("s3-flap S3PartSize = %q, want 8MB", s3Flap.Workload.S3PartSize)
+	}
+	if s3Flap.Workload.S3Concurrency != 8 {
+		t.Fatalf("s3-flap S3Concurrency = %d, want 8", s3Flap.Workload.S3Concurrency)
+	}
+	if !s3Flap.Workload.S3FaultProxyEnabled {
+		t.Fatal("s3-flap should enable the S3 fault proxy")
+	}
+	if s3Flap.Workload.S3FaultProxyFailFirstAttempts != 2 {
+		t.Fatalf("s3-flap S3FaultProxyFailFirstAttempts = %d, want 2", s3Flap.Workload.S3FaultProxyFailFirstAttempts)
+	}
+	if s3Flap.Workload.S3FaultProxyResetAfterBytes != 2*1024*1024 {
+		t.Fatalf("s3-flap S3FaultProxyResetAfterBytes = %d, want 2MiB", s3Flap.Workload.S3FaultProxyResetAfterBytes)
+	}
+	if !s3Flap.Workload.ReplicaLevelReporting {
+		t.Fatal("s3-flap should enable replica level reporting")
+	}
+}
+
 func TestDefaultMainFleetIncludesManyDBProfilesWhenEnabled(t *testing.T) {
 	t.Setenv("SOAK_ENABLE_MANY_DB_FLEET", "true")
 

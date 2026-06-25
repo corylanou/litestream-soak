@@ -27,6 +27,8 @@ type litestreamManager struct {
 	litestreamExit *reporting.ProcessExitSnapshot
 	litestreamLog  *lineBuffer
 	litestreamMu   sync.Mutex
+
+	s3FaultProxyEndpoint string
 }
 
 func newLitestreamManager(cfg *Config) litestreamManager {
@@ -308,10 +310,7 @@ func (m *litestreamManager) startLitestream(ctx context.Context) error {
 	m.litestreamCmd.Stderr = io.MultiWriter(os.Stderr, m.litestreamLog)
 
 	if m.cfg.ReplicaType == "s3" {
-		m.litestreamCmd.Env = append(os.Environ(),
-			"AWS_ACCESS_KEY_ID="+m.cfg.S3AccessKey,
-			"AWS_SECRET_ACCESS_KEY="+m.cfg.S3SecretKey,
-		)
+		m.litestreamCmd.Env = m.litestreamEnv()
 	}
 
 	if err := m.litestreamCmd.Start(); err != nil {
@@ -334,6 +333,30 @@ func (m *litestreamManager) startLitestream(ctx context.Context) error {
 	}(m.litestreamCmd)
 
 	return nil
+}
+
+func (m *litestreamManager) litestreamEnv() []string {
+	env := os.Environ()
+	env = setCommandEnv(env, "AWS_ACCESS_KEY_ID", m.cfg.S3AccessKey)
+	env = setCommandEnv(env, "AWS_SECRET_ACCESS_KEY", m.cfg.S3SecretKey)
+	if m.cfg.S3FaultProxyEnabled && m.cfg.ReplicaType == "s3" && strings.TrimSpace(m.s3FaultProxyEndpoint) != "" {
+		proxyURL := m.s3FaultProxyEndpoint
+		env = setCommandEnv(env, "HTTP_PROXY", proxyURL)
+		env = setCommandEnv(env, "HTTPS_PROXY", proxyURL)
+		env = setCommandEnv(env, "NO_PROXY", "127.0.0.1,localhost")
+	}
+	return env
+}
+
+func setCommandEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	filtered := env[:0]
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return append(filtered, prefix+value)
 }
 
 func (m *litestreamManager) stopLitestream() {

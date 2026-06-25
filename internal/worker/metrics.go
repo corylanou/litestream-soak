@@ -4,6 +4,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/corylanou/litestream-soak/internal/reporting"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -108,6 +109,21 @@ var (
 		Name: "soak_litestream_local_ltx_bytes",
 		Help: "Recursive size of the local Litestream LTX directory in bytes.",
 	}, []string{"worker_id", "profile", "source", "region"})
+
+	replicaLevelObjects = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_replica_level_objects",
+		Help: "Number of replica LTX objects by Litestream compaction level from the latest reported verification.",
+	}, []string{"worker_id", "profile", "source", "region", "level"})
+
+	replicaLevelBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_replica_level_bytes",
+		Help: "Total replica LTX bytes by Litestream compaction level from the latest reported verification.",
+	}, []string{"worker_id", "profile", "source", "region", "level"})
+
+	replicaLevelMaxTXID = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_replica_level_max_txid",
+		Help: "Maximum TXID present by Litestream compaction level from the latest reported verification.",
+	}, []string{"worker_id", "profile", "source", "region", "level"})
 
 	dbTXID = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_db_txid",
@@ -273,6 +289,16 @@ func SetLitestreamLocalStateSize(dirBytes, ltxBytes int64) {
 	labels := currentMetricLabels()
 	litestreamDirSize.WithLabelValues(labels...).Set(float64(dirBytes))
 	litestreamLTXSize.WithLabelValues(labels...).Set(float64(ltxBytes))
+}
+
+func SetReplicaLevelSummaries(summaries []reporting.ReplicaLevelSummary) {
+	labels := currentMetricLabels()
+	for _, summary := range summaries {
+		levelLabels := append(labels, summary.LevelName)
+		replicaLevelObjects.WithLabelValues(levelLabels...).Set(float64(summary.ObjectCount))
+		replicaLevelBytes.WithLabelValues(levelLabels...).Set(float64(summary.TotalBytes))
+		replicaLevelMaxTXID.WithLabelValues(levelLabels...).Set(float64(summary.MaxTXIDDecimal))
+	}
 }
 
 func SetDBTXID(txid float64) {

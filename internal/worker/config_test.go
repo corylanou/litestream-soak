@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,6 +22,57 @@ func TestConfigFromEnvReadsS3UploadTuning(t *testing.T) {
 	}
 	if cfg.S3Concurrency != 8 {
 		t.Fatalf("S3Concurrency = %d, want 8", cfg.S3Concurrency)
+	}
+}
+
+func TestConfigFromEnvReadsS3FaultProxyConfig(t *testing.T) {
+	t.Setenv("REPLICA_TYPE", "s3")
+	t.Setenv("S3_BUCKET", "bucket")
+	t.Setenv("S3_ENDPOINT", "https://fly.storage.tigris.dev")
+	t.Setenv("S3_FAULT_PROXY_ENABLED", "true")
+	t.Setenv("S3_FAULT_PROXY_TARGET_ENDPOINT", "https://target.example.com")
+	t.Setenv("S3_FAULT_PROXY_LISTEN_ADDR", "127.0.0.1:19000")
+	t.Setenv("S3_FAULT_PROXY_MIN_CONTENT_LENGTH", "8388608")
+	t.Setenv("S3_FAULT_PROXY_RESET_AFTER_BYTES", "2097152")
+	t.Setenv("S3_FAULT_PROXY_FAIL_FIRST_ATTEMPTS", "2")
+	t.Setenv("REPLICA_LEVEL_REPORTING", "true")
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v", err)
+	}
+
+	if !cfg.S3FaultProxyEnabled {
+		t.Fatal("S3FaultProxyEnabled = false, want true")
+	}
+	if cfg.S3FaultProxyTargetEndpoint != "https://target.example.com" {
+		t.Fatalf("S3FaultProxyTargetEndpoint = %q, want target endpoint", cfg.S3FaultProxyTargetEndpoint)
+	}
+	if cfg.S3FaultProxyListenAddr != "127.0.0.1:19000" {
+		t.Fatalf("S3FaultProxyListenAddr = %q, want 127.0.0.1:19000", cfg.S3FaultProxyListenAddr)
+	}
+	if cfg.S3FaultProxyMinContentLength != 8*1024*1024 {
+		t.Fatalf("S3FaultProxyMinContentLength = %d, want 8MiB", cfg.S3FaultProxyMinContentLength)
+	}
+	if cfg.S3FaultProxyResetAfterBytes != 2*1024*1024 {
+		t.Fatalf("S3FaultProxyResetAfterBytes = %d, want 2MiB", cfg.S3FaultProxyResetAfterBytes)
+	}
+	if cfg.S3FaultProxyFailFirstAttempts != 2 {
+		t.Fatalf("S3FaultProxyFailFirstAttempts = %d, want 2", cfg.S3FaultProxyFailFirstAttempts)
+	}
+	if !cfg.ReplicaLevelReporting {
+		t.Fatal("ReplicaLevelReporting = false, want true")
+	}
+}
+
+func TestWorkloadConfigOmitsDisabledS3FaultProxyDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	got := cfg.WorkloadConfig().JSON()
+
+	if strings.Contains(got, "s3_fault_proxy") {
+		t.Fatalf("WorkloadConfig().JSON() = %s, want no disabled fault proxy defaults", got)
 	}
 }
 

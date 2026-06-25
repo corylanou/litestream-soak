@@ -21,6 +21,7 @@ type Runner struct {
 	noProgress   diskPressureNoProgressState
 	verifier     *Verifier
 	reporter     *Reporter
+	s3FaultProxy *s3FaultProxy
 }
 
 func NewRunner(cfg Config) *Runner {
@@ -41,6 +42,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	SetWorkerInfo(r.cfg)
 	startTime := time.Now()
 	r.reporter = NewReporter(r.cfg)
+
+	if err := r.startS3FaultProxy(runCtx); err != nil {
+		return fmt.Errorf("start s3 fault proxy: %w", err)
+	}
+	defer r.stopS3FaultProxy()
 
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
