@@ -55,10 +55,8 @@ is unsupported.
 | --- | --- | --- |
 | `low-volume` | `worker-main-low-vol` | Constant synthetic writes at low rate with a small initial database. |
 | `high-volume` | `worker-main-high-vol` | Higher-rate wave synthetic writes, larger payloads, more load workers, and a 100 GB volume. |
-| `s3-flap` | `worker-main-s3-flap` | Large wave synthetic writes through an in-worker S3 fault proxy that resets multipart upload-part attempts to exercise L2 compaction retry behavior. |
 | `burst-volume` | `worker-main-burst-vol` | Burst-pattern synthetic writes against a 100 GB volume. |
 | `read-heavy` | `worker-main-read-heavy` | Constant synthetic writes with a high read ratio to exercise read-heavy contention. |
-| `constrained-disk` | `worker-main-constrained-disk` | Synthetic writes on a 1 GB volume with a removable reserve file to exercise disk-full initial snapshot staging, the `litestream_disk_full` signal plus staging log, and auto-recovery after space is freed. |
 | `gharchive-replay` | `worker-main-gharchive` | Replays GH Archive events from `https://data.gharchive.org/2025-01-01-0.json.gz`. |
 | `gharchive-mixed` | `worker-main-gharchive-mixed` | Combines wave synthetic load with looping GH Archive replay. |
 | `taxi-replay` | `worker-main-taxi-replay` | Replays `datasets/taxi_sample.csv`. |
@@ -85,6 +83,14 @@ The `main` source is the long-running baseline fleet. Failures there are
 expected to be informative: they show either a current Litestream regression, a
 platform problem, a workload-specific harness issue, or a known-bad state that
 the control plane can archive and pause.
+
+Fixture-sensitive fault regressions, including constrained-disk and S3 fault
+proxy scenarios, are local/on-demand checks rather than always-on fleet gates.
+They require deliberately unhealthy fixtures, such as a tiny filesystem or a
+starved local cache, so prior Fly A/B runs are treated as inconclusive when the
+fixture did not engage the intended fault. The Litestream fixes for compaction
+resume and disk-full recovery are validated through
+`scripts/local-rig-one-shot.sh` instead.
 
 PR fleets use sources named `pr-NNN`. The PR workflow builds a worker image with
 `LITESTREAM_SHA` set to the upstream PR head SHA, then notifies the control
@@ -118,11 +124,6 @@ Verification statuses are meaningful:
 - `aborted`: the cycle was interrupted, usually because the worker context was
   canceled. Aborted reports are recorded as events but do not mark the worker
   degraded.
-
-The `s3-flap` profile enables replica-level reporting on each verification.
-Worker metrics include per-level object counts, bytes, and max TXID under
-`soak_litestream_replica_level_*`, so L0/L1/L2/L9 compaction progress can be
-tracked separately from the overall pass/fail result.
 
 Deployments are recorded with soak Git SHA, Litestream SHA, image ref, source,
 and PR number. A deployment-ready notification creates or updates the source

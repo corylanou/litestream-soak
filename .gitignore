@@ -7,3 +7,4 @@ bin/
 *.restored
 .env
 .envrc
+.local-rig/

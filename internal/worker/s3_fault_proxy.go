@@ -14,14 +14,28 @@ import (
 	"time"
 )
 
-const maxS3FaultProxyAttemptKeys = 10000
+const (
+	maxS3FaultProxyAttemptKeys              = 10000
+	s3FaultProxyModeUploadPartReset         = "uploadpart-reset"
+	s3FaultProxyModeSourceGETReset          = "source-get-reset"
+	s3FaultProxyModeProvider408Canceled     = "provider-408-requestcanceled"
+	s3FaultProxyModeProviderHTTP408         = "provider-http-408"
+	s3FaultProxyModeProviderRequestCanceled = "provider-request-canceled"
+	s3FaultProxyModeConnectReset            = "connect-reset"
+	defaultS3FaultProxySourceLevel          = "0001"
+	requestCanceledResponseBody             = `<Error><Code>RequestCanceled</Code><Message>Request is canceled.</Message><RequestId>fault-proxy</RequestId></Error>`
+	requestTimeoutResponseBody              = `<Error><Code>RequestTimeout</Code><Message>Request timeout.</Message><RequestId>fault-proxy</RequestId></Error>`
+)
 
 type s3FaultProxyConfig struct {
 	TargetEndpoint    string
 	ListenAddr        string
+	Mode              string
 	MinContentLength  int64
 	ResetAfterBytes   int64
 	FailFirstAttempts int
+	MaxFailures       int
+	SourceLevel       string
 }
 
 type s3FaultProxy struct {
@@ -29,18 +43,26 @@ type s3FaultProxy struct {
 	server   *http.Server
 	listener net.Listener
 	endpoint string
+	target   *url.URL
 	proxy    *httputil.ReverseProxy
 
-	mu       sync.Mutex
-	attempts map[string]int
+	mu                     sync.Mutex
+	attempts               map[string]int
+	totalFailures          int
+	observedSourceGET      int
+	observedSourceRangeGET int
 }
 
 func newS3FaultProxy(cfg s3FaultProxyConfig) *s3FaultProxy {
 	if strings.TrimSpace(cfg.ListenAddr) == "" {
 		cfg.ListenAddr = "127.0.0.1:19000"
 	}
+	cfg.Mode = normalizeS3FaultProxyMode(cfg.Mode)
 	if cfg.ResetAfterBytes <= 0 {
 		cfg.ResetAfterBytes = 1
+	}
+	if strings.TrimSpace(cfg.SourceLevel) == "" {
+		cfg.SourceLevel = defaultS3FaultProxySourceLevel
 	}
 	return &s3FaultProxy{
 		cfg:      cfg,
@@ -60,6 +82,7 @@ func (p *s3FaultProxy) Start(ctx context.Context) error {
 	}
 	p.listener = listener
 	p.endpoint = "http://" + listener.Addr().String()
+	p.target = target
 	p.proxy = httputil.NewSingleHostReverseProxy(target)
 	p.proxy.Transport = directHTTPTransport()
 	p.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -91,7 +114,19 @@ func (p *s3FaultProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.proxyConnect(w, r)
 		return
 	}
-	if p.shouldReset(r) {
+	if p.shouldInjectProviderHTTP408(r) {
+		p.injectProviderHTTP408(w, r)
+		return
+	}
+	if p.shouldInjectProviderRequestCanceled(r) {
+		p.injectProviderRequestCanceled(w, r)
+		return
+	}
+	if p.shouldDropSourceGET(r) {
+		p.dropSourceGETResponse(w, r)
+		return
+	}
+	if p.shouldResetUploadPart(r) {
 		p.resetConnection(w, r)
 		return
 	}
@@ -118,6 +153,33 @@ func (p *s3FaultProxy) Endpoint() string {
 	return p.endpoint
 }
 
+func (p *s3FaultProxy) TotalFailures() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.totalFailures
+}
+
+func (p *s3FaultProxy) ObservedSourceGETs() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.observedSourceGET
+}
+
+func (p *s3FaultProxy) ObservedSourceRangeGETs() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.observedSourceRangeGET
+}
+
+func (p *s3FaultProxy) ResetCycle() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.attempts = make(map[string]int)
+	p.totalFailures = 0
+	p.observedSourceGET = 0
+	p.observedSourceRangeGET = 0
+}
+
 func (p *s3FaultProxy) proxyConnect(w http.ResponseWriter, r *http.Request) {
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
@@ -141,15 +203,7 @@ func (p *s3FaultProxy) proxyConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *s3FaultProxy) proxyHTTP(w http.ResponseWriter, r *http.Request) {
-	out := r.Clone(r.Context())
-	out.RequestURI = ""
-	out.URL = cloneURL(r.URL)
-	out.Host = r.Host
-	transport := p.proxy.Transport
-	if transport == nil {
-		transport = directHTTPTransport()
-	}
-	resp, err := transport.RoundTrip(out)
+	resp, err := p.roundTrip(r)
 	if err != nil {
 		slog.Warn("S3 fault proxy HTTP request failed", "method", r.Method, "url", r.URL.String(), "error", err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -162,8 +216,8 @@ func (p *s3FaultProxy) proxyHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, resp.Body)
 }
 
-func (p *s3FaultProxy) shouldReset(r *http.Request) bool {
-	if p.cfg.FailFirstAttempts <= 0 || r.Method != http.MethodPut {
+func (p *s3FaultProxy) shouldResetUploadPart(r *http.Request) bool {
+	if p.cfg.Mode != s3FaultProxyModeUploadPartReset || r.Method != http.MethodPut {
 		return false
 	}
 	query := r.URL.Query()
@@ -177,13 +231,100 @@ func (p *s3FaultProxy) shouldReset(r *http.Request) bool {
 	}
 
 	key := r.URL.Path + "\x00" + uploadID + "\x00" + partNumber
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.attempts) > maxS3FaultProxyAttemptKeys {
-		p.attempts = make(map[string]int)
+	return p.recordFault("uploadpart\x00" + key)
+}
+
+func (p *s3FaultProxy) shouldDropSourceGET(r *http.Request) bool {
+	if p.cfg.Mode != s3FaultProxyModeSourceGETReset || r.Method != http.MethodGet {
+		return false
 	}
-	p.attempts[key]++
-	return p.attempts[key] <= p.cfg.FailFirstAttempts
+	if !p.matchesSourceLevel(r.URL.Path) {
+		return false
+	}
+	p.recordObservedSourceGET(r.Header.Get("Range"))
+	return p.recordFault("source-get\x00" + r.URL.Path)
+}
+
+func (p *s3FaultProxy) shouldInjectProviderHTTP408(r *http.Request) bool {
+	if p.cfg.Mode != s3FaultProxyModeProviderHTTP408 || r.Method != http.MethodGet {
+		return false
+	}
+	return p.recordFault("provider-http-408\x00" + r.URL.Path + "\x00" + r.URL.RawQuery)
+}
+
+func (p *s3FaultProxy) shouldInjectProviderRequestCanceled(r *http.Request) bool {
+	if p.cfg.Mode != s3FaultProxyModeProviderRequestCanceled || r.Method != http.MethodGet {
+		return false
+	}
+	return p.recordFault("provider-request-canceled\x00" + r.URL.Path + "\x00" + r.URL.RawQuery)
+}
+
+func (p *s3FaultProxy) matchesSourceLevel(path string) bool {
+	level := strings.Trim(strings.TrimSpace(p.cfg.SourceLevel), "/")
+	if level == "" {
+		level = defaultS3FaultProxySourceLevel
+	}
+	return strings.Contains(path, "/"+level+"/")
+}
+
+func (p *s3FaultProxy) injectProviderHTTP408(w http.ResponseWriter, r *http.Request) {
+	slog.Warn("S3 fault proxy injected provider HTTP 408", "path", r.URL.Path, "query", r.URL.RawQuery)
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("X-Amz-Request-Id", "fault-proxy")
+	w.WriteHeader(http.StatusRequestTimeout)
+	_, _ = w.Write([]byte(requestTimeoutResponseBody))
+}
+
+func (p *s3FaultProxy) injectProviderRequestCanceled(w http.ResponseWriter, r *http.Request) {
+	slog.Warn("S3 fault proxy injected provider RequestCanceled", "path", r.URL.Path, "query", r.URL.RawQuery)
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("X-Amz-Request-Id", "fault-proxy")
+	w.WriteHeader(http.StatusBadRequest)
+	_, _ = w.Write([]byte(requestCanceledResponseBody))
+}
+
+func (p *s3FaultProxy) dropSourceGETResponse(w http.ResponseWriter, r *http.Request) {
+	resp, err := p.roundTrip(r)
+	if err != nil {
+		slog.Warn("S3 fault proxy source GET upstream request failed", "method", r.Method, "url", r.URL.String(), "error", err)
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	copyHeader(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	dropBytes := p.sourceDropBytes(resp)
+	if dropBytes > 0 {
+		_, _ = io.CopyN(w, resp.Body, dropBytes)
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		return
+	}
+	conn, _, err := hijacker.Hijack()
+	if err != nil {
+		return
+	}
+	slog.Warn("S3 fault proxy dropped source GET response", "path", r.URL.Path, "level", p.cfg.SourceLevel, "range", r.Header.Get("Range"), "drop_bytes", dropBytes)
+	_ = conn.Close()
+}
+
+func (p *s3FaultProxy) sourceDropBytes(resp *http.Response) int64 {
+	if p.cfg.ResetAfterBytes <= 0 {
+		return 1
+	}
+	if resp != nil && resp.ContentLength > 0 && resp.ContentLength <= p.cfg.ResetAfterBytes {
+		n := resp.ContentLength / 2
+		if n < 1 {
+			return 1
+		}
+		return n
+	}
+	return p.cfg.ResetAfterBytes
 }
 
 func (p *s3FaultProxy) resetConnection(w http.ResponseWriter, r *http.Request) {
@@ -216,7 +357,7 @@ func (p *s3FaultProxy) copyTunnel(ctx context.Context, host string, clientConn n
 	}()
 	go func() {
 		defer closeOnce()
-		if p.cfg.FailFirstAttempts <= 0 {
+		if p.cfg.Mode != s3FaultProxyModeConnectReset {
 			_, _ = io.Copy(upstreamConn, clientConn)
 			return
 		}
@@ -228,7 +369,7 @@ func (p *s3FaultProxy) copyTunnel(ctx context.Context, host string, clientConn n
 		if err != nil {
 			return
 		}
-		if copied >= threshold && p.recordReset(host) {
+		if copied >= threshold && p.recordFault("connect\x00"+host) {
 			slog.Warn("S3 fault proxy reset CONNECT tunnel", "host", host)
 			return
 		}
@@ -242,14 +383,59 @@ func (p *s3FaultProxy) copyTunnel(ctx context.Context, host string, clientConn n
 	}
 }
 
-func (p *s3FaultProxy) recordReset(key string) bool {
+func (p *s3FaultProxy) recordFault(key string) bool {
+	if p.cfg.FailFirstAttempts <= 0 {
+		return false
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(p.attempts) > maxS3FaultProxyAttemptKeys {
 		p.attempts = make(map[string]int)
 	}
+	if p.cfg.MaxFailures > 0 && p.totalFailures >= p.cfg.MaxFailures {
+		return false
+	}
 	p.attempts[key]++
-	return p.attempts[key] <= p.cfg.FailFirstAttempts
+	if p.attempts[key] > p.cfg.FailFirstAttempts {
+		return false
+	}
+	p.totalFailures++
+	return true
+}
+
+func (p *s3FaultProxy) recordObservedSourceGET(rangeHeader string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.observedSourceGET++
+	if isNonzeroRangeHeader(rangeHeader) {
+		p.observedSourceRangeGET++
+	}
+}
+
+func isNonzeroRangeHeader(value string) bool {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if !strings.HasPrefix(value, "bytes=") {
+		return false
+	}
+	value = strings.TrimPrefix(value, "bytes=")
+	value = strings.TrimSpace(strings.SplitN(value, "-", 2)[0])
+	return value != "" && value != "0"
+}
+
+func (p *s3FaultProxy) roundTrip(r *http.Request) (*http.Response, error) {
+	out := r.Clone(r.Context())
+	out.RequestURI = ""
+	out.URL = cloneURL(r.URL)
+	if !out.URL.IsAbs() && p.target != nil {
+		out.URL.Scheme = p.target.Scheme
+		out.URL.Host = p.target.Host
+		out.Host = p.target.Host
+	}
+	transport := p.proxy.Transport
+	if transport == nil {
+		transport = directHTTPTransport()
+	}
+	return transport.RoundTrip(out)
 }
 
 func parseProxyTargetEndpoint(endpoint string) (*url.URL, error) {
@@ -270,6 +456,20 @@ func parseProxyTargetEndpoint(endpoint string) (*url.URL, error) {
 	return target, nil
 }
 
+func normalizeS3FaultProxyMode(mode string) string {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	switch mode {
+	case "", s3FaultProxyModeUploadPartReset:
+		return s3FaultProxyModeUploadPartReset
+	case s3FaultProxyModeProvider408Canceled:
+		return s3FaultProxyModeProviderHTTP408
+	case s3FaultProxyModeSourceGETReset, s3FaultProxyModeProviderHTTP408, s3FaultProxyModeProviderRequestCanceled, s3FaultProxyModeConnectReset:
+		return mode
+	default:
+		return mode
+	}
+}
+
 func (r *Runner) startS3FaultProxy(ctx context.Context) error {
 	if !r.cfg.S3FaultProxyEnabled || r.cfg.ReplicaType != "s3" {
 		return nil
@@ -278,9 +478,12 @@ func (r *Runner) startS3FaultProxy(ctx context.Context) error {
 	proxy := newS3FaultProxy(s3FaultProxyConfig{
 		TargetEndpoint:    targetEndpoint,
 		ListenAddr:        r.cfg.S3FaultProxyListenAddr,
+		Mode:              r.cfg.S3FaultProxyMode,
 		MinContentLength:  r.cfg.S3FaultProxyMinContentLength,
 		ResetAfterBytes:   r.cfg.S3FaultProxyResetAfterBytes,
 		FailFirstAttempts: r.cfg.S3FaultProxyFailFirstAttempts,
+		MaxFailures:       r.cfg.S3FaultProxyMaxFailures,
+		SourceLevel:       r.cfg.S3FaultProxySourceLevel,
 	})
 	if err := proxy.Start(ctx); err != nil {
 		return err
@@ -288,6 +491,7 @@ func (r *Runner) startS3FaultProxy(ctx context.Context) error {
 	r.s3FaultProxy = proxy
 	r.cfg.S3FaultProxyTargetEndpoint = targetEndpoint
 	r.s3FaultProxyEndpoint = proxy.Endpoint()
+	r.cfg.S3FaultProxyEndpoint = proxy.Endpoint()
 	return nil
 }
 

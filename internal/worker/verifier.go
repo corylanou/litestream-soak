@@ -623,6 +623,9 @@ func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath stri
 	}
 
 	cmd := exec.CommandContext(ctx, "litestream-test", args...)
+	if v.cfg.ReplicaType == "s3" {
+		cmd.Env = v.cfg.s3CommandEnv(v.cfg.S3FaultProxyEndpoint)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil && txid > 0 && validateUnsupportedTXID(output) {
 		slog.Warn("litestream-test validate does not support -txid; retrying validation without pinned restore txid")
