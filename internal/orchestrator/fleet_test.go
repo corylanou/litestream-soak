@@ -208,53 +208,101 @@ func TestDefaultMainFleetTunesHighVolumeS3Uploads(t *testing.T) {
 	}
 }
 
-func TestDefaultMainFleetIncludesS3FlapProfile(t *testing.T) {
+func TestDefaultMainFleetSplitsS3FlapIntoDeterministicFaultProfiles(t *testing.T) {
 	t.Parallel()
 
 	spec := DefaultMainFleet()
-	var s3Flap DesiredWorker
+	workers := map[string]DesiredWorker{}
 	for _, worker := range spec.Workers {
-		if worker.ProfileName == "s3-flap" {
-			s3Flap = worker
-			break
-		}
+		workers[worker.ProfileName] = worker
 	}
 
-	if s3Flap.WorkerID == "" {
-		t.Fatal("DefaultMainFleet() missing s3-flap worker")
+	if _, ok := workers["s3-flap"]; ok {
+		t.Fatal("DefaultMainFleet() should split the legacy s3-flap profile into deterministic fault profiles")
 	}
-	if s3Flap.WorkerID != "worker-main-s3-flap" {
-		t.Fatalf("s3-flap WorkerID = %q, want worker-main-s3-flap", s3Flap.WorkerID)
+
+	tests := []struct {
+		profile           string
+		workerID          string
+		mode              string
+		concurrency       int
+		failFirstAttempts int
+		maxFailures       int
+		sourceLevel       string
+		requireSourceGET  bool
+	}{
+		{
+			profile:           "compaction-source-stream-drop",
+			workerID:          "worker-main-compaction-source-stream-drop",
+			mode:              "source-get-reset",
+			concurrency:       2,
+			failFirstAttempts: 1,
+			maxFailures:       6,
+			sourceLevel:       "0001",
+			requireSourceGET:  true,
+		},
+		{
+			profile:           "uploadpart-retry-quota",
+			workerID:          "worker-main-uploadpart-retry-quota",
+			mode:              "uploadpart-reset",
+			concurrency:       2,
+			failFirstAttempts: 3,
+			maxFailures:       9,
+		},
+		{
+			profile:           "provider-408-requestcanceled",
+			workerID:          "worker-main-provider-408-requestcanceled",
+			mode:              "provider-408-requestcanceled",
+			concurrency:       2,
+			failFirstAttempts: 2,
+			maxFailures:       6,
+		},
 	}
-	if s3Flap.VolumeSizeGB != 100 || s3Flap.Workload.VolumeSizeGB != 100 {
-		t.Fatalf("s3-flap volume = %d/%d, want 100", s3Flap.VolumeSizeGB, s3Flap.Workload.VolumeSizeGB)
-	}
-	if s3Flap.Workload.LoadMode != "synthetic" || s3Flap.Workload.Pattern != "wave" {
-		t.Fatalf("s3-flap workload = %+v, want synthetic wave workload", s3Flap.Workload)
-	}
-	if s3Flap.Workload.InitialSize != "256MB" {
-		t.Fatalf("s3-flap InitialSize = %q, want 256MB", s3Flap.Workload.InitialSize)
-	}
-	if s3Flap.Workload.PayloadSize < 32768 {
-		t.Fatalf("s3-flap PayloadSize = %d, want at least 32768", s3Flap.Workload.PayloadSize)
-	}
-	if s3Flap.Workload.S3PartSize != "8MB" {
-		t.Fatalf("s3-flap S3PartSize = %q, want 8MB", s3Flap.Workload.S3PartSize)
-	}
-	if s3Flap.Workload.S3Concurrency != 8 {
-		t.Fatalf("s3-flap S3Concurrency = %d, want 8", s3Flap.Workload.S3Concurrency)
-	}
-	if !s3Flap.Workload.S3FaultProxyEnabled {
-		t.Fatal("s3-flap should enable the S3 fault proxy")
-	}
-	if s3Flap.Workload.S3FaultProxyFailFirstAttempts != 2 {
-		t.Fatalf("s3-flap S3FaultProxyFailFirstAttempts = %d, want 2", s3Flap.Workload.S3FaultProxyFailFirstAttempts)
-	}
-	if s3Flap.Workload.S3FaultProxyResetAfterBytes != 2*1024*1024 {
-		t.Fatalf("s3-flap S3FaultProxyResetAfterBytes = %d, want 2MiB", s3Flap.Workload.S3FaultProxyResetAfterBytes)
-	}
-	if !s3Flap.Workload.ReplicaLevelReporting {
-		t.Fatal("s3-flap should enable replica level reporting")
+
+	for _, tc := range tests {
+		worker, ok := workers[tc.profile]
+		if !ok {
+			t.Fatalf("DefaultMainFleet() missing %s", tc.profile)
+		}
+		if worker.WorkerID != tc.workerID {
+			t.Fatalf("%s WorkerID = %q, want %q", tc.profile, worker.WorkerID, tc.workerID)
+		}
+		if worker.VolumeSizeGB != 100 || worker.Workload.VolumeSizeGB != 100 {
+			t.Fatalf("%s volume = %d/%d, want 100", tc.profile, worker.VolumeSizeGB, worker.Workload.VolumeSizeGB)
+		}
+		if worker.Workload.LoadMode != "synthetic" || worker.Workload.Pattern != "wave" {
+			t.Fatalf("%s workload = %+v, want synthetic wave workload", tc.profile, worker.Workload)
+		}
+		if worker.Workload.InitialSize != "256MB" {
+			t.Fatalf("%s InitialSize = %q, want 256MB", tc.profile, worker.Workload.InitialSize)
+		}
+		if worker.Workload.S3PartSize != "8MB" {
+			t.Fatalf("%s S3PartSize = %q, want 8MB", tc.profile, worker.Workload.S3PartSize)
+		}
+		if worker.Workload.S3Concurrency != tc.concurrency {
+			t.Fatalf("%s S3Concurrency = %d, want %d", tc.profile, worker.Workload.S3Concurrency, tc.concurrency)
+		}
+		if !worker.Workload.S3FaultProxyEnabled {
+			t.Fatalf("%s should enable the S3 fault proxy", tc.profile)
+		}
+		if worker.Workload.S3FaultProxyMode != tc.mode {
+			t.Fatalf("%s S3FaultProxyMode = %q, want %q", tc.profile, worker.Workload.S3FaultProxyMode, tc.mode)
+		}
+		if worker.Workload.S3FaultProxyFailFirstAttempts != tc.failFirstAttempts {
+			t.Fatalf("%s S3FaultProxyFailFirstAttempts = %d, want %d", tc.profile, worker.Workload.S3FaultProxyFailFirstAttempts, tc.failFirstAttempts)
+		}
+		if worker.Workload.S3FaultProxyMaxFailures != tc.maxFailures {
+			t.Fatalf("%s S3FaultProxyMaxFailures = %d, want %d", tc.profile, worker.Workload.S3FaultProxyMaxFailures, tc.maxFailures)
+		}
+		if worker.Workload.S3FaultProxySourceLevel != tc.sourceLevel {
+			t.Fatalf("%s S3FaultProxySourceLevel = %q, want %q", tc.profile, worker.Workload.S3FaultProxySourceLevel, tc.sourceLevel)
+		}
+		if worker.Workload.S3FaultProxyRequireObservedSourceGet != tc.requireSourceGET {
+			t.Fatalf("%s S3FaultProxyRequireObservedSourceGet = %v, want %v", tc.profile, worker.Workload.S3FaultProxyRequireObservedSourceGet, tc.requireSourceGET)
+		}
+		if !worker.Workload.ReplicaLevelReporting {
+			t.Fatalf("%s should enable replica level reporting", tc.profile)
+		}
 	}
 }
 

@@ -141,6 +141,9 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 		env["S3_FAULT_PROXY_ENABLED"] = "true"
 		env["S3_FAULT_PROXY_TARGET_ENDPOINT"] = m.replica.Endpoint
 	}
+	if strings.TrimSpace(workloadCfg.S3FaultProxyMode) != "" {
+		env["S3_FAULT_PROXY_MODE"] = workloadCfg.S3FaultProxyMode
+	}
 	if workloadCfg.S3FaultProxyListenAddr != "" {
 		env["S3_FAULT_PROXY_LISTEN_ADDR"] = workloadCfg.S3FaultProxyListenAddr
 	}
@@ -152,6 +155,15 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	}
 	if workloadCfg.S3FaultProxyFailFirstAttempts > 0 {
 		env["S3_FAULT_PROXY_FAIL_FIRST_ATTEMPTS"] = fmt.Sprintf("%d", workloadCfg.S3FaultProxyFailFirstAttempts)
+	}
+	if workloadCfg.S3FaultProxyMaxFailures > 0 {
+		env["S3_FAULT_PROXY_MAX_FAILURES"] = fmt.Sprintf("%d", workloadCfg.S3FaultProxyMaxFailures)
+	}
+	if strings.TrimSpace(workloadCfg.S3FaultProxySourceLevel) != "" {
+		env["S3_FAULT_PROXY_SOURCE_LEVEL"] = workloadCfg.S3FaultProxySourceLevel
+	}
+	if workloadCfg.S3FaultProxyRequireObservedSourceGet {
+		env["S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_GET"] = "true"
 	}
 	if workloadCfg.ReplicaLevelReporting {
 		env["REPLICA_LEVEL_REPORTING"] = "true"

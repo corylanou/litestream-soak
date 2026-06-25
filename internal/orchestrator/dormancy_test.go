@@ -360,25 +360,33 @@ func TestWorkerEnvIncludesS3FaultProxyWorkloadFields(t *testing.T) {
 	}
 
 	env := mgr.workerEnv(model.Worker{
-		ID:   "worker-main-s3-flap",
-		Name: "worker-main-s3-flap",
+		ID:   "worker-main-compaction-source-stream-drop",
+		Name: "worker-main-compaction-source-stream-drop",
 	}, workload.Config{
-		S3FaultProxyEnabled:           true,
-		S3FaultProxyListenAddr:        "127.0.0.1:19000",
-		S3FaultProxyMinContentLength:  8 * 1024 * 1024,
-		S3FaultProxyResetAfterBytes:   2 * 1024 * 1024,
-		S3FaultProxyFailFirstAttempts: 2,
-		ReplicaLevelReporting:         true,
+		S3FaultProxyEnabled:                  true,
+		S3FaultProxyMode:                     "source-get-reset",
+		S3FaultProxyListenAddr:               "127.0.0.1:19000",
+		S3FaultProxyMinContentLength:         8 * 1024 * 1024,
+		S3FaultProxyResetAfterBytes:          2 * 1024 * 1024,
+		S3FaultProxyFailFirstAttempts:        1,
+		S3FaultProxyMaxFailures:              6,
+		S3FaultProxySourceLevel:              "0001",
+		S3FaultProxyRequireObservedSourceGet: true,
+		ReplicaLevelReporting:                true,
 	})
 
 	want := map[string]string{
-		"S3_FAULT_PROXY_ENABLED":             "true",
-		"S3_FAULT_PROXY_TARGET_ENDPOINT":     "https://fly.storage.tigris.dev",
-		"S3_FAULT_PROXY_LISTEN_ADDR":         "127.0.0.1:19000",
-		"S3_FAULT_PROXY_MIN_CONTENT_LENGTH":  "8388608",
-		"S3_FAULT_PROXY_RESET_AFTER_BYTES":   "2097152",
-		"S3_FAULT_PROXY_FAIL_FIRST_ATTEMPTS": "2",
-		"REPLICA_LEVEL_REPORTING":            "true",
+		"S3_FAULT_PROXY_ENABLED":                     "true",
+		"S3_FAULT_PROXY_TARGET_ENDPOINT":             "https://fly.storage.tigris.dev",
+		"S3_FAULT_PROXY_MODE":                        "source-get-reset",
+		"S3_FAULT_PROXY_LISTEN_ADDR":                 "127.0.0.1:19000",
+		"S3_FAULT_PROXY_MIN_CONTENT_LENGTH":          "8388608",
+		"S3_FAULT_PROXY_RESET_AFTER_BYTES":           "2097152",
+		"S3_FAULT_PROXY_FAIL_FIRST_ATTEMPTS":         "1",
+		"S3_FAULT_PROXY_MAX_FAILURES":                "6",
+		"S3_FAULT_PROXY_SOURCE_LEVEL":                "0001",
+		"S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_GET": "true",
+		"REPLICA_LEVEL_REPORTING":                    "true",
 	}
 	for key, wantValue := range want {
 		if got := env[key]; got != wantValue {

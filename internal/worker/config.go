@@ -65,20 +65,24 @@ type Config struct {
 	ReplicaPath string // for file:// replicas (local directory)
 
 	// S3/Tigris config (only used when ReplicaType == "s3")
-	S3Bucket                      string
-	S3Endpoint                    string
-	S3AccessKey                   string
-	S3SecretKey                   string
-	S3Path                        string
-	S3PartSize                    string
-	S3Concurrency                 int
-	S3FaultProxyEnabled           bool
-	S3FaultProxyTargetEndpoint    string
-	S3FaultProxyListenAddr        string
-	S3FaultProxyMinContentLength  int64
-	S3FaultProxyResetAfterBytes   int64
-	S3FaultProxyFailFirstAttempts int
-	ReplicaLevelReporting         bool
+	S3Bucket                             string
+	S3Endpoint                           string
+	S3AccessKey                          string
+	S3SecretKey                          string
+	S3Path                               string
+	S3PartSize                           string
+	S3Concurrency                        int
+	S3FaultProxyEnabled                  bool
+	S3FaultProxyMode                     string
+	S3FaultProxyTargetEndpoint           string
+	S3FaultProxyListenAddr               string
+	S3FaultProxyMinContentLength         int64
+	S3FaultProxyResetAfterBytes          int64
+	S3FaultProxyFailFirstAttempts        int
+	S3FaultProxyMaxFailures              int
+	S3FaultProxySourceLevel              string
+	S3FaultProxyRequireObservedSourceGet bool
+	ReplicaLevelReporting                bool
 
 	// Litestream config
 	SnapshotInterval time.Duration
@@ -143,15 +147,59 @@ func DefaultConfig() Config {
 		S3Path:     "soak",
 
 		S3FaultProxyListenAddr:        "127.0.0.1:19000",
+		S3FaultProxyMode:              "uploadpart-reset",
 		S3FaultProxyMinContentLength:  8 * 1024 * 1024,
 		S3FaultProxyResetAfterBytes:   2 * 1024 * 1024,
 		S3FaultProxyFailFirstAttempts: 2,
+		S3FaultProxySourceLevel:       "0001",
 
 		SnapshotInterval: 10 * time.Minute,
 		SyncInterval:     1 * time.Second,
 
 		MetricsAddr: ":9091",
 	}
+}
+
+func applyS3FaultProfileBase(c *Config) {
+	c.WriteRate = 750
+	c.Pattern = "wave"
+	c.PayloadSize = 32768
+	c.ReadRatio = 0.1
+	c.Workers = 8
+	c.InitialSize = "256MB"
+	c.S3PartSize = "8MB"
+	c.S3Concurrency = 2
+	c.S3FaultProxyEnabled = true
+	c.ReplicaLevelReporting = true
+}
+
+func applyCompactionSourceStreamDropProfile(c *Config) {
+	applyS3FaultProfileBase(c)
+	c.S3FaultProxyMode = "source-get-reset"
+	c.S3FaultProxyMinContentLength = 1
+	c.S3FaultProxyResetAfterBytes = 64 * 1024
+	c.S3FaultProxyFailFirstAttempts = 1
+	c.S3FaultProxyMaxFailures = 6
+	c.S3FaultProxySourceLevel = "0001"
+	c.S3FaultProxyRequireObservedSourceGet = true
+}
+
+func applyUploadPartRetryQuotaProfile(c *Config) {
+	applyS3FaultProfileBase(c)
+	c.S3FaultProxyMode = "uploadpart-reset"
+	c.S3FaultProxyMinContentLength = 8 * 1024 * 1024
+	c.S3FaultProxyResetAfterBytes = 2 * 1024 * 1024
+	c.S3FaultProxyFailFirstAttempts = 3
+	c.S3FaultProxyMaxFailures = 9
+}
+
+func applyProvider408RequestCanceledProfile(c *Config) {
+	applyS3FaultProfileBase(c)
+	c.S3FaultProxyMode = "provider-408-requestcanceled"
+	c.S3FaultProxyMinContentLength = 0
+	c.S3FaultProxyResetAfterBytes = 1
+	c.S3FaultProxyFailFirstAttempts = 2
+	c.S3FaultProxyMaxFailures = 6
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -213,17 +261,12 @@ func ConfigFromEnv() (Config, error) {
 			c.PayloadSize = 4096
 			c.Workers = 8
 			c.InitialSize = "50MB"
-		case "s3-flap":
-			c.WriteRate = 750
-			c.Pattern = "wave"
-			c.PayloadSize = 32768
-			c.ReadRatio = 0.1
-			c.Workers = 8
-			c.InitialSize = "256MB"
-			c.S3PartSize = "8MB"
-			c.S3Concurrency = 8
-			c.S3FaultProxyEnabled = true
-			c.ReplicaLevelReporting = true
+		case "compaction-source-stream-drop":
+			applyCompactionSourceStreamDropProfile(&c)
+		case "uploadpart-retry-quota", "s3-flap":
+			applyUploadPartRetryQuotaProfile(&c)
+		case "provider-408-requestcanceled":
+			applyProvider408RequestCanceledProfile(&c)
 		case "burst-volume":
 			c.WriteRate = 1000
 			c.Pattern = "burst"
@@ -440,6 +483,9 @@ func ConfigFromEnv() (Config, error) {
 	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_TARGET_ENDPOINT")); v != "" {
 		c.S3FaultProxyTargetEndpoint = v
 	}
+	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_MODE")); v != "" {
+		c.S3FaultProxyMode = v
+	}
 	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_LISTEN_ADDR")); v != "" {
 		c.S3FaultProxyListenAddr = v
 	}
@@ -472,6 +518,22 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid S3_FAULT_PROXY_FAIL_FIRST_ATTEMPTS: must be non-negative")
 		}
 		c.S3FaultProxyFailFirstAttempts = n
+	}
+	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_MAX_FAILURES")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid S3_FAULT_PROXY_MAX_FAILURES: %w", err)
+		}
+		if n < 0 {
+			return c, fmt.Errorf("invalid S3_FAULT_PROXY_MAX_FAILURES: must be non-negative")
+		}
+		c.S3FaultProxyMaxFailures = n
+	}
+	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_SOURCE_LEVEL")); v != "" {
+		c.S3FaultProxySourceLevel = v
+	}
+	if parseBoolEnv(os.Getenv("S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_GET")) {
+		c.S3FaultProxyRequireObservedSourceGet = true
 	}
 	if parseBoolEnv(os.Getenv("REPLICA_LEVEL_REPORTING")) {
 		c.ReplicaLevelReporting = true
@@ -678,10 +740,14 @@ func (c Config) WorkloadConfig() workload.Config {
 	}
 	if c.S3FaultProxyEnabled {
 		cfg.S3FaultProxyEnabled = true
+		cfg.S3FaultProxyMode = c.S3FaultProxyMode
 		cfg.S3FaultProxyListenAddr = c.S3FaultProxyListenAddr
 		cfg.S3FaultProxyMinContentLength = c.S3FaultProxyMinContentLength
 		cfg.S3FaultProxyResetAfterBytes = c.S3FaultProxyResetAfterBytes
 		cfg.S3FaultProxyFailFirstAttempts = c.S3FaultProxyFailFirstAttempts
+		cfg.S3FaultProxyMaxFailures = c.S3FaultProxyMaxFailures
+		cfg.S3FaultProxySourceLevel = c.S3FaultProxySourceLevel
+		cfg.S3FaultProxyRequireObservedSourceGet = c.S3FaultProxyRequireObservedSourceGet
 	}
 	return cfg
 }
