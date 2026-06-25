@@ -79,8 +79,11 @@ func TestWorkloadConfigOmitsDisabledS3FaultProxyDefaults(t *testing.T) {
 func TestConfigFromEnvReadsManyDBConfig(t *testing.T) {
 	t.Setenv("NUM_DATABASES", "100")
 	t.Setenv("ACTIVE_PERCENT", "2.5")
+	t.Setenv("ACTIVE_ROTATE_INTERVAL", "10m")
+	t.Setenv("ACTIVE_SET_SEED", "42")
 	t.Setenv("CONFIG_MODE", "dir")
 	t.Setenv("VERIFY_SAMPLE_SIZE", "7")
+	t.Setenv("VERIFY_CHANGED_LIMIT", "40")
 	t.Setenv("REPLICATION_LAG_THRESHOLD", "3")
 
 	cfg, err := ConfigFromEnv()
@@ -94,11 +97,20 @@ func TestConfigFromEnvReadsManyDBConfig(t *testing.T) {
 	if cfg.ActivePercent != 2.5 {
 		t.Fatalf("ActivePercent = %v, want 2.5", cfg.ActivePercent)
 	}
+	if cfg.ActiveRotateInterval != 10*time.Minute {
+		t.Fatalf("ActiveRotateInterval = %s, want 10m", cfg.ActiveRotateInterval)
+	}
+	if cfg.ActiveSetSeed != 42 {
+		t.Fatalf("ActiveSetSeed = %d, want 42", cfg.ActiveSetSeed)
+	}
 	if cfg.ConfigMode != "dir" {
 		t.Fatalf("ConfigMode = %q, want dir", cfg.ConfigMode)
 	}
 	if cfg.VerifySampleSize != 7 {
 		t.Fatalf("VerifySampleSize = %d, want 7", cfg.VerifySampleSize)
+	}
+	if cfg.VerifyChangedLimit != 40 {
+		t.Fatalf("VerifyChangedLimit = %d, want 40", cfg.VerifyChangedLimit)
 	}
 	if cfg.ReplicationLagThreshold != 3 {
 		t.Fatalf("ReplicationLagThreshold = %d, want 3", cfg.ReplicationLagThreshold)

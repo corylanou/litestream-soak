@@ -402,8 +402,11 @@ func TestWorkerEnvIncludesManyDBWorkloadFields(t *testing.T) {
 		LoadMode:                "many-db",
 		NumDatabases:            100,
 		ActivePercent:           2,
+		ActiveRotateInterval:    "10m",
+		ActiveSetSeed:           42,
 		ConfigMode:              "dir",
 		VerifySampleSize:        5,
+		VerifyChangedLimit:      40,
 		ReplicationLagThreshold: 3,
 	})
 
@@ -411,8 +414,11 @@ func TestWorkerEnvIncludesManyDBWorkloadFields(t *testing.T) {
 		"LOAD_MODE":                 "many-db",
 		"NUM_DATABASES":             "100",
 		"ACTIVE_PERCENT":            "2.00",
+		"ACTIVE_ROTATE_INTERVAL":    "10m",
+		"ACTIVE_SET_SEED":           "42",
 		"CONFIG_MODE":               "dir",
 		"VERIFY_SAMPLE_SIZE":        "5",
+		"VERIFY_CHANGED_LIMIT":      "40",
 		"REPLICATION_LAG_THRESHOLD": "3",
 	}
 	for key, wantValue := range want {
@@ -498,6 +504,15 @@ func TestNormalizeWorkloadConfigDefaultsManyDBActivePercent(t *testing.T) {
 
 	if got.ActivePercent != 2 {
 		t.Fatalf("ActivePercent=%v want 2", got.ActivePercent)
+	}
+	if got.ActiveRotateInterval != "30m" {
+		t.Fatalf("ActiveRotateInterval=%q want 30m", got.ActiveRotateInterval)
+	}
+	if got.ActiveSetSeed != 1 {
+		t.Fatalf("ActiveSetSeed=%d want 1", got.ActiveSetSeed)
+	}
+	if got.VerifyChangedLimit != 100 {
+		t.Fatalf("VerifyChangedLimit=%d want 100", got.VerifyChangedLimit)
 	}
 }
 

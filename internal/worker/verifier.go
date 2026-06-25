@@ -65,11 +65,16 @@ type loadPauser interface {
 	Resume()
 }
 
+type manyDBChangeTracker interface {
+	manyDBChangedPathsAndReset() []string
+}
+
 type Verifier struct {
-	cfg        Config
-	pausers    []loadPauser
-	httpClient *http.Client
-	onStart    func(context.Context, VerificationResult)
+	cfg           Config
+	pausers       []loadPauser
+	manyDBChanges manyDBChangeTracker
+	httpClient    *http.Client
+	onStart       func(context.Context, VerificationResult)
 
 	checkpointAttempts    int
 	checkpointRetryDelay  time.Duration
@@ -90,7 +95,7 @@ const (
 )
 
 func NewVerifier(cfg Config, pausers ...loadPauser) *Verifier {
-	return &Verifier{
+	verifier := &Verifier{
 		cfg:                   cfg,
 		pausers:               pausers,
 		httpClient:            newIPCClient(cfg.SocketPath, cfg.verifySyncTimeout()+30*time.Second),
@@ -99,6 +104,13 @@ func NewVerifier(cfg Config, pausers ...loadPauser) *Verifier {
 		checkpointBusyTimeout: 5 * time.Second,
 		syncRetryDelay:        2 * time.Second,
 	}
+	for _, pauser := range pausers {
+		if changes, ok := pauser.(manyDBChangeTracker); ok {
+			verifier.manyDBChanges = changes
+			break
+		}
+	}
+	return verifier
 }
 
 func (v *Verifier) SetStartHook(fn func(context.Context, VerificationResult)) {

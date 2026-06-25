@@ -53,11 +53,20 @@ func normalizeWorkloadConfig(cfg workload.Config) workload.Config {
 		if cfg.ActivePercent == 0 && !cfg.ActivePercentSet {
 			cfg.ActivePercent = 2
 		}
+		if strings.TrimSpace(cfg.ActiveRotateInterval) == "" {
+			cfg.ActiveRotateInterval = "30m"
+		}
+		if cfg.ActiveSetSeed == 0 {
+			cfg.ActiveSetSeed = 1
+		}
 		if strings.TrimSpace(cfg.ConfigMode) == "" {
 			cfg.ConfigMode = "list"
 		}
 		if cfg.VerifySampleSize == 0 {
 			cfg.VerifySampleSize = 5
+		}
+		if cfg.VerifyChangedLimit == 0 {
+			cfg.VerifyChangedLimit = 100
 		}
 	}
 	return cfg
@@ -160,11 +169,20 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 		env["NUM_DATABASES"] = fmt.Sprintf("%d", workloadCfg.NumDatabases)
 		env["ACTIVE_PERCENT"] = fmt.Sprintf("%.2f", workloadCfg.ActivePercent)
 	}
+	if strings.TrimSpace(workloadCfg.ActiveRotateInterval) != "" {
+		env["ACTIVE_ROTATE_INTERVAL"] = workloadCfg.ActiveRotateInterval
+	}
+	if workloadCfg.ActiveSetSeed != 0 {
+		env["ACTIVE_SET_SEED"] = fmt.Sprintf("%d", workloadCfg.ActiveSetSeed)
+	}
 	if strings.TrimSpace(workloadCfg.ConfigMode) != "" {
 		env["CONFIG_MODE"] = workloadCfg.ConfigMode
 	}
 	if workloadCfg.VerifySampleSize > 0 {
 		env["VERIFY_SAMPLE_SIZE"] = fmt.Sprintf("%d", workloadCfg.VerifySampleSize)
+	}
+	if workloadCfg.VerifyChangedLimit > 0 {
+		env["VERIFY_CHANGED_LIMIT"] = fmt.Sprintf("%d", workloadCfg.VerifyChangedLimit)
 	}
 	if workloadCfg.ReplicationLagThreshold > 0 {
 		env["REPLICATION_LAG_THRESHOLD"] = fmt.Sprintf("%d", workloadCfg.ReplicationLagThreshold)

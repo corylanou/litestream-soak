@@ -293,11 +293,20 @@ func TestDefaultMainFleetIncludesManyDBProfilesWhenEnabled(t *testing.T) {
 		if worker.Workload.ActivePercent != 2 {
 			t.Fatalf("%s ActivePercent = %v, want 2", tc.profile, worker.Workload.ActivePercent)
 		}
+		if worker.Workload.ActiveRotateInterval != "30m" {
+			t.Fatalf("%s ActiveRotateInterval = %q, want 30m", tc.profile, worker.Workload.ActiveRotateInterval)
+		}
+		if worker.Workload.ActiveSetSeed != 1 {
+			t.Fatalf("%s ActiveSetSeed = %d, want 1", tc.profile, worker.Workload.ActiveSetSeed)
+		}
 		if worker.Workload.ConfigMode != tc.configMode {
 			t.Fatalf("%s ConfigMode = %q, want %q", tc.profile, worker.Workload.ConfigMode, tc.configMode)
 		}
 		if worker.Workload.VerifySampleSize != 5 {
 			t.Fatalf("%s VerifySampleSize = %d, want 5", tc.profile, worker.Workload.VerifySampleSize)
+		}
+		if worker.Workload.VerifyChangedLimit != 100 {
+			t.Fatalf("%s VerifyChangedLimit = %d, want 100", tc.profile, worker.Workload.VerifyChangedLimit)
 		}
 		if worker.VolumeSizeGB != tc.volumeGB || worker.Workload.VolumeSizeGB != tc.volumeGB {
 			t.Fatalf("%s volume = %d/%d, want %d", tc.profile, worker.VolumeSizeGB, worker.Workload.VolumeSizeGB, tc.volumeGB)

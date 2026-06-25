@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"path/filepath"
 	"time"
 )
@@ -24,13 +23,6 @@ func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResul
 		v.onStart(ctx, result)
 	}
 
-	targets := selectManyDBVerificationSample(v.cfg, rand.New(rand.NewSource(time.Now().UnixNano())))
-	if len(targets) == 0 {
-		v.failResult(ctx, &result, "many database verification sample was empty")
-		v.logResult(start, false, result.ErrorMessage)
-		return result, fmt.Errorf("many database verification sample was empty")
-	}
-
 	if err := recordVerificationStep(&result, "pause_load", func() error {
 		return v.pauseLoad(ctx)
 	}); err != nil {
@@ -46,6 +38,24 @@ func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResul
 	}()
 
 	time.Sleep(2 * time.Second)
+
+	var changed []string
+	if v.manyDBChanges != nil {
+		changed = v.manyDBChanges.manyDBChangedPathsAndReset()
+	}
+	targets, totalChanged := selectManyDBVerificationTargets(v.cfg, changed)
+	if len(targets) == 0 {
+		v.failResult(ctx, &result, "many database verification target set was empty")
+		v.logResult(start, false, result.ErrorMessage)
+		return result, fmt.Errorf("many database verification target set was empty")
+	}
+	if totalChanged > len(targets) {
+		slog.Warn("Many database verification changed set truncated",
+			"changed_databases", totalChanged,
+			"target_databases", len(targets),
+			"limit", v.cfg.manyDBVerifyChangedLimit(),
+		)
+	}
 
 	for _, dbPath := range targets {
 		name := filepath.Base(dbPath)
@@ -103,9 +113,9 @@ func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResul
 
 	result.Status = "passed"
 	result.Passed = true
-	result.Summary = fmt.Sprintf("verification passed (%d database sample)", len(targets))
+	result.Summary = fmt.Sprintf("verification passed (%d changed databases)", len(targets))
 	v.finalizeResult(&result)
-	slog.Info("Many database verification passed", "sample_size", len(targets), "duration", time.Since(start))
+	slog.Info("Many database verification passed", "verified_databases", len(targets), "changed_databases", totalChanged, "duration", time.Since(start))
 	v.logResult(start, true, "")
 	return result, nil
 }
