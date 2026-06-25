@@ -566,6 +566,9 @@ Current platform event types:
 
 - `platform_oom`: Fly reported an out-of-memory kill
 - `platform_disk_full`: Fly or the process reported `no space left on device`
+- `platform_disk_full_no_progress`: the constrained-disk scenario saw no replica progress under disk pressure before any distinct Litestream disk-full signal
+- `platform_disk_full_recovered`: Litestream emitted a distinct disk-full signal and replicated again after reserved disk space was freed without restart
+- `platform_disk_full_recovery_failed`: Litestream emitted a distinct disk-full signal but did not replicate again after reserved disk space was freed
 - `platform_restart`: Fly emitted a non-app restart or start event
 - `platform_killed`: Fly logs reported a process kill
 

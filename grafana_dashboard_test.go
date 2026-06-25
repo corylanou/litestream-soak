@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestOverviewDashboardIncludesDiskFullNoProgressSignal(t *testing.T) {
+func TestOverviewDashboardIncludesDiskFullSignalRecoveryGuard(t *testing.T) {
 	t.Parallel()
 
 	body, err := os.ReadFile("grafana/soak-overview-dashboard.json")
@@ -16,8 +16,9 @@ func TestOverviewDashboardIncludesDiskFullNoProgressSignal(t *testing.T) {
 	dashboard := string(body)
 
 	for _, want := range []string{
-		"Disk-Full No-Progress Guard",
+		"Disk-Full Signal/Recovery Guard",
 		"platform_disk_full_no_progress",
+		"platform_disk_full_recovered",
 		"soak_control_worker_latest_platform_event_info",
 	} {
 		if !strings.Contains(dashboard, want) {

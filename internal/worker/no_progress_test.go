@@ -1,6 +1,9 @@
 package worker
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -39,8 +42,17 @@ func TestDiskPressureNoProgressDetectorFiresAfterBoundedWindow(t *testing.T) {
 			t.Fatalf("at %s Detected = %v, want %v", sample.at.Sub(base), got.Detected, sample.want)
 		}
 		if sample.want {
+			if !got.ShouldReport {
+				t.Fatal("ShouldReport = false, want true")
+			}
+			if got.EventType != reporting.WorkerEventDiskFullNoProgress {
+				t.Fatalf("EventType = %q, want %q", got.EventType, reporting.WorkerEventDiskFullNoProgress)
+			}
 			if !got.Runtime.DiskPressureNoProgress {
 				t.Fatal("runtime DiskPressureNoProgress = false, want true")
+			}
+			if got.Runtime.DiskFullSignalObserved {
+				t.Fatal("runtime DiskFullSignalObserved = true, want false")
 			}
 			if got.Runtime.DiskPressureNoProgressSeconds < 60 {
 				t.Fatalf("runtime DiskPressureNoProgressSeconds = %v, want >= 60", got.Runtime.DiskPressureNoProgressSeconds)
@@ -87,5 +99,134 @@ func TestDiskPressureNoProgressDetectorResetsWhenReplicaAdvances(t *testing.T) {
 	got := runner.observeDiskPressureNoProgress(base.Add(106*time.Second), runtimeSnapshot{RuntimePayload: pressure})
 	if got.Detected {
 		t.Fatal("detector fired without a fresh full window after reset")
+	}
+}
+
+func TestDiskPressureSignalFreesReserveAndReportsRecovery(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.DBPath = filepath.Join(cfg.DataDir, "test.db")
+	cfg.DiskFullNoProgressWindow = time.Minute
+	cfg.DiskFullRecoveryReserve = 16
+	cfg.DiskFullRecoveryTimeout = 2 * time.Minute
+	runner := NewRunner(cfg)
+	runner.statsPoller.litestreamPID = func() int { return 321 }
+	if err := os.WriteFile(runner.diskFullRecoveryReservePath(), []byte("reserved"), 0644); err != nil {
+		t.Fatalf("write reserve: %v", err)
+	}
+	_, _ = runner.litestreamLog.Write([]byte("level=ERROR msg=\"snapshot\" error=\"database or disk is full: no space left on device\"\n"))
+
+	base := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
+	pressure := reporting.RuntimePayload{
+		DataDiskTotalBytes:        1024,
+		DataDiskAvailableBytes:    100,
+		DBSizeBytes:               600,
+		DBTXID:                    10,
+		ReplicatedTXID:            8,
+		ReplicationLagMax:         2,
+		LitestreamSnapshotHealthy: true,
+	}
+	first := runner.observeDiskPressureNoProgress(base, runtimeSnapshot{RuntimePayload: pressure})
+	if first.ShouldReport {
+		t.Fatalf("first observation reported %q, want no event", first.EventType)
+	}
+	if !first.Runtime.DiskFullSignalObserved {
+		t.Fatal("DiskFullSignalObserved = false, want true")
+	}
+	if !first.Runtime.DiskFullRecoveryAttempted {
+		t.Fatal("DiskFullRecoveryAttempted = false, want true")
+	}
+	if _, err := os.Stat(runner.diskFullRecoveryReservePath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reserve file stat error = %v, want not exist", err)
+	}
+
+	pressure.DBTXID = 11
+	pressure.ReplicatedTXID = 9
+	pressure.ReplicationLagMax = 2
+	recovered := runner.observeDiskPressureNoProgress(base.Add(15*time.Second), runtimeSnapshot{RuntimePayload: pressure})
+	if !recovered.ShouldReport {
+		t.Fatal("ShouldReport = false, want recovery event")
+	}
+	if recovered.EventType != reporting.WorkerEventDiskFullRecovered {
+		t.Fatalf("EventType = %q, want %q", recovered.EventType, reporting.WorkerEventDiskFullRecovered)
+	}
+	if !recovered.Runtime.DiskFullRecovered {
+		t.Fatal("DiskFullRecovered = false, want true")
+	}
+	if !recovered.Runtime.DiskFullRecoveryWithoutRestart {
+		t.Fatal("DiskFullRecoveryWithoutRestart = false, want true")
+	}
+	if recovered.Runtime.DiskPressureNoProgress {
+		t.Fatal("DiskPressureNoProgress = true, want false after signal")
+	}
+}
+
+func TestDiskPressureSignalReportsRecoveryTimeout(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.DBPath = filepath.Join(cfg.DataDir, "test.db")
+	cfg.DiskFullNoProgressWindow = time.Minute
+	cfg.DiskFullRecoveryReserve = 16
+	cfg.DiskFullRecoveryTimeout = time.Minute
+	runner := NewRunner(cfg)
+	runner.statsPoller.litestreamPID = func() int { return 321 }
+	if err := os.WriteFile(runner.diskFullRecoveryReservePath(), []byte("reserved"), 0644); err != nil {
+		t.Fatalf("write reserve: %v", err)
+	}
+	_, _ = runner.litestreamLog.Write([]byte("level=ERROR msg=\"snapshot\" error=\"ENOSPC\"\n"))
+
+	base := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
+	pressure := reporting.RuntimePayload{
+		DataDiskTotalBytes:        1024,
+		DataDiskAvailableBytes:    100,
+		DBSizeBytes:               600,
+		DBTXID:                    10,
+		ReplicatedTXID:            8,
+		ReplicationLagMax:         2,
+		LitestreamSnapshotHealthy: true,
+	}
+	first := runner.observeDiskPressureNoProgress(base, runtimeSnapshot{RuntimePayload: pressure})
+	if first.ShouldReport {
+		t.Fatalf("first observation reported %q, want no event", first.EventType)
+	}
+
+	pressure.DBTXID = 12
+	failed := runner.observeDiskPressureNoProgress(base.Add(61*time.Second), runtimeSnapshot{RuntimePayload: pressure})
+	if !failed.ShouldReport {
+		t.Fatal("ShouldReport = false, want recovery failure event")
+	}
+	if failed.EventType != reporting.WorkerEventDiskFullRecoveryFailed {
+		t.Fatalf("EventType = %q, want %q", failed.EventType, reporting.WorkerEventDiskFullRecoveryFailed)
+	}
+	if failed.Runtime.DiskFullRecovered {
+		t.Fatal("DiskFullRecovered = true, want false")
+	}
+	if !failed.Runtime.DiskFullSignalObserved {
+		t.Fatal("DiskFullSignalObserved = false, want true")
+	}
+}
+
+func TestLitestreamDiskFullSignalClassifier(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{name: "no space left", line: `level=ERROR msg="sync" error="no space left on device"`, want: true},
+		{name: "sqlite full", line: `level=ERROR msg="sync" error="SQLITE_FULL"`, want: true},
+		{name: "generic sync", line: `level=ERROR msg="sync" error="context deadline exceeded"`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, _ := litestreamDiskFullSignal([]string{test.line})
+			if got != test.want {
+				t.Fatalf("litestreamDiskFullSignal() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }

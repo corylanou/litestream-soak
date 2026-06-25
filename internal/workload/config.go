@@ -19,6 +19,8 @@ type Config struct {
 	VerifySyncDegradedAfter  string  `json:"verify_sync_degraded_after,omitempty"`
 	VerifySyncTimeout        string  `json:"verify_sync_timeout,omitempty"`
 	DiskFullNoProgressWindow string  `json:"disk_full_no_progress_window,omitempty"`
+	DiskFullRecoveryReserve  int64   `json:"disk_full_recovery_reserve_bytes,omitempty"`
+	DiskFullRecoveryTimeout  string  `json:"disk_full_recovery_timeout,omitempty"`
 	SnapshotInterval         string  `json:"snapshot_interval,omitempty"`
 	SyncInterval             string  `json:"sync_interval,omitempty"`
 	S3PartSize               string  `json:"s3_part_size,omitempty"`

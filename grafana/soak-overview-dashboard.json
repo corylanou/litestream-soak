@@ -2075,7 +2075,7 @@
       "type": "timeseries"
     },
     {
-      "description": "Alert fingerprint: platform_disk_full_no_progress",
+      "description": "Fail fingerprint: platform_disk_full_no_progress; pass fingerprint: platform_disk_full_recovered",
       "fieldConfig": {
         "defaults": {
           "thresholds": {
@@ -2120,9 +2120,13 @@
         {
           "expr": "sum(soak_control_worker_latest_platform_event_info{source=\"$source\",event_type=\"platform_disk_full_no_progress\"} == 1) or on() vector(0)",
           "legendFormat": "platform_disk_full_no_progress"
+        },
+        {
+          "expr": "sum(soak_control_worker_latest_platform_event_info{source=\"$source\",event_type=\"platform_disk_full_recovered\"} == 1) or on() vector(0)",
+          "legendFormat": "platform_disk_full_recovered"
         }
       ],
-      "title": "Disk-Full No-Progress Guard",
+      "title": "Disk-Full Signal/Recovery Guard",
       "type": "stat"
     }
   ],

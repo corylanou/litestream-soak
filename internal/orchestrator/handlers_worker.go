@@ -215,7 +215,8 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to record event")
 		return
 	}
-	if strings.TrimSpace(payload.EventType) == "platform_disk_full_no_progress" {
+	switch strings.TrimSpace(payload.EventType) {
+	case reporting.WorkerEventDiskFullNoProgress, reporting.WorkerEventDiskFullRecoveryFailed:
 		if err := a.db.UpdateWorkerVerificationState(workerID, false, message); err != nil {
 			respondError(w, r, http.StatusInternalServerError, err, "failed to update worker state")
 			return

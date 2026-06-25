@@ -57,6 +57,8 @@ type Config struct {
 	VerifySyncDegradedAfter  time.Duration
 	VerifySyncTimeout        time.Duration
 	DiskFullNoProgressWindow time.Duration
+	DiskFullRecoveryReserve  int64
+	DiskFullRecoveryTimeout  time.Duration
 
 	// Replica config
 	ReplicaType string // "file" or "s3"
@@ -125,6 +127,7 @@ func DefaultConfig() Config {
 		VerifySyncDegradedAfter:  5 * time.Minute,
 		VerifySyncTimeout:        15 * time.Minute,
 		DiskFullNoProgressWindow: 10 * time.Minute,
+		DiskFullRecoveryTimeout:  10 * time.Minute,
 
 		ReplicaType: "file",
 		ReplicaPath: "/data/replicas",
@@ -211,6 +214,22 @@ func ConfigFromEnv() (Config, error) {
 			c.ReadRatio = 0.95
 			c.Workers = 6
 			c.InitialSize = "10MB"
+		case "constrained-disk":
+			c.WriteRate = 40
+			c.Pattern = "constant"
+			c.PayloadSize = 4096
+			c.ReadRatio = 0.2
+			c.Workers = 2
+			c.InitialSize = "420MB"
+			c.VerifyInterval = 5 * time.Minute
+			c.VerifyType = "integrity"
+			c.VerifySyncDegradedAfter = time.Minute
+			c.VerifySyncTimeout = 3 * time.Minute
+			c.DiskFullNoProgressWindow = 2 * time.Minute
+			c.DiskFullRecoveryReserve = 300 * 1024 * 1024
+			c.DiskFullRecoveryTimeout = 5 * time.Minute
+			c.SnapshotInterval = 2 * time.Minute
+			c.SyncInterval = time.Second
 		case "many-dbs-100-list":
 			c.LoadMode = "many-db"
 			c.WriteRate = 20
@@ -341,6 +360,23 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid DISK_FULL_NO_PROGRESS_WINDOW: %w", err)
 		}
 		c.DiskFullNoProgressWindow = d
+	}
+	if v := os.Getenv("DISK_FULL_RECOVERY_RESERVE_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return c, fmt.Errorf("invalid DISK_FULL_RECOVERY_RESERVE_BYTES: %w", err)
+		}
+		if n < 0 {
+			return c, fmt.Errorf("invalid DISK_FULL_RECOVERY_RESERVE_BYTES: must be non-negative")
+		}
+		c.DiskFullRecoveryReserve = n
+	}
+	if v := os.Getenv("DISK_FULL_RECOVERY_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid DISK_FULL_RECOVERY_TIMEOUT: %w", err)
+		}
+		c.DiskFullRecoveryTimeout = d
 	}
 
 	if v := os.Getenv("REPLICA_TYPE"); v != "" {
@@ -547,6 +583,8 @@ func (c Config) WorkloadConfig() workload.Config {
 		VerifySyncDegradedAfter:  c.VerifySyncDegradedAfter.String(),
 		VerifySyncTimeout:        c.VerifySyncTimeout.String(),
 		DiskFullNoProgressWindow: c.DiskFullNoProgressWindow.String(),
+		DiskFullRecoveryReserve:  c.DiskFullRecoveryReserve,
+		DiskFullRecoveryTimeout:  c.DiskFullRecoveryTimeout.String(),
 		SnapshotInterval:         c.SnapshotInterval.String(),
 		SyncInterval:             c.SyncInterval.String(),
 		S3PartSize:               c.S3PartSize,

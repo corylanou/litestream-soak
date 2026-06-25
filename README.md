@@ -57,7 +57,7 @@ is unsupported.
 | `high-volume` | `worker-main-high-vol` | Higher-rate wave synthetic writes, larger payloads, more load workers, and a 100 GB volume. |
 | `burst-volume` | `worker-main-burst-vol` | Burst-pattern synthetic writes against a 100 GB volume. |
 | `read-heavy` | `worker-main-read-heavy` | Constant synthetic writes with a high read ratio to exercise read-heavy contention. |
-| `constrained-disk` | `worker-main-constrained-disk` | Synthetic writes on a 1 GB volume with a large initial database to exercise disk-full initial snapshot staging and no-progress detection. |
+| `constrained-disk` | `worker-main-constrained-disk` | Synthetic writes on a 1 GB volume with a removable reserve file to exercise disk-full initial snapshot staging, distinct disk-full signaling, and auto-recovery after space is freed. |
 | `gharchive-replay` | `worker-main-gharchive` | Replays GH Archive events from `https://data.gharchive.org/2025-01-01-0.json.gz`. |
 | `gharchive-mixed` | `worker-main-gharchive-mixed` | Combines wave synthetic load with looping GH Archive replay. |
 | `taxi-replay` | `worker-main-taxi-replay` | Replays `datasets/taxi_sample.csv`. |

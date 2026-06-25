@@ -118,8 +118,8 @@ func TestDefaultMainFleetIncludesConstrainedDiskProfile(t *testing.T) {
 	if worker.VolumeSizeGB != 1 || worker.Workload.VolumeSizeGB != 1 {
 		t.Fatalf("volume = %d/%d, want 1", worker.VolumeSizeGB, worker.Workload.VolumeSizeGB)
 	}
-	if worker.Workload.InitialSize != "700MB" {
-		t.Fatalf("InitialSize = %q, want 700MB", worker.Workload.InitialSize)
+	if worker.Workload.InitialSize != "420MB" {
+		t.Fatalf("InitialSize = %q, want 420MB", worker.Workload.InitialSize)
 	}
 	if worker.Workload.SnapshotInterval != "2m" {
 		t.Fatalf("SnapshotInterval = %q, want 2m", worker.Workload.SnapshotInterval)
@@ -135,6 +135,12 @@ func TestDefaultMainFleetIncludesConstrainedDiskProfile(t *testing.T) {
 	}
 	if worker.Workload.DiskFullNoProgressWindow != "2m" {
 		t.Fatalf("DiskFullNoProgressWindow = %q, want 2m", worker.Workload.DiskFullNoProgressWindow)
+	}
+	if worker.Workload.DiskFullRecoveryReserve != 300*1024*1024 {
+		t.Fatalf("DiskFullRecoveryReserve = %d, want 314572800", worker.Workload.DiskFullRecoveryReserve)
+	}
+	if worker.Workload.DiskFullRecoveryTimeout != "5m" {
+		t.Fatalf("DiskFullRecoveryTimeout = %q, want 5m", worker.Workload.DiskFullRecoveryTimeout)
 	}
 }
 

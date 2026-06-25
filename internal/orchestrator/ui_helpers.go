@@ -341,6 +341,8 @@ func runtimeSnapshotLabel(value string) string {
 
 func eventClass(value string) string {
 	switch {
+	case strings.HasPrefix(strings.TrimSpace(value), "platform_disk_full_recovered"):
+		return "status-good"
 	case strings.HasPrefix(strings.TrimSpace(value), "platform_oom"), strings.HasPrefix(strings.TrimSpace(value), "platform_disk_full"), strings.HasPrefix(strings.TrimSpace(value), "platform_killed"):
 		return "status-bad"
 	case strings.HasPrefix(strings.TrimSpace(value), "platform_restart"):

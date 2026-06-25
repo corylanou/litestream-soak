@@ -468,6 +468,13 @@ func (p *statsPoller) setLitestreamSnapshot(snapshot reporting.RuntimePayload) {
 	p.snapshot.WorkerFDs = snapshot.WorkerFDs
 	p.snapshot.DiskPressureNoProgress = snapshot.DiskPressureNoProgress
 	p.snapshot.DiskPressureNoProgressSeconds = snapshot.DiskPressureNoProgressSeconds
+	p.snapshot.DiskFullSignalObserved = snapshot.DiskFullSignalObserved
+	p.snapshot.DiskFullSignalMessage = snapshot.DiskFullSignalMessage
+	p.snapshot.DiskFullRecoveryAttempted = snapshot.DiskFullRecoveryAttempted
+	p.snapshot.DiskFullRecoveryFreedBytes = snapshot.DiskFullRecoveryFreedBytes
+	p.snapshot.DiskFullRecovered = snapshot.DiskFullRecovered
+	p.snapshot.DiskFullRecoverySeconds = snapshot.DiskFullRecoverySeconds
+	p.snapshot.DiskFullRecoveryWithoutRestart = snapshot.DiskFullRecoveryWithoutRestart
 	p.snapshot.LitestreamUptimeSeconds = snapshot.LitestreamUptimeSeconds
 	p.snapshot.SnapshotCollectedAt = snapshot.SnapshotCollectedAt
 	p.snapshot.LitestreamSnapshotHealthy = snapshot.LitestreamSnapshotHealthy
