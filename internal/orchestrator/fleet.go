@@ -307,17 +307,28 @@ func DefaultMainFleet() FleetSpec {
 		},
 	}
 	if manyDBFleetEnabled() {
-		workers = append(workers, manyDBFleetWorkers()...)
+		workers = append(workers, manyDB100FleetWorkers()...)
+		if manyDB1000FleetEnabled() {
+			workers = append(workers, manyDB1000FleetWorker())
+		}
 	}
 	return FleetSpec{Workers: workers}
 }
 
 func manyDBFleetEnabled() bool {
-	value := strings.TrimSpace(strings.ToLower(os.Getenv("SOAK_ENABLE_MANY_DB_FLEET")))
+	return envFlagEnabled("SOAK_ENABLE_MANY_DB_FLEET")
+}
+
+func manyDB1000FleetEnabled() bool {
+	return envFlagEnabled("SOAK_ENABLE_MANY_DB_1000")
+}
+
+func envFlagEnabled(name string) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
 	return value == "1" || value == "true" || value == "yes"
 }
 
-func manyDBFleetWorkers() []DesiredWorker {
+func manyDB100FleetWorkers() []DesiredWorker {
 	return []DesiredWorker{
 		{
 			WorkerID:     "worker-main-many-dbs-100-list",
@@ -383,37 +394,40 @@ func manyDBFleetWorkers() []DesiredWorker {
 				CPUs:                    1,
 			},
 		},
-		{
-			WorkerID:     "worker-main-many-dbs-1000-dir",
-			Name:         "worker-main-many-dbs-1000-dir",
-			Source:       "main",
-			GitSHA:       "main",
-			ProfileName:  "many-dbs-1000-dir",
-			Region:       "ord",
-			VolumeSizeGB: 20,
-			Workload: workload.Config{
-				LoadMode:                "many-db",
-				WriteRate:               20,
-				Pattern:                 "constant",
-				PayloadSize:             512,
-				Workers:                 4,
-				InitialSize:             "5MB",
-				VerifyInterval:          "30m",
-				VerifyType:              "integrity",
-				SnapshotInterval:        "10m",
-				SyncInterval:            "1s",
-				NumDatabases:            1000,
-				ActivePercent:           2,
-				ActiveRotateInterval:    "30m",
-				ActiveSetSeed:           1,
-				ConfigMode:              "dir",
-				VerifySampleSize:        5,
-				VerifyChangedLimit:      100,
-				ReplicationLagThreshold: 0,
-				VolumeSizeGB:            20,
-				MemoryMB:                4096,
-				CPUs:                    2,
-			},
+	}
+}
+
+func manyDB1000FleetWorker() DesiredWorker {
+	return DesiredWorker{
+		WorkerID:     "worker-main-many-dbs-1000-dir",
+		Name:         "worker-main-many-dbs-1000-dir",
+		Source:       "main",
+		GitSHA:       "main",
+		ProfileName:  "many-dbs-1000-dir",
+		Region:       "ord",
+		VolumeSizeGB: 20,
+		Workload: workload.Config{
+			LoadMode:                "many-db",
+			WriteRate:               20,
+			Pattern:                 "constant",
+			PayloadSize:             512,
+			Workers:                 4,
+			InitialSize:             "5MB",
+			VerifyInterval:          "30m",
+			VerifyType:              "integrity",
+			SnapshotInterval:        "10m",
+			SyncInterval:            "1s",
+			NumDatabases:            1000,
+			ActivePercent:           2,
+			ActiveRotateInterval:    "30m",
+			ActiveSetSeed:           1,
+			ConfigMode:              "dir",
+			VerifySampleSize:        5,
+			VerifyChangedLimit:      100,
+			ReplicationLagThreshold: 0,
+			VolumeSizeGB:            20,
+			MemoryMB:                4096,
+			CPUs:                    2,
 		},
 	}
 }
