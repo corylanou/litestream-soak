@@ -127,14 +127,17 @@ func TestDefaultMainFleetIncludesConstrainedDiskProfile(t *testing.T) {
 	if worker.Workload.VerifyInterval != "5m" {
 		t.Fatalf("VerifyInterval = %q, want 5m", worker.Workload.VerifyInterval)
 	}
+	if worker.Workload.MonitorInterval != "1s" {
+		t.Fatalf("MonitorInterval = %q, want 1s", worker.Workload.MonitorInterval)
+	}
 	if worker.Workload.VerifySyncDegradedAfter != "1m" {
 		t.Fatalf("VerifySyncDegradedAfter = %q, want 1m", worker.Workload.VerifySyncDegradedAfter)
 	}
 	if worker.Workload.VerifySyncTimeout != "3m" {
 		t.Fatalf("VerifySyncTimeout = %q, want 3m", worker.Workload.VerifySyncTimeout)
 	}
-	if worker.Workload.DiskFullNoProgressWindow != "2m" {
-		t.Fatalf("DiskFullNoProgressWindow = %q, want 2m", worker.Workload.DiskFullNoProgressWindow)
+	if worker.Workload.DiskFullNoProgressWindow != "7s" {
+		t.Fatalf("DiskFullNoProgressWindow = %q, want 7s", worker.Workload.DiskFullNoProgressWindow)
 	}
 	if worker.Workload.DiskFullRecoveryReserve != 300*1024*1024 {
 		t.Fatalf("DiskFullRecoveryReserve = %d, want 314572800", worker.Workload.DiskFullRecoveryReserve)
@@ -230,32 +233,42 @@ func TestDefaultMainFleetSplitsS3FlapIntoDeterministicFaultProfiles(t *testing.T
 		maxFailures       int
 		sourceLevel       string
 		requireSourceGET  bool
+		requireRangeGET   bool
 	}{
 		{
 			profile:           "compaction-source-stream-drop",
 			workerID:          "worker-main-compaction-source-stream-drop",
 			mode:              "source-get-reset",
 			concurrency:       2,
-			failFirstAttempts: 1,
-			maxFailures:       6,
+			failFirstAttempts: 2,
+			maxFailures:       0,
 			sourceLevel:       "0001",
 			requireSourceGET:  true,
+			requireRangeGET:   true,
 		},
 		{
 			profile:           "uploadpart-retry-quota",
 			workerID:          "worker-main-uploadpart-retry-quota",
 			mode:              "uploadpart-reset",
-			concurrency:       2,
+			concurrency:       1,
 			failFirstAttempts: 3,
-			maxFailures:       9,
+			maxFailures:       51,
 		},
 		{
-			profile:           "provider-408-requestcanceled",
-			workerID:          "worker-main-provider-408-requestcanceled",
-			mode:              "provider-408-requestcanceled",
-			concurrency:       2,
-			failFirstAttempts: 2,
-			maxFailures:       6,
+			profile:           "provider-http-408",
+			workerID:          "worker-main-provider-http-408",
+			mode:              "provider-http-408",
+			concurrency:       1,
+			failFirstAttempts: 1,
+			maxFailures:       1,
+		},
+		{
+			profile:           "provider-request-canceled",
+			workerID:          "worker-main-provider-request-canceled",
+			mode:              "provider-request-canceled",
+			concurrency:       1,
+			failFirstAttempts: 1,
+			maxFailures:       1,
 		},
 	}
 
@@ -299,6 +312,9 @@ func TestDefaultMainFleetSplitsS3FlapIntoDeterministicFaultProfiles(t *testing.T
 		}
 		if worker.Workload.S3FaultProxyRequireObservedSourceGet != tc.requireSourceGET {
 			t.Fatalf("%s S3FaultProxyRequireObservedSourceGet = %v, want %v", tc.profile, worker.Workload.S3FaultProxyRequireObservedSourceGet, tc.requireSourceGET)
+		}
+		if worker.Workload.S3FaultProxyRequireObservedSourceRangeGet != tc.requireRangeGET {
+			t.Fatalf("%s S3FaultProxyRequireObservedSourceRangeGet = %v, want %v", tc.profile, worker.Workload.S3FaultProxyRequireObservedSourceRangeGet, tc.requireRangeGET)
 		}
 		if !worker.Workload.ReplicaLevelReporting {
 			t.Fatalf("%s should enable replica level reporting", tc.profile)

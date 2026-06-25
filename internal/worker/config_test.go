@@ -39,6 +39,7 @@ func TestConfigFromEnvReadsS3FaultProxyConfig(t *testing.T) {
 	t.Setenv("S3_FAULT_PROXY_MAX_FAILURES", "6")
 	t.Setenv("S3_FAULT_PROXY_SOURCE_LEVEL", "0001")
 	t.Setenv("S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_GET", "true")
+	t.Setenv("S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_RANGE_GET", "true")
 	t.Setenv("REPLICA_LEVEL_REPORTING", "true")
 
 	cfg, err := ConfigFromEnv()
@@ -75,6 +76,9 @@ func TestConfigFromEnvReadsS3FaultProxyConfig(t *testing.T) {
 	}
 	if !cfg.S3FaultProxyRequireObservedSourceGet {
 		t.Fatal("S3FaultProxyRequireObservedSourceGet = false, want true")
+	}
+	if !cfg.S3FaultProxyRequireObservedSourceRangeGet {
+		t.Fatal("S3FaultProxyRequireObservedSourceRangeGet = false, want true")
 	}
 	if !cfg.ReplicaLevelReporting {
 		t.Fatal("ReplicaLevelReporting = false, want true")
@@ -122,6 +126,7 @@ func TestConfigFromEnvReadsManyDBConfig(t *testing.T) {
 }
 
 func TestConfigFromEnvReadsDiskFullNoProgressWindow(t *testing.T) {
+	t.Setenv("MONITOR_INTERVAL", "1s")
 	t.Setenv("DISK_FULL_NO_PROGRESS_WINDOW", "2m")
 	t.Setenv("DISK_FULL_RECOVERY_RESERVE_BYTES", "314572800")
 	t.Setenv("DISK_FULL_RECOVERY_TIMEOUT", "5m")
@@ -133,6 +138,9 @@ func TestConfigFromEnvReadsDiskFullNoProgressWindow(t *testing.T) {
 
 	if cfg.DiskFullNoProgressWindow != 2*time.Minute {
 		t.Fatalf("DiskFullNoProgressWindow = %s, want 2m", cfg.DiskFullNoProgressWindow)
+	}
+	if cfg.MonitorInterval != time.Second {
+		t.Fatalf("MonitorInterval = %s, want 1s", cfg.MonitorInterval)
 	}
 	if cfg.DiskFullRecoveryReserve != 314572800 {
 		t.Fatalf("DiskFullRecoveryReserve = %d, want 314572800", cfg.DiskFullRecoveryReserve)
@@ -153,8 +161,14 @@ func TestConfigFromEnvReadsConstrainedDiskProfile(t *testing.T) {
 	if cfg.InitialSize != "420MB" {
 		t.Fatalf("InitialSize = %q, want 420MB", cfg.InitialSize)
 	}
+	if cfg.MonitorInterval != time.Second {
+		t.Fatalf("MonitorInterval = %s, want 1s", cfg.MonitorInterval)
+	}
 	if cfg.DiskFullRecoveryReserve != 300*1024*1024 {
 		t.Fatalf("DiskFullRecoveryReserve = %d, want 314572800", cfg.DiskFullRecoveryReserve)
+	}
+	if cfg.DiskFullNoProgressWindow != 7*time.Second {
+		t.Fatalf("DiskFullNoProgressWindow = %s, want 7s", cfg.DiskFullNoProgressWindow)
 	}
 	if cfg.DiskFullRecoveryTimeout != 5*time.Minute {
 		t.Fatalf("DiskFullRecoveryTimeout = %s, want 5m", cfg.DiskFullRecoveryTimeout)

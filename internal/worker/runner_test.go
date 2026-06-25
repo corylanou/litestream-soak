@@ -150,7 +150,7 @@ func TestRunnerFailsPassingVerificationWhenS3FaultNotObserved(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ReplicaType = "s3"
 	cfg.S3FaultProxyEnabled = true
-	cfg.S3FaultProxyMode = "provider-408-requestcanceled"
+	cfg.S3FaultProxyMode = "provider-http-408"
 	cfg.S3FaultProxyFailFirstAttempts = 1
 	runner := NewRunner(cfg)
 	result := VerificationResult{
@@ -170,7 +170,7 @@ func TestRunnerFailsPassingVerificationWhenS3FaultNotObserved(t *testing.T) {
 	if got.Status != "failed" {
 		t.Fatalf("Status = %q, want failed", got.Status)
 	}
-	if !strings.Contains(got.ErrorMessage, "no induced provider-408-requestcanceled fault observed") {
+	if !strings.Contains(got.ErrorMessage, "no induced provider-http-408 fault observed") {
 		t.Fatalf("ErrorMessage = %q, want S3 fault guard failure", got.ErrorMessage)
 	}
 	if got.Summary != "s3 fault guard failed" {
@@ -208,6 +208,71 @@ func TestRunnerFailsPassingVerificationWhenSourceGETObservedWithoutFault(t *test
 	}
 	if !strings.Contains(got.ErrorMessage, "no induced source-get-reset fault observed") {
 		t.Fatalf("ErrorMessage = %q, want S3 fault guard failure", got.ErrorMessage)
+	}
+}
+
+func TestRunnerFailsPassingVerificationWhenSourceRangeGETNotObserved(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.ReplicaType = "s3"
+	cfg.S3FaultProxyEnabled = true
+	cfg.S3FaultProxyMode = "source-get-reset"
+	cfg.S3FaultProxyFailFirstAttempts = 1
+	cfg.S3FaultProxyRequireObservedSourceGet = true
+	cfg.S3FaultProxyRequireObservedSourceRangeGet = true
+	runner := NewRunner(cfg)
+	runner.s3FaultProxy = &s3FaultProxy{observedSourceGET: 1, totalFailures: 1}
+	result := VerificationResult{
+		StartedAt:   time.Now().Add(-time.Second).UTC(),
+		CompletedAt: time.Now().UTC(),
+		CheckType:   "integrity",
+		Status:      "passed",
+		Passed:      true,
+		Summary:     "verification passed",
+	}
+
+	got := runner.applyS3FaultProxyVerificationGuards(result)
+
+	if got.Passed {
+		t.Fatal("Passed = true, want false when source range GET was not observed")
+	}
+	if got.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", got.Status)
+	}
+	if !strings.Contains(got.ErrorMessage, "no resumed remote 0001 source range GET observed") {
+		t.Fatalf("ErrorMessage = %q, want source range GET guard failure", got.ErrorMessage)
+	}
+}
+
+func TestRunnerKeepsPassingVerificationWhenSourceRangeGETObserved(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.ReplicaType = "s3"
+	cfg.S3FaultProxyEnabled = true
+	cfg.S3FaultProxyMode = "source-get-reset"
+	cfg.S3FaultProxyFailFirstAttempts = 1
+	cfg.S3FaultProxyRequireObservedSourceGet = true
+	cfg.S3FaultProxyRequireObservedSourceRangeGet = true
+	runner := NewRunner(cfg)
+	runner.s3FaultProxy = &s3FaultProxy{observedSourceGET: 2, observedSourceRangeGET: 1, totalFailures: 1}
+	result := VerificationResult{
+		StartedAt:   time.Now().Add(-time.Second).UTC(),
+		CompletedAt: time.Now().UTC(),
+		CheckType:   "integrity",
+		Status:      "passed",
+		Passed:      true,
+		Summary:     "verification passed",
+	}
+
+	got := runner.applyS3FaultProxyVerificationGuards(result)
+
+	if !got.Passed {
+		t.Fatalf("Passed = false, want true when source range GET was observed: %q", got.ErrorMessage)
+	}
+	if got.Status != "passed" {
+		t.Fatalf("Status = %q, want passed", got.Status)
 	}
 }
 
@@ -525,6 +590,66 @@ exit 0
 		if arg == "-txid" {
 			t.Fatalf("fallback args unexpectedly include -txid: %v", args)
 		}
+	}
+}
+
+func TestVerifierValidateUsesS3ProxyEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires Unix")
+	}
+
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "env")
+	writeFakeLitestreamTest(t, dir, `
+	printf 'AWS_ACCESS_KEY_ID=%s\n' "$AWS_ACCESS_KEY_ID" > "$LITESTREAM_TEST_ENV"
+	printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$AWS_SECRET_ACCESS_KEY" >> "$LITESTREAM_TEST_ENV"
+	printf 'HTTP_PROXY=%s\n' "$HTTP_PROXY" >> "$LITESTREAM_TEST_ENV"
+	printf 'HTTPS_PROXY=%s\n' "$HTTPS_PROXY" >> "$LITESTREAM_TEST_ENV"
+	printf 'NO_PROXY=%s\n' "$NO_PROXY" >> "$LITESTREAM_TEST_ENV"
+	exit 0
+	`)
+	t.Setenv("LITESTREAM_TEST_ENV", envPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.ReplicaType = "s3"
+	cfg.S3AccessKey = "access"
+	cfg.S3SecretKey = "secret"
+	cfg.S3FaultProxyEnabled = true
+	cfg.S3FaultProxyEndpoint = "http://127.0.0.1:19000"
+	if err := os.WriteFile(cfg.DBPath, []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.ConfigPath, []byte("dbs: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	verifier := NewVerifier(cfg)
+	passed, err := verifier.validate(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("validate() error = %v", err)
+	}
+	if !passed {
+		t.Fatal("validate() passed=false")
+	}
+	env := keyValueLines(t, envPath)
+	if env["AWS_ACCESS_KEY_ID"] != "access" {
+		t.Fatalf("AWS_ACCESS_KEY_ID = %q, want access", env["AWS_ACCESS_KEY_ID"])
+	}
+	if env["AWS_SECRET_ACCESS_KEY"] != "secret" {
+		t.Fatalf("AWS_SECRET_ACCESS_KEY = %q, want secret", env["AWS_SECRET_ACCESS_KEY"])
+	}
+	if env["HTTP_PROXY"] != cfg.S3FaultProxyEndpoint {
+		t.Fatalf("HTTP_PROXY = %q, want %q", env["HTTP_PROXY"], cfg.S3FaultProxyEndpoint)
+	}
+	if env["HTTPS_PROXY"] != cfg.S3FaultProxyEndpoint {
+		t.Fatalf("HTTPS_PROXY = %q, want %q", env["HTTPS_PROXY"], cfg.S3FaultProxyEndpoint)
+	}
+	if env["NO_PROXY"] != "127.0.0.1,localhost" {
+		t.Fatalf("NO_PROXY = %q, want localhost bypass", env["NO_PROXY"])
 	}
 }
 
@@ -1108,6 +1233,20 @@ func readLines(t *testing.T, path string) []string {
 		return nil
 	}
 	return strings.Split(text, "\n")
+}
+
+func keyValueLines(t *testing.T, path string) map[string]string {
+	t.Helper()
+
+	values := make(map[string]string)
+	for _, line := range readLines(t, path) {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			t.Fatalf("line %q is not key=value", line)
+		}
+		values[key] = value
+	}
+	return values
 }
 
 func assertContains(t *testing.T, values []string, want string) {

@@ -50,8 +50,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	defer r.stopS3FaultProxy()
 
 	go func() {
-		ticker := time.NewTicker(15 * time.Second)
+		ticker := time.NewTicker(r.cfg.monitorInterval())
 		defer ticker.Stop()
+		lastHeartbeat := time.Time{}
 		for {
 			select {
 			case <-runCtx.Done():
@@ -65,7 +66,10 @@ func (r *Runner) Run(ctx context.Context) error {
 				if pressure.ShouldReport {
 					r.sendDiskFullEvent(runCtx, pressure)
 				}
-				r.sendHeartbeat(runCtx)
+				if lastHeartbeat.IsZero() || time.Since(lastHeartbeat) >= 15*time.Second {
+					r.sendHeartbeat(runCtx)
+					lastHeartbeat = time.Now()
+				}
 			}
 		}
 	}()
@@ -171,6 +175,7 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 			}
 			return nil
 		case <-ticker.C:
+			r.resetS3FaultProxyCycle()
 			result, err := r.verifier.RunCycle(ctx)
 			result = r.applyS3FaultProxyVerificationGuards(result)
 			r.sendVerification(context.WithoutCancel(ctx), result)
@@ -201,6 +206,15 @@ func (r *Runner) applyS3FaultProxyVerificationGuards(result VerificationResult) 
 			return failedS3FaultGuardResult(result, "s3 source GET fault guard failed", fmt.Sprintf("s3 source GET fault guard: no remote %s source GET observed by fault proxy; local compactor cache may have bypassed the source-read path", level))
 		}
 	}
+	if r.cfg.ReplicaType == "s3" && r.cfg.S3FaultProxyRequireObservedSourceRangeGet {
+		if r.s3FaultProxy == nil || r.s3FaultProxy.ObservedSourceRangeGETs() == 0 {
+			level := strings.Trim(strings.TrimSpace(r.cfg.S3FaultProxySourceLevel), "/")
+			if level == "" {
+				level = defaultS3FaultProxySourceLevel
+			}
+			return failedS3FaultGuardResult(result, "s3 source range GET fault guard failed", fmt.Sprintf("s3 source range GET fault guard: no resumed remote %s source range GET observed by fault proxy", level))
+		}
+	}
 
 	if r.cfg.ReplicaType == "s3" && r.cfg.S3FaultProxyEnabled && r.cfg.S3FaultProxyFailFirstAttempts > 0 {
 		if r.s3FaultProxy != nil && r.s3FaultProxy.TotalFailures() > 0 {
@@ -211,6 +225,12 @@ func (r *Runner) applyS3FaultProxyVerificationGuards(result VerificationResult) 
 	}
 
 	return result
+}
+
+func (r *Runner) resetS3FaultProxyCycle() {
+	if r.s3FaultProxy != nil {
+		r.s3FaultProxy.ResetCycle()
+	}
 }
 
 func failedS3FaultGuardResult(result VerificationResult, summary string, message string) VerificationResult {
