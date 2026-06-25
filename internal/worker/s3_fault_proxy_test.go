@@ -200,6 +200,9 @@ func TestS3FaultProxyDropsSourceGETResponseAndTracksObservation(t *testing.T) {
 	if got := proxy.ObservedSourceGETs(); got != 1 {
 		t.Fatalf("ObservedSourceGETs() = %d, want 1", got)
 	}
+	if got := proxy.ObservedSourceRangeGETs(); got != 0 {
+		t.Fatalf("ObservedSourceRangeGETs() = %d, want 0", got)
+	}
 	if got := proxy.TotalFailures(); got != 1 {
 		t.Fatalf("TotalFailures() = %d, want 1", got)
 	}
@@ -208,7 +211,51 @@ func TestS3FaultProxyDropsSourceGETResponseAndTracksObservation(t *testing.T) {
 	}
 }
 
-func TestS3FaultProxyInjectsRequestCanceled408WithoutReset(t *testing.T) {
+func TestS3FaultProxyTracksResumedSourceRangeGET(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "64")
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 64))
+	}))
+	t.Cleanup(upstream.Close)
+
+	proxy := newS3FaultProxy(s3FaultProxyConfig{
+		TargetEndpoint:    upstream.URL,
+		ListenAddr:        "127.0.0.1:0",
+		Mode:              "source-get-reset",
+		SourceLevel:       "0001",
+		ResetAfterBytes:   8,
+		FailFirstAttempts: 1,
+		MaxFailures:       1,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = proxy.Close(context.Background()) })
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, proxy.Endpoint()+"/bucket/db/0001/0000000000000001-0000000000000002.ltx", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	req.Header.Set("Range", "bytes=8-")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if got := proxy.ObservedSourceGETs(); got != 1 {
+		t.Fatalf("ObservedSourceGETs() = %d, want 1", got)
+	}
+	if got := proxy.ObservedSourceRangeGETs(); got != 1 {
+		t.Fatalf("ObservedSourceRangeGETs() = %d, want 1", got)
+	}
+}
+
+func TestS3FaultProxyInjectsHTTP408WithoutRequestCanceledCode(t *testing.T) {
 	var upstreamHits atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHits.Add(1)
@@ -219,7 +266,7 @@ func TestS3FaultProxyInjectsRequestCanceled408WithoutReset(t *testing.T) {
 	proxy := newS3FaultProxy(s3FaultProxyConfig{
 		TargetEndpoint:    upstream.URL,
 		ListenAddr:        "127.0.0.1:0",
-		Mode:              "provider-408-requestcanceled",
+		Mode:              "provider-http-408",
 		FailFirstAttempts: 1,
 		MaxFailures:       1,
 	})
@@ -242,11 +289,102 @@ func TestS3FaultProxyInjectsRequestCanceled408WithoutReset(t *testing.T) {
 	if resp.StatusCode != http.StatusRequestTimeout {
 		t.Fatalf("status = %d, want 408", resp.StatusCode)
 	}
+	if strings.Contains(string(body), "<Code>RequestCanceled</Code>") {
+		t.Fatalf("body = %q, want no RequestCanceled XML", body)
+	}
+	if got := upstreamHits.Load(); got != 0 {
+		t.Fatalf("upstream hits = %d, want 0", got)
+	}
+}
+
+func TestS3FaultProxyInjectsRequestCanceledCodeWithoutHTTP408(t *testing.T) {
+	var upstreamHits atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	proxy := newS3FaultProxy(s3FaultProxyConfig{
+		TargetEndpoint:    upstream.URL,
+		ListenAddr:        "127.0.0.1:0",
+		Mode:              "provider-request-canceled",
+		FailFirstAttempts: 1,
+		MaxFailures:       1,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = proxy.Close(context.Background()) })
+
+	resp, err := http.Get(proxy.Endpoint() + "/bucket/db?list-type=2")
+	if err != nil {
+		t.Fatalf("Get() error = %v, want RequestCanceled response", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if resp.StatusCode == http.StatusRequestTimeout {
+		t.Fatalf("status = %d, want non-408 RequestCanceled response", resp.StatusCode)
+	}
 	if !strings.Contains(string(body), "<Code>RequestCanceled</Code>") {
 		t.Fatalf("body = %q, want RequestCanceled XML", body)
 	}
 	if got := upstreamHits.Load(); got != 0 {
 		t.Fatalf("upstream hits = %d, want 0", got)
+	}
+}
+
+func TestS3FaultProxyResetsFaultCountersForNextCycle(t *testing.T) {
+	var upstreamHits atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	proxy := newS3FaultProxy(s3FaultProxyConfig{
+		TargetEndpoint:    upstream.URL,
+		ListenAddr:        "127.0.0.1:0",
+		Mode:              "provider-http-408",
+		FailFirstAttempts: 1,
+		MaxFailures:       1,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = proxy.Close(context.Background()) })
+
+	for i := 0; i < 2; i++ {
+		resp, err := http.Get(proxy.Endpoint() + "/bucket/db?list-type=2")
+		if err != nil {
+			t.Fatalf("cycle %d first Get() error = %v", i+1, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusRequestTimeout {
+			t.Fatalf("cycle %d first status = %d, want 408", i+1, resp.StatusCode)
+		}
+
+		resp, err = http.Get(proxy.Endpoint() + "/bucket/db?list-type=2")
+		if err != nil {
+			t.Fatalf("cycle %d second Get() error = %v", i+1, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("cycle %d second status = %d, want 200", i+1, resp.StatusCode)
+		}
+
+		proxy.ResetCycle()
+	}
+
+	if got := upstreamHits.Load(); got != 2 {
+		t.Fatalf("upstream hits = %d, want 2", got)
 	}
 }
 

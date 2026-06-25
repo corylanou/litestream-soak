@@ -336,16 +336,7 @@ func (m *litestreamManager) startLitestream(ctx context.Context) error {
 }
 
 func (m *litestreamManager) litestreamEnv() []string {
-	env := os.Environ()
-	env = setCommandEnv(env, "AWS_ACCESS_KEY_ID", m.cfg.S3AccessKey)
-	env = setCommandEnv(env, "AWS_SECRET_ACCESS_KEY", m.cfg.S3SecretKey)
-	if m.cfg.S3FaultProxyEnabled && m.cfg.ReplicaType == "s3" && strings.TrimSpace(m.s3FaultProxyEndpoint) != "" {
-		proxyURL := m.s3FaultProxyEndpoint
-		env = setCommandEnv(env, "HTTP_PROXY", proxyURL)
-		env = setCommandEnv(env, "HTTPS_PROXY", proxyURL)
-		env = setCommandEnv(env, "NO_PROXY", "127.0.0.1,localhost")
-	}
-	return env
+	return m.cfg.s3CommandEnv(m.s3FaultProxyEndpoint)
 }
 
 func setCommandEnv(env []string, key, value string) []string {

@@ -116,6 +116,9 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	if workloadCfg.Workers > 0 {
 		env["LOAD_WORKERS"] = fmt.Sprintf("%d", workloadCfg.Workers)
 	}
+	if strings.TrimSpace(workloadCfg.MonitorInterval) != "" {
+		env["MONITOR_INTERVAL"] = workloadCfg.MonitorInterval
+	}
 	if workloadCfg.S3PartSize != "" {
 		env["LITESTREAM_S3_PART_SIZE"] = workloadCfg.S3PartSize
 	}
@@ -164,6 +167,9 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	}
 	if workloadCfg.S3FaultProxyRequireObservedSourceGet {
 		env["S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_GET"] = "true"
+	}
+	if workloadCfg.S3FaultProxyRequireObservedSourceRangeGet {
+		env["S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_RANGE_GET"] = "true"
 	}
 	if workloadCfg.ReplicaLevelReporting {
 		env["REPLICA_LEVEL_REPORTING"] = "true"
