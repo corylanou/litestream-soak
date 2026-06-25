@@ -100,6 +100,48 @@ func TestPollDBStatsMarksSnapshotHealthy(t *testing.T) {
 	}
 }
 
+func TestPollDBStatsComputesLagFromLocalTXIDWhenListTXIDStale(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkerID = "test-worker-stale-list-txid"
+	cfg.ProfileName = "test-profile"
+	cfg.Source = "test"
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("litestream-soak-stale-list-%d.sock", time.Now().UnixNano()))
+
+	if err := os.WriteFile(cfg.DBPath, []byte("1234567890"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	startTestUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/txid":
+			_, _ = w.Write([]byte(`{"txid":45}`))
+		case "/info":
+			_, _ = w.Write([]byte(`{"uptime_seconds":99}`))
+		case "/list":
+			_, _ = w.Write([]byte(`{"databases":[{"status":"replicating","txid":40,"replicated_txid":40}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	runner := NewRunner(cfg)
+	runner.pollDBStats()
+
+	snapshot := runner.currentSnapshot()
+	if snapshot.DBTXID != 45 {
+		t.Fatalf("DBTXID = %d, want 45", snapshot.DBTXID)
+	}
+	if snapshot.ReplicatedTXID != 40 {
+		t.Fatalf("ReplicatedTXID = %d, want 40", snapshot.ReplicatedTXID)
+	}
+	if snapshot.ReplicationLagMax != 5 {
+		t.Fatalf("ReplicationLagMax = %d, want 5", snapshot.ReplicationLagMax)
+	}
+}
+
 func TestPollDBStatsClosesIPCConnections(t *testing.T) {
 	dir := t.TempDir()
 	cfg := DefaultConfig()

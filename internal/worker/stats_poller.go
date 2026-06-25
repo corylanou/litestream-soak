@@ -136,7 +136,7 @@ func (p *statsPoller) collectLitestreamRuntime(client *http.Client, collectedAt 
 	if err != nil {
 		return reporting.RuntimePayload{}, err
 	}
-	dbStatus, replicatedTXID, replicationLag, lastSyncAgeSeconds, err := p.pollList(client)
+	dbStatus, replicatedTXID, replicationLag, lastSyncAgeSeconds, err := p.pollList(client, txid)
 	if err != nil {
 		return reporting.RuntimePayload{}, err
 	}
@@ -225,7 +225,7 @@ func (p *statsPoller) pollListDatabases(client *http.Client) ([]litestreamListDa
 	return result.Databases, nil
 }
 
-func (p *statsPoller) pollList(client *http.Client) (string, uint64, uint64, float64, error) {
+func (p *statsPoller) pollList(client *http.Client, localTXID uint64) (string, uint64, uint64, float64, error) {
 	databases, err := p.pollListDatabases(client)
 	if err != nil {
 		return "", 0, 0, 0, err
@@ -234,9 +234,16 @@ func (p *statsPoller) pollList(client *http.Client) (string, uint64, uint64, flo
 	db := databases[0]
 	replicatedTXID := uint64(0)
 	lag := uint64(0)
-	if db.TXID != nil && db.ReplicatedTXID != nil {
-		if *db.TXID > *db.ReplicatedTXID {
-			lag = *db.TXID - *db.ReplicatedTXID
+	if db.ReplicatedTXID != nil {
+		lagTXID := localTXID
+		if db.TXID != nil {
+			lagTXID = *db.TXID
+			if lagTXID > 0 && localTXID > lagTXID {
+				lagTXID = localTXID
+			}
+		}
+		if lagTXID > *db.ReplicatedTXID {
+			lag = lagTXID - *db.ReplicatedTXID
 		}
 		replicatedTXID = *db.ReplicatedTXID
 		SetReplicatedTXID(float64(*db.ReplicatedTXID))
