@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -208,16 +210,53 @@ func TestDefaultMainFleetTunesHighVolumeS3Uploads(t *testing.T) {
 	}
 }
 
-func TestDefaultMainFleetIncludesManyDBProfilesWhenEnabled(t *testing.T) {
-	t.Setenv("SOAK_ENABLE_MANY_DB_FLEET", "true")
-
-	spec := DefaultMainFleet()
+func manyDBProfiles(spec FleetSpec) map[string]DesiredWorker {
 	many := map[string]DesiredWorker{}
 	for _, worker := range spec.Workers {
 		if strings.HasPrefix(worker.ProfileName, "many-dbs-") {
 			many[worker.ProfileName] = worker
 		}
 	}
+	return many
+}
+
+func TestManyDBFleetGating(t *testing.T) {
+	tests := []struct {
+		name     string
+		mainFlag string
+		k1000    string
+		want     []string
+	}{
+		{name: "both off", mainFlag: "", k1000: "", want: []string{}},
+		{name: "main only enables 100 tier", mainFlag: "true", k1000: "", want: []string{"many-dbs-100-dir", "many-dbs-100-list"}},
+		{name: "1000 flag without main is inert", mainFlag: "", k1000: "true", want: []string{}},
+		{name: "both flags enable all three", mainFlag: "true", k1000: "true", want: []string{"many-dbs-100-dir", "many-dbs-100-list", "many-dbs-1000-dir"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SOAK_ENABLE_MANY_DB_FLEET", tc.mainFlag)
+			t.Setenv("SOAK_ENABLE_MANY_DB_1000", tc.k1000)
+
+			many := manyDBProfiles(DefaultMainFleet())
+			got := make([]string, 0, len(many))
+			for name := range many {
+				got = append(got, name)
+			}
+			sort.Strings(got)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("many-dbs profiles = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDefaultMainFleetIncludesManyDBProfilesWhenEnabled(t *testing.T) {
+	t.Setenv("SOAK_ENABLE_MANY_DB_FLEET", "true")
+	t.Setenv("SOAK_ENABLE_MANY_DB_1000", "true")
+
+	spec := DefaultMainFleet()
+	many := manyDBProfiles(spec)
 
 	tests := []struct {
 		profile      string
