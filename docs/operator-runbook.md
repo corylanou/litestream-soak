@@ -21,6 +21,15 @@ Control plane:
 The control plane is protected with HTTP basic auth. Keep the username and
 password in your local `.envrc`.
 
+Rotate the basic-auth password with:
+
+```bash
+fly secrets set SOAK_BASIC_AUTH_PASSWORD="$(openssl rand -hex 16)" -a litestream-soak-ctl
+```
+
+This triggers a rolling restart of the control plane only; the worker fleet is
+unaffected. Update the value in your local `.envrc` to match.
+
 Deployment automation uses a separate bearer token for admin endpoints. Keep
 that in GitHub Actions secrets as `SOAK_ADMIN_BEARER_TOKEN` instead of reusing
 the UI basic-auth credentials. `/api/admin/*` is reserved for bearer-authenticated
