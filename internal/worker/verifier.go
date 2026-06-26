@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -611,10 +612,16 @@ func (v *Verifier) validate(ctx context.Context, txid uint64) (bool, error) {
 }
 
 func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath string, txid uint64) (bool, error) {
+	configPath, cleanupConfig, err := v.validateConfigPath(sourcePath)
+	if err != nil {
+		return false, err
+	}
+	defer cleanupConfig()
+
 	args := []string{
 		"validate",
 		"-source-db", sourcePath,
-		"-config", v.cfg.ConfigPath,
+		"-config", configPath,
 		"-restored-db", restoredPath,
 		"-check-type", v.cfg.VerifyType,
 	}
@@ -645,6 +652,57 @@ func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath stri
 	}
 
 	return true, nil
+}
+
+func (v *Verifier) validateConfigPath(sourcePath string) (string, func(), error) {
+	if !v.needsPerDBValidateConfig(sourcePath) {
+		return v.cfg.ConfigPath, func() {}, nil
+	}
+
+	path, err := v.writePerDBValidateConfig(sourcePath)
+	if err != nil {
+		return "", func() {}, err
+	}
+	return path, func() {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			slog.Warn("Failed to remove temporary validate config", "path", path, "error", err)
+		}
+	}, nil
+}
+
+func (v *Verifier) needsPerDBValidateConfig(sourcePath string) bool {
+	return v.cfg.ManyDBEnabled() &&
+		v.cfg.manyDBConfigMode() == "dir" &&
+		strings.TrimSpace(sourcePath) != "" &&
+		sourcePath != v.cfg.DBPath
+}
+
+func (v *Verifier) writePerDBValidateConfig(sourcePath string) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(v.cfg.ConfigPath), "litestream-validate-*.yml")
+	if err != nil {
+		return "", fmt.Errorf("create validate config: %w", err)
+	}
+	path := f.Name()
+
+	manager := newLitestreamManager(&v.cfg)
+	data := litestreamConfigData{
+		SocketPath: v.cfg.SocketPath,
+		Databases: []litestreamConfigDB{{
+			Path:             sourcePath,
+			SnapshotInterval: v.cfg.SnapshotInterval.String(),
+			Replica:          manager.litestreamConfigReplica(sourcePath),
+		}},
+	}
+	if err := litestreamConfigTmpl.Execute(f, data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", fmt.Errorf("write validate config: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("close validate config: %w", err)
+	}
+	return path, nil
 }
 
 func (r VerificationResult) restoreTXID() uint64 {
