@@ -534,6 +534,74 @@ exit 0
 	assertContains(t, args, restorePath)
 }
 
+func TestVerifierValidateManyDBDirUsesPerDBReplicaConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires Unix")
+	}
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "validate-config-path")
+	configBodyPath := filepath.Join(dir, "validate-config-body")
+	writeFakeLitestreamTest(t, dir, `
+if [ "$1" = "validate" ]; then
+  shift
+fi
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-config" ]; then
+    printf '%s' "$2" > "$LITESTREAM_TEST_CONFIG_PATH"
+    cat "$2" > "$LITESTREAM_TEST_CONFIG_BODY"
+    exit 0
+  fi
+  shift
+done
+exit 1
+`)
+	t.Setenv("LITESTREAM_TEST_CONFIG_PATH", configPath)
+	t.Setenv("LITESTREAM_TEST_CONFIG_BODY", configBodyPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.NumDatabases = 11
+	cfg.ConfigMode = "dir"
+	cfg.ReplicaType = "s3"
+	cfg.S3Bucket = "bucket"
+	cfg.S3Path = "soak/worker-many"
+
+	runner := NewRunner(cfg)
+	if err := runner.writeLitestreamConfig(); err != nil {
+		t.Fatalf("writeLitestreamConfig() error = %v", err)
+	}
+
+	dbPath := filepath.Join(dir, "dbs", "db-00011.db")
+	verifier := NewVerifier(cfg)
+	passed, err := verifier.validateDB(context.Background(), dbPath, dbPath+".restored", 0)
+	if err != nil {
+		t.Fatalf("validateDB() error = %v", err)
+	}
+	if !passed {
+		t.Fatal("validateDB() passed=false")
+	}
+
+	usedConfigPath := strings.TrimSpace(readFile(t, configPath))
+	if usedConfigPath == cfg.ConfigPath {
+		t.Fatalf("validate config path = original dir config %q, want generated single-db config", usedConfigPath)
+	}
+	config := readFile(t, configBodyPath)
+	if strings.Contains(config, "dir: ") {
+		t.Fatalf("validate config uses dir stanza, want single-db path config:\n%s", config)
+	}
+	for _, want := range []string{
+		"path: " + dbPath,
+		"url: s3://bucket/soak/worker-many/db-00011.db",
+	} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("validate config missing %q:\n%s", want, config)
+		}
+	}
+}
+
 func TestVerifierValidateRetriesWithoutPinnedTXIDWhenUnsupported(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake binary requires Unix")
