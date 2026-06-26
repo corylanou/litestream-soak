@@ -35,7 +35,7 @@ func (c *pprofCapturer) Run(ctx context.Context) {
 
 	hourly := time.NewTicker(time.Hour)
 	defer hourly.Stop()
-	cpu := time.NewTicker(6 * time.Hour)
+	cpu := time.NewTicker(time.Hour)
 	defer cpu.Stop()
 
 	for {
@@ -45,7 +45,7 @@ func (c *pprofCapturer) Run(ctx context.Context) {
 		case <-hourly.C:
 			c.captureSet(ctx, "hourly")
 		case <-cpu.C:
-			c.captureEndpoint(ctx, "cpu", "profile", "profile?seconds=30", 40*time.Second)
+			c.captureEndpoint(ctx, "cpu", "profile", "profile?seconds=90", 100*time.Second)
 		}
 	}
 }
