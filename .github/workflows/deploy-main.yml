@@ -177,7 +177,7 @@ jobs:
       - changes
       - build-worker-image
       - deploy-control-plane
-    if: needs.changes.outputs.worker_changed == 'true' && needs.build-worker-image.result == 'success' && (needs.deploy-control-plane.result == 'success' || needs.deploy-control-plane.result == 'skipped')
+    if: ${{ !cancelled() && needs.changes.outputs.worker_changed == 'true' && needs.build-worker-image.result == 'success' && (needs.deploy-control-plane.result == 'success' || needs.deploy-control-plane.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
