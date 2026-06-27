@@ -388,7 +388,7 @@ func TestS3FaultProxyResetsFaultCountersForNextCycle(t *testing.T) {
 	}
 }
 
-func TestStartS3FaultProxyPreservesEndpointAndSetsLitestreamProxyEnv(t *testing.T) {
+func TestStartS3FaultProxyRoutesLitestreamEndpointThroughProxy(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -409,8 +409,18 @@ func TestStartS3FaultProxyPreservesEndpointAndSetsLitestreamProxyEnv(t *testing.
 	}
 	t.Cleanup(runner.stopS3FaultProxy)
 
-	if runner.cfg.S3Endpoint != upstream.URL {
-		t.Fatalf("S3Endpoint = %q, want original endpoint %q", runner.cfg.S3Endpoint, upstream.URL)
+	if runner.cfg.S3Endpoint != runner.s3FaultProxy.Endpoint() {
+		t.Fatalf("S3Endpoint = %q, want proxy endpoint %q", runner.cfg.S3Endpoint, runner.s3FaultProxy.Endpoint())
+	}
+	if runner.cfg.S3FaultProxyTargetEndpoint != upstream.URL {
+		t.Fatalf("S3FaultProxyTargetEndpoint = %q, want original endpoint %q", runner.cfg.S3FaultProxyTargetEndpoint, upstream.URL)
+	}
+	if runner.cfg.S3FaultProxyEndpoint != runner.s3FaultProxy.Endpoint() {
+		t.Fatalf("S3FaultProxyEndpoint = %q, want proxy endpoint %q", runner.cfg.S3FaultProxyEndpoint, runner.s3FaultProxy.Endpoint())
+	}
+	data := runner.litestreamConfigData()
+	if got := data.Databases[0].Replica.S3Endpoint; got != runner.s3FaultProxy.Endpoint() {
+		t.Fatalf("litestream replica endpoint = %q, want proxy endpoint %q", got, runner.s3FaultProxy.Endpoint())
 	}
 	env := commandEnvMap(runner.litestreamEnv())
 	if env["HTTP_PROXY"] != runner.s3FaultProxy.Endpoint() {
