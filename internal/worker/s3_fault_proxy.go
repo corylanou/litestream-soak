@@ -492,6 +492,7 @@ func (r *Runner) startS3FaultProxy(ctx context.Context) error {
 	r.cfg.S3FaultProxyTargetEndpoint = targetEndpoint
 	r.s3FaultProxyEndpoint = proxy.Endpoint()
 	r.cfg.S3FaultProxyEndpoint = proxy.Endpoint()
+	r.cfg.S3Endpoint = proxy.Endpoint()
 	return nil
 }
 
