@@ -57,7 +57,22 @@ func (d *DB) ListVerificationTicks(perWorker int, since time.Time) (map[string][
 }
 
 func (d *DB) ListVerificationStatsSince(source string, since time.Time) ([]VerificationStat, error) {
+	// has_prior_pass is true when the worker had a qualifying pass strictly
+	// before this verification. Computing each worker's earliest qualifying
+	// pass once (qualifying_first_pass) replaces a per-row correlated
+	// subquery that scanned the whole verifications table for every row in
+	// the window — an O(N^2) pattern that made the dashboard render take tens
+	// of seconds. A worker has a prior pass exactly when its earliest
+	// qualifying pass predates the row, which is equivalent to the old EXISTS.
 	rows, err := d.query(`
+		WITH qualifying_first_pass AS (
+			SELECT worker_id, MIN(started_at) AS first_pass_at
+			FROM verifications
+			WHERE passed = 1
+				AND lower(trim(status)) <> 'failed'
+				AND lower(trim(status)) <> 'aborted'
+			GROUP BY worker_id
+		)
 		SELECT
 			v.id,
 			v.worker_id,
@@ -69,17 +84,10 @@ func (d *DB) ListVerificationStatsSince(source string, since time.Time) ([]Verif
 			v.passed,
 			v.duration_ms,
 			COALESCE(v.error_message, ''),
-			EXISTS (
-				SELECT 1
-				FROM verifications prior
-				WHERE prior.worker_id = v.worker_id
-					AND prior.started_at < v.started_at
-					AND prior.passed = 1
-					AND lower(trim(prior.status)) <> 'failed'
-					AND lower(trim(prior.status)) <> 'aborted'
-			)
+			(fp.first_pass_at IS NOT NULL AND fp.first_pass_at < v.started_at)
 		FROM verifications v
 		JOIN workers w ON w.id = v.worker_id
+		LEFT JOIN qualifying_first_pass fp ON fp.worker_id = v.worker_id
 		WHERE (? = '' OR w.source = ?) AND v.started_at >= ?
 		ORDER BY v.started_at ASC`,
 		source, source, since,
