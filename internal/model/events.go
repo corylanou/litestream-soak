@@ -6,7 +6,7 @@ import (
 )
 
 func (d *DB) RecordEvent(workerID, eventType, message, details string) error {
-	_, err := d.db.Exec(`
+	_, err := d.exec(`
 		INSERT INTO events (worker_id, event_type, message, details)
 		VALUES (?, ?, ?, ?)`,
 		workerID, eventType, message, details,
@@ -15,7 +15,7 @@ func (d *DB) RecordEvent(workerID, eventType, message, details string) error {
 }
 
 func (d *DB) RecordEventAt(workerID, eventType, message, details string, createdAt time.Time) error {
-	_, err := d.db.Exec(`
+	_, err := d.exec(`
 		INSERT INTO events (worker_id, event_type, message, details, created_at)
 		VALUES (?, ?, ?, ?, ?)`,
 		workerID, eventType, message, details, createdAt,
@@ -25,7 +25,7 @@ func (d *DB) RecordEventAt(workerID, eventType, message, details string, created
 
 func (d *DB) RecordUniqueEventAt(workerID, eventType, message, details string, createdAt time.Time) (bool, error) {
 	var id int
-	err := d.db.QueryRow(`
+	err := d.queryRow(`
 		SELECT 1
 		FROM events
 		WHERE worker_id = ? AND event_type = ? AND message = ? AND details = ? AND created_at = ?
@@ -55,7 +55,7 @@ func (d *DB) RecordWindowedEventAt(workerID, eventType, message, details string,
 
 	var existingID int
 	windowStart := createdAt.Add(-window)
-	err := d.db.QueryRow(`
+	err := d.queryRow(`
 		SELECT id
 		FROM events
 		WHERE worker_id = ? AND event_type = ? AND message = ? AND created_at >= ? AND created_at <= ?
@@ -65,7 +65,7 @@ func (d *DB) RecordWindowedEventAt(workerID, eventType, message, details string,
 	).Scan(&existingID)
 	switch {
 	case err == nil:
-		_, err = d.db.Exec(`
+		_, err = d.exec(`
 			UPDATE events
 			SET details = ?, created_at = ?
 			WHERE id = ?`,
@@ -86,7 +86,7 @@ func (d *DB) RecordWindowedEventAt(workerID, eventType, message, details string,
 }
 
 func (d *DB) ListEvents(limit int) ([]Event, error) {
-	rows, err := d.db.Query(`SELECT id, worker_id, event_type, message, details, created_at FROM events ORDER BY created_at DESC LIMIT ?`, limit)
+	rows, err := d.query(`SELECT id, worker_id, event_type, message, details, created_at FROM events ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +111,7 @@ func (d *DB) ListEvents(limit int) ([]Event, error) {
 }
 
 func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
-	rows, err := d.db.Query(`
+	rows, err := d.query(`
 		SELECT id, worker_id, event_type, message, details, created_at
 		FROM events
 		WHERE worker_id = ?

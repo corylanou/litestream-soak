@@ -62,7 +62,7 @@ func TestStaleWorkersUTCIndependent(t *testing.T) {
 		if err := db.CreateWorker(w); err != nil {
 			t.Fatalf("CreateWorker() error = %v", err)
 		}
-		if _, err := db.db.Exec(
+		if _, err := db.writer.Exec(
 			"UPDATE workers SET last_heartbeat_at = datetime('now','-1 hour') WHERE id = ?",
 			w.ID,
 		); err != nil {
@@ -212,7 +212,7 @@ func TestListExpiredWorkersLegacyFormat(t *testing.T) {
 	if err := db.CreateWorker(pastWorker); err != nil {
 		t.Fatalf("CreateWorker(past) error = %v", err)
 	}
-	if _, err := db.db.Exec(
+	if _, err := db.writer.Exec(
 		"UPDATE workers SET expires_at = ? WHERE id = ?",
 		"2020-01-02 15:04:05.123456789 +0000 UTC",
 		pastWorker.ID,
@@ -224,7 +224,7 @@ func TestListExpiredWorkersLegacyFormat(t *testing.T) {
 	if err := db.CreateWorker(futureWorker); err != nil {
 		t.Fatalf("CreateWorker(future) error = %v", err)
 	}
-	if _, err := db.db.Exec(
+	if _, err := db.writer.Exec(
 		"UPDATE workers SET expires_at = ? WHERE id = ?",
 		"2099-01-02 15:04:05.123456789 +0000 UTC",
 		futureWorker.ID,
@@ -294,7 +294,7 @@ func TestCreateWorkerStoresExpiresAtAsUTC(t *testing.T) {
 	}
 
 	var raw string
-	if err := db.db.QueryRow("SELECT expires_at FROM workers WHERE id = ?", w.ID).Scan(&raw); err != nil {
+	if err := db.writer.QueryRow("SELECT expires_at FROM workers WHERE id = ?", w.ID).Scan(&raw); err != nil {
 		t.Fatalf("SELECT expires_at: %v", err)
 	}
 

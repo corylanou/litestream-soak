@@ -28,7 +28,7 @@ type VerificationStat struct {
 }
 
 func (d *DB) ListVerificationTicks(perWorker int, since time.Time) (map[string][]VerificationTick, error) {
-	rows, err := d.db.Query(`
+	rows, err := d.query(`
 		SELECT worker_id, started_at, status, passed, duration_ms FROM (
 			SELECT worker_id, started_at, status, passed, duration_ms,
 				ROW_NUMBER() OVER (PARTITION BY worker_id ORDER BY started_at DESC) AS rank
@@ -57,7 +57,7 @@ func (d *DB) ListVerificationTicks(perWorker int, since time.Time) (map[string][
 }
 
 func (d *DB) ListVerificationStatsSince(source string, since time.Time) ([]VerificationStat, error) {
-	rows, err := d.db.Query(`
+	rows, err := d.query(`
 		SELECT
 			v.id,
 			v.worker_id,
@@ -118,7 +118,7 @@ func (d *DB) ListVerificationStatsSince(source string, since time.Time) ([]Verif
 }
 
 func (d *DB) RecordVerification(v *Verification) error {
-	result, err := d.db.Exec(`
+	result, err := d.exec(`
 		INSERT INTO verifications (worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		v.WorkerID, v.StartedAt, v.CompletedAt, v.Status, v.CheckType, v.SourceChecksum, v.RestoredChecksum, v.Passed, v.DurationMS, v.ErrorMessage,
@@ -136,7 +136,7 @@ func (d *DB) RecordVerification(v *Verification) error {
 }
 
 func (d *DB) ListVerifications(workerID string, limit int) ([]Verification, error) {
-	rows, err := d.db.Query(`
+	rows, err := d.query(`
 		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message
 		FROM verifications WHERE worker_id = ? ORDER BY started_at DESC LIMIT ?`,
 		workerID, limit,
@@ -168,7 +168,7 @@ func (d *DB) GetLatestFailedVerification(workerID string) (*Verification, error)
 	var verification Verification
 	var completedAt sql.NullTime
 
-	err := d.db.QueryRow(`
+	err := d.queryRow(`
 		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message
 		FROM verifications
 		WHERE worker_id = ? AND (passed = 0 OR lower(trim(status)) = 'failed') AND lower(trim(status)) <> 'aborted'
@@ -201,7 +201,7 @@ func (d *DB) GetLatestFailedVerification(workerID string) (*Verification, error)
 }
 
 func (d *DB) ListRecentFailedVerifications(limit int) ([]Verification, error) {
-	rows, err := d.db.Query(`
+	rows, err := d.query(`
 		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message
 		FROM verifications
 		WHERE (passed = 0 OR lower(trim(status)) = 'failed') AND lower(trim(status)) <> 'aborted'

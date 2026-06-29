@@ -16,7 +16,7 @@ func TestOpenAppliesPragmas(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	var journalMode string
-	if err := db.db.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+	if err := db.writer.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
 		t.Fatalf("PRAGMA journal_mode: %v", err)
 	}
 	if journalMode != "wal" {
@@ -24,11 +24,79 @@ func TestOpenAppliesPragmas(t *testing.T) {
 	}
 
 	var busyTimeout int
-	if err := db.db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+	if err := db.writer.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
 		t.Fatalf("PRAGMA busy_timeout: %v", err)
 	}
 	if busyTimeout != 30000 {
 		t.Fatalf("busy_timeout = %d, want 30000", busyTimeout)
+	}
+
+	// The reader pool must run with the same WAL pragmas so it sees committed
+	// writes and tolerates checkpoint contention.
+	var readerJournal string
+	if err := db.reader.QueryRow("PRAGMA journal_mode").Scan(&readerJournal); err != nil {
+		t.Fatalf("reader PRAGMA journal_mode: %v", err)
+	}
+	if readerJournal != "wal" {
+		t.Fatalf("reader journal_mode = %q, want wal", readerJournal)
+	}
+}
+
+func TestPoolSizing(t *testing.T) {
+	t.Parallel()
+
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if got := db.writer.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("writer MaxOpenConnections = %d, want 1 (SQLite single writer)", got)
+	}
+	if got := db.reader.Stats().MaxOpenConnections; got < 2 {
+		t.Fatalf("reader MaxOpenConnections = %d, want >= 2 for read concurrency", got)
+	}
+}
+
+// TestReaderNotBlockedByHeldWrite is the regression guard for the control-plane
+// dashboard outage: with a single shared MaxOpenConns(1) pool, a read would
+// queue behind the worker-heartbeat write stream and hang up to busy_timeout
+// (30s). With the split reader pool, reads return the last committed snapshot
+// promptly even while a write transaction holds the writer connection.
+func TestReaderNotBlockedByHeldWrite(t *testing.T) {
+	t.Parallel()
+
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Occupy the single writer connection with an open transaction holding the
+	// write lock.
+	tx, err := db.writer.Begin()
+	if err != nil {
+		t.Fatalf("Begin() error = %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback() })
+	if _, err := tx.Exec(`INSERT INTO events (event_type, message) VALUES ('test', 'holding write lock')`); err != nil {
+		t.Fatalf("tx.Exec() error = %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		var n int
+		done <- db.reader.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&n)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("reader query error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reader query blocked behind a held write transaction")
 	}
 }
 
@@ -77,7 +145,7 @@ func TestOpenNormalizesLegacyNonUTCExpiresAt(t *testing.T) {
 		if err := db.CreateWorker(w); err != nil {
 			t.Fatalf("CreateWorker(%s) error = %v", id, err)
 		}
-		if _, err := db.db.Exec("UPDATE workers SET expires_at = ? WHERE id = ?", raw, id); err != nil {
+		if _, err := db.writer.Exec("UPDATE workers SET expires_at = ? WHERE id = ?", raw, id); err != nil {
 			t.Fatalf("set legacy expires_at for %s: %v", id, err)
 		}
 	}
@@ -125,7 +193,7 @@ func TestOpenNormalizesLegacyNonUTCExpiresAt(t *testing.T) {
 		emptyZoneWorker.ID:   futureInstant,
 	} {
 		var raw string
-		if err := db.db.QueryRow("SELECT expires_at FROM workers WHERE id = ?", id).Scan(&raw); err != nil {
+		if err := db.writer.QueryRow("SELECT expires_at FROM workers WHERE id = ?", id).Scan(&raw); err != nil {
 			t.Fatalf("SELECT expires_at for %s: %v", id, err)
 		}
 		if !isStoredAsUTC(raw, want) {

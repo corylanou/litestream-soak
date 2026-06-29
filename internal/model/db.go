@@ -1,8 +1,11 @@
 package model
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
@@ -126,31 +129,88 @@ CREATE INDEX IF NOT EXISTS idx_run_archives_source_type_archived ON run_archives
 `
 
 type DB struct {
-	db *sql.DB
+	// writer serializes all mutations through a single SQLite connection
+	// (SQLite allows only one writer at a time). reader is a separate WAL
+	// connection pool sized for concurrency so dashboard/list reads are not
+	// head-of-line blocked behind the worker-heartbeat write stream.
+	writer *sql.DB
+	reader *sql.DB
 }
 
-func Open(path string) (*DB, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_time_format=sqlite&_timezone=UTC")
-	if err != nil {
-		return nil, fmt.Errorf("open db: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+const dsnParams = "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_time_format=sqlite&_timezone=UTC"
 
-	if _, err := db.Exec(migrationSQL); err != nil {
+func Open(path string) (*DB, error) {
+	writer, err := sql.Open("sqlite", path+dsnParams)
+	if err != nil {
+		return nil, fmt.Errorf("open writer db: %w", err)
+	}
+	writer.SetMaxOpenConns(1)
+	writer.SetMaxIdleConns(1)
+
+	if _, err := writer.Exec(migrationSQL); err != nil {
+		_ = writer.Close()
 		return nil, fmt.Errorf("run migrations: %w", err)
 	}
-	if err := ensureWorkerColumns(db); err != nil {
+	if err := ensureWorkerColumns(writer); err != nil {
+		_ = writer.Close()
 		return nil, fmt.Errorf("ensure worker columns: %w", err)
 	}
-	if err := ensureDeploymentColumns(db); err != nil {
+	if err := ensureDeploymentColumns(writer); err != nil {
+		_ = writer.Close()
 		return nil, fmt.Errorf("ensure deployment columns: %w", err)
 	}
-	if err := normalizeLegacyExpiry(db); err != nil {
+	if err := normalizeLegacyExpiry(writer); err != nil {
+		_ = writer.Close()
 		return nil, fmt.Errorf("normalize legacy expires_at: %w", err)
 	}
 
-	return &DB{db: db}, nil
+	reader, err := sql.Open("sqlite", path+dsnParams)
+	if err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("open reader db: %w", err)
+	}
+	readerConns := maxReaderConns()
+	reader.SetMaxOpenConns(readerConns)
+	reader.SetMaxIdleConns(readerConns)
+
+	return &DB{writer: writer, reader: reader}, nil
+}
+
+// maxReaderConns sizes the read pool for concurrency while staying bounded on
+// small control-plane VMs. WAL permits many concurrent readers alongside the
+// single writer.
+func maxReaderConns() int {
+	if n := runtime.NumCPU() * 2; n > 4 {
+		return n
+	}
+	return 4
+}
+
+// query runs a read on the concurrent reader pool.
+func (d *DB) query(query string, args ...any) (*sql.Rows, error) {
+	return d.reader.Query(query, args...)
+}
+
+// queryRow runs a single-row read on the concurrent reader pool.
+func (d *DB) queryRow(query string, args ...any) *sql.Row {
+	return d.reader.QueryRow(query, args...)
+}
+
+// exec runs a mutation on the serialized writer connection.
+func (d *DB) exec(query string, args ...any) (sql.Result, error) {
+	return d.writer.Exec(query, args...)
+}
+
+// HealthCheck runs a trivial read against the reader pool so callers can detect
+// a wedged or saturated control database. It deliberately uses the reader pool:
+// that is the path the dashboard and read APIs depend on, and the one whose
+// starvation manifests as user-facing 502s.
+func (d *DB) HealthCheck(ctx context.Context) error {
+	var one int
+	if err := d.reader.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+		return fmt.Errorf("control db health check: %w", err)
+	}
+	return nil
 }
 
 func normalizeLegacyExpiry(db *sql.DB) error {
@@ -241,7 +301,14 @@ func ensureDeploymentColumns(db *sql.DB) error {
 }
 
 func (d *DB) Close() error {
-	return d.db.Close()
+	var errs []error
+	if d.reader != nil {
+		errs = append(errs, d.reader.Close())
+	}
+	if d.writer != nil {
+		errs = append(errs, d.writer.Close())
+	}
+	return errors.Join(errs...)
 }
 
 func nullInt(value int) any {

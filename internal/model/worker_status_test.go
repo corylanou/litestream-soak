@@ -49,7 +49,7 @@ func TestUpdateWorkerVerificationStateProtectedStatuses(t *testing.T) {
 				if err := db.MarkWorkerDormant(workerID, "probe window expired", "probe_expired", "probe"); err != nil {
 					t.Fatalf("MarkWorkerDormant() error = %v", err)
 				}
-				if _, err := db.db.Exec(
+				if _, err := db.writer.Exec(
 					"UPDATE workers SET last_probe_at = datetime('now') WHERE id = ?",
 					workerID,
 				); err != nil {
