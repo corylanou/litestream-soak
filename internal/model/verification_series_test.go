@@ -133,3 +133,56 @@ func TestListVerificationStatsSinceFiltersBySourceAndTime(t *testing.T) {
 		t.Fatalf("stats[1] = %+v, want failed with duration 1500", stats[1])
 	}
 }
+
+func TestListVerificationStatsSinceComputesHasPriorPass(t *testing.T) {
+	t.Parallel()
+
+	db := seriesTestDB(t)
+	prior := seriesTestWorker(t, db, "worker-has-prior", "main")
+	fresh := seriesTestWorker(t, db, "worker-no-prior", "main")
+	abortedOnly := seriesTestWorker(t, db, "worker-aborted-only", "main")
+
+	cutoff := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
+
+	// A qualifying pass BEFORE the requested window must still count as prior.
+	recordSeriesVerification(t, db, prior.ID, cutoff.Add(-2*time.Hour), true, "completed", 500)
+	recordSeriesVerification(t, db, prior.ID, cutoff.Add(time.Hour), false, "failed", 600)
+
+	// First in-window pass has no prior; a later row then does.
+	recordSeriesVerification(t, db, fresh.ID, cutoff.Add(time.Hour), true, "completed", 700)
+	recordSeriesVerification(t, db, fresh.ID, cutoff.Add(2*time.Hour), true, "completed", 800)
+
+	// A passed-but-aborted verification is not a qualifying prior pass.
+	recordSeriesVerification(t, db, abortedOnly.ID, cutoff.Add(-time.Hour), true, "aborted", 400)
+	recordSeriesVerification(t, db, abortedOnly.ID, cutoff.Add(time.Hour), false, "failed", 450)
+
+	stats, err := db.ListVerificationStatsSince("main", cutoff)
+	if err != nil {
+		t.Fatalf("ListVerificationStatsSince() error = %v", err)
+	}
+
+	type key struct {
+		worker string
+		at     time.Time
+	}
+	got := make(map[key]bool, len(stats))
+	for _, s := range stats {
+		got[key{s.WorkerID, s.StartedAt.UTC()}] = s.HasPriorPass
+	}
+
+	want := map[key]bool{
+		{prior.ID, cutoff.Add(time.Hour)}:        true,  // qualifying pass before the window
+		{fresh.ID, cutoff.Add(time.Hour)}:        false, // first ever pass
+		{fresh.ID, cutoff.Add(2 * time.Hour)}:    true,  // prior in-window pass
+		{abortedOnly.ID, cutoff.Add(time.Hour)}:  false, // only prior "pass" was aborted
+	}
+	for k, expected := range want {
+		actual, ok := got[k]
+		if !ok {
+			t.Fatalf("missing stat for %s @ %v", k.worker, k.at)
+		}
+		if actual != expected {
+			t.Fatalf("HasPriorPass for %s @ %v = %v, want %v", k.worker, k.at, actual, expected)
+		}
+	}
+}
