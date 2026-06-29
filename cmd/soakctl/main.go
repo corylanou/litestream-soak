@@ -116,6 +116,13 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("POST /webhooks/github", webhookHandler)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if err := db.HealthCheck(ctx); err != nil {
+			slog.Warn("Health check failed: control db unhealthy", "error", err)
+			http.Error(w, "control db unhealthy", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		if _, err := fmt.Fprintln(w, "ok"); err != nil {
 			slog.Debug("Failed to write health response", "error", err)

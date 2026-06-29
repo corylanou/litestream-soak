@@ -6,7 +6,7 @@ import (
 )
 
 func (d *DB) CreateAlert(alert *AlertDelivery) (int64, bool, error) {
-	result, err := d.db.Exec(`
+	result, err := d.exec(`
 		INSERT OR IGNORE INTO alerts (worker_id, verification_id, alert_type, fingerprint, status, failure_stage, failure_signature, message, payload, error_message)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nullIntString(alert.WorkerID),
@@ -40,7 +40,7 @@ func (d *DB) CreateAlert(alert *AlertDelivery) (int64, bool, error) {
 }
 
 func (d *DB) UpdateAlertDelivery(id int64, status, payload, errMsg string, sentAt *time.Time) error {
-	_, err := d.db.Exec(`
+	_, err := d.exec(`
 		UPDATE alerts
 		SET status = ?, payload = ?, error_message = ?, sent_at = ?
 		WHERE id = ?`,
@@ -54,7 +54,7 @@ func (d *DB) UpdateAlertDelivery(id int64, status, payload, errMsg string, sentA
 }
 
 func (d *DB) ListAlerts(limit int) ([]AlertDelivery, error) {
-	rows, err := d.db.Query(`
+	rows, err := d.query(`
 		SELECT id, worker_id, verification_id, alert_type, fingerprint, status, failure_stage, failure_signature, message, payload, error_message, created_at, sent_at
 		FROM alerts
 		ORDER BY created_at DESC

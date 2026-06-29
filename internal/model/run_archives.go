@@ -40,7 +40,7 @@ func (d *DB) RecordRunArchive(archive *RunArchive) (bool, error) {
 		archive.ArchivedAt = time.Now().UTC()
 	}
 
-	result, err := d.db.Exec(`
+	result, err := d.exec(`
 		INSERT OR IGNORE INTO run_archives (deployment_id, source, worker_id, archive_type, git_sha, litestream_sha, image_ref, status, summary, payload, archived_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		archive.DeploymentID,
@@ -64,7 +64,7 @@ func (d *DB) RecordRunArchive(archive *RunArchive) (bool, error) {
 		return false, err
 	}
 	if rowsAffected == 0 {
-		err := d.db.QueryRow(`
+		err := d.queryRow(`
 			SELECT id, archived_at
 			FROM run_archives
 			WHERE deployment_id = ? AND archive_type = ? AND worker_id = ?`,
@@ -105,7 +105,7 @@ func (d *DB) ListRunArchives(source, archiveType string, limit int) ([]RunArchiv
 	query += " ORDER BY archived_at DESC, id DESC LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := d.db.Query(query, args...)
+	rows, err := d.query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func (d *DB) ListRunArchives(source, archiveType string, limit int) ([]RunArchiv
 func (d *DB) GetRunArchive(id int) (*RunArchive, error) {
 	var archive RunArchive
 	err := scanRunArchive(
-		d.db.QueryRow("SELECT "+runArchiveColumns+" FROM run_archives WHERE id = ?", id),
+		d.queryRow("SELECT "+runArchiveColumns+" FROM run_archives WHERE id = ?", id),
 		&archive,
 	)
 	if err != nil {

@@ -104,7 +104,7 @@ func scanWorker(scanner workerScanner, w *Worker) error {
 }
 
 func (d *DB) queryWorkers(query string, args ...any) ([]Worker, error) {
-	rows, err := d.db.Query(query, args...)
+	rows, err := d.query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +125,7 @@ func (d *DB) queryWorkers(query string, args ...any) ([]Worker, error) {
 }
 
 func (d *DB) CreateWorker(w *Worker) error {
-	_, err := d.db.Exec(`
+	_, err := d.exec(`
 		INSERT INTO workers (id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '', NULL)
 		ON CONFLICT(id) DO UPDATE SET
@@ -159,7 +159,7 @@ func (d *DB) CreateWorker(w *Worker) error {
 }
 
 func (d *DB) UpdateWorkerStatus(id string, status WorkerStatus, errMsg string) error {
-	_, err := d.db.Exec(`
+	_, err := d.exec(`
 		UPDATE workers SET status = ?, error_message = ?, updated_at = datetime('now')
 		WHERE id = ?`,
 		status, errMsg, id,
@@ -168,7 +168,7 @@ func (d *DB) UpdateWorkerStatus(id string, status WorkerStatus, errMsg string) e
 }
 
 func (d *DB) UpdateWorkerMachine(id, machineID, volumeID string) error {
-	_, err := d.db.Exec(`
+	_, err := d.exec(`
 		UPDATE workers SET fly_machine_id = ?, fly_volume_id = ?, updated_at = datetime('now')
 		WHERE id = ?`,
 		nullIntString(machineID), nullIntString(volumeID), id,
@@ -177,7 +177,7 @@ func (d *DB) UpdateWorkerMachine(id, machineID, volumeID string) error {
 }
 
 func (d *DB) UpdateWorkerHeartbeat(id string) error {
-	_, err := d.db.Exec(`
+	_, err := d.exec(`
 		UPDATE workers SET last_heartbeat_at = datetime('now'), updated_at = datetime('now')
 		WHERE id = ?`,
 		id,
@@ -192,7 +192,7 @@ func (d *DB) UpdateWorkerRuntimeSnapshot(id string, payload reporting.RuntimePay
 	}
 
 	if !payload.LitestreamSnapshotHealthy {
-		_, err = d.db.Exec(`
+		_, err = d.exec(`
 			UPDATE workers SET last_runtime_json = ?, updated_at = datetime('now')
 			WHERE id = ?`,
 			string(body), id,
@@ -205,7 +205,7 @@ func (d *DB) UpdateWorkerRuntimeSnapshot(id string, payload reporting.RuntimePay
 		reportedAt = time.Now().UTC()
 	}
 
-	_, err = d.db.Exec(`
+	_, err = d.exec(`
 		UPDATE workers SET last_runtime_json = ?, last_runtime_at = ?, updated_at = datetime('now')
 		WHERE id = ?`,
 		string(body), reportedAt.UTC(), id,
@@ -230,7 +230,7 @@ func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
 		profileConfig = "{}"
 	}
 
-	_, err := d.db.Exec(`
+	_, err := d.exec(`
 		INSERT INTO workers (id, app_name, region, fly_machine_id, name, status, source, git_sha, litestream_sha, profile_name, profile_config, last_heartbeat_at)
 		VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, datetime('now'))
 			ON CONFLICT(id) DO UPDATE SET
@@ -294,7 +294,7 @@ func (d *DB) UpdateWorkerVerificationState(id string, passed bool, summary strin
 	}
 
 	if passed {
-		_, err := d.db.Exec(`
+		_, err := d.exec(`
 			UPDATE workers
 			SET status = ?, error_message = ?, dormant_at = NULL, dormant_reason = '', dormant_signature = '', resume_trigger = '', last_probe_at = NULL, updated_at = datetime('now')
 			WHERE id = ? AND status NOT IN ('stopped','failed','dormant')`,
@@ -303,7 +303,7 @@ func (d *DB) UpdateWorkerVerificationState(id string, passed bool, summary strin
 		return err
 	}
 
-	_, err := d.db.Exec(`
+	_, err := d.exec(`
 		UPDATE workers
 		SET status = ?, error_message = ?, updated_at = datetime('now')
 		WHERE id = ? AND status NOT IN ('stopped','failed','dormant')`,
@@ -313,7 +313,7 @@ func (d *DB) UpdateWorkerVerificationState(id string, passed bool, summary strin
 }
 
 func (d *DB) MarkWorkerDormant(id, reason, signature, resumeTrigger string) error {
-	_, err := d.db.Exec(`
+	_, err := d.exec(`
 		UPDATE workers
 		SET status = ?, error_message = ?, dormant_at = datetime('now'), dormant_reason = ?, dormant_signature = ?, resume_trigger = ?, updated_at = datetime('now')
 		WHERE id = ?`,
@@ -328,7 +328,7 @@ func (d *DB) MarkWorkerDormant(id, reason, signature, resumeTrigger string) erro
 }
 
 func (d *DB) MarkWorkerProbing(id, resumeTrigger string) error {
-	_, err := d.db.Exec(`
+	_, err := d.exec(`
 		UPDATE workers
 		SET status = ?, error_message = '', dormant_at = NULL, dormant_reason = '', dormant_signature = '', resume_trigger = ?, last_probe_at = datetime('now'), updated_at = datetime('now')
 		WHERE id = ?`,
@@ -340,7 +340,7 @@ func (d *DB) MarkWorkerProbing(id, resumeTrigger string) error {
 }
 
 func (d *DB) ClearWorkerDormancy(id string) error {
-	_, err := d.db.Exec(`
+	_, err := d.exec(`
 		UPDATE workers
 		SET dormant_at = NULL, dormant_reason = '', dormant_signature = '', resume_trigger = '', last_probe_at = NULL, updated_at = datetime('now')
 		WHERE id = ?`,
@@ -350,7 +350,7 @@ func (d *DB) ClearWorkerDormancy(id string) error {
 }
 
 func (d *DB) UpdateWorkerMachineVersion(id, machineID, gitSHA, litestreamSHA string) error {
-	_, err := d.db.Exec(`
+	_, err := d.exec(`
 		UPDATE workers
 		SET fly_machine_id = ?, git_sha = ?, litestream_sha = ?, updated_at = datetime('now')
 		WHERE id = ?`,
@@ -365,7 +365,7 @@ func (d *DB) UpdateWorkerMachineVersion(id, machineID, gitSHA, litestreamSHA str
 func (d *DB) GetWorker(id string) (*Worker, error) {
 	var w Worker
 	err := scanWorker(
-		d.db.QueryRow("SELECT "+workerColumns+" FROM workers WHERE id = ?", id),
+		d.queryRow("SELECT "+workerColumns+" FROM workers WHERE id = ?", id),
 		&w,
 	)
 	if err != nil {
@@ -402,7 +402,7 @@ func (d *DB) ListDormancyWorkers() ([]Worker, error) {
 }
 
 func (d *DB) ListActiveWorkerSources() ([]string, error) {
-	rows, err := d.db.Query(`
+	rows, err := d.query(`
 		SELECT DISTINCT source
 		FROM workers
 		WHERE status NOT IN ('stopped', 'failed')
@@ -458,7 +458,7 @@ func (d *DB) listWorkersBySource(source string) ([]Worker, error) {
 
 // DeleteWorker removes a worker from the database along with its verifications and events.
 func (d *DB) DeleteWorker(id string) error {
-	tx, err := d.db.Begin()
+	tx, err := d.writer.Begin()
 	if err != nil {
 		return err
 	}

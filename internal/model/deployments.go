@@ -43,7 +43,7 @@ func scanDeployment(scanner deploymentScanner, dep *Deployment) error {
 }
 
 func (d *DB) CreateDeployment(dep *Deployment) (int64, error) {
-	result, err := d.db.Exec(`
+	result, err := d.exec(`
 		INSERT INTO deployments (git_sha, litestream_sha, image_ref, source, pr_number, status)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		dep.GitSHA, dep.LitestreamSHA, dep.ImageRef, dep.Source, dep.PRNumber, dep.Status,
@@ -64,7 +64,7 @@ func (d *DB) ListDeployments(source string, limit int) ([]Deployment, error) {
 	query += " ORDER BY started_at DESC, id DESC LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := d.db.Query(query, args...)
+	rows, err := d.query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +85,7 @@ func (d *DB) ListDeployments(source string, limit int) ([]Deployment, error) {
 }
 
 func (d *DB) UpdateDeployment(id int64, status, imageRef, errMsg string) error {
-	_, err := d.db.Exec(`
+	_, err := d.exec(`
 		UPDATE deployments SET status = ?, image_ref = ?, error_message = ?, completed_at = datetime('now')
 		WHERE id = ?`,
 		status, imageRef, errMsg, id,
@@ -99,7 +99,7 @@ func (d *DB) UpsertReadyDeployment(dep *Deployment) error {
 	case err == nil:
 		return d.UpdateDeployment(int64(existing.ID), "ready", dep.ImageRef, "")
 	case errors.Is(err, sql.ErrNoRows):
-		_, err := d.db.Exec(`
+		_, err := d.exec(`
 			INSERT INTO deployments (git_sha, litestream_sha, image_ref, source, pr_number, status, started_at, completed_at, error_message)
 			VALUES (?, ?, ?, ?, ?, 'ready', datetime('now'), datetime('now'), '')`,
 			dep.GitSHA, dep.LitestreamSHA, dep.ImageRef, dep.Source, dep.PRNumber,
@@ -113,7 +113,7 @@ func (d *DB) UpsertReadyDeployment(dep *Deployment) error {
 func (d *DB) GetDeploymentBySHA(sha string) (*Deployment, error) {
 	var dep Deployment
 	err := scanDeployment(
-		d.db.QueryRow("SELECT "+deploymentColumns+" FROM deployments WHERE git_sha = ? ORDER BY started_at DESC LIMIT 1", sha),
+		d.queryRow("SELECT "+deploymentColumns+" FROM deployments WHERE git_sha = ? ORDER BY started_at DESC LIMIT 1", sha),
 		&dep,
 	)
 	if err != nil {
@@ -125,7 +125,7 @@ func (d *DB) GetDeploymentBySHA(sha string) (*Deployment, error) {
 func (d *DB) GetDeploymentByVersion(source, gitSHA, litestreamSHA string) (*Deployment, error) {
 	var dep Deployment
 	err := scanDeployment(
-		d.db.QueryRow("SELECT "+deploymentColumns+" FROM deployments WHERE source = ? AND git_sha = ? AND litestream_sha = ? ORDER BY started_at DESC, id DESC LIMIT 1",
+		d.queryRow("SELECT "+deploymentColumns+" FROM deployments WHERE source = ? AND git_sha = ? AND litestream_sha = ? ORDER BY started_at DESC, id DESC LIMIT 1",
 			source,
 			gitSHA,
 			litestreamSHA,
@@ -148,7 +148,7 @@ func (d *DB) GetLatestDeployment(source string) (*Deployment, error) {
 	query += " ORDER BY started_at DESC, id DESC LIMIT 1"
 
 	var dep Deployment
-	err := scanDeployment(d.db.QueryRow(query, args...), &dep)
+	err := scanDeployment(d.queryRow(query, args...), &dep)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -168,7 +168,7 @@ func (d *DB) GetLatestReadyDeployment(source string) (*Deployment, error) {
 	query += " ORDER BY started_at DESC, id DESC LIMIT 1"
 
 	var dep Deployment
-	err := scanDeployment(d.db.QueryRow(query, args...), &dep)
+	err := scanDeployment(d.queryRow(query, args...), &dep)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
