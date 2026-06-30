@@ -54,6 +54,11 @@ func (c *pprofCapturer) captureSet(ctx context.Context, label string) {
 	c.captureEndpoint(ctx, label, "heap", "heap", 10*time.Second)
 	c.captureEndpoint(ctx, label, "allocs", "allocs", 10*time.Second)
 	c.captureEndpoint(ctx, label, "goroutine", "goroutine?debug=2", 10*time.Second)
+	// heap?debug=1 emits the text heap profile followed by a full
+	// runtime.MemStats dump (StackInuse/StackSys/HeapInuse/...), which the
+	// binary debug=0 heap profile does not carry. Captured for over-time
+	// stack/heap tracking.
+	c.captureEndpoint(ctx, label, "memstats", "heap?debug=1", 10*time.Second)
 }
 
 func (c *pprofCapturer) captureEndpoint(ctx context.Context, label, name, endpoint string, timeout time.Duration) {
@@ -82,7 +87,7 @@ func (c *pprofCapturer) captureEndpoint(ctx context.Context, label, name, endpoi
 		return
 	}
 	ext := "pprof"
-	if name == "goroutine" {
+	if name == "goroutine" || name == "memstats" {
 		ext = "txt"
 	}
 	filename := fmt.Sprintf("%s_%s_%s.%s", time.Now().UTC().Format("20060102T150405Z"), label, name, ext)
