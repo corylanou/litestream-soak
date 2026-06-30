@@ -37,6 +37,8 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"jsonCompact":             jsonCompact,
 	"joinList":                strings.Join,
 	"pathEscape":              url.PathEscape,
+	"profileCharter":          profileCharter,
+	"profileSynopsis":         profileSynopsis,
 	"queryEscape":             url.QueryEscape,
 	"runtimeClass":            runtimeSnapshotClass,
 	"runtimeLabel":            runtimeSnapshotLabel,

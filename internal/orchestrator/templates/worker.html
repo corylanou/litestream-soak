@@ -84,6 +84,21 @@
     </div>
     {{end}}
 
+    {{with profileCharter .Incident.Worker.ProfileName}}{{if .Known}}
+    <div class="panel charter-panel">
+      <div class="panel-head">
+        <span class="panel-title">Why This Test Exists{{template "info" "Why this worker is in the fleet: the scenario it runs, what it stresses, the regression it guards against, and why catching that matters. The Workload Shape panel shows the raw parameters; this explains the intent behind them."}}</span>
+        <span class="panel-note">profile: {{$.Incident.Worker.ProfileName}}</span>
+      </div>
+      <p class="charter-synopsis">{{.Synopsis}}</p>
+      <dl class="charter-grid">
+        <div><dt>Stresses</dt><dd>{{.Stresses}}</dd></div>
+        <div><dt>Guards against</dt><dd>{{.GuardsAgainst}}</dd></div>
+        <div><dt>Why it matters</dt><dd>{{.WhyItMatters}}</dd></div>
+      </dl>
+    </div>
+    {{end}}{{end}}
+
     <div class="guide-banner">
       <div class="panel guide-copy">
         <div class="panel-head">

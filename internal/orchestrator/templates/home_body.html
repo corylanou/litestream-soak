@@ -170,7 +170,7 @@
             <td><span class="dot dot-{{if .CompletedSuccess}}good{{else if or (eq (statusClass .Worker.Status) "status-bad") (eq (runtimeClass .RuntimeSnapshotStatus) "status-bad")}}bad{{else if or (eq (statusClass .Worker.Status) "status-warn") (eq (runtimeClass .RuntimeSnapshotStatus) "status-warn")}}warn{{else if eq (statusClass .Worker.Status) "status-good"}}good{{else}}neutral{{end}}"></span></td>
             <td>
               <div class="worker-name">{{.Worker.Name}}{{if .CompletedSuccess}} <span class="badge badge-good">passed</span>{{else if ne (statusClass .Worker.Status) "status-good"}} <span class="badge badge-{{if eq (statusClass .Worker.Status) "status-warn"}}warn{{else if eq (statusClass .Worker.Status) "status-bad"}}bad{{else}}neutral{{end}}">{{.Worker.Status}}</span>{{end}}</div>
-              <div class="worker-sub">{{.Worker.ProfileName}} &middot; {{.Workload.MetricLoadMode}}{{if ne .Workload.MetricReplayDataset "none"}} &middot; {{.Workload.MetricReplayDataset}}{{end}}{{if .CompletedSuccess}} &middot; clean soak, torn down{{else if ne (runtimeClass .RuntimeSnapshotStatus) "status-good"}} &middot; {{runtimeLabel .RuntimeSnapshotStatus}}{{end}}</div>
+              <div class="worker-sub">{{.Worker.ProfileName}}{{with profileSynopsis .Worker.ProfileName}}{{template "info" .}}{{end}} &middot; {{.Workload.MetricLoadMode}}{{if ne .Workload.MetricReplayDataset "none"}} &middot; {{.Workload.MetricReplayDataset}}{{end}}{{if .CompletedSuccess}} &middot; clean soak, torn down{{else if ne (runtimeClass .RuntimeSnapshotStatus) "status-good"}} &middot; {{runtimeLabel .RuntimeSnapshotStatus}}{{end}}</div>
             </td>
             <td>
               {{if .Ticks}}

@@ -90,6 +90,13 @@ h1, h2, h3, p { margin: 0; }
 .info.tip-start::after { left: -4px; transform: none; }
 .kpi-label .info, .chart-title .info, .panel-title .info, .section-title .info, .worker-table th .info { margin-left: 5px; }
 .tabs .info { margin-left: auto; align-self: center; }
+.worker-sub .info { margin-left: 5px; vertical-align: baseline; }
+
+/* Profile charter: "why this test exists" on the worker page */
+.charter-panel .charter-synopsis { margin: 0 0 14px; color: var(--text); font-weight: 600; font-size: 14px; line-height: 1.5; }
+.charter-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px 24px; margin: 0; }
+.charter-grid dt { color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+.charter-grid dd { margin: 0; color: var(--text); font-size: 13px; line-height: 1.45; }
 
 /* Status text colors (heartbeat/verification/deployment classes) */
 .status-good { color: var(--green-quiet); }
