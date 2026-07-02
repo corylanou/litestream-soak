@@ -55,6 +55,9 @@
         {{if .KPIs.FleetPassed}}
         <div class="kpi-value kpi-good kpi-value-sm">&#10003; Passed</div>
         <div class="kpi-sub">clean soak, torn down</div>
+        {{else if .Summary.Retired}}
+        <div class="kpi-value kpi-value-sm">&#9209; Retired</div>
+        <div class="kpi-sub">fleet torn down</div>
         {{else}}
         <div class="kpi-value {{if ge .KPIs.FleetHealthPct 100}}kpi-good{{else if ge .KPIs.FleetHealthPct 80}}kpi-warn{{else}}kpi-bad{{end}}">{{.KPIs.FleetHealthPct}}<span class="kpi-unit">%</span></div>
         <div class="kpi-sub">{{.SelectedSourceLabel}}</div>

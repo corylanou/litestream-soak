@@ -338,6 +338,18 @@ func TestBuildHomePageDataTreatsStoppedSourceAsRetired(t *testing.T) {
 	if !selectedCard.Retired {
 		t.Fatal("selected retired source card not marked Retired")
 	}
+
+	var body bytes.Buffer
+	if err := uiTemplates.ExecuteTemplate(&body, "home_body", data); err != nil {
+		t.Fatalf("ExecuteTemplate(home_body) error = %v", err)
+	}
+	tile := homeKPITile(t, body.String(), "Fleet health")
+	if !strings.Contains(tile, "Retired") {
+		t.Fatalf("fleet-health tile = %q, want Retired state", tile)
+	}
+	if strings.Contains(tile, "kpi-bad") {
+		t.Fatalf("fleet-health tile = %q, must not render red on a retired page", tile)
+	}
 }
 
 func TestBuildHomePageDataTagsCorrelatedS3TransportFailureEnvironmental(t *testing.T) {
