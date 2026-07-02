@@ -164,7 +164,6 @@ func TestBuildHomeScopeSummary(t *testing.T) {
 	}
 }
 
-
 func TestSortHomeSourceCardsStableOrder(t *testing.T) {
 	t.Parallel()
 
@@ -187,5 +186,119 @@ func TestSortHomeSourceCardsStableOrder(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("order = %v, want %v (main first, PRs numeric ascending, others last; selection must not affect order)", got, want)
 		}
+	}
+}
+
+func TestActiveWorkerNeedsAttentionTreatsStoppedAsNeutral(t *testing.T) {
+	t.Parallel()
+
+	if activeWorkerNeedsAttention(model.WorkerStopped, "") {
+		t.Fatal("stopped worker should never need attention")
+	}
+	if activeWorkerNeedsAttention(model.WorkerStopped, "unhealthy") {
+		t.Fatal("stopped worker with stale unhealthy runtime should never need attention")
+	}
+	if !activeWorkerNeedsAttention(model.WorkerDormant, "") {
+		t.Fatal("dormant worker should need attention")
+	}
+	if !activeWorkerNeedsAttention(model.WorkerDegraded, "") {
+		t.Fatal("degraded worker should need attention")
+	}
+	if activeWorkerNeedsAttention(model.WorkerRunning, "") {
+		t.Fatal("healthy running worker should not need attention")
+	}
+}
+
+func TestAssembleHomeSourceCardsRetiresAllStoppedSources(t *testing.T) {
+	t.Parallel()
+
+	workers := []model.Worker{
+		{ID: "w1", Name: "worker-main-low-vol", Source: "main", Status: model.WorkerRunning},
+		{ID: "w2", Name: "worker-main-old", Source: "main", Status: model.WorkerStopped},
+		{ID: "w3", Name: "worker-pr-1305-a", Source: "pr-1305", Status: model.WorkerStopped},
+		{ID: "w4", Name: "worker-pr-1305-b", Source: "pr-1305", Status: model.WorkerStopped},
+		{ID: "w5", Name: "worker-pr-77-a", Source: "pr-77", Status: model.WorkerStopped},
+		{ID: "w6", Name: "worker-pr-1322-a", Source: "pr-1322", Status: model.WorkerRunning},
+		{ID: "w7", Name: "worker-pr-1322-b", Source: "pr-1322", Status: model.WorkerDormant},
+	}
+	archives := map[string]model.RunArchive{"pr-77": {}}
+
+	cards := assembleHomeSourceCards("main", workers, archives)
+
+	bySource := map[string]homeSourceCard{}
+	for _, card := range cards {
+		bySource[card.Source] = card
+	}
+
+	if _, ok := bySource["pr-1305"]; ok {
+		t.Fatal("all-stopped source without success archive should have no tab")
+	}
+	passed, ok := bySource["pr-77"]
+	if !ok || !passed.Passed {
+		t.Fatalf("success-archived all-stopped source should render as passed, got %+v", passed)
+	}
+	mainCard := bySource["main"]
+	if mainCard.Total != 1 {
+		t.Fatalf("main Total = %d, want 1 (stopped workers excluded)", mainCard.Total)
+	}
+	if mainCard.Attention != 0 {
+		t.Fatalf("main Attention = %d, want 0", mainCard.Attention)
+	}
+	pr1322 := bySource["pr-1322"]
+	if pr1322.Total != 2 || pr1322.Attention != 1 {
+		t.Fatalf("pr-1322 counts = %d total / %d attention, want 2/1", pr1322.Total, pr1322.Attention)
+	}
+}
+
+func TestAssembleHomeSourceCardsKeepsSelectedRetiredSourceVisible(t *testing.T) {
+	t.Parallel()
+
+	workers := []model.Worker{
+		{ID: "w1", Name: "worker-main-low-vol", Source: "main", Status: model.WorkerRunning},
+		{ID: "w2", Name: "worker-pr-1324-a", Source: "pr-1324", Status: model.WorkerStopped},
+	}
+
+	cards := assembleHomeSourceCards("pr-1324", workers, nil)
+
+	var retired *homeSourceCard
+	for i := range cards {
+		if cards[i].Source == "pr-1324" {
+			retired = &cards[i]
+		}
+	}
+	if retired == nil {
+		t.Fatal("selected retired source should stay visible")
+	}
+	if !retired.Retired {
+		t.Fatal("selected all-stopped source should be marked retired")
+	}
+	if retired.Attention != 0 {
+		t.Fatalf("retired card Attention = %d, want 0", retired.Attention)
+	}
+	if !strings.Contains(retired.Summary, "retired") {
+		t.Fatalf("retired card summary = %q, want mention of retired", retired.Summary)
+	}
+}
+
+func TestStatusClassTreatsStoppedAsNeutral(t *testing.T) {
+	t.Parallel()
+
+	if got := statusClass("stopped"); got != "status-neutral" {
+		t.Fatalf("statusClass(stopped) = %q, want status-neutral", got)
+	}
+	if got := statusClass("failed"); got != "status-bad" {
+		t.Fatalf("statusClass(failed) = %q, want status-bad", got)
+	}
+}
+
+func TestWorkerPromptURLUsesHealthyModeForStoppedWorkers(t *testing.T) {
+	t.Parallel()
+
+	worker := model.Worker{ID: "worker-pr-9-low", Status: model.WorkerStopped}
+	if got := workerPromptURL(worker, "", ""); !strings.Contains(got, "mode=healthy") {
+		t.Fatalf("workerPromptURL(stopped) = %q, want healthy mode", got)
+	}
+	if got := workerPromptURL(worker, "restore_decode_error", ""); !strings.Contains(got, "mode=triage") {
+		t.Fatalf("workerPromptURL(stopped with failure signature) = %q, want triage mode", got)
 	}
 }

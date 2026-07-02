@@ -44,6 +44,7 @@ type homeSummary struct {
 	HealthyWorkers       int
 	AttentionWorkers     int
 	CompletedSuccess     bool
+	Retired              bool
 	ActiveVerifications  int
 	RecentFailures       int
 	LatestHeartbeatAt    *time.Time
@@ -78,6 +79,7 @@ type homeSourceCard struct {
 	Total      int
 	Attention  int
 	Passed     bool
+	Retired    bool
 }
 
 type workerPageData struct {
@@ -195,11 +197,13 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 	}
 	_, sourceHasSuccessArchive := successArchivesBySource[requestedSource]
 	sourceCompletedSuccess := sourceHasSuccessArchive && allWorkerSummariesStopped(summaries)
+	sourceRetired := requestedSource != "main" && !sourceCompletedSuccess && allWorkerSummariesTerminal(summaries)
 
 	workerCards := make([]homeWorker, 0, len(summaries))
 	summary := homeSummary{
 		TotalWorkers:     len(summaries),
 		CompletedSuccess: sourceCompletedSuccess,
+		Retired:          sourceRetired,
 		RecentFailures:   len(failures),
 	}
 
@@ -227,7 +231,9 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 			card.CurrentFailureSeverity = failureSeverityForCategory(card.CurrentFailureCategory)
 		}
 
-		if homeWorkerNeedsAttention(card) {
+		if !sourceRetired && homeWorkerNeedsAttention(card) {
+			// Retired sources are torn down on purpose; leftover failed
+			// workers there are history, not something to act on.
 			summary.AttentionWorkers++
 		} else {
 			summary.HealthyWorkers++
@@ -349,6 +355,21 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 	}, nil
 }
 
+// allWorkerSummariesTerminal reports whether every worker has reached a
+// terminal state (stopped or failed) — the shared definition of a retired
+// source for both the summary banner and the tab cards.
+func allWorkerSummariesTerminal(summaries []WorkerSummaryResponse) bool {
+	if len(summaries) == 0 {
+		return false
+	}
+	for _, summary := range summaries {
+		if summary.Worker.Status != model.WorkerStopped && summary.Worker.Status != model.WorkerFailed {
+			return false
+		}
+	}
+	return true
+}
+
 func allWorkerSummariesStopped(summaries []WorkerSummaryResponse) bool {
 	if len(summaries) == 0 {
 		return false
@@ -374,11 +395,14 @@ func allWorkersStopped(workers []model.Worker) bool {
 }
 
 func homeWorkerNeedsAttention(worker homeWorker) bool {
-	return workerNeedsAttentionForSuccess(worker.Worker.Status, worker.RuntimeSnapshotStatus, worker.CompletedSuccess)
+	return activeWorkerNeedsAttention(worker.Worker.Status, worker.RuntimeSnapshotStatus)
 }
 
-func workerNeedsAttentionForSuccess(status model.WorkerStatus, runtimeStatus string, completedSuccess bool) bool {
-	if completedSuccess && status == model.WorkerStopped {
+// activeWorkerNeedsAttention mirrors workerNeedsAttention except that stopped
+// workers are neutral: stopping is an intentional terminal state (clean pass,
+// teardown, retirement), never an alert.
+func activeWorkerNeedsAttention(status model.WorkerStatus, runtimeStatus string) bool {
+	if status == model.WorkerStopped {
 		return false
 	}
 	return workerNeedsAttention(status, runtimeStatus)
@@ -390,6 +414,23 @@ func (a *API) buildHomeSourceCards(selectedSource string, successArchivesBySourc
 		return nil, err
 	}
 
+	cards := assembleHomeSourceCards(selectedSource, workers, successArchivesBySource)
+	for i := range cards {
+		if latestDeployment, err := a.db.GetLatestDeployment(cards[i].Source); err == nil && latestDeployment != nil {
+			if rollout, err := a.buildDeploymentRollout(*latestDeployment); err == nil {
+				cards[i].Status = rollout.Status
+			}
+		}
+	}
+	return cards, nil
+}
+
+// assembleHomeSourceCards builds the source tab bar. Counts cover active
+// (non-stopped) workers only. A non-main source whose workers are all
+// stopped/failed is retired: it keeps a tab only while it is the selected
+// source (so a stale bookmark renders a neutral retired state instead of a
+// missing page) or when it passed a clean soak (success archive present).
+func assembleHomeSourceCards(selectedSource string, workers []model.Worker, successArchivesBySource map[string]model.RunArchive) []homeSourceCard {
 	type sourceCounts struct {
 		total     int
 		attention int
@@ -403,26 +444,34 @@ func (a *API) buildHomeSourceCards(selectedSource string, successArchivesBySourc
 
 	countsBySource := make(map[string]sourceCounts)
 	for source, sourceWorkers := range workersBySource {
-		_, sourceHasSuccessArchive := successArchivesBySource[source]
+		counts := sourceCounts{}
 		for _, worker := range sourceWorkers {
-			runtimeStatus := reporting.SnapshotStatus(extractReportedRuntime(worker, nil))
-			workerCompletedSuccess := sourceHasSuccessArchive && worker.Status == model.WorkerStopped
-			counts := countsBySource[source]
+			if worker.Status == model.WorkerStopped || worker.Status == model.WorkerFailed {
+				continue
+			}
 			counts.total++
-			if workerNeedsAttentionForSuccess(worker.Status, runtimeStatus, workerCompletedSuccess) {
+			runtimeStatus := reporting.SnapshotStatus(extractReportedRuntime(worker, nil))
+			if activeWorkerNeedsAttention(worker.Status, runtimeStatus) {
 				counts.attention++
 			}
-			countsBySource[source] = counts
 		}
+		countsBySource[source] = counts
 	}
 
 	cards := make([]homeSourceCard, 0, len(countsBySource))
 	for source, counts := range countsBySource {
 		_, sourceHasSuccessArchive := successArchivesBySource[source]
 		sourcePassed := sourceHasSuccessArchive && allWorkersStopped(workersBySource[source])
+		sourceRetired := source != "main" && counts.total == 0 && !sourcePassed
+		if sourceRetired && source != selectedSource {
+			continue
+		}
 		summary := fmt.Sprintf("%d workers, %d need attention", counts.total, counts.attention)
-		if sourcePassed {
-			summary = fmt.Sprintf("%d workers, passed clean soak", counts.total)
+		switch {
+		case sourcePassed:
+			summary = fmt.Sprintf("%d workers, passed clean soak", len(workersBySource[source]))
+		case sourceRetired:
+			summary = "retired — fleet torn down, workers stopped"
 		}
 		card := homeSourceCard{
 			Source:    source,
@@ -433,21 +482,17 @@ func (a *API) buildHomeSourceCards(selectedSource string, successArchivesBySourc
 			Total:     counts.total,
 			Attention: counts.attention,
 			Passed:    sourcePassed,
+			Retired:   sourceRetired,
 		}
 		if source != "main" {
 			card.CompareURL = fmt.Sprintf("/ui?source=%s&base_source=main&head_source=%s", url.QueryEscape(source), url.QueryEscape(source))
-		}
-		if latestDeployment, err := a.db.GetLatestDeployment(source); err == nil && latestDeployment != nil {
-			if rollout, err := a.buildDeploymentRollout(*latestDeployment); err == nil {
-				card.Status = rollout.Status
-			}
 		}
 		cards = append(cards, card)
 	}
 
 	sortHomeSourceCards(cards)
 
-	return cards, nil
+	return cards
 }
 
 // sortHomeSourceCards orders source tabs identically on every page: main
@@ -535,7 +580,7 @@ func comparisonPromptActionLabelForMode(mode string) string {
 
 func workerPromptURL(worker model.Worker, failureSignature, runtimeSnapshotStatus string) string {
 	query := url.Values{}
-	if strings.TrimSpace(failureSignature) != "" || workerNeedsAttention(worker.Status, runtimeSnapshotStatus) {
+	if strings.TrimSpace(failureSignature) != "" || activeWorkerNeedsAttention(worker.Status, runtimeSnapshotStatus) {
 		query.Set("mode", string(promptModeTriage))
 	} else {
 		query.Set("mode", string(promptModeHealthy))

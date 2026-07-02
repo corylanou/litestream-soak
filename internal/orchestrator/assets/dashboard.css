@@ -118,6 +118,8 @@ h1, h2, h3, p { margin: 0; }
 .source-tab.active { background: var(--blue-dim); border-color: rgba(88,166,255,0.4); color: var(--blue); font-weight: 600; }
 .source-tab .tab-count { font-size: 11px; color: var(--faint); }
 .source-tab .tab-alert { color: var(--red); font-weight: 700; font-size: 11px; }
+.source-tab-retired { border-style: dashed; opacity: 0.7; }
+.source-tab .tab-retired { font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.4px; }
 .source-tab-external { margin-left: auto; border-style: dashed; color: var(--blue); }
 .source-tab-external:hover { color: var(--blue); border-color: rgba(88,166,255,0.4); }
 

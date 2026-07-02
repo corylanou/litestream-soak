@@ -135,6 +135,13 @@ func buildHomeChartData(selectedSource string, chartFrom time.Time, selectedStat
 }
 
 func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, summary homeSummary, workers []homeWorker, rollout *DeploymentRolloutResponse, comparison *DeploymentComparisonResponse, comparisonPromptURL, comparisonJSONURL string, failureContext failureClassificationContext) []attentionItem {
+	if summary.Retired {
+		// Retired sources are torn down on purpose; stale heartbeats and
+		// leftover failure history are not actionable, so the neutral
+		// retired banner replaces the attention stack entirely.
+		return nil
+	}
+
 	items := make([]attentionItem, 0, 4)
 	clusterSeverity := "warn"
 	if selectedSource != "main" {
@@ -212,7 +219,7 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 	staleNames := make([]string, 0, 3)
 	staleCount := 0
 	for _, worker := range workers {
-		if worker.CompletedSuccess {
+		if worker.CompletedSuccess || worker.Worker.Status == model.WorkerStopped {
 			continue
 		}
 		if homeWorkerNeedsAttention(worker) {
