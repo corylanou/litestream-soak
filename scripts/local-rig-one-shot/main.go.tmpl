@@ -457,7 +457,7 @@ func runConstrainedDisk(ctx context.Context, cfg config) (result, error) {
 		frozenTXID = currentTXID(db)
 		logs := logBuf.Lines()
 		metric, metricOK := diskFullMetric(dbPath)
-		distinctLog := containsSubstring(logs, "disk full while staging LTX file")
+		distinctLog := containsSubstring(logs, "disk full while staging")
 		if metricOK && metric == 1 && distinctLog {
 			break
 		}
@@ -471,7 +471,7 @@ func runConstrainedDisk(ctx context.Context, cfg config) (result, error) {
 	metric, metricOK := diskFullMetric(dbPath)
 	txidDuringDiskFull := currentTXID(db)
 	metricsReachable := httpGetOK(metricsURL)
-	distinctLog := containsSubstring(logs, "disk full while staging LTX file")
+	distinctLog := containsSubstring(logs, "disk full while staging")
 
 	res.Stats = map[string]any{
 		"metrics_url":                    metricsURL,
