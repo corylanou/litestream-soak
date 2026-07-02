@@ -279,3 +279,26 @@ func TestAssembleHomeSourceCardsKeepsSelectedRetiredSourceVisible(t *testing.T) 
 		t.Fatalf("retired card summary = %q, want mention of retired", retired.Summary)
 	}
 }
+
+func TestStatusClassTreatsStoppedAsNeutral(t *testing.T) {
+	t.Parallel()
+
+	if got := statusClass("stopped"); got != "status-neutral" {
+		t.Fatalf("statusClass(stopped) = %q, want status-neutral", got)
+	}
+	if got := statusClass("failed"); got != "status-bad" {
+		t.Fatalf("statusClass(failed) = %q, want status-bad", got)
+	}
+}
+
+func TestWorkerPromptURLUsesHealthyModeForStoppedWorkers(t *testing.T) {
+	t.Parallel()
+
+	worker := model.Worker{ID: "worker-pr-9-low", Status: model.WorkerStopped}
+	if got := workerPromptURL(worker, "", ""); !strings.Contains(got, "mode=healthy") {
+		t.Fatalf("workerPromptURL(stopped) = %q, want healthy mode", got)
+	}
+	if got := workerPromptURL(worker, "restore_decode_error", ""); !strings.Contains(got, "mode=triage") {
+		t.Fatalf("workerPromptURL(stopped with failure signature) = %q, want triage mode", got)
+	}
+}

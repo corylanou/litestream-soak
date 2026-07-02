@@ -288,6 +288,20 @@ func TestBuildHomePageDataTreatsStoppedSourceAsRetired(t *testing.T) {
 		Passed:      true,
 	})
 
+	staleHeartbeat := time.Now().UTC().Add(-72 * time.Hour)
+	createTestWorker(t, db, model.Worker{
+		ID:              "worker-pr-1313-failed",
+		Name:            "worker-pr-1313-failed",
+		Status:          model.WorkerFailed,
+		Source:          source,
+		GitSHA:          "sha-pr",
+		LitestreamSHA:   "litestream-pr",
+		PRNumber:        1313,
+		ProfileName:     "high-volume",
+		ProfileConfig:   "{}",
+		LastHeartbeatAt: &staleHeartbeat,
+	})
+
 	api := NewAPI(db, nil, nil, nil, nil, nil)
 	request := httptest.NewRequest(http.MethodGet, "/ui?source=pr-1313", nil)
 	data, err := api.buildHomePageData(request)
@@ -295,6 +309,9 @@ func TestBuildHomePageDataTreatsStoppedSourceAsRetired(t *testing.T) {
 		t.Fatalf("buildHomePageData() error = %v", err)
 	}
 
+	if len(data.Attention) != 0 {
+		t.Fatalf("Attention = %d items, want none on a retired source (got %+v)", len(data.Attention), data.Attention[0])
+	}
 	if data.Summary.AttentionWorkers != 0 {
 		t.Fatalf("AttentionWorkers = %d, want 0 (stopped is an intentional terminal state)", data.Summary.AttentionWorkers)
 	}

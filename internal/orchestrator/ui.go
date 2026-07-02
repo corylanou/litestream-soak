@@ -197,7 +197,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 	}
 	_, sourceHasSuccessArchive := successArchivesBySource[requestedSource]
 	sourceCompletedSuccess := sourceHasSuccessArchive && allWorkerSummariesStopped(summaries)
-	sourceRetired := requestedSource != "main" && !sourceCompletedSuccess && allWorkerSummariesStopped(summaries)
+	sourceRetired := requestedSource != "main" && !sourceCompletedSuccess && allWorkerSummariesTerminal(summaries)
 
 	workerCards := make([]homeWorker, 0, len(summaries))
 	summary := homeSummary{
@@ -231,7 +231,9 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 			card.CurrentFailureSeverity = failureSeverityForCategory(card.CurrentFailureCategory)
 		}
 
-		if homeWorkerNeedsAttention(card) {
+		if !sourceRetired && homeWorkerNeedsAttention(card) {
+			// Retired sources are torn down on purpose; leftover failed
+			// workers there are history, not something to act on.
 			summary.AttentionWorkers++
 		} else {
 			summary.HealthyWorkers++
@@ -351,6 +353,21 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		KPIs:                     kpis,
 		ChartData:                chartData,
 	}, nil
+}
+
+// allWorkerSummariesTerminal reports whether every worker has reached a
+// terminal state (stopped or failed) — the shared definition of a retired
+// source for both the summary banner and the tab cards.
+func allWorkerSummariesTerminal(summaries []WorkerSummaryResponse) bool {
+	if len(summaries) == 0 {
+		return false
+	}
+	for _, summary := range summaries {
+		if summary.Worker.Status != model.WorkerStopped && summary.Worker.Status != model.WorkerFailed {
+			return false
+		}
+	}
+	return true
 }
 
 func allWorkerSummariesStopped(summaries []WorkerSummaryResponse) bool {
@@ -563,7 +580,7 @@ func comparisonPromptActionLabelForMode(mode string) string {
 
 func workerPromptURL(worker model.Worker, failureSignature, runtimeSnapshotStatus string) string {
 	query := url.Values{}
-	if strings.TrimSpace(failureSignature) != "" || workerNeedsAttention(worker.Status, runtimeSnapshotStatus) {
+	if strings.TrimSpace(failureSignature) != "" || activeWorkerNeedsAttention(worker.Status, runtimeSnapshotStatus) {
 		query.Set("mode", string(promptModeTriage))
 	} else {
 		query.Set("mode", string(promptModeHealthy))

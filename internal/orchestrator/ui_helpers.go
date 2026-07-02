@@ -267,8 +267,10 @@ func statusClass(value any) string {
 		return "status-good"
 	case "degraded", "dormant", "probing", "starting", "building", "pending":
 		return "status-warn"
-	case "failed", "stopped":
+	case "failed":
 		return "status-bad"
+	case "stopped":
+		return "status-neutral"
 	default:
 		return "status-neutral"
 	}
