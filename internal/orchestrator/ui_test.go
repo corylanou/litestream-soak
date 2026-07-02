@@ -233,9 +233,8 @@ func TestAssembleHomeSourceCardsRetiresAllStoppedSources(t *testing.T) {
 	if _, ok := bySource["pr-1305"]; ok {
 		t.Fatal("all-stopped source without success archive should have no tab")
 	}
-	passed, ok := bySource["pr-77"]
-	if !ok || !passed.Passed {
-		t.Fatalf("success-archived all-stopped source should render as passed, got %+v", passed)
+	if _, ok := bySource["pr-77"]; ok {
+		t.Fatal("passed (all-stopped) source should have no tab either — the bar is active-only")
 	}
 	mainCard := bySource["main"]
 	if mainCard.Total != 1 {
@@ -300,5 +299,29 @@ func TestWorkerPromptURLUsesHealthyModeForStoppedWorkers(t *testing.T) {
 	}
 	if got := workerPromptURL(worker, "restore_decode_error", ""); !strings.Contains(got, "mode=triage") {
 		t.Fatalf("workerPromptURL(stopped with failure signature) = %q, want triage mode", got)
+	}
+}
+
+func TestFilterStatsToActiveWorkersDropsRetiredHistory(t *testing.T) {
+	t.Parallel()
+
+	summaries := []WorkerSummaryResponse{
+		{Worker: model.Worker{ID: "w-live", Status: model.WorkerRunning}},
+		{Worker: model.Worker{ID: "w-retired", Status: model.WorkerStopped}},
+		{Worker: model.Worker{ID: "w-dead", Status: model.WorkerFailed}},
+	}
+	stats := []model.VerificationStat{
+		{WorkerID: "w-live", Status: "passed", Passed: true},
+		{WorkerID: "w-retired", Status: "failed"},
+		{WorkerID: "w-dead", Status: "failed"},
+	}
+
+	filtered := filterStatsToActiveWorkers(stats, summaries)
+
+	if len(filtered) != 1 {
+		t.Fatalf("filtered len = %d, want 1 (only the live worker), got %+v", len(filtered), filtered)
+	}
+	if filtered[0].WorkerID != "w-live" {
+		t.Fatalf("filtered worker = %q, want w-live", filtered[0].WorkerID)
 	}
 }

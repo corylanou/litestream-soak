@@ -281,6 +281,26 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 	return items
 }
 
+// filterStatsToActiveWorkers drops verification history that belongs to
+// stopped/failed (retired) workers so a live source's KPIs and charts reflect
+// only the fleet that is actually running.
+func filterStatsToActiveWorkers(stats []model.VerificationStat, summaries []WorkerSummaryResponse) []model.VerificationStat {
+	active := make(map[string]bool, len(summaries))
+	for _, summary := range summaries {
+		if summary.Worker.Status == model.WorkerStopped || summary.Worker.Status == model.WorkerFailed {
+			continue
+		}
+		active[summary.Worker.ID] = true
+	}
+	filtered := make([]model.VerificationStat, 0, len(stats))
+	for _, stat := range stats {
+		if active[stat.WorkerID] {
+			filtered = append(filtered, stat)
+		}
+	}
+	return filtered
+}
+
 func splitStatsAt(stats []model.VerificationStat, cutoff time.Time) (before, after []model.VerificationStat) {
 	for _, stat := range stats {
 		if stat.StartedAt.Before(cutoff) {

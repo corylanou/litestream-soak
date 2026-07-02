@@ -157,6 +157,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 	if err != nil {
 		return homePageData{}, err
 	}
+	sourceStats = filterStatsToActiveWorkers(sourceStats, summaries)
 	previousStats, windowStats := splitStatsAt(sourceStats, now.Add(-24*time.Hour))
 	allWindowStats, err := a.db.ListVerificationStatsSince("", now.Add(-24*time.Hour))
 	if err != nil {
@@ -463,7 +464,7 @@ func assembleHomeSourceCards(selectedSource string, workers []model.Worker, succ
 		_, sourceHasSuccessArchive := successArchivesBySource[source]
 		sourcePassed := sourceHasSuccessArchive && allWorkersStopped(workersBySource[source])
 		sourceRetired := source != "main" && counts.total == 0 && !sourcePassed
-		if sourceRetired && source != selectedSource {
+		if source != "main" && counts.total == 0 && source != selectedSource {
 			continue
 		}
 		summary := fmt.Sprintf("%d workers, %d need attention", counts.total, counts.attention)
