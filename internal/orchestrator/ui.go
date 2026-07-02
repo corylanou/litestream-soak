@@ -170,6 +170,11 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		if err != nil {
 			return homePageData{}, err
 		}
+		mainWorkers, err := a.db.ListWorkersFiltered("", "main")
+		if err != nil {
+			return homePageData{}, err
+		}
+		mainStats = filterStatsToActiveWorkerRows(mainStats, mainWorkers)
 	}
 	ticksByWorker, err := a.db.ListVerificationTicks(20, now.Add(-7*24*time.Hour))
 	if err != nil {
@@ -323,7 +328,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		return homePageData{}, err
 	}
 
-	diagnosis := buildDiagnosisSnapshot(summaries)
+	diagnosis := buildDiagnosisSnapshot(activeWorkerSummaries(summaries))
 
 	attention := buildAttentionItems(requestedSource, diagnosis, summary, workerCards, rollout, releaseComparison, comparisonPromptURL, comparisonJSONURL, failureContext)
 	kpis := buildHomeKPIs(summary, windowStats, previousStats, rollout, failureContext)
@@ -426,11 +431,10 @@ func (a *API) buildHomeSourceCards(selectedSource string, successArchivesBySourc
 	return cards, nil
 }
 
-// assembleHomeSourceCards builds the source tab bar. Counts cover active
-// (non-stopped) workers only. A non-main source whose workers are all
-// stopped/failed is retired: it keeps a tab only while it is the selected
-// source (so a stale bookmark renders a neutral retired state instead of a
-// missing page) or when it passed a clean soak (success archive present).
+// assembleHomeSourceCards builds the source tab bar. The bar is active-only:
+// counts cover non-stopped workers, and a non-main source with no active
+// workers gets no tab — passed or not — unless it is the selected source, so
+// a stale bookmark still renders its neutral retired/passed page state.
 func assembleHomeSourceCards(selectedSource string, workers []model.Worker, successArchivesBySource map[string]model.RunArchive) []homeSourceCard {
 	type sourceCounts struct {
 		total     int

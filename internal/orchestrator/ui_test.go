@@ -325,3 +325,25 @@ func TestFilterStatsToActiveWorkersDropsRetiredHistory(t *testing.T) {
 		t.Fatalf("filtered worker = %q, want w-live", filtered[0].WorkerID)
 	}
 }
+
+func TestActiveWorkerSummariesDropsRetiredRows(t *testing.T) {
+	t.Parallel()
+
+	summaries := []WorkerSummaryResponse{
+		{Worker: model.Worker{ID: "w-live", Status: model.WorkerRunning}},
+		{Worker: model.Worker{ID: "w-stopped", Status: model.WorkerStopped}},
+		{Worker: model.Worker{ID: "w-failed", Status: model.WorkerFailed}},
+		{Worker: model.Worker{ID: "w-dormant", Status: model.WorkerDormant}},
+	}
+
+	got := activeWorkerSummaries(summaries)
+
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2 (running + dormant)", len(got))
+	}
+	for _, summary := range got {
+		if summary.Worker.Status == model.WorkerStopped || summary.Worker.Status == model.WorkerFailed {
+			t.Fatalf("retired worker %s leaked through", summary.Worker.ID)
+		}
+	}
+}
