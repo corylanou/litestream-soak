@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 func TestDeriveAllocRate(t *testing.T) {
@@ -215,5 +217,73 @@ litestream_disk_full{db="`+cfg.DBPath+`"} 0
 	}
 	if snapshot.LitestreamAllocBytesTotal != 0 || snapshot.LitestreamAllocRateBytesPerSec != 0 {
 		t.Fatalf("alloc metrics = %f/%f, want zero", snapshot.LitestreamAllocBytesTotal, snapshot.LitestreamAllocRateBytesPerSec)
+	}
+}
+
+func TestSetLitestreamSnapshotFailurePreservesMonotonicTotals(t *testing.T) {
+	cfg := DefaultConfig()
+	poller := newStatsPoller(&cfg)
+	poller.s3ListRequests = func() int64 { return 17 }
+	poller.setLitestreamSnapshot(reporting.RuntimePayload{
+		S3ListRequestsTotal:            9,
+		LitestreamHeapInuseBytes:       111,
+		LitestreamStackInuseBytes:      22,
+		LitestreamAllocBytesTotal:      3333,
+		LitestreamAllocRateBytesPerSec: 5,
+		LitestreamSnapshotHealthy:      true,
+	})
+
+	poller.setLitestreamSnapshotFailure(time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC), fmt.Errorf("ipc down"))
+
+	if poller.snapshot.LitestreamSnapshotHealthy {
+		t.Fatal("LitestreamSnapshotHealthy = true, want false after failure")
+	}
+	if got := poller.snapshot.S3ListRequestsTotal; got != 17 {
+		t.Fatalf("S3ListRequestsTotal = %d, want 17 (local counter must be sampled even on IPC failure)", got)
+	}
+	if got := poller.snapshot.LitestreamHeapInuseBytes; got != 111 {
+		t.Fatalf("LitestreamHeapInuseBytes = %d, want 111 (carried forward)", got)
+	}
+	if got := poller.snapshot.LitestreamStackInuseBytes; got != 22 {
+		t.Fatalf("LitestreamStackInuseBytes = %d, want 22 (carried forward)", got)
+	}
+	if got := poller.snapshot.LitestreamAllocBytesTotal; got != 3333 {
+		t.Fatalf("LitestreamAllocBytesTotal = %f, want 3333 (carried forward)", got)
+	}
+	if got := poller.snapshot.LitestreamAllocRateBytesPerSec; got != 0 {
+		t.Fatalf("LitestreamAllocRateBytesPerSec = %f, want 0 during failure", got)
+	}
+}
+
+func TestCollectLitestreamRuntimeCarriesForwardMemStatsWhenFamiliesAbsent(t *testing.T) {
+	cfg := newStatsPollerTestConfig(t)
+	startStatsPollerIPCServer(t, &cfg, `# HELP litestream_db_disk_full Whether replication is paused because the local disk is full
+# TYPE litestream_db_disk_full gauge
+litestream_db_disk_full{db="`+cfg.DBPath+`"} 0
+`)
+	poller := newStatsPoller(&cfg)
+	poller.setLitestreamSnapshot(reporting.RuntimePayload{
+		LitestreamHeapInuseBytes:  444,
+		LitestreamStackInuseBytes: 55,
+		LitestreamAllocBytesTotal: 6666,
+		LitestreamSnapshotHealthy: true,
+	})
+
+	payload, err := poller.collectLitestreamRuntime(poller.ipcClient(), time.Now().UTC())
+	if err != nil {
+		t.Fatalf("collectLitestreamRuntime() error = %v", err)
+	}
+
+	if got := payload.LitestreamHeapInuseBytes; got != 444 {
+		t.Fatalf("LitestreamHeapInuseBytes = %d, want 444 (carried forward when families absent)", got)
+	}
+	if got := payload.LitestreamStackInuseBytes; got != 55 {
+		t.Fatalf("LitestreamStackInuseBytes = %d, want 55 (carried forward when families absent)", got)
+	}
+	if got := payload.LitestreamAllocBytesTotal; got != 6666 {
+		t.Fatalf("LitestreamAllocBytesTotal = %f, want 6666 (carried forward when families absent)", got)
+	}
+	if got := payload.LitestreamAllocRateBytesPerSec; got != 0 {
+		t.Fatalf("LitestreamAllocRateBytesPerSec = %f, want 0 when families absent", got)
 	}
 }

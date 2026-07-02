@@ -418,3 +418,30 @@ func TestConfigFromEnvRejectsNaNActivePercent(t *testing.T) {
 		t.Fatal("ConfigFromEnv() error = nil, want non-nil")
 	}
 }
+
+func TestConfigFromEnvNormalizesObserveModeFaultKnobs(t *testing.T) {
+	t.Setenv("S3_FAULT_PROXY_ENABLED", "true")
+	t.Setenv("S3_FAULT_PROXY_MODE", "observe")
+	t.Setenv("S3_FAULT_PROXY_FAIL_FIRST_ATTEMPTS", "3")
+	t.Setenv("S3_FAULT_PROXY_MAX_FAILURES", "5")
+	t.Setenv("S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_GET", "true")
+	t.Setenv("S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_RANGE_GET", "true")
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v", err)
+	}
+
+	if cfg.S3FaultProxyFailFirstAttempts != 0 {
+		t.Fatalf("S3FaultProxyFailFirstAttempts = %d, want 0 in observe mode", cfg.S3FaultProxyFailFirstAttempts)
+	}
+	if cfg.S3FaultProxyMaxFailures != 0 {
+		t.Fatalf("S3FaultProxyMaxFailures = %d, want 0 in observe mode", cfg.S3FaultProxyMaxFailures)
+	}
+	if cfg.S3FaultProxyRequireObservedSourceGet {
+		t.Fatal("S3FaultProxyRequireObservedSourceGet = true, want false in observe mode")
+	}
+	if cfg.S3FaultProxyRequireObservedSourceRangeGet {
+		t.Fatal("S3FaultProxyRequireObservedSourceRangeGet = true, want false in observe mode")
+	}
+}

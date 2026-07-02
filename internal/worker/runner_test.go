@@ -1372,3 +1372,30 @@ func TestSuperviseReplayRestartsAfterError(t *testing.T) {
 		t.Fatalf("replay runs = %d, want >= 2 after error", runs.Load())
 	}
 }
+
+func TestRunnerObserveModeSkipsS3FaultVerificationGuards(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.ReplicaType = "s3"
+	cfg.S3FaultProxyEnabled = true
+	cfg.S3FaultProxyMode = "observe"
+	cfg.S3FaultProxyFailFirstAttempts = 2
+	cfg.S3FaultProxyRequireObservedSourceGet = true
+	cfg.S3FaultProxyRequireObservedSourceRangeGet = true
+	runner := NewRunner(cfg)
+	result := VerificationResult{
+		StartedAt:   time.Now().Add(-time.Second).UTC(),
+		CompletedAt: time.Now().UTC(),
+		CheckType:   "integrity",
+		Status:      "passed",
+		Passed:      true,
+		Summary:     "verification passed",
+	}
+
+	got := runner.applyS3FaultProxyVerificationGuards(result)
+
+	if !got.Passed {
+		t.Fatalf("Passed = false (%q), want true: observe mode injects no faults so guards must not arm", got.ErrorMessage)
+	}
+}

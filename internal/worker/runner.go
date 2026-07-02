@@ -202,6 +202,9 @@ func (r *Runner) applyS3FaultProxyVerificationGuards(result VerificationResult) 
 	if !result.Passed {
 		return result
 	}
+	if r.cfg.S3FaultProxyEnabled && r.cfg.s3FaultProxyObserveMode() {
+		return result
+	}
 
 	if r.cfg.ReplicaType == "s3" && r.cfg.S3FaultProxyRequireObservedSourceGet {
 		if r.s3FaultProxy == nil || r.s3FaultProxy.ObservedSourceGETs() == 0 {

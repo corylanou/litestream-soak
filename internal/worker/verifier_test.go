@@ -975,3 +975,80 @@ func TestCheckpointCyclesPausersWhenBusy(t *testing.T) {
 		t.Fatal("expected checkpoint to re-pause pausers before retrying")
 	}
 }
+
+func TestValidateConfigPathObserveModeBypassesProxyEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.NumDatabases = 3
+	cfg.ConfigMode = "list"
+	cfg.ReplicaType = "s3"
+	cfg.S3Bucket = "bucket"
+	cfg.S3Path = "soak/worker-many"
+	cfg.S3Endpoint = "http://127.0.0.1:9999"
+	cfg.S3FaultProxyEnabled = true
+	cfg.S3FaultProxyMode = "observe"
+	cfg.S3FaultProxyTargetEndpoint = "https://real.example.com"
+
+	verifier := NewVerifier(cfg)
+	sourcePath := filepath.Join(dir, "dbs", "db-00001.db")
+
+	if !verifier.needsPerDBValidateConfig(sourcePath) {
+		t.Fatal("needsPerDBValidateConfig() = false, want true for observe-mode list config")
+	}
+
+	path, cleanup, err := verifier.validateConfigPath(sourcePath)
+	if err != nil {
+		t.Fatalf("validateConfigPath() error = %v", err)
+	}
+	defer cleanup()
+	if path == cfg.ConfigPath {
+		t.Fatal("validateConfigPath() returned the shared config, want a per-DB validate config")
+	}
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read validate config: %v", err)
+	}
+	config := string(body)
+	if !strings.Contains(config, "endpoint: https://real.example.com") {
+		t.Fatalf("validate config missing real target endpoint:\n%s", config)
+	}
+	if strings.Contains(config, "http://127.0.0.1:9999") {
+		t.Fatalf("validate config still points at the observe proxy:\n%s", config)
+	}
+}
+
+func TestValidateConfigPathFaultModesKeepProxyEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.NumDatabases = 3
+	cfg.ConfigMode = "dir"
+	cfg.ReplicaType = "s3"
+	cfg.S3Bucket = "bucket"
+	cfg.S3Path = "soak/worker-many"
+	cfg.S3Endpoint = "http://127.0.0.1:9999"
+	cfg.S3FaultProxyEnabled = true
+	cfg.S3FaultProxyMode = "uploadpart-reset"
+	cfg.S3FaultProxyTargetEndpoint = "https://real.example.com"
+
+	verifier := NewVerifier(cfg)
+	sourcePath := filepath.Join(dir, "dbs", "db-00001.db")
+
+	path, cleanup, err := verifier.validateConfigPath(sourcePath)
+	if err != nil {
+		t.Fatalf("validateConfigPath() error = %v", err)
+	}
+	defer cleanup()
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read validate config: %v", err)
+	}
+	if !strings.Contains(string(body), "endpoint: http://127.0.0.1:9999") {
+		t.Fatalf("fault-mode validate config must keep the proxy endpoint:\n%s", string(body))
+	}
+}

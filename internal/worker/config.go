@@ -613,6 +613,12 @@ func ConfigFromEnv() (Config, error) {
 	if parseBoolEnv(os.Getenv("S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_RANGE_GET")) {
 		c.S3FaultProxyRequireObservedSourceRangeGet = true
 	}
+	if c.S3FaultProxyEnabled && c.s3FaultProxyObserveMode() {
+		c.S3FaultProxyFailFirstAttempts = 0
+		c.S3FaultProxyMaxFailures = 0
+		c.S3FaultProxyRequireObservedSourceGet = false
+		c.S3FaultProxyRequireObservedSourceRangeGet = false
+	}
 	if parseBoolEnv(os.Getenv("REPLICA_LEVEL_REPORTING")) {
 		c.ReplicaLevelReporting = true
 	}
@@ -867,6 +873,10 @@ func (c Config) manyDBConfigMode() string {
 		return "list"
 	}
 	return mode
+}
+
+func (c Config) s3FaultProxyObserveMode() bool {
+	return normalizeS3FaultProxyMode(c.S3FaultProxyMode) == s3FaultProxyModeObserve
 }
 
 func (c Config) manyDBVerifyChangedLimit() int {

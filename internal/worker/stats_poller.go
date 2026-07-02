@@ -112,8 +112,12 @@ func (p *statsPoller) collectLitestreamRuntime(client *http.Client, collectedAt 
 	litestreamMetrics := p.pollLitestreamMetrics(client)
 	listRequests := p.currentS3ListRequests()
 	SetS3ListRequests(listRequests)
+	heapInuse, stackInuse, allocTotal := p.lastLitestreamMemStats()
 	allocRate := 0.0
 	if litestreamMetrics.MemStatsPresent {
+		heapInuse = uint64(litestreamMetrics.HeapInuseBytes)
+		stackInuse = uint64(litestreamMetrics.StackInuseBytes)
+		allocTotal = litestreamMetrics.AllocBytesTotal
 		allocRate = p.deriveAllocRate(collectedAt, litestreamMetrics.AllocBytesTotal)
 		SetLitestreamMemStats(litestreamMetrics.HeapInuseBytes, litestreamMetrics.StackInuseBytes, litestreamMetrics.AllocBytesTotal, allocRate)
 	}
@@ -138,12 +142,10 @@ func (p *statsPoller) collectLitestreamRuntime(client *http.Client, collectedAt 
 		snapshot.WorkerRSSBytes = process.WorkerRSSBytes
 		snapshot.WorkerFDs = process.WorkerFDs
 		snapshot.S3ListRequestsTotal = listRequests
-		if litestreamMetrics.MemStatsPresent {
-			snapshot.LitestreamHeapInuseBytes = uint64(litestreamMetrics.HeapInuseBytes)
-			snapshot.LitestreamStackInuseBytes = uint64(litestreamMetrics.StackInuseBytes)
-			snapshot.LitestreamAllocBytesTotal = litestreamMetrics.AllocBytesTotal
-			snapshot.LitestreamAllocRateBytesPerSec = allocRate
-		}
+		snapshot.LitestreamHeapInuseBytes = heapInuse
+		snapshot.LitestreamStackInuseBytes = stackInuse
+		snapshot.LitestreamAllocBytesTotal = allocTotal
+		snapshot.LitestreamAllocRateBytesPerSec = allocRate
 		SetProcessStats(process)
 		return snapshot, nil
 	}
@@ -187,12 +189,10 @@ func (p *statsPoller) collectLitestreamRuntime(client *http.Client, collectedAt 
 		SnapshotCollectedAt:             collectedAt,
 		LitestreamSnapshotHealthy:       true,
 	}
-	if litestreamMetrics.MemStatsPresent {
-		snapshot.LitestreamHeapInuseBytes = uint64(litestreamMetrics.HeapInuseBytes)
-		snapshot.LitestreamStackInuseBytes = uint64(litestreamMetrics.StackInuseBytes)
-		snapshot.LitestreamAllocBytesTotal = litestreamMetrics.AllocBytesTotal
-		snapshot.LitestreamAllocRateBytesPerSec = allocRate
-	}
+	snapshot.LitestreamHeapInuseBytes = heapInuse
+	snapshot.LitestreamStackInuseBytes = stackInuse
+	snapshot.LitestreamAllocBytesTotal = allocTotal
+	snapshot.LitestreamAllocRateBytesPerSec = allocRate
 	return snapshot, nil
 }
 
@@ -574,6 +574,7 @@ func (p *statsPoller) setLitestreamSnapshot(snapshot reporting.RuntimePayload) {
 }
 
 func (p *statsPoller) setLitestreamSnapshotFailure(collectedAt time.Time, err error) {
+	heapInuse, stackInuse, allocTotal := p.lastLitestreamMemStats()
 	p.setLitestreamSnapshot(reporting.RuntimePayload{
 		DBTXID:                      0,
 		DBStatus:                    "unknown",
@@ -585,10 +586,20 @@ func (p *statsPoller) setLitestreamSnapshotFailure(collectedAt time.Time, err er
 		ReplicationLagMax:           0,
 		ReplicationLagOverThreshold: 0,
 		LitestreamUptimeSeconds:     0,
+		S3ListRequestsTotal:         p.currentS3ListRequests(),
+		LitestreamHeapInuseBytes:    heapInuse,
+		LitestreamStackInuseBytes:   stackInuse,
+		LitestreamAllocBytesTotal:   allocTotal,
 		SnapshotCollectedAt:         collectedAt,
 		LitestreamSnapshotHealthy:   false,
 		LitestreamSnapshotError:     err.Error(),
 	})
+}
+
+func (p *statsPoller) lastLitestreamMemStats() (uint64, uint64, float64) {
+	p.snapshotMu.Lock()
+	defer p.snapshotMu.Unlock()
+	return p.snapshot.LitestreamHeapInuseBytes, p.snapshot.LitestreamStackInuseBytes, p.snapshot.LitestreamAllocBytesTotal
 }
 
 func (p *statsPoller) currentLitestreamPID() int {
