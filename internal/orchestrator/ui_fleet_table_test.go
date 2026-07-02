@@ -32,7 +32,7 @@ func TestFleetRowStatus(t *testing.T) {
 		{
 			name:   "stopped worker",
 			worker: homeWorker{Worker: model.Worker{Status: model.WorkerStopped}},
-			want:   "failing",
+			want:   "stopped",
 		},
 		{
 			name: "running worker with unhealthy runtime",
