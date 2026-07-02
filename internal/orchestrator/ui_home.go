@@ -197,9 +197,14 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 
 	if len(diagnosis.Clusters) == 0 && summary.AttentionWorkers > 0 {
 		names := make([]string, 0, 3)
+		var firstAttention *model.Worker
 		for _, worker := range workers {
 			if !homeWorkerNeedsAttention(worker) {
 				continue
+			}
+			if firstAttention == nil {
+				attentionWorker := worker.Worker
+				firstAttention = &attentionWorker
 			}
 			if len(names) < 3 {
 				names = append(names, fmt.Sprintf("%s (%s)", worker.Worker.Name, worker.Worker.Status))
@@ -209,15 +214,22 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 		if summary.AttentionWorkers > len(names) {
 			detail += fmt.Sprintf(", +%d more", summary.AttentionWorkers-len(names))
 		}
-		items = append(items, attentionItem{
+		item := attentionItem{
 			Severity: "warn",
 			Title:    fmt.Sprintf("%d worker(s) need attention", summary.AttentionWorkers),
 			Detail:   detail,
-		})
+		}
+		if firstAttention != nil {
+			item.Actions = []attentionAction{
+				{Label: "Open " + firstAttention.Name, URL: "/ui/workers/" + url.PathEscape(firstAttention.ID)},
+			}
+		}
+		items = append(items, item)
 	}
 
 	staleNames := make([]string, 0, 3)
 	staleCount := 0
+	var firstStale *model.Worker
 	for _, worker := range workers {
 		if worker.CompletedSuccess || worker.Worker.Status == model.WorkerStopped {
 			continue
@@ -229,6 +241,10 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 			continue
 		}
 		staleCount++
+		if firstStale == nil {
+			staleWorker := worker.Worker
+			firstStale = &staleWorker
+		}
 		if len(staleNames) < 3 {
 			staleNames = append(staleNames, worker.Worker.Name)
 		}
@@ -238,11 +254,17 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 		if staleCount > len(staleNames) {
 			detail += fmt.Sprintf(", +%d more", staleCount-len(staleNames))
 		}
-		items = append(items, attentionItem{
+		item := attentionItem{
 			Severity: "warn",
 			Title:    fmt.Sprintf("%d worker(s) have stale heartbeats", staleCount),
 			Detail:   detail + " — data from these workers is old; restore visibility before trusting this page",
-		})
+		}
+		if firstStale != nil {
+			item.Actions = []attentionAction{
+				{Label: "Open " + firstStale.Name, URL: "/ui/workers/" + url.PathEscape(firstStale.ID)},
+			}
+		}
+		items = append(items, item)
 	}
 
 	if rollout != nil && rollout.GraceWindowExceeded {
