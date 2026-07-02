@@ -6,6 +6,8 @@
   var paused = false;
   var refreshing = false;
   var charts = [];
+  var fleetSort = { key: null, dir: 1 };
+  var fleetFilter = "all";
 
   var css = getComputedStyle(document.documentElement);
   var theme = {
@@ -184,6 +186,159 @@
     }
   }
 
+  function applyFleetView() {
+    var tbody = document.querySelector(".worker-table tbody");
+    if (!tbody) return;
+    var rows = Array.prototype.slice.call(tbody.querySelectorAll("tr[data-status]"));
+    rows.forEach(function (row, i) {
+      if (!row.dataset.serverIndex) row.dataset.serverIndex = String(i);
+    });
+    var visible = 0;
+    rows.forEach(function (row) {
+      var status = row.dataset.status;
+      var match = fleetFilter === "all" || status === fleetFilter || (fleetFilter === "healthy" && status === "passed");
+      row.hidden = !match;
+      if (match) visible++;
+    });
+    var key = fleetSort.key || "serverIndex";
+    var dir = fleetSort.key ? fleetSort.dir : 1;
+    rows.sort(function (a, b) {
+      var av = a.dataset[key] || "";
+      var bv = b.dataset[key] || "";
+      var an = parseFloat(av);
+      var bn = parseFloat(bv);
+      var cmp;
+      if (!isNaN(an) && !isNaN(bn)) {
+        cmp = an - bn;
+      } else {
+        cmp = av.toLowerCase().localeCompare(bv.toLowerCase());
+      }
+      return cmp * dir;
+    });
+    rows.forEach(function (row) { tbody.appendChild(row); });
+    document.querySelectorAll("[data-status-filter]").forEach(function (chip) {
+      chip.classList.toggle("active", chip.dataset.statusFilter === fleetFilter);
+    });
+    document.querySelectorAll(".worker-table th .th-sort[data-sort]").forEach(function (btn) {
+      var th = btn.closest("th");
+      if (!th) return;
+      if (btn.dataset.sort === fleetSort.key) {
+        th.setAttribute("aria-sort", fleetSort.dir === 1 ? "ascending" : "descending");
+      } else {
+        th.setAttribute("aria-sort", "none");
+      }
+    });
+    var emptyRow = tbody.querySelector(".fleet-empty-row");
+    if (visible === 0 && rows.length > 0) {
+      if (!emptyRow) {
+        emptyRow = document.createElement("tr");
+        emptyRow.className = "fleet-empty-row";
+        var cell = document.createElement("td");
+        cell.colSpan = 7;
+        cell.textContent = "No workers match this filter.";
+        emptyRow.appendChild(cell);
+      }
+      tbody.appendChild(emptyRow);
+    } else if (emptyRow) {
+      emptyRow.remove();
+    }
+  }
+
+  var tooltipEl = null;
+  var tooltipTrigger = null;
+  var tooltipHideTimer = null;
+  var tooltipOpenBeforePress = false;
+
+  function cancelTooltipHide() {
+    if (tooltipHideTimer) {
+      clearTimeout(tooltipHideTimer);
+      tooltipHideTimer = null;
+    }
+  }
+
+  function positionTooltip(trigger) {
+    tooltipEl.style.visibility = "hidden";
+    tooltipEl.hidden = false;
+    var rect = trigger.getBoundingClientRect();
+    var width = tooltipEl.offsetWidth;
+    var height = tooltipEl.offsetHeight;
+    var top = rect.top - height - 8;
+    if (top < 8) top = rect.bottom + 8;
+    var left = rect.left + rect.width / 2 - width / 2;
+    var maxLeft = document.documentElement.clientWidth - width - 8;
+    if (left > maxLeft) left = maxLeft;
+    if (left < 8) left = 8;
+    tooltipEl.style.top = top + "px";
+    tooltipEl.style.left = left + "px";
+    tooltipEl.style.visibility = "visible";
+  }
+
+  function showTip(trigger) {
+    var text = trigger.getAttribute("data-tip");
+    if (!text) return;
+    cancelTooltipHide();
+    if (tooltipTrigger && tooltipTrigger !== trigger) {
+      tooltipTrigger.removeAttribute("aria-describedby");
+    }
+    tooltipTrigger = trigger;
+    trigger.setAttribute("aria-describedby", "app-tooltip");
+    tooltipEl.textContent = text;
+    positionTooltip(trigger);
+  }
+
+  function hideTip() {
+    cancelTooltipHide();
+    if (tooltipTrigger) {
+      tooltipTrigger.removeAttribute("aria-describedby");
+      tooltipTrigger = null;
+    }
+    if (tooltipEl) tooltipEl.hidden = true;
+  }
+
+  function scheduleTooltipHide() {
+    cancelTooltipHide();
+    tooltipHideTimer = setTimeout(hideTip, 120);
+  }
+
+  function bindTooltips() {
+    tooltipEl = document.createElement("div");
+    tooltipEl.className = "tooltip";
+    tooltipEl.id = "app-tooltip";
+    tooltipEl.setAttribute("role", "tooltip");
+    tooltipEl.hidden = true;
+    document.body.appendChild(tooltipEl);
+
+    document.addEventListener("pointerover", function (e) {
+      if (e.pointerType === "touch") return;
+      if (tooltipEl.contains(e.target)) {
+        cancelTooltipHide();
+        return;
+      }
+      var trigger = e.target.closest("[data-tip]");
+      if (trigger) showTip(trigger);
+    });
+    document.addEventListener("pointerout", function (e) {
+      if (e.pointerType === "touch") return;
+      if (tooltipEl.contains(e.target) || e.target.closest("[data-tip]")) scheduleTooltipHide();
+    });
+    document.addEventListener("pointerdown", function (e) {
+      var trigger = e.target.closest("[data-tip]");
+      tooltipOpenBeforePress = !!trigger && trigger === tooltipTrigger && !tooltipEl.hidden;
+    });
+    document.addEventListener("focusin", function (e) {
+      var trigger = e.target.closest("[data-tip]");
+      if (trigger) showTip(trigger);
+    });
+    document.addEventListener("focusout", function (e) {
+      if (e.target.closest("[data-tip]")) hideTip();
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") hideTip();
+    });
+    document.addEventListener("scroll", hideTip, true);
+    window.addEventListener("resize", hideTip);
+  }
+
   function updateRefreshIndicator() {
     var el = document.getElementById("refresh-count");
     var dot = document.getElementById("refresh-dot");
@@ -211,9 +366,24 @@
       if (!root) return;
       var activeTab = root.querySelector(".tab.active");
       var activeTabName = activeTab ? activeTab.dataset.tab : null;
+      var tablePanel = root.querySelector(".table-panel");
+      var tableScrollTop = tablePanel ? tablePanel.scrollTop : 0;
+      var openDetails = {};
+      root.querySelectorAll("details.section-details[id]").forEach(function (details) {
+        openDetails[details.id] = details.open;
+      });
       root.innerHTML = await resp.text();
+      hideTip();
       if (activeTabName) selectTab(activeTabName);
       initCharts();
+      applyFleetView();
+      root.querySelectorAll("details.section-details[id]").forEach(function (details) {
+        if (Object.prototype.hasOwnProperty.call(openDetails, details.id)) {
+          details.open = openDetails[details.id];
+        }
+      });
+      tablePanel = root.querySelector(".table-panel");
+      if (tablePanel) tablePanel.scrollTop = tableScrollTop;
     } finally {
       refreshing = false;
       countdown = REFRESH_INTERVAL;
@@ -251,6 +421,24 @@
 
   function bindGlobalInteractions() {
     document.addEventListener("click", function (e) {
+      if (tooltipEl.contains(e.target)) return;
+      var tipTrigger = e.target.closest("[data-tip]");
+      if (tipTrigger) {
+        if (tooltipOpenBeforePress) {
+          hideTip();
+        } else {
+          showTip(tipTrigger);
+        }
+        tooltipOpenBeforePress = false;
+        return;
+      }
+      hideTip();
+      var navLink = e.target.closest('.section-nav a[href^="#"]');
+      if (navLink) {
+        var navTarget = document.getElementById(navLink.getAttribute("href").slice(1));
+        if (navTarget && navTarget.tagName === "DETAILS" && !navTarget.open) navTarget.open = true;
+        return;
+      }
       var tab = e.target.closest(".tab[data-tab]");
       if (tab) {
         selectTab(tab.dataset.tab);
@@ -268,6 +456,27 @@
       var modeBtn = e.target.closest(".mode-btn");
       if (modeBtn) {
         loadPromptMode(modeBtn);
+        return;
+      }
+      var filterChip = e.target.closest("[data-status-filter]");
+      if (filterChip) {
+        fleetFilter = filterChip.dataset.statusFilter;
+        applyFleetView();
+        return;
+      }
+      var sortBtn = e.target.closest("th .th-sort[data-sort]");
+      if (sortBtn) {
+        var sortKey = sortBtn.dataset.sort;
+        if (fleetSort.key !== sortKey) {
+          fleetSort.key = sortKey;
+          fleetSort.dir = 1;
+        } else if (fleetSort.dir === 1) {
+          fleetSort.dir = -1;
+        } else {
+          fleetSort.key = null;
+          fleetSort.dir = 1;
+        }
+        applyFleetView();
         return;
       }
       if (e.target.closest("a,button,summary,textarea,details")) return;
@@ -332,6 +541,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
+    bindTooltips();
     bindGlobalInteractions();
     initCharts();
     if (document.getElementById("home-live-root")) startCountdown();

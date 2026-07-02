@@ -464,3 +464,54 @@ func heartbeatUnix(value *time.Time) int64 {
 	}
 	return value.Unix()
 }
+
+func fleetRowStatus(worker homeWorker) string {
+	if worker.CompletedSuccess {
+		return "passed"
+	}
+	workerClass := statusClass(worker.Worker.Status)
+	runtimeClass := runtimeSnapshotClass(worker.RuntimeSnapshotStatus)
+	if workerClass == "status-bad" || runtimeClass == "status-bad" {
+		return "failing"
+	}
+	switch worker.Worker.Status {
+	case model.WorkerProbing, model.WorkerStarting, model.WorkerBuilding, model.WorkerPending:
+		return "probing"
+	}
+	if workerClass == "status-warn" || runtimeClass == "status-warn" {
+		return "degraded"
+	}
+	if workerClass == "status-good" {
+		return "healthy"
+	}
+	return "unknown"
+}
+
+func firstDegradedWorkerID(rollout *DeploymentRolloutResponse) string {
+	if rollout == nil {
+		return ""
+	}
+	for _, worker := range rollout.Workers {
+		if worker.Status == model.WorkerDegraded {
+			return worker.WorkerID
+		}
+	}
+	return ""
+}
+
+func homeWorkerOutcomeRank(worker homeWorker) int {
+	if worker.ActiveVerification != nil {
+		return 1
+	}
+	if worker.LatestVerification == nil {
+		return 2
+	}
+	switch verificationClass(worker.LatestVerification) {
+	case "status-bad":
+		return 0
+	case "status-good":
+		return 3
+	default:
+		return 2
+	}
+}
