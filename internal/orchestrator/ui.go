@@ -207,7 +207,6 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 
 	workerCards := make([]homeWorker, 0, len(summaries))
 	summary := homeSummary{
-		TotalWorkers:     len(summaries),
 		CompletedSuccess: sourceCompletedSuccess,
 		Retired:          sourceRetired,
 		RecentFailures:   len(failures),
@@ -237,12 +236,15 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 			card.CurrentFailureSeverity = failureSeverityForCategory(card.CurrentFailureCategory)
 		}
 
-		if !sourceRetired && homeWorkerNeedsAttention(card) {
-			// Retired sources are torn down on purpose; leftover failed
-			// workers there are history, not something to act on.
-			summary.AttentionWorkers++
-		} else {
-			summary.HealthyWorkers++
+		if workerRowActive(card.Worker) {
+			// Retired rows are history, not fleet state: the healthy/attention
+			// tallies and worker counts cover the active fleet only.
+			summary.TotalWorkers++
+			if homeWorkerNeedsAttention(card) {
+				summary.AttentionWorkers++
+			} else {
+				summary.HealthyWorkers++
+			}
 		}
 		if workerSummary.ActiveVerification != nil {
 			summary.ActiveVerifications++

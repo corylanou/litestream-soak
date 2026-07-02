@@ -163,11 +163,11 @@ func TestBuildHomePageDataTreatsStoppedSuccessArchiveAsPassed(t *testing.T) {
 	if data.Summary.AttentionWorkers != 0 {
 		t.Fatalf("AttentionWorkers = %d, want 0", data.Summary.AttentionWorkers)
 	}
-	if data.Summary.HealthyWorkers != 2 {
-		t.Fatalf("HealthyWorkers = %d, want 2", data.Summary.HealthyWorkers)
+	if data.Summary.HealthyWorkers != 0 {
+		t.Fatalf("HealthyWorkers = %d, want 0 (torn-down workers are not active fleet)", data.Summary.HealthyWorkers)
 	}
-	if data.KPIs.FleetHealthPct != 100 {
-		t.Fatalf("FleetHealthPct = %d, want 100", data.KPIs.FleetHealthPct)
+	if data.Summary.TotalWorkers != 0 {
+		t.Fatalf("TotalWorkers = %d, want 0 (active-only count)", data.Summary.TotalWorkers)
 	}
 	if !data.KPIs.FleetPassed {
 		t.Fatal("FleetPassed = false, want true")
