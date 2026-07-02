@@ -281,6 +281,58 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 	return items
 }
 
+// filterStatsToActiveWorkers drops verification history that belongs to
+// stopped/failed (retired) workers so a live source's KPIs and charts reflect
+// only the fleet that is actually running.
+func filterStatsToActiveWorkers(stats []model.VerificationStat, summaries []WorkerSummaryResponse) []model.VerificationStat {
+	active := make(map[string]bool, len(summaries))
+	for _, summary := range summaries {
+		if workerRowActive(summary.Worker) {
+			active[summary.Worker.ID] = true
+		}
+	}
+	return filterStatsToWorkerSet(stats, active)
+}
+
+// filterStatsToActiveWorkerRows is filterStatsToActiveWorkers for a plain
+// worker list (used for the main-baseline chart overlay on PR pages).
+func filterStatsToActiveWorkerRows(stats []model.VerificationStat, workers []model.Worker) []model.VerificationStat {
+	active := make(map[string]bool, len(workers))
+	for _, worker := range workers {
+		if workerRowActive(worker) {
+			active[worker.ID] = true
+		}
+	}
+	return filterStatsToWorkerSet(stats, active)
+}
+
+func workerRowActive(worker model.Worker) bool {
+	return worker.Status != model.WorkerStopped && worker.Status != model.WorkerFailed
+}
+
+func filterStatsToWorkerSet(stats []model.VerificationStat, active map[string]bool) []model.VerificationStat {
+	filtered := make([]model.VerificationStat, 0, len(stats))
+	for _, stat := range stats {
+		if active[stat.WorkerID] {
+			filtered = append(filtered, stat)
+		}
+	}
+	return filtered
+}
+
+// activeWorkerSummaries returns only summaries whose worker rows are still
+// active, so retired workers' leftover failure signatures cannot seed
+// diagnosis clusters on live pages.
+func activeWorkerSummaries(summaries []WorkerSummaryResponse) []WorkerSummaryResponse {
+	filtered := make([]WorkerSummaryResponse, 0, len(summaries))
+	for _, summary := range summaries {
+		if workerRowActive(summary.Worker) {
+			filtered = append(filtered, summary)
+		}
+	}
+	return filtered
+}
+
 func splitStatsAt(stats []model.VerificationStat, cutoff time.Time) (before, after []model.VerificationStat) {
 	for _, stat := range stats {
 		if stat.StartedAt.Before(cutoff) {
