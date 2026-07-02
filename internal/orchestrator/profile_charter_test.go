@@ -50,6 +50,9 @@ func allFleetProfiles() map[string]struct{} {
 	for _, w := range manyDB100FleetWorkers() {
 		profiles[w.ProfileName] = struct{}{}
 	}
+	for _, w := range manyDB500FleetWorkers() {
+		profiles[w.ProfileName] = struct{}{}
+	}
 	profiles[manyDB1000FleetWorker().ProfileName] = struct{}{}
 	return profiles
 }

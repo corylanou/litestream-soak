@@ -10,8 +10,6 @@ import (
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
-	"github.com/prometheus/common/expfmt"
-	"github.com/prometheus/common/model"
 )
 
 const diskFullRecoveryReserveFile = "soak-disk-full-recovery.reserve"
@@ -102,32 +100,11 @@ func litestreamDiskFullSignal(lines []string) (bool, string) {
 }
 
 func parseLitestreamDiskFullMetric(r io.Reader, dbPath string) (bool, bool, error) {
-	parser := expfmt.NewTextParser(model.LegacyValidation)
-	families, err := parser.TextToMetricFamilies(r)
+	snapshot, err := parseLitestreamMetrics(r, dbPath)
 	if err != nil {
 		return false, false, err
 	}
-
-	family := families[litestreamDiskFullMetricName]
-	if family == nil {
-		return false, false, nil
-	}
-
-	present := false
-	for _, metric := range family.GetMetric() {
-		if !metricMatchesDBPath(metric, dbPath) {
-			continue
-		}
-		gauge := metric.GetGauge()
-		if gauge == nil {
-			continue
-		}
-		present = true
-		if gauge.GetValue() > 0 {
-			return true, true, nil
-		}
-	}
-	return false, present, nil
+	return snapshot.DiskFull, snapshot.DiskFullPresent, nil
 }
 
 func metricMatchesDBPath(metric *dto.Metric, dbPath string) bool {

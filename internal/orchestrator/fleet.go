@@ -308,6 +308,9 @@ func DefaultMainFleet() FleetSpec {
 	}
 	if manyDBFleetEnabled() {
 		workers = append(workers, manyDB100FleetWorkers()...)
+		if manyDB500FleetEnabled() {
+			workers = append(workers, manyDB500FleetWorkers()...)
+		}
 		if manyDB1000FleetEnabled() {
 			workers = append(workers, manyDB1000FleetWorker())
 		}
@@ -319,8 +322,20 @@ func manyDBFleetEnabled() bool {
 	return envFlagEnabled("SOAK_ENABLE_MANY_DB_FLEET")
 }
 
+func manyDB500FleetEnabled() bool {
+	return envFlagEnabled("SOAK_ENABLE_MANY_DB_500")
+}
+
 func manyDB1000FleetEnabled() bool {
 	return envFlagEnabled("SOAK_ENABLE_MANY_DB_1000")
+}
+
+func withManyDBObserveProxy(workers []DesiredWorker) []DesiredWorker {
+	for i := range workers {
+		workers[i].Workload.S3FaultProxyEnabled = true
+		workers[i].Workload.S3FaultProxyMode = "observe"
+	}
+	return workers
 }
 
 func envFlagEnabled(name string) bool {
@@ -329,7 +344,7 @@ func envFlagEnabled(name string) bool {
 }
 
 func manyDB100FleetWorkers() []DesiredWorker {
-	return []DesiredWorker{
+	return withManyDBObserveProxy([]DesiredWorker{
 		{
 			WorkerID:     "worker-main-many-dbs-100-list",
 			Name:         "worker-main-many-dbs-100-list",
@@ -394,11 +409,117 @@ func manyDB100FleetWorkers() []DesiredWorker {
 				CPUs:                    1,
 			},
 		},
-	}
+	})
+}
+
+func manyDB500FleetWorkers() []DesiredWorker {
+	return withManyDBObserveProxy([]DesiredWorker{
+		{
+			WorkerID:     "worker-main-many-dbs-500-list",
+			Name:         "worker-main-many-dbs-500-list",
+			Source:       "main",
+			GitSHA:       "main",
+			ProfileName:  "many-dbs-500-list",
+			Region:       "ord",
+			VolumeSizeGB: 15,
+			Workload: workload.Config{
+				LoadMode:                "many-db",
+				WriteRate:               20,
+				Pattern:                 "constant",
+				PayloadSize:             512,
+				Workers:                 3,
+				InitialSize:             "5MB",
+				VerifyInterval:          "30m",
+				VerifyType:              "integrity",
+				SnapshotInterval:        "10m",
+				SyncInterval:            "1s",
+				NumDatabases:            500,
+				ActivePercent:           2,
+				ActiveRotateInterval:    "30m",
+				ActiveSetSeed:           1,
+				ConfigMode:              "list",
+				VerifySampleSize:        5,
+				VerifyChangedLimit:      100,
+				ReplicationLagThreshold: 0,
+				VolumeSizeGB:            15,
+				MemoryMB:                3072,
+				CPUs:                    2,
+			},
+		},
+		{
+			WorkerID:     "worker-main-many-dbs-500-dir",
+			Name:         "worker-main-many-dbs-500-dir",
+			Source:       "main",
+			GitSHA:       "main",
+			ProfileName:  "many-dbs-500-dir",
+			Region:       "ord",
+			VolumeSizeGB: 15,
+			Workload: workload.Config{
+				LoadMode:                "many-db",
+				WriteRate:               20,
+				Pattern:                 "constant",
+				PayloadSize:             512,
+				Workers:                 3,
+				InitialSize:             "5MB",
+				VerifyInterval:          "30m",
+				VerifyType:              "integrity",
+				SnapshotInterval:        "10m",
+				SyncInterval:            "1s",
+				NumDatabases:            500,
+				ActivePercent:           2,
+				ActiveRotateInterval:    "30m",
+				ActiveSetSeed:           1,
+				ConfigMode:              "dir",
+				VerifySampleSize:        5,
+				VerifyChangedLimit:      100,
+				ReplicationLagThreshold: 0,
+				VolumeSizeGB:            15,
+				MemoryMB:                3072,
+				CPUs:                    2,
+			},
+		},
+		{
+			WorkerID:     "worker-main-many-dbs-500-dir-lowfreq",
+			Name:         "worker-main-many-dbs-500-dir-lowfreq",
+			Source:       "main",
+			GitSHA:       "main",
+			ProfileName:  "many-dbs-500-dir-lowfreq",
+			Region:       "ord",
+			VolumeSizeGB: 15,
+			Workload: workload.Config{
+				LoadMode:                 "many-db",
+				WriteRate:                20,
+				Pattern:                  "constant",
+				PayloadSize:              512,
+				Workers:                  3,
+				InitialSize:              "5MB",
+				VerifyInterval:           "30m",
+				VerifyType:               "integrity",
+				SnapshotInterval:         "1h",
+				SyncInterval:             "1s",
+				NumDatabases:             500,
+				ActivePercent:            2,
+				ActiveRotateInterval:     "30m",
+				ActiveSetSeed:            1,
+				ConfigMode:               "dir",
+				VerifySampleSize:         5,
+				VerifyChangedLimit:       100,
+				ReplicationLagThreshold:  0,
+				L1CompactionInterval:     "5m",
+				L2CompactionInterval:     "30m",
+				L3CompactionInterval:     "6h",
+				L0Retention:              "1h",
+				L0RetentionCheckInterval: "2m",
+				VolumeSizeGB:             15,
+				MemoryMB:                 3072,
+				CPUs:                     2,
+			},
+		},
+	})
 }
 
 func manyDB1000FleetWorker() DesiredWorker {
-	return DesiredWorker{
+	return withManyDBObserveProxy([]DesiredWorker{{
 		WorkerID:     "worker-main-many-dbs-1000-dir",
 		Name:         "worker-main-many-dbs-1000-dir",
 		Source:       "main",
@@ -429,7 +550,7 @@ func manyDB1000FleetWorker() DesiredWorker {
 			MemoryMB:                4096,
 			CPUs:                    2,
 		},
-	}
+	}})[0]
 }
 
 func DefaultFleetForSource(source, gitSHA, litestreamSHA string) FleetSpec {

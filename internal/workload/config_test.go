@@ -103,6 +103,43 @@ func TestParseConfig(t *testing.T) {
 	}
 }
 
+func TestConfigCompactionKnobsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		L1CompactionInterval:     "5m",
+		L2CompactionInterval:     "30m",
+		L3CompactionInterval:     "6h",
+		L0Retention:              "1h",
+		L0RetentionCheckInterval: "2m",
+	}
+
+	parsed, err := ParseConfig(cfg.JSON())
+	if err != nil {
+		t.Fatalf("ParseConfig(%q) error = %v", cfg.JSON(), err)
+	}
+	if parsed != cfg {
+		t.Fatalf("round-trip = %+v, want %+v", parsed, cfg)
+	}
+}
+
+func TestConfigJSONOmitsEmptyCompactionKnobs(t *testing.T) {
+	t.Parallel()
+
+	got := Config{WriteRate: 100}.JSON()
+	for _, key := range []string{
+		"l1_compaction_interval",
+		"l2_compaction_interval",
+		"l3_compaction_interval",
+		"l0_retention",
+		"l0_retention_check_interval",
+	} {
+		if strings.Contains(got, key) {
+			t.Fatalf("JSON() = %s, want no %q key when unset", got, key)
+		}
+	}
+}
+
 func TestConfigJSONIncludesExplicitZeroActivePercent(t *testing.T) {
 	t.Parallel()
 

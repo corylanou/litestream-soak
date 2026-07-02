@@ -70,12 +70,36 @@ quality scoring. The release-quality code only scores `ord` workers and
 explicitly excludes `low-vol-syd` and `high-vol-ams`.
 
 Many-database profiles are opt-in with `SOAK_ENABLE_MANY_DB_FLEET=true`.
-When enabled, the main and PR fleets also reconcile `many-dbs-100-list`,
-`many-dbs-100-dir`, and `many-dbs-1000-dir`. These profiles seed databases
-under `/data/dbs`, drive writes into the configured active subset with an
-in-process writer, rotate active membership on a deterministic interval, report
-aggregate runtime/process metrics only, and verify changed databases per cycle.
-They are excluded from release-quality scoring.
+When enabled, the main and PR fleets also reconcile `many-dbs-100-list` and
+`many-dbs-100-dir`. Two nested flags extend the tier ladder: with
+`SOAK_ENABLE_MANY_DB_500=true` the fleets add `many-dbs-500-list`,
+`many-dbs-500-dir`, and `many-dbs-500-dir-lowfreq`; with
+`SOAK_ENABLE_MANY_DB_1000=true` they add `many-dbs-1000-dir`. Both nested
+flags are inert unless the base flag is also set. These profiles seed
+databases under `/data/dbs`, drive writes into the configured active subset
+with an in-process writer, rotate active membership on a deterministic
+interval, report aggregate runtime/process metrics only, and verify changed
+databases per cycle. They are excluded from release-quality scoring.
+
+All many-DB profiles run the S3 proxy in passive `observe` mode: it injects no
+faults and counts Litestream-originated S3 LIST requests so LIST volume can be
+compared across tiers. Litestream heap-in-use, stack-in-use, and allocation
+rate are captured from its `/metrics` endpoint and reported alongside the
+existing process stats.
+
+`many-dbs-500-dir-lowfreq` is the reduced-frequency control pair for
+`many-dbs-500-dir`: identical workload, but with longer retention and
+compaction intervals so the LIST/GC/CPU cost of compaction frequency can be
+measured directly.
+
+| Interval | Default | Lowfreq |
+| --- | --- | --- |
+| Snapshot | 10m | 1h |
+| L1 compaction | 30s (upstream) | 5m |
+| L2 compaction | 5m (upstream) | 30m |
+| L3 compaction | 1h (upstream) | 6h |
+| L0 retention | 5m (upstream) | 1h |
+| L0 retention check | 15s (upstream) | 2m |
 
 ## Fleet Sources
 

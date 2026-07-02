@@ -93,6 +93,24 @@ var profileCharters = map[string]ProfileCharter{
 		GuardsAgainst: "Discovery bugs (databases missed, double-watched, or mis-globbed) on top of the fan-out resource risks.",
 		WhyItMatters:  "Dir mode is how you run many DBs without hand-maintaining config. It must find and replicate every one.",
 	},
+	"many-dbs-500-list": {
+		Synopsis:      "Replicates 500 databases, each declared explicitly in the config (list mode).",
+		Stresses:      "Explicitly enumerated replication fan-out at five times the 100-database tier.",
+		GuardsAgainst: "Per-database resource costs (memory, file descriptors, S3 request volume) that grow faster than linearly between 100 and 1000 databases.",
+		WhyItMatters:  "Fills the gap between the 100 and 1000 lanes, showing where scaling costs bend before they cliff.",
+	},
+	"many-dbs-500-dir": {
+		Synopsis:      "Replicates 500 databases auto-discovered from a directory (dir mode) at default compaction cadence.",
+		Stresses:      "Directory discovery plus compaction and retention overhead across 500 replication streams.",
+		GuardsAgainst: "Discovery and scheduling regressions at mid-tier fan-out, and background-maintenance cost growth between the 100 and 1000 lanes.",
+		WhyItMatters:  "The default-cadence half of the 500-tier pair: its overhead baseline is what the lowfreq control is measured against.",
+	},
+	"many-dbs-500-dir-lowfreq": {
+		Synopsis:      "The reduced-frequency control pair for many-dbs-500-dir: the same 500 databases in dir mode, but with hourly snapshots and relaxed compaction and L0 retention intervals.",
+		Stresses:      "500-database replication with deliberately infrequent background maintenance.",
+		GuardsAgainst: "Misattributing many-database overhead: comparing against many-dbs-500-dir isolates retention/compaction frequency as the only variable.",
+		WhyItMatters:  "Quantifies how much of the S3 LIST, GC, and CPU cost at fan-out comes from the default compaction cadence rather than replication itself.",
+	},
 	"many-dbs-1000-dir": {
 		Synopsis:      "Scale test: 1000 databases auto-discovered from a directory.",
 		Stresses:      "Replication fan-out an order of magnitude beyond the 100-database lanes.",

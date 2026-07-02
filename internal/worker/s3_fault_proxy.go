@@ -22,6 +22,7 @@ const (
 	s3FaultProxyModeProviderHTTP408         = "provider-http-408"
 	s3FaultProxyModeProviderRequestCanceled = "provider-request-canceled"
 	s3FaultProxyModeConnectReset            = "connect-reset"
+	s3FaultProxyModeObserve                 = "observe"
 	defaultS3FaultProxySourceLevel          = "0001"
 	requestCanceledResponseBody             = `<Error><Code>RequestCanceled</Code><Message>Request is canceled.</Message><RequestId>fault-proxy</RequestId></Error>`
 	requestTimeoutResponseBody              = `<Error><Code>RequestTimeout</Code><Message>Request timeout.</Message><RequestId>fault-proxy</RequestId></Error>`
@@ -51,6 +52,7 @@ type s3FaultProxy struct {
 	totalFailures          int
 	observedSourceGET      int
 	observedSourceRangeGET int
+	listRequests           int64
 }
 
 func newS3FaultProxy(cfg s3FaultProxyConfig) *s3FaultProxy {
@@ -58,6 +60,10 @@ func newS3FaultProxy(cfg s3FaultProxyConfig) *s3FaultProxy {
 		cfg.ListenAddr = "127.0.0.1:19000"
 	}
 	cfg.Mode = normalizeS3FaultProxyMode(cfg.Mode)
+	if cfg.Mode == s3FaultProxyModeObserve {
+		cfg.FailFirstAttempts = 0
+		cfg.MaxFailures = 0
+	}
 	if cfg.ResetAfterBytes <= 0 {
 		cfg.ResetAfterBytes = 1
 	}
@@ -113,6 +119,9 @@ func (p *s3FaultProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
 		p.proxyConnect(w, r)
 		return
+	}
+	if isS3ListRequest(r) {
+		p.recordListRequest()
 	}
 	if p.shouldInjectProviderHTTP408(r) {
 		p.injectProviderHTTP408(w, r)
@@ -171,6 +180,12 @@ func (p *s3FaultProxy) ObservedSourceRangeGETs() int {
 	return p.observedSourceRangeGET
 }
 
+func (p *s3FaultProxy) ListRequests() int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.listRequests
+}
+
 func (p *s3FaultProxy) ResetCycle() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -178,6 +193,7 @@ func (p *s3FaultProxy) ResetCycle() {
 	p.totalFailures = 0
 	p.observedSourceGET = 0
 	p.observedSourceRangeGET = 0
+	// listRequests is intentionally exempt: it is reported as a monotonic total.
 }
 
 func (p *s3FaultProxy) proxyConnect(w http.ResponseWriter, r *http.Request) {
@@ -412,6 +428,16 @@ func (p *s3FaultProxy) recordObservedSourceGET(rangeHeader string) {
 	}
 }
 
+func (p *s3FaultProxy) recordListRequest() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.listRequests++
+}
+
+func isS3ListRequest(r *http.Request) bool {
+	return r.Method == http.MethodGet && r.URL.Query().Get("list-type") != ""
+}
+
 func isNonzeroRangeHeader(value string) bool {
 	value = strings.TrimSpace(strings.ToLower(value))
 	if !strings.HasPrefix(value, "bytes=") {
@@ -463,7 +489,7 @@ func normalizeS3FaultProxyMode(mode string) string {
 		return s3FaultProxyModeUploadPartReset
 	case s3FaultProxyModeProvider408Canceled:
 		return s3FaultProxyModeProviderHTTP408
-	case s3FaultProxyModeSourceGETReset, s3FaultProxyModeProviderHTTP408, s3FaultProxyModeProviderRequestCanceled, s3FaultProxyModeConnectReset:
+	case s3FaultProxyModeSourceGETReset, s3FaultProxyModeProviderHTTP408, s3FaultProxyModeProviderRequestCanceled, s3FaultProxyModeConnectReset, s3FaultProxyModeObserve:
 		return mode
 	default:
 		return mode

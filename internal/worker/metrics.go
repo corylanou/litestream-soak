@@ -205,6 +205,31 @@ var (
 		Help: "Open file descriptor count for the soak worker process.",
 	}, []string{"worker_id", "profile", "source", "region"})
 
+	s3ListRequestsTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_s3_list_requests_total",
+		Help: "Litestream-originated S3 LIST requests observed through the S3 fault proxy; monotonic per worker process.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	litestreamHeapInuseBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_heap_inuse_bytes",
+		Help: "Litestream Go heap in-use bytes from its Prometheus metrics endpoint.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	litestreamStackInuseBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_stack_inuse_bytes",
+		Help: "Litestream Go stack in-use bytes from its Prometheus metrics endpoint.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	litestreamAllocBytesTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_alloc_bytes_total",
+		Help: "Cumulative Litestream Go heap bytes allocated from its Prometheus metrics endpoint.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	litestreamAllocRateBytesPerSecond = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_alloc_rate_bytes_per_second",
+		Help: "Litestream Go heap allocation rate derived from consecutive alloc_bytes_total samples.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
 	litestreamUptime = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_litestream_uptime_seconds",
 		Help: "Litestream process uptime.",
@@ -339,6 +364,18 @@ func SetProcessStats(snapshot processStatsSnapshot) {
 	litestreamFDs.WithLabelValues(labels...).Set(float64(snapshot.LitestreamFDs))
 	workerRSSBytes.WithLabelValues(labels...).Set(float64(snapshot.WorkerRSSBytes))
 	workerFDs.WithLabelValues(labels...).Set(float64(snapshot.WorkerFDs))
+}
+
+func SetS3ListRequests(total uint64) {
+	s3ListRequestsTotal.WithLabelValues(currentMetricLabels()...).Set(float64(total))
+}
+
+func SetLitestreamMemStats(heapInuse, stackInuse, allocTotal, allocRate float64) {
+	labels := currentMetricLabels()
+	litestreamHeapInuseBytes.WithLabelValues(labels...).Set(heapInuse)
+	litestreamStackInuseBytes.WithLabelValues(labels...).Set(stackInuse)
+	litestreamAllocBytesTotal.WithLabelValues(labels...).Set(allocTotal)
+	litestreamAllocRateBytesPerSecond.WithLabelValues(labels...).Set(allocRate)
 }
 
 func SetLitestreamUptime(seconds float64) {

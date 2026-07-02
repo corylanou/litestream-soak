@@ -96,6 +96,124 @@ func TestWorkloadConfigOmitsDisabledS3FaultProxyDefaults(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvReadsCompactionKnobs(t *testing.T) {
+	t.Setenv("L1_COMPACTION_INTERVAL", "5m")
+	t.Setenv("L2_COMPACTION_INTERVAL", "30m")
+	t.Setenv("L3_COMPACTION_INTERVAL", "6h")
+	t.Setenv("L0_RETENTION", "1h")
+	t.Setenv("L0_RETENTION_CHECK_INTERVAL", "2m")
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v", err)
+	}
+
+	if cfg.L1CompactionInterval != 5*time.Minute {
+		t.Fatalf("L1CompactionInterval = %s, want 5m", cfg.L1CompactionInterval)
+	}
+	if cfg.L2CompactionInterval != 30*time.Minute {
+		t.Fatalf("L2CompactionInterval = %s, want 30m", cfg.L2CompactionInterval)
+	}
+	if cfg.L3CompactionInterval != 6*time.Hour {
+		t.Fatalf("L3CompactionInterval = %s, want 6h", cfg.L3CompactionInterval)
+	}
+	if cfg.L0Retention != time.Hour {
+		t.Fatalf("L0Retention = %s, want 1h", cfg.L0Retention)
+	}
+	if cfg.L0RetentionCheckInterval != 2*time.Minute {
+		t.Fatalf("L0RetentionCheckInterval = %s, want 2m", cfg.L0RetentionCheckInterval)
+	}
+}
+
+func TestConfigFromEnvRejectsInvalidCompactionKnobs(t *testing.T) {
+	for _, key := range []string{
+		"L1_COMPACTION_INTERVAL",
+		"L2_COMPACTION_INTERVAL",
+		"L3_COMPACTION_INTERVAL",
+		"L0_RETENTION",
+		"L0_RETENTION_CHECK_INTERVAL",
+	} {
+		t.Run(key, func(t *testing.T) {
+			t.Setenv("L1_COMPACTION_INTERVAL", "5m")
+			t.Setenv("L2_COMPACTION_INTERVAL", "30m")
+			t.Setenv("L3_COMPACTION_INTERVAL", "6h")
+			t.Setenv(key, "not-a-duration")
+
+			if _, err := ConfigFromEnv(); err == nil {
+				t.Fatalf("ConfigFromEnv() error = nil, want non-nil for invalid %s", key)
+			}
+		})
+	}
+}
+
+func TestConfigFromEnvLeavesCompactionKnobsUnset(t *testing.T) {
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v", err)
+	}
+
+	if cfg.L1CompactionInterval != 0 || cfg.L2CompactionInterval != 0 || cfg.L3CompactionInterval != 0 {
+		t.Fatalf("compaction intervals = %s/%s/%s, want all zero",
+			cfg.L1CompactionInterval, cfg.L2CompactionInterval, cfg.L3CompactionInterval)
+	}
+	if cfg.L0Retention != 0 || cfg.L0RetentionCheckInterval != 0 {
+		t.Fatalf("L0 retention knobs = %s/%s, want zero", cfg.L0Retention, cfg.L0RetentionCheckInterval)
+	}
+}
+
+func TestConfigFromEnvRejectsPartialCompactionLevels(t *testing.T) {
+	t.Setenv("L1_COMPACTION_INTERVAL", "5m")
+
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Fatal("ConfigFromEnv() error = nil, want non-nil for partial compaction levels")
+	}
+}
+
+func TestWorkloadConfigOmitsZeroCompactionKnobs(t *testing.T) {
+	t.Parallel()
+
+	got := DefaultConfig().WorkloadConfig().JSON()
+	for _, key := range []string{
+		"l1_compaction_interval",
+		"l2_compaction_interval",
+		"l3_compaction_interval",
+		"l0_retention",
+		"l0_retention_check_interval",
+	} {
+		if strings.Contains(got, key) {
+			t.Fatalf("WorkloadConfig().JSON() = %s, want no %q when unset", got, key)
+		}
+	}
+}
+
+func TestWorkloadConfigIncludesCompactionKnobsWhenSet(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.L1CompactionInterval = 5 * time.Minute
+	cfg.L2CompactionInterval = 30 * time.Minute
+	cfg.L3CompactionInterval = 6 * time.Hour
+	cfg.L0Retention = time.Hour
+	cfg.L0RetentionCheckInterval = 2 * time.Minute
+
+	got := cfg.WorkloadConfig()
+	if got.L1CompactionInterval != "5m0s" {
+		t.Fatalf("L1CompactionInterval = %q, want 5m0s", got.L1CompactionInterval)
+	}
+	if got.L2CompactionInterval != "30m0s" {
+		t.Fatalf("L2CompactionInterval = %q, want 30m0s", got.L2CompactionInterval)
+	}
+	if got.L3CompactionInterval != "6h0m0s" {
+		t.Fatalf("L3CompactionInterval = %q, want 6h0m0s", got.L3CompactionInterval)
+	}
+	if got.L0Retention != "1h0m0s" {
+		t.Fatalf("L0Retention = %q, want 1h0m0s", got.L0Retention)
+	}
+	if got.L0RetentionCheckInterval != "2m0s" {
+		t.Fatalf("L0RetentionCheckInterval = %q, want 2m0s", got.L0RetentionCheckInterval)
+	}
+}
+
 func TestConfigFromEnvReadsManyDBConfig(t *testing.T) {
 	t.Setenv("NUM_DATABASES", "100")
 	t.Setenv("ACTIVE_PERCENT", "2.5")
@@ -134,6 +252,83 @@ func TestConfigFromEnvReadsManyDBConfig(t *testing.T) {
 	}
 	if cfg.ReplicationLagThreshold != 3 {
 		t.Fatalf("ReplicationLagThreshold = %d, want 3", cfg.ReplicationLagThreshold)
+	}
+}
+
+func TestConfigFromEnvReadsManyDBProfiles(t *testing.T) {
+	tests := []struct {
+		profile      string
+		numDatabases int
+		workers      int
+		configMode   string
+	}{
+		{profile: "many-dbs-100-list", numDatabases: 100, workers: 2, configMode: "list"},
+		{profile: "many-dbs-100-dir", numDatabases: 100, workers: 2, configMode: "dir"},
+		{profile: "many-dbs-500-list", numDatabases: 500, workers: 3, configMode: "list"},
+		{profile: "many-dbs-500-dir", numDatabases: 500, workers: 3, configMode: "dir"},
+		{profile: "many-dbs-500-dir-lowfreq", numDatabases: 500, workers: 3, configMode: "dir"},
+		{profile: "many-dbs-1000-dir", numDatabases: 1000, workers: 4, configMode: "dir"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.profile, func(t *testing.T) {
+			t.Setenv("PROFILE", tc.profile)
+
+			cfg, err := ConfigFromEnv()
+			if err != nil {
+				t.Fatalf("ConfigFromEnv() error = %v", err)
+			}
+
+			if cfg.LoadMode != "many-db" {
+				t.Fatalf("LoadMode = %q, want many-db", cfg.LoadMode)
+			}
+			if cfg.NumDatabases != tc.numDatabases {
+				t.Fatalf("NumDatabases = %d, want %d", cfg.NumDatabases, tc.numDatabases)
+			}
+			if cfg.Workers != tc.workers {
+				t.Fatalf("Workers = %d, want %d", cfg.Workers, tc.workers)
+			}
+			if cfg.ConfigMode != tc.configMode {
+				t.Fatalf("ConfigMode = %q, want %q", cfg.ConfigMode, tc.configMode)
+			}
+			if !cfg.S3FaultProxyEnabled {
+				t.Fatal("S3FaultProxyEnabled = false, want true")
+			}
+			if cfg.S3FaultProxyMode != "observe" {
+				t.Fatalf("S3FaultProxyMode = %q, want observe", cfg.S3FaultProxyMode)
+			}
+			if cfg.S3FaultProxyFailFirstAttempts != 0 {
+				t.Fatalf("S3FaultProxyFailFirstAttempts = %d, want 0", cfg.S3FaultProxyFailFirstAttempts)
+			}
+		})
+	}
+}
+
+func TestConfigFromEnvReadsManyDB500LowFreqProfileKnobs(t *testing.T) {
+	t.Setenv("PROFILE", "many-dbs-500-dir-lowfreq")
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v", err)
+	}
+
+	if cfg.SnapshotInterval != time.Hour {
+		t.Fatalf("SnapshotInterval = %s, want 1h", cfg.SnapshotInterval)
+	}
+	if cfg.L1CompactionInterval != 5*time.Minute {
+		t.Fatalf("L1CompactionInterval = %s, want 5m", cfg.L1CompactionInterval)
+	}
+	if cfg.L2CompactionInterval != 30*time.Minute {
+		t.Fatalf("L2CompactionInterval = %s, want 30m", cfg.L2CompactionInterval)
+	}
+	if cfg.L3CompactionInterval != 6*time.Hour {
+		t.Fatalf("L3CompactionInterval = %s, want 6h", cfg.L3CompactionInterval)
+	}
+	if cfg.L0Retention != time.Hour {
+		t.Fatalf("L0Retention = %s, want 1h", cfg.L0Retention)
+	}
+	if cfg.L0RetentionCheckInterval != 2*time.Minute {
+		t.Fatalf("L0RetentionCheckInterval = %s, want 2m", cfg.L0RetentionCheckInterval)
 	}
 }
 
