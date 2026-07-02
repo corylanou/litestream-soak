@@ -24,6 +24,11 @@ type Config struct {
 	DiskFullRecoveryTimeout                   string  `json:"disk_full_recovery_timeout,omitempty"`
 	SnapshotInterval                          string  `json:"snapshot_interval,omitempty"`
 	SyncInterval                              string  `json:"sync_interval,omitempty"`
+	L1CompactionInterval                      string  `json:"l1_compaction_interval,omitempty"`
+	L2CompactionInterval                      string  `json:"l2_compaction_interval,omitempty"`
+	L3CompactionInterval                      string  `json:"l3_compaction_interval,omitempty"`
+	L0Retention                               string  `json:"l0_retention,omitempty"`
+	L0RetentionCheckInterval                  string  `json:"l0_retention_check_interval,omitempty"`
 	S3PartSize                                string  `json:"s3_part_size,omitempty"`
 	S3Concurrency                             int     `json:"s3_concurrency,omitempty"`
 	S3FaultProxyEnabled                       bool    `json:"s3_fault_proxy_enabled,omitempty"`

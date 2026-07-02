@@ -32,6 +32,12 @@ func NewRunner(cfg Config) *Runner {
 	runner.litestreamManager = newLitestreamManager(&runner.cfg)
 	runner.statsPoller = newStatsPoller(&runner.cfg)
 	runner.statsPoller.litestreamPID = runner.litestreamManager.litestreamPID
+	runner.s3ListRequests = func() int64 {
+		if runner.s3FaultProxy == nil {
+			return 0
+		}
+		return runner.s3FaultProxy.ListRequests()
+	}
 	runner.loadReplayManager = newLoadReplayManager(&runner.cfg)
 	return runner
 }
@@ -194,6 +200,9 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 
 func (r *Runner) applyS3FaultProxyVerificationGuards(result VerificationResult) VerificationResult {
 	if !result.Passed {
+		return result
+	}
+	if r.cfg.S3FaultProxyEnabled && r.cfg.s3FaultProxyObserveMode() {
 		return result
 	}
 

@@ -294,15 +294,20 @@ func TestControlMetricsObserveWorkerZeroesStaleStatusAndRuntimeSeries(t *testing
 
 	worker.Status = model.WorkerDegraded
 	worker.LastRuntimeJSON = mustJSON(reporting.RuntimePayload{
-		DataDiskTotalBytes:        8192,
-		DataDiskUsedBytes:         4096,
-		DataDiskFreeBytes:         4096,
-		DataDiskUsedPercent:       50,
-		DBSizeBytes:               2048,
-		WALSizeBytes:              256,
-		LitestreamDirSizeBytes:    512,
-		LitestreamLTXSizeBytes:    128,
-		LitestreamSnapshotHealthy: true,
+		DataDiskTotalBytes:             8192,
+		DataDiskUsedBytes:              4096,
+		DataDiskFreeBytes:              4096,
+		DataDiskUsedPercent:            50,
+		DBSizeBytes:                    2048,
+		WALSizeBytes:                   256,
+		LitestreamDirSizeBytes:         512,
+		LitestreamLTXSizeBytes:         128,
+		S3ListRequestsTotal:            9210,
+		LitestreamHeapInuseBytes:       4194304,
+		LitestreamStackInuseBytes:      1048576,
+		LitestreamAllocBytesTotal:      987654321,
+		LitestreamAllocRateBytesPerSec: 2048.5,
+		LitestreamSnapshotHealthy:      true,
 	})
 	metrics.observeWorker(worker)
 
@@ -318,6 +323,11 @@ func TestControlMetricsObserveWorkerZeroesStaleStatusAndRuntimeSeries(t *testing
 	assertGaugeVecValue(t, controlWorkerWALSize, labels, 256)
 	assertGaugeVecValue(t, controlWorkerLitestreamLocalStateSize, labels, 512)
 	assertGaugeVecValue(t, controlWorkerLitestreamLocalLTXSize, labels, 128)
+	assertGaugeVecValue(t, controlWorkerS3ListRequestsTotal, labels, 9210)
+	assertGaugeVecValue(t, controlWorkerLitestreamHeapInuseBytes, labels, 4194304)
+	assertGaugeVecValue(t, controlWorkerLitestreamStackInuseBytes, labels, 1048576)
+	assertGaugeVecValue(t, controlWorkerLitestreamAllocBytesTotal, labels, 987654321)
+	assertGaugeVecValue(t, controlWorkerLitestreamAllocRateBytesPerSecond, labels, 2048.5)
 }
 
 func TestControlMetricsObserveVerificationSetsResultAndClearsCurrentFailure(t *testing.T) {

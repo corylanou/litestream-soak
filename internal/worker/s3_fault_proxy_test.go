@@ -488,6 +488,210 @@ func TestS3FaultProxyResetsConnectTunnelAfterThreshold(t *testing.T) {
 	}
 }
 
+func TestNormalizeS3FaultProxyModeObserve(t *testing.T) {
+	if got := normalizeS3FaultProxyMode("observe"); got != s3FaultProxyModeObserve {
+		t.Fatalf("normalizeS3FaultProxyMode(\"observe\") = %q, want %q", got, s3FaultProxyModeObserve)
+	}
+	if got := normalizeS3FaultProxyMode(""); got != s3FaultProxyModeUploadPartReset {
+		t.Fatalf("normalizeS3FaultProxyMode(\"\") = %q, want %q", got, s3FaultProxyModeUploadPartReset)
+	}
+}
+
+func TestS3FaultProxyObserveModeNeverInjectsFaults(t *testing.T) {
+	var upstreamHits atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	proxy := newS3FaultProxy(s3FaultProxyConfig{
+		TargetEndpoint:    upstream.URL,
+		ListenAddr:        "127.0.0.1:0",
+		Mode:              "observe",
+		SourceLevel:       "0001",
+		ResetAfterBytes:   4,
+		FailFirstAttempts: 3,
+		MaxFailures:       5,
+	})
+	if proxy.cfg.FailFirstAttempts != 0 {
+		t.Fatalf("observe mode FailFirstAttempts = %d, want 0", proxy.cfg.FailFirstAttempts)
+	}
+	if proxy.cfg.MaxFailures != 0 {
+		t.Fatalf("observe mode MaxFailures = %d, want 0", proxy.cfg.MaxFailures)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = proxy.Close(context.Background()) })
+
+	client := &http.Client{Timeout: time.Second}
+	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, proxy.Endpoint()+"/bucket/key?partNumber=1&uploadId=test-upload", bytes.NewReader(bytes.Repeat([]byte("x"), 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	putResp, err := client.Do(putReq)
+	if err != nil {
+		t.Fatalf("multipart PUT error = %v, want pass-through", err)
+	}
+	_ = putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("multipart PUT status = %d, want 200", putResp.StatusCode)
+	}
+
+	getResp, err := client.Get(proxy.Endpoint() + "/bucket/db/0001/0000000000000001-0000000000000002.ltx")
+	if err != nil {
+		t.Fatalf("source GET error = %v, want pass-through", err)
+	}
+	if _, err := io.ReadAll(getResp.Body); err != nil {
+		t.Fatalf("source GET ReadAll() error = %v, want full body", err)
+	}
+	_ = getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("source GET status = %d, want 200", getResp.StatusCode)
+	}
+
+	if got := proxy.TotalFailures(); got != 0 {
+		t.Fatalf("TotalFailures() = %d, want 0", got)
+	}
+	if got := upstreamHits.Load(); got != 2 {
+		t.Fatalf("upstream hits = %d, want 2", got)
+	}
+}
+
+func TestS3FaultProxyCountsListRequests(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	proxy := newS3FaultProxy(s3FaultProxyConfig{
+		TargetEndpoint: upstream.URL,
+		ListenAddr:     "127.0.0.1:0",
+		Mode:           "observe",
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = proxy.Close(context.Background()) })
+
+	client := &http.Client{Timeout: time.Second}
+
+	listResp, err := client.Get(proxy.Endpoint() + "/bucket?list-type=2&prefix=db/")
+	if err != nil {
+		t.Fatalf("LIST Get() error = %v", err)
+	}
+	_ = listResp.Body.Close()
+	if got := proxy.ListRequests(); got != 1 {
+		t.Fatalf("ListRequests() after LIST = %d, want 1", got)
+	}
+
+	objResp, err := client.Get(proxy.Endpoint() + "/bucket/db/key")
+	if err != nil {
+		t.Fatalf("object Get() error = %v", err)
+	}
+	_ = objResp.Body.Close()
+
+	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, proxy.Endpoint()+"/bucket/db/key", bytes.NewReader([]byte("x")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	putResp, err := client.Do(putReq)
+	if err != nil {
+		t.Fatalf("PUT error = %v", err)
+	}
+	_ = putResp.Body.Close()
+
+	if got := proxy.ListRequests(); got != 1 {
+		t.Fatalf("ListRequests() after non-LIST requests = %d, want 1", got)
+	}
+}
+
+func TestS3FaultProxyCountsListRequestsInDefaultMode(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	proxy := newS3FaultProxy(s3FaultProxyConfig{
+		TargetEndpoint: upstream.URL,
+		ListenAddr:     "127.0.0.1:0",
+	})
+	if proxy.cfg.Mode != s3FaultProxyModeUploadPartReset {
+		t.Fatalf("default mode = %q, want %q", proxy.cfg.Mode, s3FaultProxyModeUploadPartReset)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = proxy.Close(context.Background()) })
+
+	resp, err := http.Get(proxy.Endpoint() + "/bucket?list-type=2")
+	if err != nil {
+		t.Fatalf("LIST Get() error = %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if got := proxy.ListRequests(); got != 1 {
+		t.Fatalf("ListRequests() = %d, want 1", got)
+	}
+}
+
+func TestS3FaultProxyResetCyclePreservesListRequests(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	proxy := newS3FaultProxy(s3FaultProxyConfig{
+		TargetEndpoint:    upstream.URL,
+		ListenAddr:        "127.0.0.1:0",
+		Mode:              "provider-http-408",
+		FailFirstAttempts: 1,
+		MaxFailures:       1,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = proxy.Close(context.Background()) })
+
+	for i := 0; i < 2; i++ {
+		resp, err := http.Get(proxy.Endpoint() + "/bucket/db?list-type=2")
+		if err != nil {
+			t.Fatalf("Get() %d error = %v", i+1, err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	if got := proxy.TotalFailures(); got != 1 {
+		t.Fatalf("TotalFailures() before reset = %d, want 1", got)
+	}
+	if got := proxy.ListRequests(); got != 2 {
+		t.Fatalf("ListRequests() before reset = %d, want 2", got)
+	}
+
+	proxy.ResetCycle()
+
+	if got := proxy.TotalFailures(); got != 0 {
+		t.Fatalf("TotalFailures() after reset = %d, want 0", got)
+	}
+	if got := proxy.ObservedSourceGETs(); got != 0 {
+		t.Fatalf("ObservedSourceGETs() after reset = %d, want 0", got)
+	}
+	if got := proxy.ListRequests(); got != 2 {
+		t.Fatalf("ListRequests() after reset = %d, want 2", got)
+	}
+}
+
 func commandEnvMap(env []string) map[string]string {
 	out := make(map[string]string, len(env))
 	for _, entry := range env {

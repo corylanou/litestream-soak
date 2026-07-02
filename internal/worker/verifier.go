@@ -671,10 +671,23 @@ func (v *Verifier) validateConfigPath(sourcePath string) (string, func(), error)
 }
 
 func (v *Verifier) needsPerDBValidateConfig(sourcePath string) bool {
-	return v.cfg.ManyDBEnabled() &&
-		v.cfg.manyDBConfigMode() == "dir" &&
-		strings.TrimSpace(sourcePath) != "" &&
-		sourcePath != v.cfg.DBPath
+	if !v.cfg.ManyDBEnabled() || strings.TrimSpace(sourcePath) == "" || sourcePath == v.cfg.DBPath {
+		return false
+	}
+	if v.cfg.manyDBConfigMode() == "dir" {
+		return true
+	}
+	return v.observeModeValidateEndpoint() != ""
+}
+
+// Observe-mode validation restores bypass the counting proxy so verifier LIST
+// traffic does not pollute the litestream-originated LIST metric; fault modes
+// keep the proxy in the validation path for fault observation.
+func (v *Verifier) observeModeValidateEndpoint() string {
+	if !v.cfg.S3FaultProxyEnabled || v.cfg.ReplicaType != "s3" || !v.cfg.s3FaultProxyObserveMode() {
+		return ""
+	}
+	return strings.TrimSpace(v.cfg.S3FaultProxyTargetEndpoint)
 }
 
 func (v *Verifier) writePerDBValidateConfig(sourcePath string) (string, error) {
@@ -685,12 +698,16 @@ func (v *Verifier) writePerDBValidateConfig(sourcePath string) (string, error) {
 	path := f.Name()
 
 	manager := newLitestreamManager(&v.cfg)
+	replica := manager.litestreamConfigReplica(sourcePath)
+	if endpoint := v.observeModeValidateEndpoint(); endpoint != "" {
+		replica.S3Endpoint = endpoint
+	}
 	data := litestreamConfigData{
 		SocketPath: v.cfg.SocketPath,
 		Databases: []litestreamConfigDB{{
 			Path:             sourcePath,
 			SnapshotInterval: v.cfg.SnapshotInterval.String(),
-			Replica:          manager.litestreamConfigReplica(sourcePath),
+			Replica:          replica,
 		}},
 	}
 	if err := litestreamConfigTmpl.Execute(f, data); err != nil {

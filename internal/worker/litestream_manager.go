@@ -42,6 +42,22 @@ var litestreamConfigTmpl = template.Must(template.New("config").Parse(`socket:
   enabled: true
   path: {{.SocketPath}}
 
+{{- if .Levels}}
+
+levels:
+{{- range .Levels}}
+  - interval: {{.}}
+{{- end}}
+{{- end}}
+{{- if .L0Retention}}
+
+l0-retention: {{.L0Retention}}
+{{- end}}
+{{- if .L0RetentionCheckInterval}}
+
+l0-retention-check-interval: {{.L0RetentionCheckInterval}}
+{{- end}}
+
 dbs:
 {{- range .Databases}}
   - {{if .Dir}}dir: {{.Dir}}{{else}}path: {{.Path}}{{end}}
@@ -99,8 +115,11 @@ func (m *litestreamManager) writeLitestreamConfig() error {
 }
 
 type litestreamConfigData struct {
-	SocketPath string
-	Databases  []litestreamConfigDB
+	SocketPath               string
+	Levels                   []string
+	L0Retention              string
+	L0RetentionCheckInterval string
+	Databases                []litestreamConfigDB
 }
 
 type litestreamConfigDB struct {
@@ -124,28 +143,39 @@ type litestreamConfigReplica struct {
 }
 
 func (m *litestreamManager) litestreamConfigData() litestreamConfigData {
-	if !m.cfg.ManyDBEnabled() {
-		return litestreamConfigData{
-			SocketPath: m.cfg.SocketPath,
-			Databases: []litestreamConfigDB{{
-				Path:             m.cfg.DBPath,
-				SnapshotInterval: m.cfg.SnapshotInterval.String(),
-				Replica:          m.litestreamConfigReplica(m.cfg.DBPath),
-			}},
+	data := litestreamConfigData{SocketPath: m.cfg.SocketPath}
+	if m.cfg.L1CompactionInterval > 0 && m.cfg.L2CompactionInterval > 0 && m.cfg.L3CompactionInterval > 0 {
+		data.Levels = []string{
+			m.cfg.L1CompactionInterval.String(),
+			m.cfg.L2CompactionInterval.String(),
+			m.cfg.L3CompactionInterval.String(),
 		}
+	}
+	if m.cfg.L0Retention > 0 {
+		data.L0Retention = m.cfg.L0Retention.String()
+	}
+	if m.cfg.L0RetentionCheckInterval > 0 {
+		data.L0RetentionCheckInterval = m.cfg.L0RetentionCheckInterval.String()
+	}
+
+	if !m.cfg.ManyDBEnabled() {
+		data.Databases = []litestreamConfigDB{{
+			Path:             m.cfg.DBPath,
+			SnapshotInterval: m.cfg.SnapshotInterval.String(),
+			Replica:          m.litestreamConfigReplica(m.cfg.DBPath),
+		}}
+		return data
 	}
 
 	if m.cfg.manyDBConfigMode() == "dir" {
-		return litestreamConfigData{
-			SocketPath: m.cfg.SocketPath,
-			Databases: []litestreamConfigDB{{
-				Dir:              m.cfg.ManyDBDir(),
-				Pattern:          "*.db",
-				Watch:            true,
-				SnapshotInterval: m.cfg.SnapshotInterval.String(),
-				Replica:          m.litestreamConfigReplica(""),
-			}},
-		}
+		data.Databases = []litestreamConfigDB{{
+			Dir:              m.cfg.ManyDBDir(),
+			Pattern:          "*.db",
+			Watch:            true,
+			SnapshotInterval: m.cfg.SnapshotInterval.String(),
+			Replica:          m.litestreamConfigReplica(""),
+		}}
+		return data
 	}
 
 	paths := m.cfg.ManyDBPaths()
@@ -157,10 +187,8 @@ func (m *litestreamManager) litestreamConfigData() litestreamConfigData {
 			Replica:          m.litestreamConfigReplica(dbPath),
 		})
 	}
-	return litestreamConfigData{
-		SocketPath: m.cfg.SocketPath,
-		Databases:  dbs,
-	}
+	data.Databases = dbs
+	return data
 }
 
 func (m *litestreamManager) litestreamConfigReplica(dbPath string) litestreamConfigReplica {

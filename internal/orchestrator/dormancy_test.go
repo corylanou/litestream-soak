@@ -399,6 +399,65 @@ func TestWorkerEnvIncludesS3FaultProxyWorkloadFields(t *testing.T) {
 	}
 }
 
+func TestWorkerEnvIncludesCompactionKnobs(t *testing.T) {
+	t.Parallel()
+
+	mgr := &Manager{
+		replica:        ReplicaConfig{Bucket: "bucket", Endpoint: "endpoint"},
+		controlBaseURL: "https://litestream-soak-ctl.fly.dev",
+	}
+
+	env := mgr.workerEnv(model.Worker{
+		ID:   "worker-main-many-dbs-500",
+		Name: "worker-main-many-dbs-500",
+	}, workload.Config{
+		L1CompactionInterval:     "5m0s",
+		L2CompactionInterval:     "30m0s",
+		L3CompactionInterval:     "6h0m0s",
+		L0Retention:              "1h0m0s",
+		L0RetentionCheckInterval: "2m0s",
+	})
+
+	want := map[string]string{
+		"L1_COMPACTION_INTERVAL":      "5m0s",
+		"L2_COMPACTION_INTERVAL":      "30m0s",
+		"L3_COMPACTION_INTERVAL":      "6h0m0s",
+		"L0_RETENTION":                "1h0m0s",
+		"L0_RETENTION_CHECK_INTERVAL": "2m0s",
+	}
+	for key, wantValue := range want {
+		if got := env[key]; got != wantValue {
+			t.Fatalf("%s=%q, want %q", key, got, wantValue)
+		}
+	}
+}
+
+func TestWorkerEnvOmitsCompactionKnobsWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	mgr := &Manager{
+		replica:        ReplicaConfig{Bucket: "bucket", Endpoint: "endpoint"},
+		controlBaseURL: "https://litestream-soak-ctl.fly.dev",
+	}
+
+	env := mgr.workerEnv(model.Worker{
+		ID:   "worker-main-low-vol",
+		Name: "worker-main-low-vol",
+	}, workload.Config{})
+
+	for _, key := range []string{
+		"L1_COMPACTION_INTERVAL",
+		"L2_COMPACTION_INTERVAL",
+		"L3_COMPACTION_INTERVAL",
+		"L0_RETENTION",
+		"L0_RETENTION_CHECK_INTERVAL",
+	} {
+		if _, ok := env[key]; ok {
+			t.Fatalf("%s should be omitted when unset", key)
+		}
+	}
+}
+
 func TestWorkerEnvIncludesManyDBWorkloadFields(t *testing.T) {
 	t.Parallel()
 

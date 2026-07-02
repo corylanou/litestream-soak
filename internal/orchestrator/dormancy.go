@@ -128,6 +128,21 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	if strings.TrimSpace(workloadCfg.MonitorInterval) != "" {
 		env["MONITOR_INTERVAL"] = workloadCfg.MonitorInterval
 	}
+	if strings.TrimSpace(workloadCfg.L1CompactionInterval) != "" {
+		env["L1_COMPACTION_INTERVAL"] = workloadCfg.L1CompactionInterval
+	}
+	if strings.TrimSpace(workloadCfg.L2CompactionInterval) != "" {
+		env["L2_COMPACTION_INTERVAL"] = workloadCfg.L2CompactionInterval
+	}
+	if strings.TrimSpace(workloadCfg.L3CompactionInterval) != "" {
+		env["L3_COMPACTION_INTERVAL"] = workloadCfg.L3CompactionInterval
+	}
+	if strings.TrimSpace(workloadCfg.L0Retention) != "" {
+		env["L0_RETENTION"] = workloadCfg.L0Retention
+	}
+	if strings.TrimSpace(workloadCfg.L0RetentionCheckInterval) != "" {
+		env["L0_RETENTION_CHECK_INTERVAL"] = workloadCfg.L0RetentionCheckInterval
+	}
 	if workloadCfg.S3PartSize != "" {
 		env["LITESTREAM_S3_PART_SIZE"] = workloadCfg.S3PartSize
 	}

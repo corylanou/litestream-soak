@@ -197,6 +197,31 @@ var (
 		Help: "Litestream open file descriptor count from the latest runtime snapshot.",
 	}, []string{"worker_id", "profile", "source", "app_name", "region"})
 
+	controlWorkerS3ListRequestsTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_s3_list_requests_total",
+		Help: "Litestream-originated S3 LIST requests observed through the worker fault proxy from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerLitestreamHeapInuseBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_litestream_heap_inuse_bytes",
+		Help: "Litestream Go heap in-use bytes from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerLitestreamStackInuseBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_litestream_stack_inuse_bytes",
+		Help: "Litestream Go stack in-use bytes from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerLitestreamAllocBytesTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_litestream_alloc_bytes_total",
+		Help: "Cumulative Litestream Go heap bytes allocated from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
+	controlWorkerLitestreamAllocRateBytesPerSecond = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_litestream_alloc_rate_bytes_per_second",
+		Help: "Litestream Go heap allocation rate in bytes per second from the latest runtime snapshot.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region"})
+
 	controlWorkerRSSBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_control_worker_rss_bytes",
 		Help: "Soak worker process resident memory in bytes from the latest runtime snapshot.",
@@ -470,6 +495,11 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 		controlWorkerLitestreamCPUSeconds.WithLabelValues(labels...).Set(runtime.LitestreamCPUSecondsTotal)
 		controlWorkerLitestreamGoroutines.WithLabelValues(labels...).Set(float64(runtime.LitestreamGoroutines))
 		controlWorkerLitestreamFDs.WithLabelValues(labels...).Set(float64(runtime.LitestreamFDs))
+		controlWorkerS3ListRequestsTotal.WithLabelValues(labels...).Set(float64(runtime.S3ListRequestsTotal))
+		controlWorkerLitestreamHeapInuseBytes.WithLabelValues(labels...).Set(float64(runtime.LitestreamHeapInuseBytes))
+		controlWorkerLitestreamStackInuseBytes.WithLabelValues(labels...).Set(float64(runtime.LitestreamStackInuseBytes))
+		controlWorkerLitestreamAllocBytesTotal.WithLabelValues(labels...).Set(runtime.LitestreamAllocBytesTotal)
+		controlWorkerLitestreamAllocRateBytesPerSecond.WithLabelValues(labels...).Set(runtime.LitestreamAllocRateBytesPerSec)
 		controlWorkerRSSBytes.WithLabelValues(labels...).Set(float64(runtime.WorkerRSSBytes))
 		controlWorkerFDs.WithLabelValues(labels...).Set(float64(runtime.WorkerFDs))
 		controlWorkerLitestreamLocalStateSize.WithLabelValues(labels...).Set(float64(runtime.LitestreamDirSizeBytes))

@@ -829,6 +829,43 @@ flagged explicitly instead of being silently treated as current.
 
 That reporting contract lives in `internal/reporting/types.go`.
 
+## Many-DB Scaling Tiers
+
+The many-DB tier ladder is flag-gated in `internal/orchestrator/fleet.go`:
+
+- `SOAK_ENABLE_MANY_DB_FLEET=true` enables `many-dbs-100-list` and
+  `many-dbs-100-dir` (2 load workers, 10 GB volume, 2048 MB, 1 CPU each).
+- `SOAK_ENABLE_MANY_DB_500=true` (nested, inert without the base flag) adds
+  `many-dbs-500-list`, `many-dbs-500-dir`, and `many-dbs-500-dir-lowfreq`
+  (3 load workers, 15 GB volume, 3072 MB, 2 CPUs each — three machines).
+- `SOAK_ENABLE_MANY_DB_1000=true` (nested) adds `many-dbs-1000-dir`
+  (4 load workers, 20 GB volume, 4096 MB, 2 CPUs).
+
+`many-dbs-500-dir-lowfreq` is the reduced-frequency control for
+`many-dbs-500-dir`: same workload with snapshot 1h, L1/L2/L3 compaction
+5m/30m/6h, L0 retention 1h checked every 2m. The default profiles omit those
+keys so upstream Litestream defaults apply.
+
+All many-DB profiles route Litestream's S3 traffic through the in-worker proxy
+in passive `observe` mode (no fault injection) to count LIST requests. New
+per-worker series on the control plane:
+
+- `soak_control_worker_s3_list_requests_total` — monotonic LIST count; a
+  gauge, so it resets to 0 on worker restart. Use
+  `delta(soak_control_worker_s3_list_requests_total[1h])` for LIST/hour and
+  treat negative deltas as restarts.
+- `soak_control_worker_litestream_heap_inuse_bytes`,
+  `soak_control_worker_litestream_stack_inuse_bytes`,
+  `soak_control_worker_litestream_alloc_bytes_total`, and
+  `soak_control_worker_litestream_alloc_rate_bytes_per_second` — Litestream
+  process memory, sampled from its `/metrics` endpoint every poll.
+
+For the tier comparison table, pull idle CPU
+(`rate(soak_control_worker_litestream_cpu_seconds_total[1h])`), goroutines,
+heap/stack in-use, allocation rate, and LIST/hour per profile, and divide by
+database count for per-DB scaling. Compare `many-dbs-500-dir` against
+`many-dbs-500-dir-lowfreq` for the reduced-frequency lever.
+
 ## Current Operator Mental Model
 
 Use the control plane to answer:

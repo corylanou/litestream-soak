@@ -80,6 +80,11 @@ type RuntimePayload struct {
 	DiskFullRecoverySeconds         float64   `json:"disk_full_recovery_seconds,omitempty"`
 	DiskFullRecoveryWithoutRestart  bool      `json:"disk_full_recovery_without_restart,omitempty"`
 	LitestreamUptimeSeconds         float64   `json:"litestream_uptime_seconds,omitempty"`
+	S3ListRequestsTotal             uint64    `json:"s3_list_requests_total,omitempty"`
+	LitestreamHeapInuseBytes        uint64    `json:"litestream_heap_inuse_bytes,omitempty"`
+	LitestreamStackInuseBytes       uint64    `json:"litestream_stack_inuse_bytes,omitempty"`
+	LitestreamAllocBytesTotal       float64   `json:"litestream_alloc_bytes_total,omitempty"`
+	LitestreamAllocRateBytesPerSec  float64   `json:"litestream_alloc_rate_bytes_per_sec,omitempty"`
 	SnapshotCollectedAt             time.Time `json:"snapshot_collected_at,omitempty"`
 	LitestreamSnapshotHealthy       bool      `json:"litestream_snapshot_healthy"`
 	LitestreamSnapshotError         string    `json:"litestream_snapshot_error,omitempty"`

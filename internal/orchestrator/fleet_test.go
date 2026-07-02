@@ -224,18 +224,23 @@ func TestManyDBFleetGating(t *testing.T) {
 	tests := []struct {
 		name     string
 		mainFlag string
+		k500     string
 		k1000    string
 		want     []string
 	}{
-		{name: "both off", mainFlag: "", k1000: "", want: []string{}},
-		{name: "main only enables 100 tier", mainFlag: "true", k1000: "", want: []string{"many-dbs-100-dir", "many-dbs-100-list"}},
-		{name: "1000 flag without main is inert", mainFlag: "", k1000: "true", want: []string{}},
-		{name: "both flags enable all three", mainFlag: "true", k1000: "true", want: []string{"many-dbs-100-dir", "many-dbs-100-list", "many-dbs-1000-dir"}},
+		{name: "all off", mainFlag: "", k500: "", k1000: "", want: []string{}},
+		{name: "main only enables 100 tier", mainFlag: "true", k500: "", k1000: "", want: []string{"many-dbs-100-dir", "many-dbs-100-list"}},
+		{name: "500 flag without main is inert", mainFlag: "", k500: "true", k1000: "", want: []string{}},
+		{name: "1000 flag without main is inert", mainFlag: "", k500: "", k1000: "true", want: []string{}},
+		{name: "main plus 500 adds the 500 tier", mainFlag: "true", k500: "true", k1000: "", want: []string{"many-dbs-100-dir", "many-dbs-100-list", "many-dbs-500-dir", "many-dbs-500-dir-lowfreq", "many-dbs-500-list"}},
+		{name: "main plus 1000 enables three", mainFlag: "true", k500: "", k1000: "true", want: []string{"many-dbs-100-dir", "many-dbs-100-list", "many-dbs-1000-dir"}},
+		{name: "all flags enable all six", mainFlag: "true", k500: "true", k1000: "true", want: []string{"many-dbs-100-dir", "many-dbs-100-list", "many-dbs-1000-dir", "many-dbs-500-dir", "many-dbs-500-dir-lowfreq", "many-dbs-500-list"}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("SOAK_ENABLE_MANY_DB_FLEET", tc.mainFlag)
+			t.Setenv("SOAK_ENABLE_MANY_DB_500", tc.k500)
 			t.Setenv("SOAK_ENABLE_MANY_DB_1000", tc.k1000)
 
 			many := manyDBProfiles(DefaultMainFleet())
@@ -244,8 +249,10 @@ func TestManyDBFleetGating(t *testing.T) {
 				got = append(got, name)
 			}
 			sort.Strings(got)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("many-dbs profiles = %v, want %v", got, tc.want)
+			want := append([]string{}, tc.want...)
+			sort.Strings(want)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("many-dbs profiles = %v, want %v", got, want)
 			}
 		})
 	}
@@ -253,6 +260,7 @@ func TestManyDBFleetGating(t *testing.T) {
 
 func TestDefaultMainFleetIncludesManyDBProfilesWhenEnabled(t *testing.T) {
 	t.Setenv("SOAK_ENABLE_MANY_DB_FLEET", "true")
+	t.Setenv("SOAK_ENABLE_MANY_DB_500", "true")
 	t.Setenv("SOAK_ENABLE_MANY_DB_1000", "true")
 
 	spec := DefaultMainFleet()
@@ -265,16 +273,23 @@ func TestDefaultMainFleetIncludesManyDBProfilesWhenEnabled(t *testing.T) {
 		volumeGB     int
 		memoryMB     int
 		cpus         int
+		workers      int
 	}{
-		{profile: "many-dbs-100-list", numDatabases: 100, configMode: "list", volumeGB: 10, memoryMB: 2048, cpus: 1},
-		{profile: "many-dbs-100-dir", numDatabases: 100, configMode: "dir", volumeGB: 10, memoryMB: 2048, cpus: 1},
-		{profile: "many-dbs-1000-dir", numDatabases: 1000, configMode: "dir", volumeGB: 20, memoryMB: 4096, cpus: 2},
+		{profile: "many-dbs-100-list", numDatabases: 100, configMode: "list", volumeGB: 10, memoryMB: 2048, cpus: 1, workers: 2},
+		{profile: "many-dbs-100-dir", numDatabases: 100, configMode: "dir", volumeGB: 10, memoryMB: 2048, cpus: 1, workers: 2},
+		{profile: "many-dbs-500-list", numDatabases: 500, configMode: "list", volumeGB: 15, memoryMB: 3072, cpus: 2, workers: 3},
+		{profile: "many-dbs-500-dir", numDatabases: 500, configMode: "dir", volumeGB: 15, memoryMB: 3072, cpus: 2, workers: 3},
+		{profile: "many-dbs-500-dir-lowfreq", numDatabases: 500, configMode: "dir", volumeGB: 15, memoryMB: 3072, cpus: 2, workers: 3},
+		{profile: "many-dbs-1000-dir", numDatabases: 1000, configMode: "dir", volumeGB: 20, memoryMB: 4096, cpus: 2, workers: 4},
 	}
 
 	for _, tc := range tests {
 		worker, ok := many[tc.profile]
 		if !ok {
 			t.Fatalf("DefaultMainFleet() missing %s", tc.profile)
+		}
+		if worker.Workload.Workers != tc.workers {
+			t.Fatalf("%s Workers = %d, want %d", tc.profile, worker.Workload.Workers, tc.workers)
 		}
 		if worker.Workload.NumDatabases != tc.numDatabases {
 			t.Fatalf("%s NumDatabases = %d, want %d", tc.profile, worker.Workload.NumDatabases, tc.numDatabases)
@@ -307,6 +322,45 @@ func TestDefaultMainFleetIncludesManyDBProfilesWhenEnabled(t *testing.T) {
 			t.Fatalf("%s CPUs = %d, want %d", tc.profile, worker.Workload.CPUs, tc.cpus)
 		}
 	}
+
+	for profile, worker := range many {
+		if !worker.Workload.S3FaultProxyEnabled {
+			t.Fatalf("%s S3FaultProxyEnabled = false, want true", profile)
+		}
+		if worker.Workload.S3FaultProxyMode != "observe" {
+			t.Fatalf("%s S3FaultProxyMode = %q, want observe", profile, worker.Workload.S3FaultProxyMode)
+		}
+	}
+
+	lowfreq := many["many-dbs-500-dir-lowfreq"]
+	if lowfreq.Workload.SnapshotInterval != "1h" {
+		t.Fatalf("lowfreq SnapshotInterval = %q, want 1h", lowfreq.Workload.SnapshotInterval)
+	}
+	if lowfreq.Workload.L1CompactionInterval != "5m" {
+		t.Fatalf("lowfreq L1CompactionInterval = %q, want 5m", lowfreq.Workload.L1CompactionInterval)
+	}
+	if lowfreq.Workload.L2CompactionInterval != "30m" {
+		t.Fatalf("lowfreq L2CompactionInterval = %q, want 30m", lowfreq.Workload.L2CompactionInterval)
+	}
+	if lowfreq.Workload.L3CompactionInterval != "6h" {
+		t.Fatalf("lowfreq L3CompactionInterval = %q, want 6h", lowfreq.Workload.L3CompactionInterval)
+	}
+	if lowfreq.Workload.L0Retention != "1h" {
+		t.Fatalf("lowfreq L0Retention = %q, want 1h", lowfreq.Workload.L0Retention)
+	}
+	if lowfreq.Workload.L0RetentionCheckInterval != "2m" {
+		t.Fatalf("lowfreq L0RetentionCheckInterval = %q, want 2m", lowfreq.Workload.L0RetentionCheckInterval)
+	}
+
+	for _, profile := range []string{"many-dbs-500-list", "many-dbs-500-dir"} {
+		w := many[profile].Workload
+		if w.L1CompactionInterval != "" || w.L2CompactionInterval != "" || w.L3CompactionInterval != "" ||
+			w.L0Retention != "" || w.L0RetentionCheckInterval != "" {
+			t.Fatalf("%s compaction/retention knobs = %q/%q/%q/%q/%q, want all empty",
+				profile, w.L1CompactionInterval, w.L2CompactionInterval, w.L3CompactionInterval,
+				w.L0Retention, w.L0RetentionCheckInterval)
+		}
+	}
 }
 
 func TestManyDBProfilesExcludedFromReleaseQuality(t *testing.T) {
@@ -314,6 +368,9 @@ func TestManyDBProfilesExcludedFromReleaseQuality(t *testing.T) {
 
 	if workerIncludedInReleaseQuality(model.Worker{ProfileName: "many-dbs-100-dir", Region: "ord"}) {
 		t.Fatal("many-dbs-100-dir should be excluded from release quality")
+	}
+	if workerIncludedInReleaseQuality(model.Worker{ProfileName: "many-dbs-500-dir-lowfreq", Region: "ord"}) {
+		t.Fatal("many-dbs-500-dir-lowfreq should be excluded from release quality")
 	}
 	if !workerIncludedInReleaseQuality(model.Worker{ProfileName: "low-volume", Region: "ord"}) {
 		t.Fatal("low-volume in ord should be included in release quality")

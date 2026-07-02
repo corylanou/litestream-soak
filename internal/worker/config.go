@@ -93,8 +93,13 @@ type Config struct {
 	ReplicaLevelReporting                     bool
 
 	// Litestream config
-	SnapshotInterval time.Duration
-	SyncInterval     time.Duration
+	SnapshotInterval         time.Duration
+	SyncInterval             time.Duration
+	L1CompactionInterval     time.Duration
+	L2CompactionInterval     time.Duration
+	L3CompactionInterval     time.Duration
+	L0Retention              time.Duration
+	L0RetentionCheckInterval time.Duration
 
 	// Replay
 	LoadMode       string  // "synthetic", "replay", "both"
@@ -216,6 +221,21 @@ func applyProviderHTTP408Profile(c *Config) {
 	c.S3FaultProxyMaxFailures = 1
 }
 
+func applyManyDBProfileBase(c *Config, numDatabases, workers int, configMode string) {
+	c.LoadMode = "many-db"
+	c.WriteRate = 20
+	c.Pattern = "constant"
+	c.PayloadSize = 512
+	c.Workers = workers
+	c.NumDatabases = numDatabases
+	c.ActivePercent = 2
+	c.ConfigMode = configMode
+	c.VerifySampleSize = 5
+	c.S3FaultProxyEnabled = true
+	c.S3FaultProxyMode = "observe"
+	c.S3FaultProxyFailFirstAttempts = 0
+}
+
 func applyProviderRequestCanceledProfile(c *Config) {
 	applyS3FaultProfileBase(c)
 	c.S3Concurrency = 1
@@ -326,35 +346,24 @@ func ConfigFromEnv() (Config, error) {
 			c.SnapshotInterval = 2 * time.Minute
 			c.SyncInterval = time.Second
 		case "many-dbs-100-list":
-			c.LoadMode = "many-db"
-			c.WriteRate = 20
-			c.Pattern = "constant"
-			c.PayloadSize = 512
-			c.Workers = 2
-			c.NumDatabases = 100
-			c.ActivePercent = 2
-			c.ConfigMode = "list"
-			c.VerifySampleSize = 5
+			applyManyDBProfileBase(&c, 100, 2, "list")
 		case "many-dbs-100-dir":
-			c.LoadMode = "many-db"
-			c.WriteRate = 20
-			c.Pattern = "constant"
-			c.PayloadSize = 512
-			c.Workers = 2
-			c.NumDatabases = 100
-			c.ActivePercent = 2
-			c.ConfigMode = "dir"
-			c.VerifySampleSize = 5
+			applyManyDBProfileBase(&c, 100, 2, "dir")
+		case "many-dbs-500-list":
+			applyManyDBProfileBase(&c, 500, 3, "list")
+		case "many-dbs-500-dir":
+			applyManyDBProfileBase(&c, 500, 3, "dir")
+		case "many-dbs-500-dir-lowfreq":
+			// Values must stay in sync with manyDB500FleetWorkers in internal/orchestrator/fleet.go.
+			applyManyDBProfileBase(&c, 500, 3, "dir")
+			c.SnapshotInterval = time.Hour
+			c.L1CompactionInterval = 5 * time.Minute
+			c.L2CompactionInterval = 30 * time.Minute
+			c.L3CompactionInterval = 6 * time.Hour
+			c.L0Retention = time.Hour
+			c.L0RetentionCheckInterval = 2 * time.Minute
 		case "many-dbs-1000-dir":
-			c.LoadMode = "many-db"
-			c.WriteRate = 20
-			c.Pattern = "constant"
-			c.PayloadSize = 512
-			c.Workers = 4
-			c.NumDatabases = 1000
-			c.ActivePercent = 2
-			c.ConfigMode = "dir"
-			c.VerifySampleSize = 5
+			applyManyDBProfileBase(&c, 1000, 4, "dir")
 		}
 	}
 
@@ -604,6 +613,12 @@ func ConfigFromEnv() (Config, error) {
 	if parseBoolEnv(os.Getenv("S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_RANGE_GET")) {
 		c.S3FaultProxyRequireObservedSourceRangeGet = true
 	}
+	if c.S3FaultProxyEnabled && c.s3FaultProxyObserveMode() {
+		c.S3FaultProxyFailFirstAttempts = 0
+		c.S3FaultProxyMaxFailures = 0
+		c.S3FaultProxyRequireObservedSourceGet = false
+		c.S3FaultProxyRequireObservedSourceRangeGet = false
+	}
 	if parseBoolEnv(os.Getenv("REPLICA_LEVEL_REPORTING")) {
 		c.ReplicaLevelReporting = true
 	}
@@ -621,6 +636,50 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid SYNC_INTERVAL: %w", err)
 		}
 		c.SyncInterval = d
+	}
+	if v := os.Getenv("L1_COMPACTION_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid L1_COMPACTION_INTERVAL: %w", err)
+		}
+		c.L1CompactionInterval = d
+	}
+	if v := os.Getenv("L2_COMPACTION_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid L2_COMPACTION_INTERVAL: %w", err)
+		}
+		c.L2CompactionInterval = d
+	}
+	if v := os.Getenv("L3_COMPACTION_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid L3_COMPACTION_INTERVAL: %w", err)
+		}
+		c.L3CompactionInterval = d
+	}
+	if v := os.Getenv("L0_RETENTION"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid L0_RETENTION: %w", err)
+		}
+		c.L0Retention = d
+	}
+	if v := os.Getenv("L0_RETENTION_CHECK_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid L0_RETENTION_CHECK_INTERVAL: %w", err)
+		}
+		c.L0RetentionCheckInterval = d
+	}
+	levelsSet := 0
+	for _, d := range []time.Duration{c.L1CompactionInterval, c.L2CompactionInterval, c.L3CompactionInterval} {
+		if d != 0 {
+			levelsSet++
+		}
+	}
+	if levelsSet != 0 && levelsSet != 3 {
+		return c, fmt.Errorf("L1_COMPACTION_INTERVAL, L2_COMPACTION_INTERVAL, and L3_COMPACTION_INTERVAL must be set together")
 	}
 
 	if v := os.Getenv("LOAD_MODE"); v != "" {
@@ -816,6 +875,10 @@ func (c Config) manyDBConfigMode() string {
 	return mode
 }
 
+func (c Config) s3FaultProxyObserveMode() bool {
+	return normalizeS3FaultProxyMode(c.S3FaultProxyMode) == s3FaultProxyModeObserve
+}
+
 func (c Config) manyDBVerifyChangedLimit() int {
 	if c.VerifyChangedLimit <= 0 {
 		return 100
@@ -859,6 +922,21 @@ func (c Config) WorkloadConfig() workload.Config {
 		ReplayDataURL:            c.ReplayDataURL,
 		ReplaySpeed:              c.ReplaySpeed,
 		ReplayLoop:               c.ReplayLoop,
+	}
+	if c.L1CompactionInterval > 0 {
+		cfg.L1CompactionInterval = c.L1CompactionInterval.String()
+	}
+	if c.L2CompactionInterval > 0 {
+		cfg.L2CompactionInterval = c.L2CompactionInterval.String()
+	}
+	if c.L3CompactionInterval > 0 {
+		cfg.L3CompactionInterval = c.L3CompactionInterval.String()
+	}
+	if c.L0Retention > 0 {
+		cfg.L0Retention = c.L0Retention.String()
+	}
+	if c.L0RetentionCheckInterval > 0 {
+		cfg.L0RetentionCheckInterval = c.L0RetentionCheckInterval.String()
 	}
 	if c.ManyDBEnabled() {
 		cfg.ActiveRotateInterval = c.manyDBActiveRotateInterval().String()
