@@ -1,9 +1,9 @@
 {{define "home_body"}}
     <div class="source-tabs" aria-label="Fleet sources">
       {{range .ActiveSources}}
-      <a class="source-tab{{if .Selected}} active{{end}}" href="{{.ViewURL}}" title="{{.Summary}}">
+      <a class="source-tab{{if .Selected}} active{{end}}{{if .Retired}} source-tab-retired{{end}}" href="{{.ViewURL}}" title="{{.Summary}}">
         {{.Label}}
-        <span class="tab-count">{{.Total}}</span>
+        {{if .Retired}}<span class="tab-retired">retired</span>{{else}}<span class="tab-count">{{.Total}}</span>{{end}}
         {{if gt .Attention 0}}<span class="tab-alert">{{.Attention}}!</span>{{end}}
       </a>
       {{end}}
@@ -33,8 +33,10 @@
     </div>
     {{else}}
     <div class="all-clear">
-      <span class="ok-mark">&#10003;</span>
-      {{if .Summary.CompletedSuccess}}
+      <span class="ok-mark">{{if .Summary.Retired}}&#9209;{{else}}&#10003;{{end}}</span>
+      {{if .Summary.Retired}}
+      Retired &mdash; the {{.SelectedSourceLabel}} fleet was torn down; workers are stopped and no longer soaking.
+      {{else if .Summary.CompletedSuccess}}
       Passed in {{.SelectedSourceLabel}} &mdash; clean soak, torn down after success.
       {{else}}
       {{if gt .Summary.ActiveVerifications 0}}

@@ -262,7 +262,7 @@ func TestHomeBodyRendersPassedComparisonWithoutDeltas(t *testing.T) {
 	}
 }
 
-func TestBuildHomePageDataKeepsStoppedWorkersWithoutSuccessAttention(t *testing.T) {
+func TestBuildHomePageDataTreatsStoppedSourceAsRetired(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
@@ -295,17 +295,31 @@ func TestBuildHomePageDataKeepsStoppedWorkersWithoutSuccessAttention(t *testing.
 		t.Fatalf("buildHomePageData() error = %v", err)
 	}
 
-	if data.Summary.AttentionWorkers != 1 {
-		t.Fatalf("AttentionWorkers = %d, want 1", data.Summary.AttentionWorkers)
+	if data.Summary.AttentionWorkers != 0 {
+		t.Fatalf("AttentionWorkers = %d, want 0 (stopped is an intentional terminal state)", data.Summary.AttentionWorkers)
 	}
-	if data.Summary.HealthyWorkers != 0 {
-		t.Fatalf("HealthyWorkers = %d, want 0", data.Summary.HealthyWorkers)
+	if !data.Summary.Retired {
+		t.Fatal("Summary.Retired = false, want true for an all-stopped source without a success archive")
 	}
-	if data.KPIs.FleetHealthPct != 0 {
-		t.Fatalf("FleetHealthPct = %d, want 0", data.KPIs.FleetHealthPct)
+	if data.Summary.CompletedSuccess {
+		t.Fatal("Summary.CompletedSuccess = true, want false without a success archive")
 	}
-	if len(data.Attention) == 0 {
-		t.Fatal("Attention is empty, want stopped worker attention item")
+	for _, item := range data.Attention {
+		if strings.Contains(item.Title, "need attention") {
+			t.Fatalf("retired source rendered attention item %q", item.Title)
+		}
+	}
+	var selectedCard *homeSourceCard
+	for i := range data.ActiveSources {
+		if data.ActiveSources[i].Source == source {
+			selectedCard = &data.ActiveSources[i]
+		}
+	}
+	if selectedCard == nil {
+		t.Fatal("selected retired source missing from tab cards")
+	}
+	if !selectedCard.Retired {
+		t.Fatal("selected retired source card not marked Retired")
 	}
 }
 
