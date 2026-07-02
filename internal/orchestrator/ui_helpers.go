@@ -471,6 +471,9 @@ func fleetRowStatus(worker homeWorker) string {
 	if worker.CompletedSuccess {
 		return "passed"
 	}
+	if worker.Worker.Status == model.WorkerStopped {
+		return "stopped"
+	}
 	workerClass := statusClass(worker.Worker.Status)
 	runtimeClass := runtimeSnapshotClass(worker.RuntimeSnapshotStatus)
 	if workerClass == "status-bad" || runtimeClass == "status-bad" {
