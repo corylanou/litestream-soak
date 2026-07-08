@@ -415,6 +415,7 @@ func workerPassedSuccessWindow(db *model.DB, worker model.Worker, deployment mod
 		return false, err
 	}
 	var latestPassAt time.Time
+	environmental := environmentalVerificationIDs(verifications, currentEnvironmentalFailurePolicy())
 	for _, verification := range verifications {
 		observedAt, ok := verificationObservedAt(verification)
 		if !ok {
@@ -424,6 +425,9 @@ func workerPassedSuccessWindow(db *model.DB, worker model.Worker, deployment mod
 			break
 		}
 		if activeFailure(&verification) {
+			if environmental[verification.ID] {
+				continue
+			}
 			return false, nil
 		}
 		if verification.Succeeded() && observedAt.After(latestPassAt) {

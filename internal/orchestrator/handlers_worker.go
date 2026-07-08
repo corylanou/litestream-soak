@@ -149,6 +149,8 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	if workerBeforeUpdate != nil && workerBeforeUpdate.Status == model.WorkerProbing {
 		if payload.Passed && !aborted {
 			_ = a.db.RecordEvent(workerID, "worker_probe_passed", "Worker probe verification passed", "")
+		} else if failed && environmental {
+			_ = a.db.RecordEvent(workerID, "worker_probe_environmental", "Worker probe hit a transient provider error; probe remains open", string(details))
 		} else if failed && a.manager != nil {
 			signature := vf.Signature
 			reason := fmt.Sprintf("worker probe failed with %s; returning to dormant state", signature)
@@ -167,7 +169,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 			a.metrics.observePlatformEvent(*worker, latestPlatformEvent(coalesceEventFeed(events)))
 		}
 		a.observeLatestDeploymentState(worker.Source)
-		if a.alerts != nil {
+		if a.alerts != nil && !environmental {
 			a.alerts.NotifyVerificationFailure(*worker, *verification)
 		}
 	}

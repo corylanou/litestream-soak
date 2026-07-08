@@ -62,6 +62,25 @@ type homeChartData struct {
 
 const homeChartHours = 24
 
+// mergeStatsByID unions two stat windows (deduplicated by verification ID) so
+// the failure-classification context covers every stat the page evaluates —
+// including the 24-48h previous window used for pass-rate deltas.
+func mergeStatsByID(primary, extra []model.VerificationStat) []model.VerificationStat {
+	seen := make(map[int]bool, len(primary))
+	merged := make([]model.VerificationStat, 0, len(primary)+len(extra))
+	for _, stat := range primary {
+		seen[stat.ID] = true
+		merged = append(merged, stat)
+	}
+	for _, stat := range extra {
+		if seen[stat.ID] {
+			continue
+		}
+		merged = append(merged, stat)
+	}
+	return merged
+}
+
 // excludeEnvironmentalStats drops environmentally-categorized failures from
 // pass-rate math: provider weather should not read as a litestream regression.
 func excludeEnvironmentalStats(stats []model.VerificationStat, failureContext failureClassificationContext) []model.VerificationStat {

@@ -123,6 +123,12 @@ func escalatedEnvironmentalStatIDs(stats []model.VerificationStat, policy Enviro
 		var streak environmentalStreak
 		for _, stat := range workerStats {
 			verification := verificationFromStat(stat)
+			if verificationStatusAborted(stat.Status) {
+				// Aborted checks are inconclusive: they must neither extend a
+				// streak nor count as recovery, or interleaved aborts could
+				// keep a genuinely missing bucket from ever escalating.
+				continue
+			}
 			if !verification.Failed() {
 				streak.reset()
 				continue
@@ -147,6 +153,9 @@ func escalatedEnvironmentalStatIDs(stats []model.VerificationStat, policy Enviro
 func environmentalStreakEscalated(previous []model.Verification, now time.Time, policy EnvironmentalFailurePolicy) bool {
 	streak := environmentalStreak{count: 1, start: now}
 	for _, verification := range previous {
+		if verificationStatusAborted(verification.Status) {
+			continue
+		}
 		if !verification.Failed() {
 			break
 		}
@@ -176,4 +185,38 @@ func (a *API) environmentalWithoutEscalation(workerID string, failure verificati
 		startedAt = time.Now().UTC()
 	}
 	return !environmentalStreakEscalated(previous, startedAt, policy)
+}
+
+// environmentalVerificationIDs walks a worker's verifications oldest-first
+// and returns the IDs of failures that count as unescalated environmental
+// blips, so lifecycle checks (success teardown) can ignore provider weather
+// without ignoring escalated streaks.
+func environmentalVerificationIDs(verifications []model.Verification, policy EnvironmentalFailurePolicy) map[int]bool {
+	ordered := make([]model.Verification, len(verifications))
+	copy(ordered, verifications)
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].StartedAt.Before(ordered[j].StartedAt)
+	})
+	environmental := make(map[int]bool)
+	var streak environmentalStreak
+	for i := range ordered {
+		verification := ordered[i]
+		if verificationStatusAborted(verification.Status) {
+			continue
+		}
+		if !verification.Failed() {
+			streak.reset()
+			continue
+		}
+		failure := classifyVerification(&verification)
+		if !isTransientObjectStoreFailure(failure.Classification, policy) {
+			streak.reset()
+			continue
+		}
+		streak.observe(verification.StartedAt)
+		if !streak.escalated(verification.StartedAt, policy) {
+			environmental[verification.ID] = true
+		}
+	}
+	return environmental
 }

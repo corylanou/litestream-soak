@@ -214,3 +214,50 @@ func TestHandleVerificationEnvironmentalKeepsWorkerRunningUntilEscalation(t *tes
 		t.Fatalf("worker status after escalated streak = %q, want degraded", worker.Status)
 	}
 }
+
+func TestEnvironmentalStreakTreatsAbortedAsNeutral(t *testing.T) {
+	policy := EnvironmentalFailurePolicy{Bucket: "b", EscalateAfterConsecutive: 2, EscalateAfterDuration: time.Hour}
+
+	now := time.Now().UTC()
+	envFailure := func(age time.Duration) model.Verification {
+		return model.Verification{Status: "failed", CheckType: "integrity", StartedAt: now.Add(-age), ErrorMessage: tigrisListNoSuchBucket}
+	}
+	abortedAt := func(age time.Duration) model.Verification {
+		return model.Verification{Status: "aborted", CheckType: "integrity", StartedAt: now.Add(-age)}
+	}
+
+	interleaved := []model.Verification{abortedAt(5 * time.Minute), envFailure(10 * time.Minute), abortedAt(15 * time.Minute), envFailure(20 * time.Minute)}
+	if !environmentalStreakEscalated(interleaved, now, policy) {
+		t.Fatal("aborted checks between environmental failures must not reset the streak (deleted-bucket bypass)")
+	}
+
+	stats := []model.VerificationStat{
+		{ID: 1, WorkerID: "w1", Source: "pr-1", Status: "failed", CheckType: "integrity", StartedAt: now.Add(-20 * time.Minute), ErrorMessage: tigrisListNoSuchBucket, HasPriorPass: true},
+		{ID: 2, WorkerID: "w1", Source: "pr-1", Status: "aborted", CheckType: "integrity", StartedAt: now.Add(-15 * time.Minute), HasPriorPass: true},
+		{ID: 3, WorkerID: "w1", Source: "pr-1", Status: "failed", CheckType: "integrity", StartedAt: now.Add(-10 * time.Minute), ErrorMessage: tigrisListNoSuchBucket, HasPriorPass: true},
+		{ID: 4, WorkerID: "w1", Source: "pr-1", Status: "failed", CheckType: "integrity", StartedAt: now.Add(-5 * time.Minute), ErrorMessage: tigrisListNoSuchBucket, HasPriorPass: true},
+	}
+	escalated := escalatedEnvironmentalStatIDs(stats, policy)
+	if !escalated[4] {
+		t.Fatal("stats-path streak must escalate across interleaved aborts")
+	}
+}
+
+func TestEnvironmentalVerificationIDsForLifecycle(t *testing.T) {
+	policy := EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 2, EscalateAfterDuration: time.Hour}
+
+	now := time.Now().UTC()
+	verifications := []model.Verification{
+		{ID: 1, Status: "failed", CheckType: "integrity", StartedAt: now.Add(-30 * time.Minute), ErrorMessage: tigrisListNoSuchBucket},
+		{ID: 2, Status: "passed", Passed: true, StartedAt: now.Add(-25 * time.Minute)},
+		{ID: 3, Status: "failed", CheckType: "integrity", StartedAt: now.Add(-20 * time.Minute), ErrorMessage: "validation failed (exit 1)"},
+	}
+
+	environmental := environmentalVerificationIDs(verifications, policy)
+	if !environmental[1] {
+		t.Fatal("single blip should be environmental for lifecycle checks")
+	}
+	if environmental[3] {
+		t.Fatal("real failures must never be environmental for lifecycle checks")
+	}
+}
