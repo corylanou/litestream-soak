@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -36,7 +37,7 @@ func TestPruneDBOnceDropsOnlyOldHistory(t *testing.T) {
 	}
 
 	mgr := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
-	mgr.pruneDBOnce(30)
+	mgr.pruneDBOnce(context.Background(), 30)
 
 	stats, err := db.ListVerificationStatsSince("", time.Now().UTC().AddDate(0, 0, -90))
 	if err != nil {
