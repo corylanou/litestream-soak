@@ -177,7 +177,15 @@ func (a *API) environmentalWithoutEscalation(workerID string, failure verificati
 	if !isTransientObjectStoreFailure(failure.Classification, policy) {
 		return false
 	}
-	previous, err := a.db.ListVerifications(workerID, policy.EscalateAfterConsecutive+1)
+	// Fetch well beyond the consecutive threshold: aborted rows are neutral
+	// to streaks but still occupy query rows, so a tight limit could hide
+	// older environmental failures behind interleaved aborts and starve the
+	// escalation guard (Codex review finding).
+	historyLimit := (policy.EscalateAfterConsecutive + 1) * 5
+	if historyLimit < 50 {
+		historyLimit = 50
+	}
+	previous, err := a.db.ListVerifications(workerID, historyLimit)
 	if err != nil {
 		return false
 	}

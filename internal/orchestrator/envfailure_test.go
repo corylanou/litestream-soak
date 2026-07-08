@@ -261,3 +261,41 @@ func TestEnvironmentalVerificationIDsForLifecycle(t *testing.T) {
 		t.Fatal("real failures must never be environmental for lifecycle checks")
 	}
 }
+
+func TestHandleVerificationEscalatesAcrossAbortStarvedHistory(t *testing.T) {
+	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 2, EscalateAfterDuration: 12 * time.Hour})
+
+	db := openTestDB(t)
+	workerID := "worker-env-abort-starve"
+	createTestWorker(t, db, model.Worker{
+		ID: workerID, Name: workerID, Status: model.WorkerRunning, Source: "pr-1322",
+		GitSHA: "abc123", LitestreamSHA: "ls123", ProfileName: "many-dbs-100-dir", ProfileConfig: "{}",
+	})
+	now := time.Now().UTC()
+	record := func(age time.Duration, status, errorMessage string) {
+		t.Helper()
+		done := now.Add(-age).Add(time.Minute)
+		if err := db.RecordVerification(&model.Verification{
+			WorkerID: workerID, StartedAt: now.Add(-age), CompletedAt: &done,
+			Status: status, CheckType: "integrity", Passed: false, ErrorMessage: errorMessage,
+		}); err != nil {
+			t.Fatalf("RecordVerification() error = %v", err)
+		}
+	}
+	record(40*time.Minute, "failed", tigrisListNoSuchBucket)
+	record(30*time.Minute, "aborted", "")
+	record(20*time.Minute, "aborted", "")
+	record(10*time.Minute, "failed", tigrisListNoSuchBucket)
+
+	manager := &Manager{db: db, appName: "litestream-soak"}
+	api := NewAPI(db, nil, nil, nil, manager, nil)
+	postVerificationForTest(t, api, workerID, now, tigrisListNoSuchBucket)
+
+	worker, err := db.GetWorker(workerID)
+	if err != nil {
+		t.Fatalf("GetWorker() error = %v", err)
+	}
+	if worker.Status != model.WorkerDegraded {
+		t.Fatalf("worker status = %q, want degraded — interleaved aborts must not starve the escalation guard", worker.Status)
+	}
+}
