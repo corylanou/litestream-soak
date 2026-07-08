@@ -61,11 +61,13 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	var vf verificationFailure
 	aborted := verificationStatusAborted(payload.Status)
 	failed := !payload.Passed && !aborted
+	environmental := false
 	if failed {
 		vf = classifyFailureMessage(payload.CheckType, payload.ErrorMessage)
 		if payload.FailureClassification == nil {
 			payload.FailureClassification = vf.Classification
 		}
+		environmental = a.environmentalWithoutEscalation(workerID, vf, payload.StartedAt)
 	}
 	if payload.FailureDebug != nil && payload.FailureDebug.FailureClassification == nil && payload.FailureClassification != nil {
 		classification := *payload.FailureClassification
@@ -101,7 +103,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to record verification")
 		return
 	}
-	if !aborted {
+	if !aborted && !environmental {
 		if err := a.db.UpdateWorkerVerificationState(workerID, payload.Passed, payload.Summary); err != nil {
 			respondError(w, r, http.StatusInternalServerError, err, "failed to update worker state")
 			return
@@ -122,6 +124,11 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		if message == "" {
 			message = "verification aborted"
 		}
+	case failed && environmental:
+		eventType = "verification_failed_environmental"
+		if message == "" {
+			message = "verification failed (environmental provider blip)"
+		}
 	case failed:
 		eventType = "verification_failed"
 		if message == "" {
@@ -135,13 +142,15 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to record event")
 		return
 	}
-	if failed && workerBeforeUpdate != nil && workerBeforeUpdate.Status != model.WorkerDegraded && workerBeforeUpdate.Status != model.WorkerDormant {
+	if failed && !environmental && workerBeforeUpdate != nil && workerBeforeUpdate.Status != model.WorkerDegraded && workerBeforeUpdate.Status != model.WorkerDormant {
 		_ = a.db.RecordEvent(workerID, "first_failure", "Worker transitioned from healthy to failing", string(details))
 	}
 
 	if workerBeforeUpdate != nil && workerBeforeUpdate.Status == model.WorkerProbing {
 		if payload.Passed && !aborted {
 			_ = a.db.RecordEvent(workerID, "worker_probe_passed", "Worker probe verification passed", "")
+		} else if failed && environmental {
+			_ = a.db.RecordEvent(workerID, "worker_probe_environmental", "Worker probe hit a transient provider error; probe remains open", string(details))
 		} else if failed && a.manager != nil {
 			signature := vf.Signature
 			reason := fmt.Sprintf("worker probe failed with %s; returning to dormant state", signature)
@@ -160,7 +169,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 			a.metrics.observePlatformEvent(*worker, latestPlatformEvent(coalesceEventFeed(events)))
 		}
 		a.observeLatestDeploymentState(worker.Source)
-		if a.alerts != nil {
+		if a.alerts != nil && !environmental {
 			a.alerts.NotifyVerificationFailure(*worker, *verification)
 		}
 	}

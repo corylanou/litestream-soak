@@ -288,7 +288,7 @@ func comparisonOutcomeFailed(outcome DeploymentWorkerOutcome) bool {
 }
 
 func comparisonPassedWorkers(scorecard DeploymentScorecard) int {
-	return scorecard.PassedWorkers + scorecard.RampUpFailures
+	return scorecard.PassedWorkers + scorecard.RampUpFailures + scorecard.EnvironmentalFailures
 }
 
 func comparisonFailedWorkers(scorecard DeploymentScorecard) int {
@@ -296,7 +296,7 @@ func comparisonFailedWorkers(scorecard DeploymentScorecard) int {
 }
 
 func failureExcludedFromComparison(category string) bool {
-	return category == failureCategoryRampUp
+	return category == failureCategoryRampUp || category == failureCategoryEnvironmental
 }
 
 func comparisonOutcomeKey(outcome DeploymentWorkerOutcome) string {
@@ -426,10 +426,31 @@ func countDeploymentScorecardOutcome(scorecard *DeploymentScorecard, failureCoun
 }
 
 func deploymentFailureCategory(worker model.Worker, verification model.Verification, verifications []model.Verification) string {
+	policy := currentEnvironmentalFailurePolicy()
+	failure := classifyVerification(&verification)
+	if isTransientObjectStoreFailure(failure.Classification, policy) &&
+		!environmentalStreakEscalated(verificationsBefore(verifications, verification), verification.StartedAt, policy) {
+		return failureCategoryEnvironmental
+	}
 	if isDeploymentRampUpFailure(worker, verification, verifications) {
 		return failureCategoryRampUp
 	}
 	return failureCategoryActionable
+}
+
+// verificationsBefore returns the verifications that started before the given
+// one, newest first, matching what the ingest-time streak guard sees.
+func verificationsBefore(verifications []model.Verification, verification model.Verification) []model.Verification {
+	previous := make([]model.Verification, 0, len(verifications))
+	for _, candidate := range verifications {
+		if candidate.StartedAt.Before(verification.StartedAt) {
+			previous = append(previous, candidate)
+		}
+	}
+	sort.Slice(previous, func(i, j int) bool {
+		return previous[i].StartedAt.After(previous[j].StartedAt)
+	})
+	return previous
 }
 
 func isDeploymentRampUpFailure(worker model.Worker, verification model.Verification, verifications []model.Verification) bool {

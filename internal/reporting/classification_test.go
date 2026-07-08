@@ -277,3 +277,25 @@ func TestRedactObjectPrefix(t *testing.T) {
 		t.Fatalf("RedactObjectPrefix() = %q", got)
 	}
 }
+
+func TestClassifyVerificationFailureTransientBucketAndSlowdown(t *testing.T) {
+	t.Parallel()
+
+	noSuchBucket := `wait for sync: sync returned 500: {"error":"sync database: db sync: replica sync: list objects: operation error S3: ListObjectsV2, https response error StatusCode: 404, RequestID: 01H8, api error NoSuchBucket: The specified bucket does not exist"}`
+	classification := ClassifyVerificationFailure("integrity", noSuchBucket)
+	if classification.Stage != "sync" {
+		t.Fatalf("Stage = %q, want sync", classification.Stage)
+	}
+	if classification.Signature != "sync_s3_bucket_missing" {
+		t.Fatalf("Signature = %q, want sync_s3_bucket_missing", classification.Signature)
+	}
+	if classification.ObjectStore == nil || classification.ObjectStore.HTTPStatus != 404 || classification.ObjectStore.APICode != "NoSuchBucket" {
+		t.Fatalf("ObjectStore = %+v, want 404/NoSuchBucket", classification.ObjectStore)
+	}
+
+	slowdown := `restore failed: operation error S3: GetObject, https response error StatusCode: 503, api error SlowDown: Please reduce your request rate`
+	classification = ClassifyVerificationFailure("integrity", slowdown)
+	if classification.Signature != "restore_s3_slowdown" {
+		t.Fatalf("Signature = %q, want restore_s3_slowdown", classification.Signature)
+	}
+}

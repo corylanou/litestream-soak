@@ -60,6 +60,8 @@ func inferProbableSubsystem(stage, signature string) string {
 	switch {
 	case strings.Contains(text, "disk_capacity") || strings.Contains(text, "disk_full"):
 		return "Disk capacity / restore scratch headroom"
+	case strings.Contains(text, "s3_bucket_missing") || strings.Contains(text, "s3_slowdown"):
+		return "Object store provider (environmental)"
 	case strings.Contains(text, "s3_transport") || strings.Contains(text, "s3-transport"):
 		return "S3 transport"
 	case strings.Contains(text, "db_sync_executor") || strings.Contains(text, "db sync executor"):
@@ -95,6 +97,8 @@ func buildFailureClassificationContext(stats []model.VerificationStat) failureCl
 		environmentalSources:     make(map[string]map[string]struct{}),
 	}
 
+	policy := currentEnvironmentalFailurePolicy()
+	escalated := escalatedEnvironmentalStatIDs(stats, policy)
 	for _, stat := range stats {
 		verification := verificationFromStat(stat)
 		if !verification.Failed() {
@@ -102,10 +106,14 @@ func buildFailureClassificationContext(stats []model.VerificationStat) failureCl
 		}
 		failure := classifyFailureMessage(stat.CheckType, stat.ErrorMessage)
 		category := failureCategoryActionable
-		if failure.Signature == "s3_transport" && hasCorrelatedS3TransportFailure(stat, stats) {
+		switch {
+		case isTransientObjectStoreFailure(failure.Classification, policy) && !escalated[stat.ID]:
 			category = failureCategoryEnvironmental
 			ctx.addEnvironmentalSource(failure.Signature, stat.Source)
-		} else if isRampUpFailureStat(stat) {
+		case failure.Signature == "s3_transport" && hasCorrelatedS3TransportFailure(stat, stats):
+			category = failureCategoryEnvironmental
+			ctx.addEnvironmentalSource(failure.Signature, stat.Source)
+		case isRampUpFailureStat(stat):
 			category = failureCategoryRampUp
 		}
 		ctx.categoryByVerificationID[stat.ID] = category
@@ -131,6 +139,15 @@ func (ctx *failureClassificationContext) addEnvironmentalSource(signature, sourc
 		ctx.environmentalSources[signature] = make(map[string]struct{})
 	}
 	ctx.environmentalSources[signature][source] = struct{}{}
+}
+
+func (ctx failureClassificationContext) environmentalSignatures() []string {
+	signatures := make([]string, 0, len(ctx.environmentalSources))
+	for signature := range ctx.environmentalSources {
+		signatures = append(signatures, signature)
+	}
+	sort.Strings(signatures)
+	return signatures
 }
 
 func (ctx failureClassificationContext) environmentalSourceLabels(signature string) []string {

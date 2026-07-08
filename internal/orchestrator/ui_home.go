@@ -62,6 +62,39 @@ type homeChartData struct {
 
 const homeChartHours = 24
 
+// mergeStatsByID unions two stat windows (deduplicated by verification ID) so
+// the failure-classification context covers every stat the page evaluates —
+// including the 24-48h previous window used for pass-rate deltas.
+func mergeStatsByID(primary, extra []model.VerificationStat) []model.VerificationStat {
+	seen := make(map[int]bool, len(primary))
+	merged := make([]model.VerificationStat, 0, len(primary)+len(extra))
+	for _, stat := range primary {
+		seen[stat.ID] = true
+		merged = append(merged, stat)
+	}
+	for _, stat := range extra {
+		if seen[stat.ID] {
+			continue
+		}
+		merged = append(merged, stat)
+	}
+	return merged
+}
+
+// excludeEnvironmentalStats drops environmentally-categorized failures from
+// pass-rate math: provider weather should not read as a litestream regression.
+func excludeEnvironmentalStats(stats []model.VerificationStat, failureContext failureClassificationContext) []model.VerificationStat {
+	filtered := make([]model.VerificationStat, 0, len(stats))
+	for _, stat := range stats {
+		verification := model.Verification{Status: stat.Status, Passed: stat.Passed}
+		if verification.Failed() && failureContext.categoryForVerificationID(stat.ID) == failureCategoryEnvironmental {
+			continue
+		}
+		filtered = append(filtered, stat)
+	}
+	return filtered
+}
+
 func buildHomeKPIs(summary homeSummary, windowStats, previousStats []model.VerificationStat, rollout *DeploymentRolloutResponse, failureContext failureClassificationContext) homeKPIs {
 	kpis := homeKPIs{
 		TotalWorkers:       summary.TotalWorkers,
@@ -77,13 +110,13 @@ func buildHomeKPIs(summary homeSummary, windowStats, previousStats []model.Verif
 		kpis.FleetHealthPct = 100
 	}
 
-	rate, total := passRateSummary(windowStats)
+	rate, total := passRateSummary(excludeEnvironmentalStats(windowStats, failureContext))
 	kpis.Checks24h = total
 	if total > 0 {
 		kpis.PassRatePct = rate
 		kpis.HasPassRate = true
 	}
-	prevRate, prevTotal := passRateSummary(previousStats)
+	prevRate, prevTotal := passRateSummary(excludeEnvironmentalStats(previousStats, failureContext))
 	if total > 0 && prevTotal > 0 {
 		kpis.PassRateDelta = rate - prevRate
 		kpis.HasPassRateDelta = true
@@ -160,12 +193,21 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 		})
 	}
 
-	if sources := failureContext.environmentalSourceLabels("s3_transport"); len(sources) >= 2 {
-		items = append(items, attentionItem{
+	for _, signature := range failureContext.environmentalSignatures() {
+		sources := failureContext.environmentalSourceLabels(signature)
+		item := attentionItem{
 			Severity: "warn",
-			Title:    "S3 degraded across fleets",
-			Detail:   fmt.Sprintf("%s share s3_transport failures in the correlation window", strings.Join(sources, " and ")),
-		})
+			Title:    "Object store environment degraded",
+			Detail:   fmt.Sprintf("%s hit transient provider errors (%s); excluded from pass rate and comparisons, watching for escalation", strings.Join(sources, " and "), signature),
+		}
+		if signature == "s3_transport" {
+			if len(sources) < 2 {
+				continue
+			}
+			item.Title = "S3 degraded across fleets"
+			item.Detail = fmt.Sprintf("%s share s3_transport failures in the correlation window", strings.Join(sources, " and "))
+		}
+		items = append(items, item)
 	}
 
 	for index, cluster := range diagnosis.Clusters {

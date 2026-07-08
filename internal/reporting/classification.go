@@ -71,7 +71,7 @@ func InferFailureStage(checkType, errorMessage string) string {
 
 func ParseObjectStoreFailure(errorMessage string) *ObjectStoreFailure {
 	text := strings.ToLower(errorMessage)
-	if !strings.Contains(text, "operation error s3") && !strings.Contains(text, "listobjectsv2") && !strings.Contains(text, "getobject") && !strings.Contains(text, "requestcanceled") && !strings.Contains(text, "accessdenied") {
+	if !strings.Contains(text, "operation error s3") && !strings.Contains(text, "listobjectsv2") && !strings.Contains(text, "getobject") && !strings.Contains(text, "requestcanceled") && !strings.Contains(text, "accessdenied") && !strings.Contains(text, "nosuchbucket") && !strings.Contains(text, "slowdown") {
 		return nil
 	}
 
@@ -208,6 +208,10 @@ func objectStoreSignature(stage string, failure ObjectStoreFailure) string {
 	operation := strings.ToLower(failure.Operation)
 	apiCode := strings.ToLower(failure.APICode)
 	switch {
+	case apiCode == "nosuchbucket" || (operation == "listobjectsv2" && failure.HTTPStatus == 404):
+		return prefix + "_s3_bucket_missing"
+	case apiCode == "slowdown" || failure.HTTPStatus == 503:
+		return prefix + "_s3_slowdown"
 	case operation == "listobjectsv2" && (failure.HTTPStatus == 408 || apiCode == "requestcanceled"):
 		return prefix + "_s3_list_request_canceled"
 	case operation == "getobject" && (failure.HTTPStatus == 408 || apiCode == "requestcanceled"):

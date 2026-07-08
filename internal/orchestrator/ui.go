@@ -163,7 +163,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 	if err != nil {
 		return homePageData{}, err
 	}
-	failureContext := buildFailureClassificationContext(allWindowStats)
+	failureContext := buildFailureClassificationContext(mergeStatsByID(allWindowStats, sourceStats))
 	var mainStats []model.VerificationStat
 	if requestedSource != "main" {
 		mainStats, err = a.db.ListVerificationStatsSince("main", chartFrom)
@@ -334,7 +334,9 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 
 	attention := buildAttentionItems(requestedSource, diagnosis, summary, workerCards, rollout, releaseComparison, comparisonPromptURL, comparisonJSONURL, failureContext)
 	kpis := buildHomeKPIs(summary, windowStats, previousStats, rollout, failureContext)
-	chartData := buildHomeChartData(requestedSource, chartFrom, filterStatsSince(sourceStats, chartFrom), mainStats)
+	chartData := buildHomeChartData(requestedSource, chartFrom,
+		excludeEnvironmentalStats(filterStatsSince(sourceStats, chartFrom), failureContext),
+		excludeEnvironmentalStats(mainStats, failureContext))
 
 	return homePageData{
 		GeneratedAt:              now,
