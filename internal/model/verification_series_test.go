@@ -171,10 +171,10 @@ func TestListVerificationStatsSinceComputesHasPriorPass(t *testing.T) {
 	}
 
 	want := map[key]bool{
-		{prior.ID, cutoff.Add(time.Hour)}:        true,  // qualifying pass before the window
-		{fresh.ID, cutoff.Add(time.Hour)}:        false, // first ever pass
-		{fresh.ID, cutoff.Add(2 * time.Hour)}:    true,  // prior in-window pass
-		{abortedOnly.ID, cutoff.Add(time.Hour)}:  false, // only prior "pass" was aborted
+		{prior.ID, cutoff.Add(time.Hour)}:       true,  // qualifying pass before the window
+		{fresh.ID, cutoff.Add(time.Hour)}:       false, // first ever pass
+		{fresh.ID, cutoff.Add(2 * time.Hour)}:   true,  // prior in-window pass
+		{abortedOnly.ID, cutoff.Add(time.Hour)}: false, // only prior "pass" was aborted
 	}
 	for k, expected := range want {
 		actual, ok := got[k]
