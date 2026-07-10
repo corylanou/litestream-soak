@@ -291,11 +291,8 @@ func TestConfigFromEnvReadsManyDBProfiles(t *testing.T) {
 			if cfg.ConfigMode != tc.configMode {
 				t.Fatalf("ConfigMode = %q, want %q", cfg.ConfigMode, tc.configMode)
 			}
-			if !cfg.S3FaultProxyEnabled {
-				t.Fatal("S3FaultProxyEnabled = false, want true")
-			}
-			if cfg.S3FaultProxyMode != "observe" {
-				t.Fatalf("S3FaultProxyMode = %q, want observe", cfg.S3FaultProxyMode)
+			if cfg.S3FaultProxyEnabled {
+				t.Fatal("S3FaultProxyEnabled = true, want false by default until the proxy re-signs requests (issue #146)")
 			}
 			if cfg.S3FaultProxyFailFirstAttempts != 0 {
 				t.Fatalf("S3FaultProxyFailFirstAttempts = %d, want 0", cfg.S3FaultProxyFailFirstAttempts)
@@ -483,5 +480,22 @@ func TestConfigFromEnvRejectsNegativeTruncatePageN(t *testing.T) {
 
 	if _, err := ConfigFromEnv(); err == nil {
 		t.Fatal("ConfigFromEnv() error = nil, want error for negative TRUNCATE_PAGE_N")
+	}
+}
+
+func TestObserveProxyOptInViaEnv(t *testing.T) {
+	t.Setenv("REPLICA_TYPE", "s3")
+	t.Setenv("S3_BUCKET", "bucket")
+	t.Setenv("S3_OBSERVE_PROXY_ENABLED", "true")
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v", err)
+	}
+	if !cfg.S3FaultProxyEnabled {
+		t.Fatal("S3FaultProxyEnabled = false, want true when S3_OBSERVE_PROXY_ENABLED is set")
+	}
+	if cfg.S3FaultProxyMode != "observe" {
+		t.Fatalf("S3FaultProxyMode = %q, want observe", cfg.S3FaultProxyMode)
 	}
 }

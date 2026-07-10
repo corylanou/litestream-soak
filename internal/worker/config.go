@@ -236,8 +236,9 @@ func applyManyDBProfileBase(c *Config, numDatabases, workers int, configMode str
 	c.ActivePercent = 2
 	c.ConfigMode = configMode
 	c.VerifySampleSize = 5
-	c.S3FaultProxyEnabled = true
-	c.S3FaultProxyMode = "observe"
+	// The S3 observe proxy is opt-in until it re-signs forwarded requests:
+	// it currently forwards litestream's Host header, which Tigris resolves
+	// as bucket "127.0.0.1" (NoSuchBucket) — see issue #146.
 	c.S3FaultProxyFailFirstAttempts = 0
 }
 
@@ -559,6 +560,10 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if parseBoolEnv(os.Getenv("S3_FAULT_PROXY_ENABLED")) {
 		c.S3FaultProxyEnabled = true
+	}
+	if parseBoolEnv(os.Getenv("S3_OBSERVE_PROXY_ENABLED")) {
+		c.S3FaultProxyEnabled = true
+		c.S3FaultProxyMode = "observe"
 	}
 	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_TARGET_ENDPOINT")); v != "" {
 		c.S3FaultProxyTargetEndpoint = v
