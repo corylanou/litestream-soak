@@ -193,7 +193,7 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 		})
 	}
 
-	for _, signature := range failureContext.environmentalSignatures() {
+	for _, signature := range failureContext.recentEnvironmentalSignatures(time.Now().UTC(), s3CorrelationWindow) {
 		sources := failureContext.environmentalSourceLabels(signature)
 		item := attentionItem{
 			Severity: "warn",

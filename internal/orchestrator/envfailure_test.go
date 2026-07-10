@@ -299,3 +299,27 @@ func TestHandleVerificationEscalatesAcrossAbortStarvedHistory(t *testing.T) {
 		t.Fatalf("worker status = %q, want degraded — interleaved aborts must not starve the escalation guard", worker.Status)
 	}
 }
+
+func TestRecentEnvironmentalSignaturesAgeOut(t *testing.T) {
+	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 5, EscalateAfterDuration: 12 * time.Hour})
+
+	now := time.Now().UTC()
+	stats := []model.VerificationStat{
+		{ID: 1, WorkerID: "w-old", Source: "main", Status: "failed", CheckType: "integrity", StartedAt: now.Add(-9 * time.Hour), ErrorMessage: tigrisListNoSuchBucket, HasPriorPass: true},
+		{ID: 2, WorkerID: "w-new", Source: "pr-9", Status: "failed", CheckType: "integrity", StartedAt: now.Add(-30 * time.Minute), ErrorMessage: tigrisListNoSuchBucket, HasPriorPass: true},
+	}
+	ctx := buildFailureClassificationContext(stats)
+
+	recent := ctx.recentEnvironmentalSignatures(now, 4*time.Hour)
+	if len(recent) != 1 || recent[0] != "sync_s3_bucket_missing" {
+		t.Fatalf("recent signatures = %v, want just the fresh one", recent)
+	}
+
+	staleOnly := buildFailureClassificationContext(stats[:1])
+	if got := staleOnly.recentEnvironmentalSignatures(now, 4*time.Hour); len(got) != 0 {
+		t.Fatalf("stale-only signatures = %v, want none (banner must age out)", got)
+	}
+	if got := staleOnly.categoryForVerificationID(1); got != failureCategoryEnvironmental {
+		t.Fatalf("stale env failure category = %q, want environmental (KPI tiles still classify)", got)
+	}
+}

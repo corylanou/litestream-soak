@@ -88,13 +88,13 @@ func activeFailure(verification *model.Verification) bool {
 
 type failureClassificationContext struct {
 	categoryByVerificationID map[int]string
-	environmentalSources     map[string]map[string]struct{}
+	environmentalSources     map[string]map[string]time.Time
 }
 
 func buildFailureClassificationContext(stats []model.VerificationStat) failureClassificationContext {
 	ctx := failureClassificationContext{
 		categoryByVerificationID: make(map[int]string),
-		environmentalSources:     make(map[string]map[string]struct{}),
+		environmentalSources:     make(map[string]map[string]time.Time),
 	}
 
 	policy := currentEnvironmentalFailurePolicy()
@@ -109,10 +109,10 @@ func buildFailureClassificationContext(stats []model.VerificationStat) failureCl
 		switch {
 		case isTransientObjectStoreFailure(failure.Classification, policy) && !escalated[stat.ID]:
 			category = failureCategoryEnvironmental
-			ctx.addEnvironmentalSource(failure.Signature, stat.Source)
+			ctx.addEnvironmentalSource(failure.Signature, stat.Source, stat.StartedAt)
 		case failure.Signature == "s3_transport" && hasCorrelatedS3TransportFailure(stat, stats):
 			category = failureCategoryEnvironmental
-			ctx.addEnvironmentalSource(failure.Signature, stat.Source)
+			ctx.addEnvironmentalSource(failure.Signature, stat.Source, stat.StartedAt)
 		case isRampUpFailureStat(stat):
 			category = failureCategoryRampUp
 		}
@@ -129,22 +129,33 @@ func (ctx failureClassificationContext) categoryForVerificationID(id int) string
 	return firstNonEmpty(ctx.categoryByVerificationID[id], failureCategoryActionable)
 }
 
-func (ctx *failureClassificationContext) addEnvironmentalSource(signature, source string) {
+func (ctx *failureClassificationContext) addEnvironmentalSource(signature, source string, occurredAt time.Time) {
 	signature = strings.TrimSpace(signature)
 	source = strings.TrimSpace(source)
 	if signature == "" || source == "" {
 		return
 	}
 	if ctx.environmentalSources[signature] == nil {
-		ctx.environmentalSources[signature] = make(map[string]struct{})
+		ctx.environmentalSources[signature] = make(map[string]time.Time)
 	}
-	ctx.environmentalSources[signature][source] = struct{}{}
+	if occurredAt.After(ctx.environmentalSources[signature][source]) {
+		ctx.environmentalSources[signature][source] = occurredAt
+	}
 }
 
-func (ctx failureClassificationContext) environmentalSignatures() []string {
+// recentEnvironmentalSignatures lists signatures whose newest environmental
+// failure landed within the window: the attention banner reports live
+// provider weather, not incidents that already blew over (those age out of
+// the KPI tiles on their own).
+func (ctx failureClassificationContext) recentEnvironmentalSignatures(now time.Time, window time.Duration) []string {
 	signatures := make([]string, 0, len(ctx.environmentalSources))
-	for signature := range ctx.environmentalSources {
-		signatures = append(signatures, signature)
+	for signature, sources := range ctx.environmentalSources {
+		for _, occurredAt := range sources {
+			if now.Sub(occurredAt) <= window {
+				signatures = append(signatures, signature)
+				break
+			}
+		}
 	}
 	sort.Strings(signatures)
 	return signatures
