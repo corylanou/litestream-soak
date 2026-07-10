@@ -386,6 +386,14 @@ func manyDB1000FleetEnabled() bool {
 }
 
 func withManyDBObserveProxy(workers []DesiredWorker) []DesiredWorker {
+	// Opt-in until the proxy re-signs forwarded requests: it currently
+	// forwards litestream's Host header, which Tigris resolves as bucket
+	// "127.0.0.1" (NoSuchBucket) — see issue #146. This is the fleet-spec
+	// twin of the worker-profile gate from #147; fleet-created workers take
+	// their workload config from here, not from worker profile defaults.
+	if !envFlagEnabled("SOAK_ENABLE_S3_OBSERVE_PROXY") {
+		return workers
+	}
 	for i := range workers {
 		workers[i].Workload.S3FaultProxyEnabled = true
 		workers[i].Workload.S3FaultProxyMode = "observe"
