@@ -100,6 +100,11 @@ type Config struct {
 	L3CompactionInterval     time.Duration
 	L0Retention              time.Duration
 	L0RetentionCheckInterval time.Duration
+	TruncatePageN            *int
+
+	// Pinned reader: long-lived read transactions that pin the WAL
+	PinnedReaderHold  time.Duration
+	PinnedReaderPause time.Duration
 
 	// Replay
 	LoadMode       string  // "synthetic", "replay", "both"
@@ -672,6 +677,36 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.L0RetentionCheckInterval = d
 	}
+	if v := strings.TrimSpace(os.Getenv("TRUNCATE_PAGE_N")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid TRUNCATE_PAGE_N: %w", err)
+		}
+		if n < 0 {
+			return c, fmt.Errorf("invalid TRUNCATE_PAGE_N: must be non-negative")
+		}
+		c.TruncatePageN = &n
+	}
+	if v := os.Getenv("PINNED_READER_HOLD"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid PINNED_READER_HOLD: %w", err)
+		}
+		if d < 0 {
+			return c, fmt.Errorf("invalid PINNED_READER_HOLD: must be non-negative")
+		}
+		c.PinnedReaderHold = d
+	}
+	if v := os.Getenv("PINNED_READER_PAUSE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid PINNED_READER_PAUSE: %w", err)
+		}
+		if d < 0 {
+			return c, fmt.Errorf("invalid PINNED_READER_PAUSE: must be non-negative")
+		}
+		c.PinnedReaderPause = d
+	}
 	levelsSet := 0
 	for _, d := range []time.Duration{c.L1CompactionInterval, c.L2CompactionInterval, c.L3CompactionInterval} {
 		if d != 0 {
@@ -937,6 +972,16 @@ func (c Config) WorkloadConfig() workload.Config {
 	}
 	if c.L0RetentionCheckInterval > 0 {
 		cfg.L0RetentionCheckInterval = c.L0RetentionCheckInterval.String()
+	}
+	if c.TruncatePageN != nil {
+		n := *c.TruncatePageN
+		cfg.TruncatePageN = &n
+	}
+	if c.PinnedReaderHold > 0 {
+		cfg.PinnedReaderHold = c.PinnedReaderHold.String()
+	}
+	if c.PinnedReaderPause > 0 {
+		cfg.PinnedReaderPause = c.PinnedReaderPause.String()
 	}
 	if c.ManyDBEnabled() {
 		cfg.ActiveRotateInterval = c.manyDBActiveRotateInterval().String()

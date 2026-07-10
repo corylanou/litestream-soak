@@ -56,6 +56,9 @@ type Config struct {
 	VerifySampleSize                          int     `json:"verify_sample_size,omitempty"`
 	VerifyChangedLimit                        int     `json:"verify_changed_limit,omitempty"`
 	ReplicationLagThreshold                   uint64  `json:"replication_lag_threshold,omitempty"`
+	TruncatePageN                             *int    `json:"truncate_page_n,omitempty"`
+	PinnedReaderHold                          string  `json:"pinned_reader_hold,omitempty"`
+	PinnedReaderPause                         string  `json:"pinned_reader_pause,omitempty"`
 	VolumeSizeGB                              int     `json:"volume_size_gb,omitempty"`
 	MemoryMB                                  int     `json:"memory_mb,omitempty"`
 	CPUs                                      int     `json:"cpus,omitempty"`

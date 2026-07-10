@@ -81,6 +81,18 @@ var profileCharters = map[string]ProfileCharter{
 		GuardsAgainst: "Regressions in handling ordinary transactional workloads with relational structure.",
 		WhyItMatters:  "Mirrors the most common real Litestream use case: a transactional application database.",
 	},
+	"overload-truncate0": {
+		Synopsis:      "Sustained overload with the WAL truncate threshold disabled: 8 writers at 600 writes/s of 2KB rows with truncate-page-n: 0.",
+		Stresses:      "WAL growth bounding and backlog drain when writes outpace replication and the operator has disabled the explicit truncate threshold.",
+		GuardsAgainst: "Unbounded WAL and local L0 backlog growth when chunked sync falls behind and no configured truncate threshold exists as a backstop.",
+		WhyItMatters:  "Guards the litestream#1343 and litestream#1331 fixes: a zero threshold must fall back to a default backstop and limited sync batches must re-loop until drained, or sustained overload fills the disk.",
+	},
+	"pinned-reader": {
+		Synopsis:      "Steady writes at 200 writes/s while a companion reader repeatedly holds a read transaction open for 4 minutes at a time.",
+		Stresses:      "Checkpoint and truncate behavior while a long-lived read transaction pins the WAL above the checkpoint watermark.",
+		GuardsAgainst: "Checkpoint starvation, WAL runaway, and wasted passive-checkpoint churn while readers pin the WAL for minutes.",
+		WhyItMatters:  "Guards the litestream#1339 fix and the SnapshotReader lock-release contract: long-lived readers are common in reporting workloads and must not degrade replication or stall writers.",
+	},
 	"many-dbs-100-list": {
 		Synopsis:      "Replicates 100 separate SQLite databases, each declared explicitly in the config (list mode).",
 		Stresses:      "Managing many simultaneous replication streams enumerated one by one.",

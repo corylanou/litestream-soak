@@ -85,3 +85,53 @@ func TestWriteLitestreamConfigRendersCompactionKnobs(t *testing.T) {
 		t.Fatalf("config has %d level interval entries, want 3:\n%s", got, config)
 	}
 }
+
+func TestWriteLitestreamConfigRendersTruncatePageN(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.ReplicaType = "s3"
+	cfg.S3Bucket = "bucket"
+	cfg.S3Path = "soak/worker-1"
+	zero := 0
+	cfg.TruncatePageN = &zero
+
+	runner := NewRunner(cfg)
+	if err := runner.writeLitestreamConfig(); err != nil {
+		t.Fatalf("writeLitestreamConfig() error = %v", err)
+	}
+
+	body, err := os.ReadFile(cfg.ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(body), "truncate-page-n: 0") {
+		t.Fatalf("config missing truncate-page-n: 0:\n%s", string(body))
+	}
+}
+
+func TestWriteLitestreamConfigOmitsTruncatePageNByDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.ReplicaType = "s3"
+	cfg.S3Bucket = "bucket"
+	cfg.S3Path = "soak/worker-1"
+
+	runner := NewRunner(cfg)
+	if err := runner.writeLitestreamConfig(); err != nil {
+		t.Fatalf("writeLitestreamConfig() error = %v", err)
+	}
+
+	body, err := os.ReadFile(cfg.ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if strings.Contains(string(body), "truncate-page-n") {
+		t.Fatalf("config contains truncate-page-n when unset:\n%s", string(body))
+	}
+}
