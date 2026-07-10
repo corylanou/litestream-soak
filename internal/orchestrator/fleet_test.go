@@ -324,11 +324,8 @@ func TestDefaultMainFleetIncludesManyDBProfilesWhenEnabled(t *testing.T) {
 	}
 
 	for profile, worker := range many {
-		if !worker.Workload.S3FaultProxyEnabled {
-			t.Fatalf("%s S3FaultProxyEnabled = false, want true", profile)
-		}
-		if worker.Workload.S3FaultProxyMode != "observe" {
-			t.Fatalf("%s S3FaultProxyMode = %q, want observe", profile, worker.Workload.S3FaultProxyMode)
+		if worker.Workload.S3FaultProxyEnabled {
+			t.Fatalf("%s S3FaultProxyEnabled = true, want false by default until the proxy re-signs requests (issue #146)", profile)
 		}
 	}
 
@@ -421,5 +418,19 @@ func TestResolveWorkerVolumeSizeUsesDefaultFleetForRollouts(t *testing.T) {
 	}
 	if got := resolveWorkerVolumeSize(worker, normalizeWorkload(parsedCfg)); got != 100 {
 		t.Fatalf("resolveWorkerVolumeSize() = %d, want 100", got)
+	}
+}
+
+func TestManyDBObserveProxyOptInViaEnv(t *testing.T) {
+	t.Setenv("SOAK_ENABLE_MANY_DB_FLEET", "true")
+	t.Setenv("SOAK_ENABLE_S3_OBSERVE_PROXY", "true")
+
+	for _, worker := range DefaultMainFleet().Workers {
+		if !strings.HasPrefix(worker.ProfileName, "many-dbs-") {
+			continue
+		}
+		if !worker.Workload.S3FaultProxyEnabled || worker.Workload.S3FaultProxyMode != "observe" {
+			t.Fatalf("%s proxy = %v/%q, want enabled observe when SOAK_ENABLE_S3_OBSERVE_PROXY set", worker.ProfileName, worker.Workload.S3FaultProxyEnabled, worker.Workload.S3FaultProxyMode)
+		}
 	}
 }
