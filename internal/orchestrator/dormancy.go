@@ -220,6 +220,15 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	if workloadCfg.ReplicationLagThreshold > 0 {
 		env["REPLICATION_LAG_THRESHOLD"] = fmt.Sprintf("%d", workloadCfg.ReplicationLagThreshold)
 	}
+	if workloadCfg.TruncatePageN != nil {
+		env["TRUNCATE_PAGE_N"] = fmt.Sprintf("%d", *workloadCfg.TruncatePageN)
+	}
+	if strings.TrimSpace(workloadCfg.PinnedReaderHold) != "" {
+		env["PINNED_READER_HOLD"] = workloadCfg.PinnedReaderHold
+	}
+	if strings.TrimSpace(workloadCfg.PinnedReaderPause) != "" {
+		env["PINNED_READER_PAUSE"] = workloadCfg.PinnedReaderPause
+	}
 	if workloadCfg.ReplayDataset != "" {
 		env["REPLAY_DATASET"] = workloadCfg.ReplayDataset
 	}

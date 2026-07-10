@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -66,6 +67,9 @@ dbs:
 {{- end}}
 {{- if .Watch}}
     watch: true
+{{- end}}
+{{- if .TruncatePageN}}
+    truncate-page-n: {{.TruncatePageN}}
 {{- end}}
     snapshot:
       interval: {{.SnapshotInterval}}
@@ -127,6 +131,7 @@ type litestreamConfigDB struct {
 	Dir              string
 	Pattern          string
 	Watch            bool
+	TruncatePageN    string
 	SnapshotInterval string
 	Replica          litestreamConfigReplica
 }
@@ -158,9 +163,15 @@ func (m *litestreamManager) litestreamConfigData() litestreamConfigData {
 		data.L0RetentionCheckInterval = m.cfg.L0RetentionCheckInterval.String()
 	}
 
+	truncatePageN := ""
+	if m.cfg.TruncatePageN != nil {
+		truncatePageN = strconv.Itoa(*m.cfg.TruncatePageN)
+	}
+
 	if !m.cfg.ManyDBEnabled() {
 		data.Databases = []litestreamConfigDB{{
 			Path:             m.cfg.DBPath,
+			TruncatePageN:    truncatePageN,
 			SnapshotInterval: m.cfg.SnapshotInterval.String(),
 			Replica:          m.litestreamConfigReplica(m.cfg.DBPath),
 		}}
@@ -172,6 +183,7 @@ func (m *litestreamManager) litestreamConfigData() litestreamConfigData {
 			Dir:              m.cfg.ManyDBDir(),
 			Pattern:          "*.db",
 			Watch:            true,
+			TruncatePageN:    truncatePageN,
 			SnapshotInterval: m.cfg.SnapshotInterval.String(),
 			Replica:          m.litestreamConfigReplica(""),
 		}}
@@ -183,6 +195,7 @@ func (m *litestreamManager) litestreamConfigData() litestreamConfigData {
 	for _, dbPath := range paths {
 		dbs = append(dbs, litestreamConfigDB{
 			Path:             dbPath,
+			TruncatePageN:    truncatePageN,
 			SnapshotInterval: m.cfg.SnapshotInterval.String(),
 			Replica:          m.litestreamConfigReplica(dbPath),
 		})

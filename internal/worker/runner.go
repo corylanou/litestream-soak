@@ -122,6 +122,13 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 
+	var pinned *pinnedReader
+	if r.cfg.PinnedReaderHold > 0 && !r.cfg.ManyDBEnabled() {
+		pinned = newPinnedReader(r.cfg.DBPath, r.cfg.PinnedReaderHold, r.cfg.PinnedReaderPause)
+		pinned.Start(runCtx)
+		defer pinned.Stop()
+	}
+
 	var pausers []loadPauser
 	if r.loadSup != nil {
 		pausers = append(pausers, r.loadSup)
@@ -131,6 +138,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	if r.manyDBLoad != nil {
 		pausers = append(pausers, r.manyDBLoad)
+	}
+	if pinned != nil {
+		pausers = append(pausers, pinned)
 	}
 	r.verifier = NewVerifier(r.cfg, pausers...)
 	r.verifier.SetStartHook(r.sendVerificationStarted)

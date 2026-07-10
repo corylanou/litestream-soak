@@ -305,6 +305,61 @@ func DefaultMainFleet() FleetSpec {
 				CPUs:             1,
 			},
 		},
+		{
+			WorkerID:     "worker-main-overload-truncate0",
+			Name:         "worker-main-overload-truncate0",
+			Source:       "main",
+			GitSHA:       "main",
+			ProfileName:  "overload-truncate0",
+			Region:       "ord",
+			VolumeSizeGB: 100,
+			Workload: workload.Config{
+				LoadMode:         "synthetic",
+				WriteRate:        600,
+				Pattern:          "constant",
+				PayloadSize:      2048,
+				ReadRatio:        0.1,
+				Workers:          8,
+				InitialSize:      "50MB",
+				VerifyInterval:   "30m",
+				VerifyType:       "integrity",
+				SnapshotInterval: "10m",
+				SyncInterval:     "1s",
+				S3PartSize:       "16MB",
+				S3Concurrency:    8,
+				TruncatePageN:    intPtr(0),
+				VolumeSizeGB:     100,
+				MemoryMB:         2048,
+				CPUs:             2,
+			},
+		},
+		{
+			WorkerID:     "worker-main-pinned-reader",
+			Name:         "worker-main-pinned-reader",
+			Source:       "main",
+			GitSHA:       "main",
+			ProfileName:  "pinned-reader",
+			Region:       "ord",
+			VolumeSizeGB: 100,
+			Workload: workload.Config{
+				LoadMode:          "synthetic",
+				WriteRate:         200,
+				Pattern:           "constant",
+				PayloadSize:       2048,
+				ReadRatio:         0.1,
+				Workers:           4,
+				InitialSize:       "20MB",
+				VerifyInterval:    "30m",
+				VerifyType:        "integrity",
+				SnapshotInterval:  "10m",
+				SyncInterval:      "1s",
+				PinnedReaderHold:  "4m",
+				PinnedReaderPause: "45s",
+				VolumeSizeGB:      100,
+				MemoryMB:          2048,
+				CPUs:              2,
+			},
+		},
 	}
 	if manyDBFleetEnabled() {
 		workers = append(workers, manyDB100FleetWorkers()...)
@@ -707,6 +762,10 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func intPtr(n int) *int {
+	return &n
 }
 
 func supportsDefaultFleetSource(source string) bool {

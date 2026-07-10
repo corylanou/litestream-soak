@@ -445,3 +445,43 @@ func TestConfigFromEnvNormalizesObserveModeFaultKnobs(t *testing.T) {
 		t.Fatal("S3FaultProxyRequireObservedSourceRangeGet = true, want false in observe mode")
 	}
 }
+
+func TestConfigFromEnvReadsTruncatePageNAndPinnedReader(t *testing.T) {
+	t.Setenv("REPLICA_TYPE", "s3")
+	t.Setenv("S3_BUCKET", "bucket")
+	t.Setenv("TRUNCATE_PAGE_N", "0")
+	t.Setenv("PINNED_READER_HOLD", "4m")
+	t.Setenv("PINNED_READER_PAUSE", "45s")
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v", err)
+	}
+	if cfg.TruncatePageN == nil || *cfg.TruncatePageN != 0 {
+		t.Fatalf("TruncatePageN = %v, want pointer to 0", cfg.TruncatePageN)
+	}
+	if got, want := cfg.PinnedReaderHold, 4*time.Minute; got != want {
+		t.Fatalf("PinnedReaderHold = %v, want %v", got, want)
+	}
+	if got, want := cfg.PinnedReaderPause, 45*time.Second; got != want {
+		t.Fatalf("PinnedReaderPause = %v, want %v", got, want)
+	}
+
+	wl := cfg.WorkloadConfig()
+	if wl.TruncatePageN == nil || *wl.TruncatePageN != 0 {
+		t.Fatalf("WorkloadConfig().TruncatePageN = %v, want pointer to 0", wl.TruncatePageN)
+	}
+	if wl.PinnedReaderHold != "4m0s" || wl.PinnedReaderPause != "45s" {
+		t.Fatalf("WorkloadConfig() pinned reader = %q/%q, want 4m0s/45s", wl.PinnedReaderHold, wl.PinnedReaderPause)
+	}
+}
+
+func TestConfigFromEnvRejectsNegativeTruncatePageN(t *testing.T) {
+	t.Setenv("REPLICA_TYPE", "s3")
+	t.Setenv("S3_BUCKET", "bucket")
+	t.Setenv("TRUNCATE_PAGE_N", "-1")
+
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Fatal("ConfigFromEnv() error = nil, want error for negative TRUNCATE_PAGE_N")
+	}
+}
