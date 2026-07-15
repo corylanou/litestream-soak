@@ -19,6 +19,7 @@ func TestConfigFromEnvRejectsUnsafeRuntimeValues(t *testing.T) {
 		{key: "SNAPSHOT_INTERVAL", value: "0s"},
 		{key: "SYNC_INTERVAL", value: "-1s"},
 		{key: "REPLAY_SPEED", value: "0"},
+		{key: "LITESTREAM_S3_CONCURRENCY", value: "8garbage"},
 	}
 
 	for _, tt := range tests {

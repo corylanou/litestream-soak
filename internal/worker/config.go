@@ -574,12 +574,14 @@ func ConfigFromEnv() (Config, error) {
 		c.S3PartSize = v
 	}
 	if v := os.Getenv("LITESTREAM_S3_CONCURRENCY"); v != "" {
-		if _, err := fmt.Sscanf(v, "%d", &c.S3Concurrency); err != nil {
+		n, err := strconv.Atoi(v)
+		if err != nil {
 			return c, fmt.Errorf("invalid LITESTREAM_S3_CONCURRENCY: %w", err)
 		}
-		if c.S3Concurrency <= 0 {
+		if n <= 0 {
 			return c, fmt.Errorf("invalid LITESTREAM_S3_CONCURRENCY: must be positive")
 		}
+		c.S3Concurrency = n
 	}
 	if parseBoolEnv(os.Getenv("S3_FAULT_PROXY_ENABLED")) {
 		c.S3FaultProxyEnabled = true
