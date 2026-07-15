@@ -374,27 +374,47 @@ func ConfigFromEnv() (Config, error) {
 	}
 
 	if v := os.Getenv("WRITE_RATE"); v != "" {
-		if _, err := fmt.Sscanf(v, "%d", &c.WriteRate); err != nil {
+		n, err := strconv.Atoi(v)
+		if err != nil {
 			return c, fmt.Errorf("invalid WRITE_RATE: %w", err)
 		}
+		if n < 0 {
+			return c, fmt.Errorf("invalid WRITE_RATE: must be non-negative")
+		}
+		c.WriteRate = n
 	}
 	if v := os.Getenv("PATTERN"); v != "" {
 		c.Pattern = v
 	}
 	if v := os.Getenv("PAYLOAD_SIZE"); v != "" {
-		if _, err := fmt.Sscanf(v, "%d", &c.PayloadSize); err != nil {
+		n, err := strconv.Atoi(v)
+		if err != nil {
 			return c, fmt.Errorf("invalid PAYLOAD_SIZE: %w", err)
 		}
+		if n <= 0 {
+			return c, fmt.Errorf("invalid PAYLOAD_SIZE: must be positive")
+		}
+		c.PayloadSize = n
 	}
 	if v := os.Getenv("READ_RATIO"); v != "" {
-		if _, err := fmt.Sscanf(v, "%f", &c.ReadRatio); err != nil {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil {
 			return c, fmt.Errorf("invalid READ_RATIO: %w", err)
 		}
+		if math.IsNaN(n) || n < 0 || n > 1 {
+			return c, fmt.Errorf("invalid READ_RATIO: must be between 0 and 1")
+		}
+		c.ReadRatio = n
 	}
 	if v := os.Getenv("LOAD_WORKERS"); v != "" {
-		if _, err := fmt.Sscanf(v, "%d", &c.Workers); err != nil {
+		n, err := strconv.Atoi(v)
+		if err != nil {
 			return c, fmt.Errorf("invalid LOAD_WORKERS: %w", err)
 		}
+		if n <= 0 {
+			return c, fmt.Errorf("invalid LOAD_WORKERS: must be positive")
+		}
+		c.Workers = n
 	}
 	if v := os.Getenv("INITIAL_SIZE"); v != "" {
 		c.InitialSize = v
@@ -471,6 +491,9 @@ func ConfigFromEnv() (Config, error) {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid VERIFY_INTERVAL: %w", err)
+		}
+		if d <= 0 {
+			return c, fmt.Errorf("invalid VERIFY_INTERVAL: must be positive")
 		}
 		c.VerifyInterval = d
 	}
@@ -638,12 +661,18 @@ func ConfigFromEnv() (Config, error) {
 		if err != nil {
 			return c, fmt.Errorf("invalid SNAPSHOT_INTERVAL: %w", err)
 		}
+		if d <= 0 {
+			return c, fmt.Errorf("invalid SNAPSHOT_INTERVAL: must be positive")
+		}
 		c.SnapshotInterval = d
 	}
 	if v := os.Getenv("SYNC_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid SYNC_INTERVAL: %w", err)
+		}
+		if d <= 0 {
+			return c, fmt.Errorf("invalid SYNC_INTERVAL: must be positive")
 		}
 		c.SyncInterval = d
 	}
@@ -735,9 +764,14 @@ func ConfigFromEnv() (Config, error) {
 		c.ReplayDataURL = v
 	}
 	if v := os.Getenv("REPLAY_SPEED"); v != "" {
-		if _, err := fmt.Sscanf(v, "%f", &c.ReplaySpeed); err != nil {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil {
 			return c, fmt.Errorf("invalid REPLAY_SPEED: %w", err)
 		}
+		if math.IsNaN(n) || math.IsInf(n, 0) || n <= 0 {
+			return c, fmt.Errorf("invalid REPLAY_SPEED: must be positive and finite")
+		}
+		c.ReplaySpeed = n
 	}
 	if v := os.Getenv("REPLAY_LOOP"); v == "false" || v == "0" {
 		c.ReplayLoop = false
