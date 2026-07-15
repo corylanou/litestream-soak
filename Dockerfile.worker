@@ -1,11 +1,11 @@
 ARG LITESTREAM_SHA=main
 
 # Stage 1: Build litestream + litestream-test from source
-FROM golang:1.25@sha256:fb6b5fe6aca5fb55b7238c2fadaac64bd955ceeb6f305cb0ac3fd28b377e4415 AS litestream-builder
+FROM golang:1.25@sha256:9669c2ed28435af1b8989acb9fd5235346a912016cc8b152b694a9a91dced0a6 AS litestream-builder
 ARG LITESTREAM_SHA
 WORKDIR /src/litestream
 RUN git clone https://github.com/benbjohnson/litestream.git . && \
-    git checkout ${LITESTREAM_SHA} && \
+    git checkout -- "${LITESTREAM_SHA}" && \
     git rev-parse HEAD >/tmp/litestream.sha
 RUN go build \
     -ldflags "-s -w -X 'main.Version=${LITESTREAM_SHA}'" \
@@ -16,7 +16,7 @@ RUN CGO_CFLAGS="-DSQLITE_DEFAULT_WAL_AUTOCHECKPOINT=0" go build \
     -o /usr/local/bin/litestream-test ./cmd/litestream-test
 
 # Stage 2: Build soakworker
-FROM golang:1.25@sha256:fb6b5fe6aca5fb55b7238c2fadaac64bd955ceeb6f305cb0ac3fd28b377e4415 AS soakworker-builder
+FROM golang:1.25@sha256:9669c2ed28435af1b8989acb9fd5235346a912016cc8b152b694a9a91dced0a6 AS soakworker-builder
 WORKDIR /src/soak
 COPY go.mod go.sum ./
 RUN go mod download

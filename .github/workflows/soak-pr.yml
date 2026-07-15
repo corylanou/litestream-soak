@@ -45,20 +45,30 @@ jobs:
           SOAK_PR_REPO_ALLOWLIST: ${{ vars.SOAK_PR_REPO_ALLOWLIST }}
           SOAK_PR_ACTOR_ALLOWLIST: ${{ vars.SOAK_PR_ACTOR_ALLOWLIST }}
           SOAK_PR_LABEL_NAME: ${{ vars.SOAK_PR_LABEL_NAME }}
+          PR_NUMBER: ${{ github.event.client_payload.pr_number || github.event.inputs.pr_number }}
+          REPO_FULL_NAME: ${{ github.event.client_payload.repo_full_name || github.event.inputs.repo_full_name || 'benbjohnson/litestream' }}
+          PR_SHA: ${{ github.event.client_payload.pr_sha || github.event.inputs.pr_sha || '' }}
+          DISPATCHER_LOGIN: ${{ github.actor }}
+          REQUESTED_LABEL: ${{ github.event.client_payload.label || '' }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
-          pr_number="${{ github.event.client_payload.pr_number || github.event.inputs.pr_number }}"
-          repo_full_name="${{ github.event.client_payload.repo_full_name || github.event.inputs.repo_full_name || 'benbjohnson/litestream' }}"
-          pr_sha="${{ github.event.client_payload.pr_sha || github.event.inputs.pr_sha || '' }}"
+          pr_number="${PR_NUMBER}"
+          repo_full_name="${REPO_FULL_NAME}"
+          pr_sha="${PR_SHA}"
           allowed_repos="${SOAK_PR_REPO_ALLOWLIST:-benbjohnson/litestream}"
           allowed_actors="${SOAK_PR_ACTOR_ALLOWLIST:-benbjohnson,corylanou}"
-          actor_login="${{ github.event.client_payload.actor || '' }}"
-          requested_label="${{ github.event.client_payload.label || '' }}"
+          actor_login="${DISPATCHER_LOGIN}"
+          requested_label="${REQUESTED_LABEL}"
           expected_label="${SOAK_PR_LABEL_NAME:-soak:test}"
 
-          if [ -z "${pr_number}" ]; then
-            echo "pr_number is required" >&2
+          if [[ ! "${pr_number}" =~ ^[0-9]+$ ]]; then
+            echo "pr_number must be numeric" >&2
+            exit 1
+          fi
+          if [[ ! "${repo_full_name}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "repo_full_name must use owner/name format" >&2
             exit 1
           fi
 
@@ -70,9 +80,9 @@ jobs:
               ;;
           esac
 
-          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+          if [ "${EVENT_NAME}" = "repository_dispatch" ]; then
             if [ -z "${actor_login}" ]; then
-              echo "repository_dispatch requests must include client_payload.actor" >&2
+              echo "repository_dispatch requests must have an authenticated dispatcher" >&2
               exit 1
             fi
             if ! printf '%s\n' "${allowed_actors}" | tr ',' '\n' | grep -Fxq "${actor_login}"; then
@@ -88,14 +98,14 @@ jobs:
           if [ -z "${pr_sha}" ]; then
             pr_sha="$(gh api "repos/${repo_full_name}/pulls/${pr_number}" --jq .head.sha)"
           fi
-          if [ -z "${pr_sha}" ]; then
-            echo "failed to resolve PR head SHA" >&2
+          if [[ ! "${pr_sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "pr_sha must be a 40-character hexadecimal commit SHA" >&2
             exit 1
           fi
 
           source_name="pr-${pr_number}"
           trigger="github_actions_pr_soak"
-          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+          if [ "${EVENT_NAME}" = "repository_dispatch" ]; then
             trigger="repository_dispatch_pr_soak"
           fi
 
@@ -115,7 +125,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
         with:
           version: 0.4.59
 
@@ -123,6 +133,8 @@ jobs:
         shell: bash
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          PR_NUMBER: ${{ needs.resolve-request.outputs.pr_number }}
+          PR_SHA: ${{ needs.resolve-request.outputs.pr_sha }}
         run: |
           set -euo pipefail
 
@@ -150,8 +162,8 @@ jobs:
           }
 
           short_sha="${GITHUB_SHA::12}"
-          pr_number="${{ needs.resolve-request.outputs.pr_number }}"
-          pr_sha="${{ needs.resolve-request.outputs.pr_sha }}"
+          pr_number="${PR_NUMBER}"
+          pr_sha="${PR_SHA}"
           image_label="sha-${short_sha}-pr-${pr_number}-ls-${pr_sha::12}"
           log_file="$(mktemp)"
 
@@ -183,6 +195,10 @@ jobs:
         env:
           CONTROL_BASE_URL: ${{ vars.SOAK_CONTROL_BASE_URL }}
           SOAK_ADMIN_BEARER_TOKEN: ${{ secrets.SOAK_ADMIN_BEARER_TOKEN }}
+          SOURCE_NAME: ${{ needs.resolve-request.outputs.source_name }}
+          TRIGGER: ${{ needs.resolve-request.outputs.trigger }}
+          IMAGE_REF: ${{ needs.build-worker-image.outputs.image_ref }}
+          PR_SHA: ${{ needs.resolve-request.outputs.pr_sha }}
         run: |
           set -euo pipefail
 
@@ -193,7 +209,7 @@ jobs:
           chmod +x scripts/notify-deployment-ready.sh
           ./scripts/notify-deployment-ready.sh \
             "${GITHUB_SHA}" \
-            "${{ needs.resolve-request.outputs.source_name }}" \
-            "${{ needs.resolve-request.outputs.trigger }}" \
-            "${{ needs.build-worker-image.outputs.image_ref }}" \
-            "${{ needs.resolve-request.outputs.pr_sha }}"
+            "${SOURCE_NAME}" \
+            "${TRIGGER}" \
+            "${IMAGE_REF}" \
+            "${PR_SHA}"
