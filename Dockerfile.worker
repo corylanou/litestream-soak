@@ -5,7 +5,7 @@ FROM golang:1.25@sha256:9669c2ed28435af1b8989acb9fd5235346a912016cc8b152b694a9a9
 ARG LITESTREAM_SHA
 WORKDIR /src/litestream
 RUN git clone https://github.com/benbjohnson/litestream.git . && \
-    git checkout -- "${LITESTREAM_SHA}" && \
+    git checkout --detach "${LITESTREAM_SHA}" && \
     git rev-parse HEAD >/tmp/litestream.sha
 RUN go build \
     -ldflags "-s -w -X 'main.Version=${LITESTREAM_SHA}'" \
