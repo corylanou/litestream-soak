@@ -88,6 +88,13 @@ func TestWorkerDockerfileDisablesLitestreamTestWALAutocheckpoint(t *testing.T) {
 	}
 }
 
+func TestWorkerDockerfileQuotesLitestreamCheckoutRef(t *testing.T) {
+	content := string(readFile(t, "Dockerfile.worker"))
+	if !strings.Contains(content, `git checkout -- "${LITESTREAM_SHA}"`) {
+		t.Fatal("Dockerfile.worker must quote the Litestream checkout ref")
+	}
+}
+
 func TestDockerEntrypointRepairsDataBeforeDroppingPrivileges(t *testing.T) {
 	content := string(readFile(t, "docker-entrypoint.sh"))
 	for _, want := range []string{

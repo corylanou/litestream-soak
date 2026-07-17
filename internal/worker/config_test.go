@@ -6,6 +6,32 @@ import (
 	"time"
 )
 
+func TestConfigFromEnvRejectsUnsafeRuntimeValues(t *testing.T) {
+	tests := []struct {
+		key   string
+		value string
+	}{
+		{key: "WRITE_RATE", value: "-1"},
+		{key: "PAYLOAD_SIZE", value: "0"},
+		{key: "READ_RATIO", value: "1.1"},
+		{key: "LOAD_WORKERS", value: "0"},
+		{key: "VERIFY_INTERVAL", value: "0s"},
+		{key: "SNAPSHOT_INTERVAL", value: "0s"},
+		{key: "SYNC_INTERVAL", value: "-1s"},
+		{key: "REPLAY_SPEED", value: "0"},
+		{key: "LITESTREAM_S3_CONCURRENCY", value: "8garbage"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			t.Setenv(tt.key, tt.value)
+			if _, err := ConfigFromEnv(); err == nil {
+				t.Fatalf("ConfigFromEnv() error = nil for %s=%s", tt.key, tt.value)
+			}
+		})
+	}
+}
+
 func TestConfigFromEnvReadsS3UploadTuning(t *testing.T) {
 	t.Setenv("REPLICA_TYPE", "s3")
 	t.Setenv("S3_BUCKET", "bucket")

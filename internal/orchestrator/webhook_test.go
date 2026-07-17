@@ -195,3 +195,21 @@ func TestWebhookHandlerInvalidSignatureReturns401(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 }
+
+func TestWebhookHandlerRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
+
+	secret := "test-secret"
+	h := NewWebhookHandler(secret, nil, false)
+	body := bytes.Repeat([]byte("x"), 1<<20+1)
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(body))
+	req.Header.Set("X-GitHub-Event", "ping")
+	req.Header.Set("X-Hub-Signature-256", signWebhookBody(secret, body))
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
+	}
+}

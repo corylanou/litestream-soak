@@ -26,7 +26,7 @@ func (b *lineBuffer) Write(p []byte) (int, error) {
 
 	text := b.pending + string(p)
 	parts := strings.Split(text, "\n")
-	b.pending = parts[len(parts)-1]
+	b.pending = sanitizeLine(parts[len(parts)-1])
 	for _, line := range parts[:len(parts)-1] {
 		b.append(strings.TrimRight(line, "\r"))
 	}

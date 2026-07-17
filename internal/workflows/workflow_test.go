@@ -43,6 +43,25 @@ func TestSetupGoUsesNode24Action(t *testing.T) {
 	}
 }
 
+func TestFlyctlActionUsesImmutableRef(t *testing.T) {
+	t.Parallel()
+
+	const pinnedRef = "superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1"
+	for _, file := range workflowFiles {
+		t.Run(file, func(t *testing.T) {
+			t.Parallel()
+
+			content := readWorkflow(t, file)
+			if strings.Contains(content, "superfly/flyctl-actions/setup-flyctl@master") {
+				t.Fatalf("%s uses the mutable setup-flyctl master branch", file)
+			}
+			if strings.Contains(content, "superfly/flyctl-actions/setup-flyctl@") && !strings.Contains(content, pinnedRef) {
+				t.Fatalf("%s does not pin setup-flyctl to %s", file, pinnedRef)
+			}
+		})
+	}
+}
+
 func TestFlyctlImageRefParsingReportsContext(t *testing.T) {
 	t.Parallel()
 
@@ -100,6 +119,34 @@ func TestDeployMainDetectsDockerEntrypointChangesForBothImages(t *testing.T) {
 				t.Fatalf("deploy-main.yml %s pattern must match docker-entrypoint.sh, got %q", tt.output, pattern)
 			}
 		})
+	}
+}
+
+func TestSoakPRDoesNotInterpolateDispatchInputsIntoShell(t *testing.T) {
+	t.Parallel()
+
+	content := readWorkflow(t, "soak-pr.yml")
+	for _, unsafe := range []string{
+		`pr_number="${{ github.event.client_payload`,
+		`repo_full_name="${{ github.event.client_payload`,
+		`pr_sha="${{ github.event.client_payload`,
+		`actor_login="${{ github.event.client_payload`,
+		`requested_label="${{ github.event.client_payload`,
+	} {
+		if strings.Contains(content, unsafe) {
+			t.Fatalf("soak-pr.yml interpolates dispatch input into shell with %q", unsafe)
+		}
+	}
+	for _, required := range []string{
+		`PR_NUMBER: ${{ github.event.client_payload.pr_number || github.event.inputs.pr_number }}`,
+		`REPO_FULL_NAME: ${{ github.event.client_payload.repo_full_name || github.event.inputs.repo_full_name || 'benbjohnson/litestream' }}`,
+		`PR_SHA: ${{ github.event.client_payload.pr_sha || github.event.inputs.pr_sha || '' }}`,
+		`if [[ ! "${pr_number}" =~ ^[0-9]+$ ]]; then`,
+		`if [[ ! "${pr_sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then`,
+	} {
+		if !strings.Contains(content, required) {
+			t.Fatalf("soak-pr.yml is missing input hardening %q", required)
+		}
 	}
 }
 

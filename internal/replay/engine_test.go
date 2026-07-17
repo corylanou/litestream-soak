@@ -139,6 +139,8 @@ func TestEngineCountsDroppedRows(t *testing.T) {
 	}
 
 	engine := NewEngine(cfg, failingInsertAdapter{})
+	labels := []string{"failing", cfg.WorkerID, cfg.ProfileName, cfg.Source}
+	before := testutil.ToFloat64(replayDroppedRowsTotal.WithLabelValues(labels...))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -147,9 +149,9 @@ func TestEngineCountsDroppedRows(t *testing.T) {
 		t.Fatalf("engine run: %v", err)
 	}
 
-	dropped := testutil.ToFloat64(replayDroppedRowsTotal.WithLabelValues("failing", cfg.WorkerID, cfg.ProfileName, cfg.Source))
-	if dropped != 3 {
-		t.Fatalf("dropped rows=%v, want 3", dropped)
+	after := testutil.ToFloat64(replayDroppedRowsTotal.WithLabelValues(labels...))
+	if got := after - before; got != 3 {
+		t.Fatalf("dropped rows increased by %v, want 3", got)
 	}
 }
 

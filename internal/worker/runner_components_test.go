@@ -2,9 +2,23 @@ package worker
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestLineBufferBoundsPendingLine(t *testing.T) {
+	t.Parallel()
+
+	buffer := newLineBuffer(2)
+	input := strings.Repeat("x", 1<<20)
+	if _, err := buffer.Write([]byte(input)); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if len(buffer.pending) > len(sanitizeLine(input)) {
+		t.Fatalf("pending length = %d, want at most %d", len(buffer.pending), len(sanitizeLine(input)))
+	}
+}
 
 func TestNewRunnerWiresLifecycleComponents(t *testing.T) {
 	cfg := DefaultConfig()
