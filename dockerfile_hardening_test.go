@@ -90,8 +90,8 @@ func TestWorkerDockerfileDisablesLitestreamTestWALAutocheckpoint(t *testing.T) {
 
 func TestWorkerDockerfileQuotesLitestreamCheckoutRef(t *testing.T) {
 	content := string(readFile(t, "Dockerfile.worker"))
-	if !strings.Contains(content, `git checkout -- "${LITESTREAM_SHA}"`) {
-		t.Fatal("Dockerfile.worker must quote the Litestream checkout ref")
+	if !strings.Contains(content, `git checkout --detach "${LITESTREAM_SHA}"`) {
+		t.Fatal("Dockerfile.worker must quote the Litestream checkout ref and use --detach (a bare -- makes git treat the SHA as a pathspec and the build fails)")
 	}
 }
 
