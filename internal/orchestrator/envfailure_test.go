@@ -323,3 +323,57 @@ func TestRecentEnvironmentalSignaturesAgeOut(t *testing.T) {
 		t.Fatalf("stale env failure category = %q, want environmental (KPI tiles still classify)", got)
 	}
 }
+
+func TestIsTransientObjectStoreFailure408RequestCanceled(t *testing.T) {
+	policy := EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared"}.normalized()
+
+	list408 := `restore failed: operation error S3: ListObjectsV2, https response error StatusCode: 408, RequestID: 1783, api error RequestCanceled: Request was canceled`
+	if !isTransientObjectStoreFailure(classifyForTest(list408), policy) {
+		t.Fatal("408/RequestCanceled on ListObjectsV2 should be transient-environmental")
+	}
+	put408 := `wait for sync: sync returned 500: {"error":"sync database: replica sync: write ltx file: operation error S3: PutObject, https response error StatusCode: 408, api error RequestCanceled: Request was canceled"}`
+	if !isTransientObjectStoreFailure(classifyForTest(put408), policy) {
+		t.Fatal("sync-side PutObject 408 should be transient-environmental too")
+	}
+	mismatch := list408 + ` s3://some-other-bucket/prefix/x.ltx`
+	if isTransientObjectStoreFailure(classifyForTest(mismatch), policy) {
+		t.Fatal("bucket mismatch stays fail-closed for 408s")
+	}
+
+	streakPolicy := EnvironmentalFailurePolicy{Bucket: "b", EscalateAfterConsecutive: 2, EscalateAfterDuration: time.Hour}
+	now := time.Now().UTC()
+	failure := func(age time.Duration) model.Verification {
+		return model.Verification{Status: "failed", CheckType: "integrity", StartedAt: now.Add(-age), ErrorMessage: list408}
+	}
+	if !environmentalStreakEscalated([]model.Verification{failure(5 * time.Minute), failure(10 * time.Minute)}, now, streakPolicy) {
+		t.Fatal("a persistent 408 streak must still escalate to actionable")
+	}
+}
+
+func TestSingleWorkerCorroborationEnvironmentalResetsStreak(t *testing.T) {
+	policy := EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 10, EscalateAfterDuration: 12 * time.Hour}
+
+	now := time.Now().UTC()
+	hard := func(age time.Duration) model.Verification {
+		return model.Verification{ID: int(age.Seconds()), Status: "failed", CheckType: "integrity", StartedAt: now.Add(-age), ErrorMessage: "validation failed (exit 1)"}
+	}
+	env := model.Verification{ID: 999, Status: "failed", CheckType: "integrity", StartedAt: now.Add(-20 * time.Second), ErrorMessage: tigrisListNoSuchBucket}
+
+	verifications := []model.Verification{hard(10 * time.Second), env, hard(30 * time.Second)}
+	environmental := environmentalVerificationIDs(verifications, policy)
+	if !environmental[999] {
+		t.Fatal("the interleaved provider blip should classify environmental")
+	}
+	if environmental[10] || environmental[30] {
+		t.Fatal("hard failures must never classify environmental")
+	}
+
+	deployment := model.Deployment{StartedAt: now.Add(-time.Hour)}
+	corroborated, decided := walkConsecutiveActionable(verifications, deployment, policy, 2)
+	if corroborated {
+		t.Fatal("an environmental blip between hard failures must reset single-worker corroboration")
+	}
+	if !decided {
+		t.Fatal("hitting the environmental failure should decide the walk, not exhaust it")
+	}
+}
