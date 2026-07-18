@@ -349,3 +349,22 @@ func TestIsTransientObjectStoreFailure408RequestCanceled(t *testing.T) {
 		t.Fatal("a persistent 408 streak must still escalate to actionable")
 	}
 }
+
+func TestSingleWorkerCorroborationEnvironmentalResetsStreak(t *testing.T) {
+	policy := EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 10, EscalateAfterDuration: 12 * time.Hour}
+
+	now := time.Now().UTC()
+	hard := func(age time.Duration) model.Verification {
+		return model.Verification{ID: int(age.Seconds()), Status: "failed", CheckType: "integrity", StartedAt: now.Add(-age), ErrorMessage: "validation failed (exit 1)"}
+	}
+	env := model.Verification{ID: 999, Status: "failed", CheckType: "integrity", StartedAt: now.Add(-20 * time.Second), ErrorMessage: tigrisListNoSuchBucket}
+
+	verifications := []model.Verification{hard(10 * time.Second), env, hard(30 * time.Second)}
+	environmental := environmentalVerificationIDs(verifications, policy)
+	if !environmental[999] {
+		t.Fatal("the interleaved provider blip should classify environmental")
+	}
+	if environmental[10] || environmental[30] {
+		t.Fatal("hard failures must never classify environmental")
+	}
+}

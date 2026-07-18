@@ -489,7 +489,11 @@ func failedSourcePauseCandidate(db *model.DB, deployment model.Deployment, polic
 		return failedSourcePauseEvaluation{}, false, nil
 	}
 
-	if rollout.AttentionWorkers < policy.MinAttentionWorkers {
+	actionableAttention, err := countActionableAttentionWorkers(db, rollout, deployment)
+	if err != nil {
+		return failedSourcePauseEvaluation{}, false, err
+	}
+	if actionableAttention < policy.MinAttentionWorkers {
 		corroborated, err := singleWorkerFailureCorroborated(db, rollout, deployment, policy.SingleWorkerMinConsecutiveFailures)
 		if err != nil {
 			return failedSourcePauseEvaluation{}, false, err
@@ -777,23 +781,53 @@ func prMaxAgeActionSummary(action PRMaxAgeAction) string {
 	return "stopping worker compute while preserving volumes and replica data for debugging"
 }
 
-// singleWorkerFailureCorroborated decides whether a lone attention worker
-// justifies pausing the whole source: it must have accumulated the required
-// number of consecutive actionable (non-environmental, non-aborted) failed
-// verifications since the deployment started. One blip after a run of passes
-// is not corroboration.
-func singleWorkerFailureCorroborated(db *model.DB, rollout DeploymentRolloutResponse, deployment model.Deployment, minConsecutive int) (bool, error) {
+const sourcePauseHistoryLimitCap = 1000
+
+// pauseEvidenceHistory fetches a worker's verification history with the
+// limit growing until the walk can reach a decision boundary (pass, the
+// deployment start, or genuinely exhausted history) even when neutral
+// aborted rows pad the window — otherwise interleaved aborts could hide
+// older failures from corroboration entirely (Codex review finding).
+func pauseEvidenceHistory(db *model.DB, workerID string, deployment model.Deployment, initialLimit int) ([]model.Verification, error) {
+	limit := initialLimit
+	for {
+		verifications, err := db.ListVerifications(workerID, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(verifications) < limit || limit >= sourcePauseHistoryLimitCap {
+			return verifications, nil
+		}
+		for _, verification := range verifications {
+			if verificationStatusAborted(verification.Status) {
+				continue
+			}
+			return verifications, nil
+		}
+		oldest := verifications[len(verifications)-1]
+		if oldest.StartedAt.Before(deployment.StartedAt.UTC()) {
+			return verifications, nil
+		}
+		limit *= 4
+	}
+}
+
+// countActionableAttentionWorkers counts attention workers whose most recent
+// non-aborted verification since the deployment started is an actionable
+// (non-environmental) failure. Dormant or runtime-stale workers without such
+// evidence do not corroborate a known-bad release (Codex review finding).
+func countActionableAttentionWorkers(db *model.DB, rollout DeploymentRolloutResponse, deployment model.Deployment) (int, error) {
 	policy := currentEnvironmentalFailurePolicy()
+	count := 0
 	for _, progress := range rollout.Workers {
 		if !workerNeedsAttention(progress.Status, progress.RuntimeSnapshotStatus) {
 			continue
 		}
-		verifications, err := db.ListVerifications(progress.WorkerID, minConsecutive*5+10)
+		verifications, err := pauseEvidenceHistory(db, progress.WorkerID, deployment, 20)
 		if err != nil {
-			return false, err
+			return 0, err
 		}
 		environmental := environmentalVerificationIDs(verifications, policy)
-		consecutive := 0
 		for _, verification := range verifications {
 			if verification.StartedAt.Before(deployment.StartedAt.UTC()) {
 				break
@@ -801,14 +835,71 @@ func singleWorkerFailureCorroborated(db *model.DB, rollout DeploymentRolloutResp
 			if verificationStatusAborted(verification.Status) {
 				continue
 			}
-			if !verification.Failed() || environmental[verification.ID] {
-				break
+			if verification.Failed() && !environmental[verification.ID] {
+				count++
 			}
-			consecutive++
-			if consecutive >= minConsecutive {
+			break
+		}
+	}
+	return count, nil
+}
+
+// singleWorkerFailureCorroborated decides whether a lone attention worker
+// justifies pausing the whole source: it must have accumulated the required
+// number of consecutive actionable failed verifications since the deployment
+// started. Aborted checks are neutral (skipped); an environmental failure
+// resets the count — provider weather interleaving a streak makes the
+// attribution ambiguous, and the escalation guard already converts
+// persistent weather into actionable failures on its own.
+func singleWorkerFailureCorroborated(db *model.DB, rollout DeploymentRolloutResponse, deployment model.Deployment, minConsecutive int) (bool, error) {
+	policy := currentEnvironmentalFailurePolicy()
+	for _, progress := range rollout.Workers {
+		if !workerNeedsAttention(progress.Status, progress.RuntimeSnapshotStatus) {
+			continue
+		}
+		limit := minConsecutive*5 + 10
+		for {
+			verifications, err := db.ListVerifications(progress.WorkerID, limit)
+			if err != nil {
+				return false, err
+			}
+			corroborated, decided := walkConsecutiveActionable(verifications, deployment, policy, minConsecutive)
+			if corroborated {
 				return true, nil
 			}
+			// Grow the window only when the walk fell off the end of a full
+			// page while skipping neutral aborts — otherwise interleaved
+			// aborts could hide older failures from corroboration entirely.
+			if decided || len(verifications) < limit || limit >= sourcePauseHistoryLimitCap {
+				break
+			}
+			limit *= 4
 		}
 	}
 	return false, nil
+}
+
+// walkConsecutiveActionable walks newest-first, skipping aborted checks,
+// counting consecutive actionable failures since the deployment started.
+// decided is false only when the walk exhausted the slice while the streak
+// was still open (more history could change the answer).
+func walkConsecutiveActionable(verifications []model.Verification, deployment model.Deployment, policy EnvironmentalFailurePolicy, minConsecutive int) (corroborated, decided bool) {
+	environmental := environmentalVerificationIDs(verifications, policy)
+	consecutive := 0
+	for _, verification := range verifications {
+		if verification.StartedAt.Before(deployment.StartedAt.UTC()) {
+			return false, true
+		}
+		if verificationStatusAborted(verification.Status) {
+			continue
+		}
+		if !verification.Failed() || environmental[verification.ID] {
+			return false, true
+		}
+		consecutive++
+		if consecutive >= minConsecutive {
+			return true, true
+		}
+	}
+	return false, false
 }
