@@ -72,6 +72,11 @@ func isTransientObjectStoreFailure(classification *reporting.FailureClassificati
 		return true
 	case apiCode == "slowdown", failure.HTTPStatus == 503:
 		return true
+	case apiCode == "requestcanceled", failure.HTTPStatus == 408:
+		// Provider-side request timeouts (Tigris 408/RequestCanceled) on
+		// list, get, or put — the 2026-07-18 syd blip that false-alarmed a
+		// fleet pause. Streak escalation still applies.
+		return true
 	default:
 		return false
 	}

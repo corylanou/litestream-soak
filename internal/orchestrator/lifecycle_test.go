@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -188,15 +189,18 @@ func TestFailedSourcePauseCandidatePausesKnownBadMain(t *testing.T) {
 	}
 
 	verifiedAt := time.Now().UTC().Add(time.Minute)
-	mustRecordVerification(t, db, &model.Verification{
-		WorkerID:     "worker-main-low-vol",
-		StartedAt:    verifiedAt.Add(-15 * time.Second),
-		CompletedAt:  &verifiedAt,
-		Status:       "failed",
-		CheckType:    "integrity",
-		Passed:       false,
-		ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": context deadline exceeded`,
-	})
+	for _, age := range []time.Duration{40 * time.Second, 15 * time.Second} {
+		done := verifiedAt.Add(-age).Add(5 * time.Second)
+		mustRecordVerification(t, db, &model.Verification{
+			WorkerID:     "worker-main-low-vol",
+			StartedAt:    verifiedAt.Add(-age),
+			CompletedAt:  &done,
+			Status:       "failed",
+			CheckType:    "integrity",
+			Passed:       false,
+			ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": context deadline exceeded`,
+		})
+	}
 	mustRecordVerification(t, db, &model.Verification{
 		WorkerID:    "worker-main-read-heavy",
 		StartedAt:   verifiedAt.Add(-10 * time.Second),
@@ -315,4 +319,101 @@ func createCleanSuccessCandidate(t *testing.T, db *model.DB, source string, prNu
 	})
 
 	return deployment, *storedWorker
+}
+
+func TestFailedSourcePauseCandidateIgnoresSingleEnvironmentalBlip(t *testing.T) {
+	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 4, EscalateAfterDuration: 30 * time.Minute})
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA: "soak-sha", LitestreamSHA: "litestream-sha",
+		ImageRef: "registry.fly.io/litestream-soak:soak-sha", Source: "main", Status: "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+	deployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment() error = %v", err)
+	}
+
+	createTestWorker(t, db, model.Worker{
+		ID: "worker-main-low-vol-syd", Name: "worker-main-low-vol-syd", Status: model.WorkerDegraded,
+		Source: "main", GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA,
+		ProfileName: "low-vol-syd", ProfileConfig: "{}",
+	})
+	for i := 0; i < 14; i++ {
+		createTestWorker(t, db, model.Worker{
+			ID: fmt.Sprintf("worker-main-green-%02d", i), Name: fmt.Sprintf("worker-main-green-%02d", i),
+			Status: model.WorkerRunning, Source: "main", GitSHA: deployment.GitSHA,
+			LitestreamSHA: deployment.LitestreamSHA, ProfileName: "low-volume", ProfileConfig: "{}",
+		})
+	}
+
+	now := time.Now().UTC().Add(time.Minute)
+	for i := 9; i >= 1; i-- {
+		done := now.Add(-time.Duration(i*5) * time.Second).Add(time.Second)
+		mustRecordVerification(t, db, &model.Verification{
+			WorkerID: "worker-main-low-vol-syd", StartedAt: now.Add(-time.Duration(i*5) * time.Second),
+			CompletedAt: &done, Status: "passed", CheckType: "integrity", Passed: true,
+		})
+	}
+	done := now
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID: "worker-main-low-vol-syd", StartedAt: now.Add(-2 * time.Second), CompletedAt: &done,
+		Status: "failed", CheckType: "integrity", Passed: false,
+		ErrorMessage: `restore failed: operation error S3: ListObjectsV2, https response error StatusCode: 408, RequestID: 1783, api error RequestCanceled: Request was canceled`,
+	})
+	for i := 0; i < 14; i++ {
+		mustRecordVerification(t, db, &model.Verification{
+			WorkerID: fmt.Sprintf("worker-main-green-%02d", i), StartedAt: now.Add(-2 * time.Second),
+			CompletedAt: &done, Status: "passed", CheckType: "integrity", Passed: true,
+		})
+	}
+
+	_, ok, err := failedSourcePauseCandidate(db, *deployment, FailedSourcePausePolicy{})
+	if err != nil {
+		t.Fatalf("failedSourcePauseCandidate() error = %v", err)
+	}
+	if ok {
+		t.Fatal("one environmental 408 blip after nine passes must NOT pause a 15-worker fleet (2026-07-18 false alarm)")
+	}
+}
+
+func TestFailedSourcePauseCandidateSingleWorkerCorroborated(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA: "soak-sha", LitestreamSHA: "litestream-sha",
+		ImageRef: "registry.fly.io/litestream-soak:soak-sha", Source: "main", Status: "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+	deployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment() error = %v", err)
+	}
+	createTestWorker(t, db, model.Worker{
+		ID: "worker-main-low-vol", Name: "worker-main-low-vol", Status: model.WorkerDegraded,
+		Source: "main", GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA,
+		ProfileName: "low-volume", ProfileConfig: "{}",
+	})
+
+	now := time.Now().UTC().Add(time.Minute)
+	for _, age := range []time.Duration{40 * time.Second, 15 * time.Second} {
+		done := now.Add(-age).Add(time.Minute)
+		mustRecordVerification(t, db, &model.Verification{
+			WorkerID: "worker-main-low-vol", StartedAt: now.Add(-age), CompletedAt: &done,
+			Status: "failed", CheckType: "integrity", Passed: false,
+			ErrorMessage: "validation failed (exit 1): integrity check mismatch",
+		})
+	}
+
+	_, ok, err := failedSourcePauseCandidate(db, *deployment, FailedSourcePausePolicy{})
+	if err != nil {
+		t.Fatalf("failedSourcePauseCandidate() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("a lone worker with consecutive actionable failures must still pause the source")
+	}
 }

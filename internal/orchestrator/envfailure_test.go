@@ -323,3 +323,29 @@ func TestRecentEnvironmentalSignaturesAgeOut(t *testing.T) {
 		t.Fatalf("stale env failure category = %q, want environmental (KPI tiles still classify)", got)
 	}
 }
+
+func TestIsTransientObjectStoreFailure408RequestCanceled(t *testing.T) {
+	policy := EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared"}.normalized()
+
+	list408 := `restore failed: operation error S3: ListObjectsV2, https response error StatusCode: 408, RequestID: 1783, api error RequestCanceled: Request was canceled`
+	if !isTransientObjectStoreFailure(classifyForTest(list408), policy) {
+		t.Fatal("408/RequestCanceled on ListObjectsV2 should be transient-environmental")
+	}
+	put408 := `wait for sync: sync returned 500: {"error":"sync database: replica sync: write ltx file: operation error S3: PutObject, https response error StatusCode: 408, api error RequestCanceled: Request was canceled"}`
+	if !isTransientObjectStoreFailure(classifyForTest(put408), policy) {
+		t.Fatal("sync-side PutObject 408 should be transient-environmental too")
+	}
+	mismatch := list408 + ` s3://some-other-bucket/prefix/x.ltx`
+	if isTransientObjectStoreFailure(classifyForTest(mismatch), policy) {
+		t.Fatal("bucket mismatch stays fail-closed for 408s")
+	}
+
+	streakPolicy := EnvironmentalFailurePolicy{Bucket: "b", EscalateAfterConsecutive: 2, EscalateAfterDuration: time.Hour}
+	now := time.Now().UTC()
+	failure := func(age time.Duration) model.Verification {
+		return model.Verification{Status: "failed", CheckType: "integrity", StartedAt: now.Add(-age), ErrorMessage: list408}
+	}
+	if !environmentalStreakEscalated([]model.Verification{failure(5 * time.Minute), failure(10 * time.Minute)}, now, streakPolicy) {
+		t.Fatal("a persistent 408 streak must still escalate to actionable")
+	}
+}

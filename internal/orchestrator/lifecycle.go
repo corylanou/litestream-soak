@@ -44,6 +44,13 @@ type PRMaxAgePolicy struct {
 type FailedSourcePausePolicy struct {
 	CheckInterval   time.Duration
 	SourceAllowlist []string
+	// MinAttentionWorkers pauses immediately when this many workers need
+	// attention at once. A single struggling worker instead requires
+	// SingleWorkerMinConsecutiveFailures actionable (non-environmental)
+	// failed verifications since the deployment started — one provider blip
+	// must not park a whole fleet (2026-07-18 false alarm).
+	MinAttentionWorkers                int
+	SingleWorkerMinConsecutiveFailures int
 }
 
 type successTeardownEvaluation struct {
@@ -170,6 +177,12 @@ func normalizeFailedSourcePausePolicy(policy FailedSourcePausePolicy) FailedSour
 	}
 	if len(policy.SourceAllowlist) == 0 {
 		policy.SourceAllowlist = []string{"main"}
+	}
+	if policy.MinAttentionWorkers <= 0 {
+		policy.MinAttentionWorkers = 2
+	}
+	if policy.SingleWorkerMinConsecutiveFailures <= 0 {
+		policy.SingleWorkerMinConsecutiveFailures = 2
 	}
 	return policy
 }
@@ -476,6 +489,16 @@ func failedSourcePauseCandidate(db *model.DB, deployment model.Deployment, polic
 		return failedSourcePauseEvaluation{}, false, nil
 	}
 
+	if rollout.AttentionWorkers < policy.MinAttentionWorkers {
+		corroborated, err := singleWorkerFailureCorroborated(db, rollout, deployment, policy.SingleWorkerMinConsecutiveFailures)
+		if err != nil {
+			return failedSourcePauseEvaluation{}, false, err
+		}
+		if !corroborated {
+			return failedSourcePauseEvaluation{}, false, nil
+		}
+	}
+
 	signature := dominantRolloutFailureSignature(rollout)
 	summary := fmt.Sprintf("%s is known-bad for soak %s / litestream %s; pausing active worker compute until the next deployment.", sourceHumanLabel(source), shortVersionValue(deployment.GitSHA), shortVersionValue(deployment.LitestreamSHA))
 	return failedSourcePauseEvaluation{
@@ -752,4 +775,40 @@ func prMaxAgeActionSummary(action PRMaxAgeAction) string {
 		return "destroying worker compute, volumes, and replica prefix data"
 	}
 	return "stopping worker compute while preserving volumes and replica data for debugging"
+}
+
+// singleWorkerFailureCorroborated decides whether a lone attention worker
+// justifies pausing the whole source: it must have accumulated the required
+// number of consecutive actionable (non-environmental, non-aborted) failed
+// verifications since the deployment started. One blip after a run of passes
+// is not corroboration.
+func singleWorkerFailureCorroborated(db *model.DB, rollout DeploymentRolloutResponse, deployment model.Deployment, minConsecutive int) (bool, error) {
+	policy := currentEnvironmentalFailurePolicy()
+	for _, progress := range rollout.Workers {
+		if !workerNeedsAttention(progress.Status, progress.RuntimeSnapshotStatus) {
+			continue
+		}
+		verifications, err := db.ListVerifications(progress.WorkerID, minConsecutive*5+10)
+		if err != nil {
+			return false, err
+		}
+		environmental := environmentalVerificationIDs(verifications, policy)
+		consecutive := 0
+		for _, verification := range verifications {
+			if verification.StartedAt.Before(deployment.StartedAt.UTC()) {
+				break
+			}
+			if verificationStatusAborted(verification.Status) {
+				continue
+			}
+			if !verification.Failed() || environmental[verification.ID] {
+				break
+			}
+			consecutive++
+			if consecutive >= minConsecutive {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
