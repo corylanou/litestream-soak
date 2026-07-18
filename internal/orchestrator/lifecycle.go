@@ -873,7 +873,7 @@ func singleWorkerFailureCorroborated(db *model.DB, rollout DeploymentRolloutResp
 			if decided || len(verifications) < limit || limit >= sourcePauseHistoryLimitCap {
 				break
 			}
-			limit *= 4
+			limit = min(limit*4, sourcePauseHistoryLimitCap)
 		}
 	}
 	return false, nil

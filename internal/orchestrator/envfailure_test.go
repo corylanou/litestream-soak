@@ -367,4 +367,13 @@ func TestSingleWorkerCorroborationEnvironmentalResetsStreak(t *testing.T) {
 	if environmental[10] || environmental[30] {
 		t.Fatal("hard failures must never classify environmental")
 	}
+
+	deployment := model.Deployment{StartedAt: now.Add(-time.Hour)}
+	corroborated, decided := walkConsecutiveActionable(verifications, deployment, policy, 2)
+	if corroborated {
+		t.Fatal("an environmental blip between hard failures must reset single-worker corroboration")
+	}
+	if !decided {
+		t.Fatal("hitting the environmental failure should decide the walk, not exhaust it")
+	}
 }
