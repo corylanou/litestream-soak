@@ -114,8 +114,8 @@ func TestEvaluateDormantFleetAlertsPersistsDeduplicatesAndResolvesWithoutWebhook
 	manager := NewManager(nil, db, nil, dispatcher, "litestream-soak", ReplicaConfig{}, "", "")
 	policy := DormantFleetAlertPolicy{Threshold: time.Nanosecond}
 
-	manager.evaluateDormantFleetAlerts(policy)
-	manager.evaluateDormantFleetAlerts(policy)
+	manager.evaluateDormantFleetAlerts(context.Background(), policy)
+	manager.evaluateDormantFleetAlerts(context.Background(), policy)
 
 	alerts, err := db.ListAlerts(10)
 	if err != nil {
@@ -143,7 +143,7 @@ func TestEvaluateDormantFleetAlertsPersistsDeduplicatesAndResolvesWithoutWebhook
 	if err := db.MarkWorkerProbing("worker-main-a", "deployment_ready"); err != nil {
 		t.Fatalf("MarkWorkerProbing() error = %v", err)
 	}
-	manager.evaluateDormantFleetAlerts(policy)
+	manager.evaluateDormantFleetAlerts(context.Background(), policy)
 
 	alerts, err = db.ListAlerts(10)
 	if err != nil {
@@ -185,7 +185,7 @@ func TestEvaluateDormantFleetAlertsWaitsForThresholdAndActiveDeployment(t *testi
 	}
 
 	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
-	manager.evaluateDormantFleetAlerts(DormantFleetAlertPolicy{Threshold: time.Hour})
+	manager.evaluateDormantFleetAlerts(context.Background(), DormantFleetAlertPolicy{Threshold: time.Hour})
 
 	alerts, err := db.ListAlerts(10)
 	if err != nil {
@@ -195,7 +195,7 @@ func TestEvaluateDormantFleetAlertsWaitsForThresholdAndActiveDeployment(t *testi
 		t.Fatalf("len(alerts) before threshold = %d, want 0", len(alerts))
 	}
 
-	manager.evaluateDormantFleetAlerts(DormantFleetAlertPolicy{Threshold: time.Nanosecond})
+	manager.evaluateDormantFleetAlerts(context.Background(), DormantFleetAlertPolicy{Threshold: time.Nanosecond})
 	alerts, err = db.ListAlerts(10)
 	if err != nil {
 		t.Fatalf("ListAlerts() during deployment error = %v", err)

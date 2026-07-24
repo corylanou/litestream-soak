@@ -436,24 +436,31 @@ func TestLockSourceSerializesSameSource(t *testing.T) {
 	t.Parallel()
 
 	mgr := &Manager{}
-	unlock := mgr.lockSource("main")
+	unlock := mustLockSource(t, mgr, "main")
 
-	acquired := make(chan struct{})
+	acquired := make(chan error, 1)
 	go func() {
-		unlock2 := mgr.lockSource("main")
-		close(acquired)
+		unlock2, err := mgr.lockSource(context.Background(), "main")
+		if err != nil {
+			acquired <- err
+			return
+		}
 		unlock2()
+		acquired <- nil
 	}()
 
 	select {
-	case <-acquired:
-		t.Fatal("second lockSource(main) acquired while first held")
+	case err := <-acquired:
+		t.Fatalf("second lockSource(main) returned while first held: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 
 	unlock()
 	select {
-	case <-acquired:
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("second lockSource(main) error = %v", err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("second lockSource(main) did not acquire after unlock")
 	}
@@ -463,21 +470,37 @@ func TestLockSourceDistinctSourcesDoNotBlock(t *testing.T) {
 	t.Parallel()
 
 	mgr := &Manager{}
-	unlock := mgr.lockSource("main")
+	unlock := mustLockSource(t, mgr, "main")
 	defer unlock()
 
-	acquired := make(chan struct{})
+	acquired := make(chan error, 1)
 	go func() {
-		unlock2 := mgr.lockSource("pr-123")
+		unlock2, err := mgr.lockSource(context.Background(), "pr-123")
+		if err != nil {
+			acquired <- err
+			return
+		}
 		unlock2()
-		close(acquired)
+		acquired <- nil
 	}()
 
 	select {
-	case <-acquired:
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("lockSource(pr-123) error = %v", err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("lockSource(pr-123) blocked behind lockSource(main)")
 	}
+}
+
+func mustLockSource(t *testing.T, mgr *Manager, source string) func() {
+	t.Helper()
+	unlock, err := mgr.lockSource(context.Background(), source)
+	if err != nil {
+		t.Fatalf("lockSource(%s) error = %v", source, err)
+	}
+	return unlock
 }
 
 func TestLockWorkerSerializesSameID(t *testing.T) {
@@ -657,7 +680,7 @@ func TestRollingUpdateSourceSkipsUpToDateWorkers(t *testing.T) {
 		t.Fatalf("worker was modified: machine=%q volume=%q", worker.FlyMachineID, worker.FlyVolumeID)
 	}
 
-	unlock := mgr.lockSource("main")
+	unlock := mustLockSource(t, mgr, "main")
 	unlock()
 }
 

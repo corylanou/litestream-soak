@@ -126,8 +126,14 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 		return "", fmt.Errorf("deployment manager unavailable")
 	}
 
-	unlockSource := d.manager.lockSource(source)
+	unlockSource, err := d.manager.lockSource(ctx, source)
+	if err != nil {
+		return "", fmt.Errorf("lock deployment source: %w", err)
+	}
 	defer unlockSource()
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("start deployment ready rollout: %w", err)
+	}
 
 	if err := d.db.UpsertReadyDeployment(&model.Deployment{
 		GitSHA:        sha,
@@ -152,6 +158,9 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 	if !current {
 		slog.Info("Deployment ready superseded, skipping rollout", "source", source, "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "latest_sha", latest.GitSHA, "latest_litestream_sha", latest.LitestreamSHA, "latest_image", latest.ImageRef, "trigger", trigger)
 		return imageRef, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("start deployment rollout: %w", err)
 	}
 
 	slog.Info("Deployment ready, starting rolling update", "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "trigger", trigger)

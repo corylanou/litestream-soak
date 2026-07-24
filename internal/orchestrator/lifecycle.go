@@ -137,7 +137,7 @@ func (m *Manager) RunSuccessTeardownLoop(ctx context.Context, policy SuccessTear
 func (m *Manager) RunDormantFleetAlertLoop(ctx context.Context, policy DormantFleetAlertPolicy) {
 	policy = normalizeDormantFleetAlertPolicy(policy)
 
-	m.evaluateDormantFleetAlerts(policy)
+	m.evaluateDormantFleetAlerts(ctx, policy)
 
 	ticker := time.NewTicker(policy.CheckInterval)
 	defer ticker.Stop()
@@ -147,7 +147,7 @@ func (m *Manager) RunDormantFleetAlertLoop(ctx context.Context, policy DormantFl
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.evaluateDormantFleetAlerts(policy)
+			m.evaluateDormantFleetAlerts(ctx, policy)
 		}
 	}
 }
@@ -162,7 +162,7 @@ func normalizeDormantFleetAlertPolicy(policy DormantFleetAlertPolicy) DormantFle
 	return policy
 }
 
-func (m *Manager) evaluateDormantFleetAlerts(policy DormantFleetAlertPolicy) {
+func (m *Manager) evaluateDormantFleetAlerts(ctx context.Context, policy DormantFleetAlertPolicy) {
 	policy = normalizeDormantFleetAlertPolicy(policy)
 	sources, err := m.db.ListActiveWorkerSources()
 	if err != nil {
@@ -184,8 +184,15 @@ func (m *Manager) evaluateDormantFleetAlerts(policy DormantFleetAlertPolicy) {
 
 	now := time.Now().UTC()
 	for source := range sourceSet {
-		unlockSource := m.lockSource(source)
-		err := m.evaluateDormantFleetAlertLocked(source, policy, now)
+		unlockSource, err := m.lockSource(ctx, source)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Error("Failed to lock source for dormant fleet alert", "source", source, "error", err)
+			continue
+		}
+		err = m.evaluateDormantFleetAlertLocked(source, policy, now)
 		unlockSource()
 		if err != nil {
 			slog.Error("Failed to evaluate dormant fleet alert", "source", source, "error", err)
@@ -414,8 +421,15 @@ func (m *Manager) evaluateFailedSourcePause(ctx context.Context, policy FailedSo
 	}
 
 	for _, source := range sources {
-		unlockSource := m.lockSource(source)
-		err := m.evaluateFailedSourcePauseLocked(ctx, source, policy)
+		unlockSource, err := m.lockSource(ctx, source)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Error("Failed to lock source for failed-source pause", "source", source, "error", err)
+			continue
+		}
+		err = m.evaluateFailedSourcePauseLocked(ctx, source, policy)
 		unlockSource()
 		if err != nil {
 			slog.Error("Failed to evaluate failed-source pause", "source", source, "error", err)

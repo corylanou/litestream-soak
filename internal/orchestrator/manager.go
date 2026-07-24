@@ -41,6 +41,32 @@ type ReplicaConfig struct {
 	Region    string
 }
 
+type contextLock struct {
+	available chan struct{}
+}
+
+func newContextLock() *contextLock {
+	lock := &contextLock{available: make(chan struct{}, 1)}
+	lock.available <- struct{}{}
+	return lock
+}
+
+func (l *contextLock) lock(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-l.available:
+		if err := ctx.Err(); err != nil {
+			l.available <- struct{}{}
+			return nil, err
+		}
+		return func() { l.available <- struct{}{} }, nil
+	}
+}
+
 type Manager struct {
 	fly              *flyapi.Client
 	db               *model.DB
@@ -53,7 +79,7 @@ type Manager struct {
 
 	locks       sync.Mutex
 	workerLocks map[string]*sync.Mutex
-	sourceLocks map[string]*sync.Mutex
+	sourceLocks map[string]*contextLock
 }
 
 func (m *Manager) keyedLock(table *map[string]*sync.Mutex, key string) func() {
@@ -76,8 +102,23 @@ func (m *Manager) lockWorker(id string) func() {
 	return m.keyedLock(&m.workerLocks, id)
 }
 
-func (m *Manager) lockSource(source string) func() {
-	return m.keyedLock(&m.sourceLocks, source)
+func (m *Manager) lockSource(ctx context.Context, source string) (func(), error) {
+	m.locks.Lock()
+	if m.sourceLocks == nil {
+		m.sourceLocks = make(map[string]*contextLock)
+	}
+	lock, ok := m.sourceLocks[source]
+	if !ok {
+		lock = newContextLock()
+		m.sourceLocks[source] = lock
+	}
+	m.locks.Unlock()
+
+	unlock, err := lock.lock(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire source lock for %s: %w", source, err)
+	}
+	return unlock, nil
 }
 
 func NewManager(fly *flyapi.Client, db *model.DB, metrics *controlMetrics, alerts *AlertDispatcher, appName string, replica ReplicaConfig, controlBaseURL, platformLogToken string) *Manager {
@@ -459,7 +500,10 @@ func (m *Manager) RollingUpdate(ctx context.Context, newImageRef, newSHA, newLit
 func (m *Manager) RollingUpdateSource(ctx context.Context, source, newImageRef, newSHA, newLitestreamSHA string) error {
 	source = firstNonEmpty(strings.TrimSpace(source), "main")
 
-	unlockSource := m.lockSource(source)
+	unlockSource, err := m.lockSource(ctx, source)
+	if err != nil {
+		return err
+	}
 	defer unlockSource()
 
 	return m.rollingUpdateSourceLocked(ctx, source, newImageRef, newSHA, newLitestreamSHA)
