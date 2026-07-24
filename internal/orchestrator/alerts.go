@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -30,19 +31,21 @@ type alertWebhookPayload struct {
 }
 
 type alertWebhookDetail struct {
-	AlertID          int64                      `json:"alert_id"`
-	AlertType        string                     `json:"alert_type"`
-	Severity         string                     `json:"severity"`
-	GeneratedAt      time.Time                  `json:"generated_at"`
-	FailureStage     string                     `json:"failure_stage,omitempty"`
-	FailureSignature string                     `json:"failure_signature,omitempty"`
-	Message          string                     `json:"message"`
-	Worker           *model.Worker              `json:"worker,omitempty"`
-	Deployment       *model.Deployment          `json:"deployment,omitempty"`
-	Rollout          *DeploymentRolloutResponse `json:"rollout,omitempty"`
-	Verification     *model.Verification        `json:"verification,omitempty"`
-	TriageCommands   []string                   `json:"triage_commands,omitempty"`
-	URLs             map[string]string          `json:"urls"`
+	AlertID            int64                      `json:"alert_id"`
+	AlertType          string                     `json:"alert_type"`
+	Source             string                     `json:"source,omitempty"`
+	Severity           string                     `json:"severity"`
+	GeneratedAt        time.Time                  `json:"generated_at"`
+	ConditionStartedAt *time.Time                 `json:"condition_started_at,omitempty"`
+	FailureStage       string                     `json:"failure_stage,omitempty"`
+	FailureSignature   string                     `json:"failure_signature,omitempty"`
+	Message            string                     `json:"message"`
+	Worker             *model.Worker              `json:"worker,omitempty"`
+	Deployment         *model.Deployment          `json:"deployment,omitempty"`
+	Rollout            *DeploymentRolloutResponse `json:"rollout,omitempty"`
+	Verification       *model.Verification        `json:"verification,omitempty"`
+	TriageCommands     []string                   `json:"triage_commands,omitempty"`
+	URLs               map[string]string          `json:"urls"`
 }
 
 var (
@@ -99,6 +102,43 @@ func (d *AlertDispatcher) NotifyDeploymentAttention(rollout DeploymentRolloutRes
 	}
 
 	go d.notifyDeploymentAttention(rollout)
+}
+
+func (d *AlertDispatcher) NotifyFleetFullyDormant(source string, conditionStartedAt time.Time, rollout *DeploymentRolloutResponse) error {
+	source = firstNonEmpty(strings.TrimSpace(source), "main")
+	conditionStartedAt = conditionStartedAt.UTC()
+	message := fmt.Sprintf("%s fleet is 100%% dormant, leaving zero soak coverage", sourceHumanLabel(source))
+	status := "not_configured"
+	if d.Enabled() {
+		status = "pending"
+	}
+	delivery := &model.AlertDelivery{
+		Source:             source,
+		AlertType:          fleetFullyDormantAlertType,
+		Fingerprint:        fmt.Sprintf("%s:%s:%s", fleetFullyDormantAlertType, source, conditionStartedAt.Format(time.RFC3339Nano)),
+		Status:             status,
+		ConditionStatus:    "active",
+		ConditionStartedAt: &conditionStartedAt,
+		FailureStage:       "fleet",
+		FailureSignature:   fleetFullyDormantAlertType,
+		Message:            message,
+	}
+
+	id, created, err := d.db.CreateAlert(delivery)
+	if err != nil {
+		return err
+	}
+	if !created {
+		controlAlertTotal.WithLabelValues("", delivery.AlertType, "duplicate").Inc()
+		return nil
+	}
+	if !d.Enabled() {
+		return nil
+	}
+
+	payload := d.buildFleetFullyDormantPayload(id, source, conditionStartedAt, message, rollout)
+	go d.sendAlert(id, "", delivery.AlertType, payload)
+	return nil
 }
 
 func (d *AlertDispatcher) notifyVerificationFailure(worker model.Worker, verification model.Verification) {
@@ -277,6 +317,30 @@ func (d *AlertDispatcher) buildDeploymentPayload(id int64, rollout DeploymentRol
 	}
 }
 
+func (d *AlertDispatcher) buildFleetFullyDormantPayload(id int64, source string, conditionStartedAt time.Time, message string, rollout *DeploymentRolloutResponse) alertWebhookPayload {
+	detail := alertWebhookDetail{
+		AlertID:            id,
+		AlertType:          fleetFullyDormantAlertType,
+		Source:             source,
+		Severity:           "critical",
+		GeneratedAt:        time.Now().UTC(),
+		ConditionStartedAt: &conditionStartedAt,
+		FailureStage:       "fleet",
+		FailureSignature:   fleetFullyDormantAlertType,
+		Message:            message,
+		TriageCommands:     buildDormantFleetTriageCommands(source),
+		URLs:               d.dormantFleetAlertURLs(source),
+	}
+	if rollout != nil {
+		detail.Deployment = &rollout.Deployment
+		detail.Rollout = rollout
+	}
+	return alertWebhookPayload{
+		Text:  fmt.Sprintf("Litestream soak alert: %s has zero soak coverage", sourceHumanLabel(source)),
+		Alert: detail,
+	}
+}
+
 func (d *AlertDispatcher) alertURLs(workerID string) map[string]string {
 	urls := map[string]string{}
 	if d.baseURL == "" {
@@ -304,6 +368,17 @@ func (d *AlertDispatcher) deploymentAlertURLs() map[string]string {
 	return urls
 }
 
+func (d *AlertDispatcher) dormantFleetAlertURLs(source string) map[string]string {
+	urls := d.deploymentAlertURLs()
+	if d.baseURL == "" {
+		return urls
+	}
+	query := "?source=" + url.QueryEscape(source)
+	urls["workers_api"] = d.baseURL + "/api/workers" + query
+	urls["deployment_api"] = d.baseURL + "/api/deployments/latest" + query
+	return urls
+}
+
 func rolloutAttentionAlertable(rollout DeploymentRolloutResponse) bool {
 	if !rollout.GraceWindowExceeded {
 		return false
@@ -322,6 +397,16 @@ func buildDeploymentTriageCommands() []string {
 		`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/deployments/latest | jq .`,
 		`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/diagnosis | jq .`,
 		`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/events?limit=20 | jq .`,
+		"fly machines list -a litestream-soak",
+	}
+}
+
+func buildDormantFleetTriageCommands(source string) []string {
+	source = firstNonEmpty(strings.TrimSpace(source), "main")
+	return []string{
+		fmt.Sprintf(`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" "https://litestream-soak-ctl.fly.dev/api/workers?source=%s" | jq .`, url.QueryEscape(source)),
+		fmt.Sprintf(`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" "https://litestream-soak-ctl.fly.dev/api/deployments/latest?source=%s" | jq .`, url.QueryEscape(source)),
+		`curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" https://litestream-soak-ctl.fly.dev/api/alerts | jq .`,
 		"fly machines list -a litestream-soak",
 	}
 }

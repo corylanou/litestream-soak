@@ -267,6 +267,8 @@ func (a *API) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if alert.AlertType == "deployment_attention" {
 			item.TriageCommands = buildDeploymentTriageCommands()
+		} else if alert.AlertType == fleetFullyDormantAlertType {
+			item.TriageCommands = buildDormantFleetTriageCommands(alert.Source)
 		}
 		response = append(response, item)
 	}

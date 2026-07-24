@@ -43,6 +43,79 @@ func TestBuildAttentionItemsFlagsStaleHeartbeats(t *testing.T) {
 	}
 }
 
+func TestBuildAttentionItemsPrioritizesDormantFleetCondition(t *testing.T) {
+	t.Parallel()
+
+	rollout := &DeploymentRolloutResponse{
+		Deployment:          model.Deployment{Source: "pr-155"},
+		Status:              "needs_attention",
+		TotalWorkers:        2,
+		DormantWorkers:      2,
+		AttentionWorkers:    2,
+		DormantFleetAlert:   true,
+		GraceWindowExceeded: true,
+	}
+	workers := []homeWorker{
+		{Worker: model.Worker{ID: "pr-155-a", Name: "pr-155-a", Status: model.WorkerDormant}},
+		{Worker: model.Worker{ID: "pr-155-b", Name: "pr-155-b", Status: model.WorkerDormant}},
+	}
+
+	items := buildAttentionItems(
+		"pr-155",
+		diagnosisSnapshot{},
+		homeSummary{TotalWorkers: 2, AttentionWorkers: 2},
+		workers,
+		rollout,
+		nil,
+		"",
+		"",
+		failureClassificationContext{},
+	)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one dormant fleet item without generic duplicates", items)
+	}
+	item := items[0]
+	if item.Severity != "bad" {
+		t.Fatalf("Severity = %q, want bad", item.Severity)
+	}
+	if !strings.Contains(item.Title+" "+item.Detail, "zero soak coverage") {
+		t.Fatalf("item = %+v, want zero soak coverage", item)
+	}
+	actions := make(map[string]string)
+	for _, action := range item.Actions {
+		actions[action.Label] = action.URL
+	}
+	if actions["Workers"] != "/api/workers?source=pr-155" {
+		t.Fatalf("Workers URL = %q, want source-specific URL", actions["Workers"])
+	}
+	if actions["Rollout"] != "/api/deployments/latest?source=pr-155" {
+		t.Fatalf("Rollout URL = %q, want source-specific URL", actions["Rollout"])
+	}
+	if actions["Alerts"] != "/api/alerts" {
+		t.Fatalf("Alerts URL = %q, want /api/alerts", actions["Alerts"])
+	}
+
+	inactive := *rollout
+	inactive.DormantFleetAlert = false
+	inactive.GraceWindowExceeded = false
+	inactiveItems := buildAttentionItems(
+		"pr-155",
+		diagnosisSnapshot{},
+		homeSummary{},
+		nil,
+		&inactive,
+		nil,
+		"",
+		"",
+		failureClassificationContext{},
+	)
+	for _, inactiveItem := range inactiveItems {
+		if strings.Contains(inactiveItem.Title+" "+inactiveItem.Detail, "zero soak coverage") {
+			t.Fatalf("inactive items retained dormant fleet condition: %+v", inactiveItems)
+		}
+	}
+}
+
 func TestHomeBodyRendersStalestHeartbeatState(t *testing.T) {
 	t.Parallel()
 

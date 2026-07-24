@@ -63,6 +63,7 @@ func main() {
 	dormancyThreshold := durationEnvOrDefault("SOAK_DORMANCY_THRESHOLD", 24*time.Hour)
 	dormancyInterval := durationEnvOrDefault("SOAK_DORMANCY_CHECK_INTERVAL", 10*time.Minute)
 	dormancyMinFailures := intEnvOrDefault("SOAK_DORMANCY_MIN_FAILURES", 3)
+	dormantFleetAlertPolicy := dormantFleetAlertPolicyFromEnv()
 	successTeardownEnabled := envOrDefault("SOAK_SUCCESS_TEARDOWN_ENABLED", "false") == "true"
 	successTeardownThreshold := durationEnvOrDefault("SOAK_SUCCESS_TEARDOWN_THRESHOLD", 24*time.Hour)
 	successTeardownInterval := durationEnvOrDefault("SOAK_SUCCESS_TEARDOWN_CHECK_INTERVAL", 10*time.Minute)
@@ -158,6 +159,7 @@ func main() {
 	go mgr.RunExpiryLoop(ctx)
 	go mgr.RunDBRetentionLoop(ctx, intEnvOrDefault("SOAK_DB_RETENTION_DAYS", 30))
 	go mgr.RunHeartbeatMonitor(ctx, 5*time.Minute)
+	go mgr.RunDormantFleetAlertLoop(ctx, dormantFleetAlertPolicy)
 	if fleetEnabled {
 		go mgr.RunFleetReconciler(ctx, orchestrator.DefaultMainFleet(), 10*time.Minute)
 	}
@@ -209,6 +211,8 @@ func main() {
 		"dormancy_threshold", dormancyThreshold,
 		"dormancy_check_interval", dormancyInterval,
 		"dormancy_min_failures", dormancyMinFailures,
+		"dormant_fleet_alert_threshold", dormantFleetAlertPolicy.Threshold,
+		"dormant_fleet_alert_check_interval", dormantFleetAlertPolicy.CheckInterval,
 		"success_teardown_enabled", successTeardownEnabled,
 		"success_teardown_threshold", successTeardownThreshold,
 		"success_teardown_check_interval", successTeardownInterval,
@@ -280,6 +284,13 @@ func durationEnvOrDefault(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return value
+}
+
+func dormantFleetAlertPolicyFromEnv() orchestrator.DormantFleetAlertPolicy {
+	return orchestrator.DormantFleetAlertPolicy{
+		Threshold:     durationEnvOrDefault("SOAK_DORMANT_FLEET_ALERT_THRESHOLD", 2*time.Hour),
+		CheckInterval: durationEnvOrDefault("SOAK_DORMANT_FLEET_ALERT_CHECK_INTERVAL", 10*time.Minute),
+	}
 }
 
 func intEnvOrDefault(key string, def int) int {

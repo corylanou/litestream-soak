@@ -106,6 +106,8 @@ type DeploymentRolloutResponse struct {
 	ProbingWorkers          int                        `json:"probing_workers"`
 	RuntimeUnhealthyWorkers int                        `json:"runtime_unhealthy_workers"`
 	AttentionWorkers        int                        `json:"attention_workers"`
+	DormantFleetAlert       bool                       `json:"dormant_fleet_alert"`
+	DormantFleetSince       *time.Time                 `json:"dormant_fleet_since,omitempty"`
 	VerifiedSinceDeploy     int                        `json:"verified_since_deploy_workers"`
 	AwaitingVerification    int                        `json:"awaiting_verification_workers"`
 	Workers                 []DeploymentWorkerProgress `json:"workers,omitempty"`

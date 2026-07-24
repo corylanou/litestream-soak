@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -157,6 +158,100 @@ func TestBuildDeploymentRolloutIgnoresAbortedForVerifiedSinceDeploy(t *testing.T
 	}
 	if rollout.Workers[0].LastVerificationAt == nil || !rollout.Workers[0].LastVerificationAt.Equal(abortedAt) {
 		t.Fatalf("LastVerificationAt = %v, want aborted report time %v", rollout.Workers[0].LastVerificationAt, abortedAt)
+	}
+}
+
+func TestBuildDeploymentRolloutSurfacesAndClearsDormantFleetCondition(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "soak-dormant",
+		LitestreamSHA: "litestream-dormant",
+		ImageRef:      "registry.fly.io/litestream-soak:soak-dormant",
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+	deployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment() error = %v", err)
+	}
+	for _, workerID := range []string{"worker-main-a", "worker-main-b"} {
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        deployment.GitSHA,
+			LitestreamSHA: deployment.LitestreamSHA,
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+		if err := db.MarkWorkerDormant(workerID, "known bad", "integrity_check_mismatch", "known_bad_source"); err != nil {
+			t.Fatalf("MarkWorkerDormant(%s) error = %v", workerID, err)
+		}
+	}
+	workers, err := db.ListWorkersForSource("main")
+	if err != nil {
+		t.Fatalf("ListWorkersForSource() error = %v", err)
+	}
+	conditionStartedAt, fullyDormant := fullyDormantFleetEpoch(workers)
+	if !fullyDormant {
+		t.Fatal("fullyDormantFleetEpoch() = false, want true")
+	}
+	if _, created, err := db.CreateAlert(&model.AlertDelivery{
+		Source:             "main",
+		AlertType:          "fleet_fully_dormant",
+		Fingerprint:        "fleet_fully_dormant:main:" + conditionStartedAt.Format(time.RFC3339Nano),
+		Status:             "not_configured",
+		ConditionStatus:    "active",
+		ConditionStartedAt: &conditionStartedAt,
+	}); err != nil {
+		t.Fatalf("CreateAlert() error = %v", err)
+	} else if !created {
+		t.Fatal("CreateAlert() created = false, want true")
+	}
+
+	rollout, err := buildDeploymentRollout(db, *deployment)
+	if err != nil {
+		t.Fatalf("buildDeploymentRollout() error = %v", err)
+	}
+	if !rollout.DormantFleetAlert {
+		t.Fatal("DormantFleetAlert = false, want true")
+	}
+	if rollout.DormantFleetSince == nil || !rollout.DormantFleetSince.Equal(conditionStartedAt) {
+		t.Fatalf("DormantFleetSince = %v, want %v", rollout.DormantFleetSince, conditionStartedAt)
+	}
+	for name, value := range map[string]string{
+		"Summary":    rollout.Summary,
+		"NextAction": rollout.NextAction,
+		"NextChecks": strings.Join(rollout.NextChecks, " "),
+	} {
+		if !strings.Contains(value, "zero soak coverage") {
+			t.Fatalf("%s = %q, want zero soak coverage", name, value)
+		}
+	}
+	if !strings.Contains(rollout.Summary, "100% dormant") {
+		t.Fatalf("Summary = %q, want 100%% dormant", rollout.Summary)
+	}
+
+	if _, err := db.ResolveActiveAlertCondition("fleet_fully_dormant", "main", time.Now().UTC()); err != nil {
+		t.Fatalf("ResolveActiveAlertCondition() error = %v", err)
+	}
+	resolved, err := buildDeploymentRollout(db, *deployment)
+	if err != nil {
+		t.Fatalf("buildDeploymentRollout() after resolve error = %v", err)
+	}
+	if resolved.DormantFleetAlert {
+		t.Fatal("DormantFleetAlert after resolve = true, want false")
+	}
+	if resolved.DormantFleetSince != nil {
+		t.Fatalf("DormantFleetSince after resolve = %v, want nil", resolved.DormantFleetSince)
+	}
+	if strings.Contains(resolved.Summary, "zero soak coverage") || strings.Contains(resolved.NextAction, "zero soak coverage") {
+		t.Fatalf("resolved rollout retained dormant condition wording: %+v", resolved)
 	}
 }
 

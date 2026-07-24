@@ -17,6 +17,8 @@ import (
 var validSHARe = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 var validImageRefRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`)
 
+const deploymentBuildTimeout = 10 * time.Minute
+
 type Deployer struct {
 	manager           *Manager
 	db                *model.DB
@@ -175,7 +177,7 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 }
 
 func (d *Deployer) buildImage(sha string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), deploymentBuildTimeout)
 	defer cancel()
 
 	imageTag := fmt.Sprintf("registry.fly.io/%s:sha-%s", d.appName, trimSHA(sha))

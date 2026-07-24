@@ -176,6 +176,21 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 	}
 
 	items := make([]attentionItem, 0, 4)
+	dormantFleetActive := rollout != nil && rollout.DormantFleetAlert
+	if dormantFleetActive {
+		source := firstNonEmpty(strings.TrimSpace(selectedSource), "main")
+		query := "?source=" + url.QueryEscape(source)
+		items = append(items, attentionItem{
+			Severity: "bad",
+			Title:    fmt.Sprintf("%s has zero soak coverage", sourceHumanLabel(source)),
+			Detail:   "100% of the source fleet is dormant; resume at least one worker before trusting soak results.",
+			Actions: []attentionAction{
+				{Label: "Workers", URL: "/api/workers" + query, Kind: "primary"},
+				{Label: "Rollout", URL: "/api/deployments/latest" + query},
+				{Label: "Alerts", URL: "/api/alerts"},
+			},
+		})
+	}
 	clusterSeverity := "warn"
 	if selectedSource != "main" {
 		clusterSeverity = "bad"
@@ -237,7 +252,7 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 		items = append(items, item)
 	}
 
-	if len(diagnosis.Clusters) == 0 && summary.AttentionWorkers > 0 {
+	if !dormantFleetActive && len(diagnosis.Clusters) == 0 && summary.AttentionWorkers > 0 {
 		names := make([]string, 0, 3)
 		var firstAttention *model.Worker
 		for _, worker := range workers {
@@ -309,7 +324,7 @@ func buildAttentionItems(selectedSource string, diagnosis diagnosisSnapshot, sum
 		items = append(items, item)
 	}
 
-	if rollout != nil && rollout.GraceWindowExceeded {
+	if rollout != nil && rollout.GraceWindowExceeded && !dormantFleetActive {
 		items = append(items, attentionItem{
 			Severity: "warn",
 			Title:    "Rollout is beyond the 45m grace window",

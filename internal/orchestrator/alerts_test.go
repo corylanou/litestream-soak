@@ -850,6 +850,84 @@ func TestNotifyDeploymentAttentionDuplicateFingerprintSkipsDelivery(t *testing.T
 	}
 }
 
+func TestNotifyFleetFullyDormantSendsOnceWithConditionAndRolloutContext(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	server, ch := newAlertWebhookServer(t, http.StatusOK)
+	conditionStartedAt := time.Date(2026, 7, 24, 12, 30, 0, 0, time.UTC)
+	rollout := DeploymentRolloutResponse{
+		Deployment: model.Deployment{
+			ID:            42,
+			Source:        "main",
+			GitSHA:        "soak-sha",
+			LitestreamSHA: "litestream-sha",
+			ImageRef:      "registry.fly.io/litestream-soak:soak-sha",
+			Status:        "ready",
+		},
+		Status:         "needs_attention",
+		TotalWorkers:   2,
+		DormantWorkers: 2,
+	}
+
+	dispatcher := NewAlertDispatcher(db, "https://control.example", server.URL, "")
+	if err := dispatcher.NotifyFleetFullyDormant("main", conditionStartedAt, &rollout); err != nil {
+		t.Fatalf("NotifyFleetFullyDormant() error = %v", err)
+	}
+	if err := dispatcher.NotifyFleetFullyDormant("main", conditionStartedAt, &rollout); err != nil {
+		t.Fatalf("NotifyFleetFullyDormant() duplicate error = %v", err)
+	}
+
+	got := waitForAlert(t, ch)
+	if got.payload.Alert.AlertType != "fleet_fully_dormant" {
+		t.Fatalf("AlertType = %q, want fleet_fully_dormant", got.payload.Alert.AlertType)
+	}
+	if got.payload.Alert.Source != "main" {
+		t.Fatalf("Source = %q, want main", got.payload.Alert.Source)
+	}
+	if got.payload.Alert.ConditionStartedAt == nil || !got.payload.Alert.ConditionStartedAt.Equal(conditionStartedAt) {
+		t.Fatalf("ConditionStartedAt = %v, want %v", got.payload.Alert.ConditionStartedAt, conditionStartedAt)
+	}
+	if got.payload.Alert.Severity != "critical" {
+		t.Fatalf("Severity = %q, want critical", got.payload.Alert.Severity)
+	}
+	if !strings.Contains(got.payload.Alert.Message, "zero soak coverage") {
+		t.Fatalf("Message = %q, want zero soak coverage", got.payload.Alert.Message)
+	}
+	if got.payload.Alert.Deployment == nil || got.payload.Alert.Deployment.ID != rollout.Deployment.ID {
+		t.Fatalf("Deployment = %+v, want deployment %d", got.payload.Alert.Deployment, rollout.Deployment.ID)
+	}
+	if got.payload.Alert.Rollout == nil || got.payload.Alert.Rollout.TotalWorkers != rollout.TotalWorkers {
+		t.Fatalf("Rollout = %+v, want rollout context", got.payload.Alert.Rollout)
+	}
+	if len(got.payload.Alert.TriageCommands) == 0 {
+		t.Fatal("TriageCommands = empty, want fleet triage")
+	}
+	if got.payload.Alert.URLs["control_ui"] == "" || got.payload.Alert.URLs["alerts_api"] == "" {
+		t.Fatalf("URLs = %+v, want control_ui and alerts_api", got.payload.Alert.URLs)
+	}
+
+	select {
+	case duplicate := <-ch:
+		t.Fatalf("unexpected duplicate webhook = %+v", duplicate)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	alerts, err := db.ListAlerts(10)
+	if err != nil {
+		t.Fatalf("ListAlerts() error = %v", err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("len(alerts) = %d, want 1", len(alerts))
+	}
+	if alerts[0].Status != "sent" {
+		t.Fatalf("Status = %q, want sent", alerts[0].Status)
+	}
+	if alerts[0].ConditionStatus != "active" {
+		t.Fatalf("ConditionStatus = %q, want active", alerts[0].ConditionStatus)
+	}
+}
+
 func TestAlertURLsEmptyBaseURL(t *testing.T) {
 	t.Parallel()
 

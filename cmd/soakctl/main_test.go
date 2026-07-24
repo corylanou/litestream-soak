@@ -51,6 +51,29 @@ func TestShutdownOnCancelUsesBoundedContext(t *testing.T) {
 	}
 }
 
+func TestDormantFleetAlertPolicyFromEnv(t *testing.T) {
+	t.Setenv("SOAK_DORMANT_FLEET_ALERT_THRESHOLD", "")
+	t.Setenv("SOAK_DORMANT_FLEET_ALERT_CHECK_INTERVAL", "")
+
+	policy := dormantFleetAlertPolicyFromEnv()
+	if policy.Threshold != 2*time.Hour {
+		t.Fatalf("Threshold = %s, want 2h", policy.Threshold)
+	}
+	if policy.CheckInterval != 10*time.Minute {
+		t.Fatalf("CheckInterval = %s, want 10m", policy.CheckInterval)
+	}
+
+	t.Setenv("SOAK_DORMANT_FLEET_ALERT_THRESHOLD", "45m")
+	t.Setenv("SOAK_DORMANT_FLEET_ALERT_CHECK_INTERVAL", "90s")
+	policy = dormantFleetAlertPolicyFromEnv()
+	if policy.Threshold != 45*time.Minute {
+		t.Fatalf("configured Threshold = %s, want 45m", policy.Threshold)
+	}
+	if policy.CheckInterval != 90*time.Second {
+		t.Fatalf("configured CheckInterval = %s, want 90s", policy.CheckInterval)
+	}
+}
+
 func TestIsAdminBearerAuthorized(t *testing.T) {
 	request := httptest.NewRequest("POST", "/api/admin/deployments/ready", nil)
 	request.Header.Set("Authorization", "Bearer test-token")
