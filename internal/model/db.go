@@ -81,9 +81,13 @@ CREATE TABLE IF NOT EXISTS alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     worker_id TEXT REFERENCES workers(id),
     verification_id INTEGER REFERENCES verifications(id),
+    source TEXT NOT NULL DEFAULT '',
     alert_type TEXT NOT NULL,
     fingerprint TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL DEFAULT 'pending',
+    condition_status TEXT NOT NULL DEFAULT '',
+    condition_started_at DATETIME,
+    condition_resolved_at DATETIME,
     failure_stage TEXT,
     failure_signature TEXT,
     message TEXT,
@@ -158,6 +162,10 @@ func Open(path string) (*DB, error) {
 	if err := ensureDeploymentColumns(writer); err != nil {
 		_ = writer.Close()
 		return nil, fmt.Errorf("ensure deployment columns: %w", err)
+	}
+	if err := ensureAlertColumns(writer); err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("ensure alert columns: %w", err)
 	}
 	if err := normalizeLegacyExpiry(writer); err != nil {
 		_ = writer.Close()
@@ -298,6 +306,27 @@ func ensureDeploymentColumns(db *sql.DB) error {
 	}
 
 	return nil
+}
+
+func ensureAlertColumns(db *sql.DB) error {
+	statements := []string{
+		`ALTER TABLE alerts ADD COLUMN source TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE alerts ADD COLUMN condition_status TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE alerts ADD COLUMN condition_started_at DATETIME`,
+		`ALTER TABLE alerts ADD COLUMN condition_resolved_at DATETIME`,
+	}
+
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return err
+		}
+	}
+
+	_, err := db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_active_condition
+		ON alerts(alert_type, source)
+		WHERE condition_status = 'active'`)
+	return err
 }
 
 func (d *DB) Close() error {

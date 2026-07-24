@@ -1324,6 +1324,57 @@ func TestHandleListAlertsIncludesDeploymentTriage(t *testing.T) {
 	}
 }
 
+func TestHandleListAlertsIncludesDormantFleetConditionAndTriage(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	conditionStartedAt := time.Date(2026, 7, 24, 12, 30, 0, 0, time.UTC)
+	if _, created, err := db.CreateAlert(&model.AlertDelivery{
+		Source:             "pr-155",
+		AlertType:          fleetFullyDormantAlertType,
+		Fingerprint:        fleetFullyDormantAlertType + ":pr-155:" + conditionStartedAt.Format(time.RFC3339Nano),
+		Status:             "sent",
+		ConditionStatus:    "active",
+		ConditionStartedAt: &conditionStartedAt,
+	}); err != nil {
+		t.Fatalf("CreateAlert() error = %v", err)
+	} else if !created {
+		t.Fatal("CreateAlert() created = false, want true")
+	}
+	if _, err := db.ResolveActiveAlertCondition(fleetFullyDormantAlertType, "pr-155", conditionStartedAt.Add(time.Hour)); err != nil {
+		t.Fatalf("ResolveActiveAlertCondition() error = %v", err)
+	}
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/alerts", nil)
+	recorder := httptest.NewRecorder()
+	api.handleListAlerts(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var alerts []struct {
+		Alert          model.AlertDelivery `json:"alert"`
+		TriageCommands []string            `json:"triage_commands"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&alerts); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("len(alerts) = %d, want 1", len(alerts))
+	}
+	alert := alerts[0].Alert
+	if alert.Source != "pr-155" || alert.ConditionStatus != "resolved" {
+		t.Fatalf("Alert = %+v, want pr-155 resolved condition", alert)
+	}
+	if alert.ConditionStartedAt == nil || alert.ConditionResolvedAt == nil {
+		t.Fatalf("condition timestamps = %v/%v, want both", alert.ConditionStartedAt, alert.ConditionResolvedAt)
+	}
+	if len(alerts[0].TriageCommands) == 0 || !strings.Contains(strings.Join(alerts[0].TriageCommands, " "), "source=pr-155") {
+		t.Fatalf("TriageCommands = %+v, want source-specific dormant fleet triage", alerts[0].TriageCommands)
+	}
+}
+
 func TestApplyDeploymentRolloutGuidanceGraceWindow(t *testing.T) {
 	t.Parallel()
 

@@ -503,6 +503,14 @@ func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (Deployme
 		Deployment: deployment,
 		Workers:    make([]DeploymentWorkerProgress, 0, len(workers)),
 	}
+	activeDormantFleet, err := db.GetActiveAlertCondition(fleetFullyDormantAlertType, source)
+	if err != nil {
+		return DeploymentRolloutResponse{}, err
+	}
+	if activeDormantFleet != nil {
+		response.DormantFleetAlert = true
+		response.DormantFleetSince = activeDormantFleet.ConditionStartedAt
+	}
 
 	for _, worker := range workers {
 		runtimeStatus := reporting.SnapshotStatus(extractReportedRuntime(worker, nil))
@@ -648,6 +656,9 @@ func inferDeploymentRolloutStatus(rollout DeploymentRolloutResponse) string {
 
 func summarizeDeploymentRollout(rollout DeploymentRolloutResponse) string {
 	subject := deploymentHumanLabel(rollout.Deployment)
+	if rollout.DormantFleetAlert {
+		return fmt.Sprintf("The %s fleet is 100%% dormant, leaving zero soak coverage until at least one worker resumes.", subject)
+	}
 	switch rollout.Status {
 	case "no_workers":
 		return fmt.Sprintf("The %s rollout is recorded, but no workers for that source are registered yet.", subject)
@@ -827,6 +838,9 @@ func deploymentGraceWindowExceeded(rollout DeploymentRolloutResponse, now time.T
 }
 
 func inferDeploymentNextAction(rollout DeploymentRolloutResponse) string {
+	if rollout.DormantFleetAlert {
+		return "Restore zero soak coverage now by resuming at least one dormant worker, then confirm heartbeats and verification restart."
+	}
 	switch rollout.Status {
 	case "no_workers":
 		return "Create or reconcile the main fleet before trusting this release."
@@ -856,6 +870,13 @@ func inferDeploymentNextAction(rollout DeploymentRolloutResponse) string {
 }
 
 func inferDeploymentNextChecks(rollout DeploymentRolloutResponse) []string {
+	if rollout.DormantFleetAlert {
+		return []string{
+			"Confirm the source is at zero soak coverage because 100% of its workers are dormant.",
+			"Resume the dormant fleet and verify at least one worker returns to running or probing.",
+			"Confirm fresh heartbeats and post-resume verification results appear before trusting the rollout.",
+		}
+	}
 	checks := make([]string, 0, 3)
 	switch rollout.Status {
 	case "no_workers":

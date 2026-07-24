@@ -513,6 +513,10 @@ func (m *Manager) ResumeDormantWorkers(ctx context.Context, source, imageRef, gi
 		return fmt.Errorf("list dormant workers: %w", err)
 	}
 
+	return m.resumeDormantWorkers(ctx, workers, imageRef, gitSHA, litestreamSHA, resumeTrigger)
+}
+
+func (m *Manager) resumeDormantWorkers(ctx context.Context, workers []model.Worker, imageRef, gitSHA, litestreamSHA, resumeTrigger string) error {
 	var resumeErrors []error
 	for _, worker := range workers {
 		if err := m.resumeDormantWorker(ctx, worker, imageRef, gitSHA, litestreamSHA, resumeTrigger); err != nil {
@@ -567,6 +571,9 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	if err := m.db.MarkWorkerProbing(worker.ID, resumeTrigger); err != nil {
 		return fmt.Errorf("mark worker probing: %w", err)
 	}
+	if err := m.resolveDormantFleetCondition(worker.Source); err != nil {
+		return err
+	}
 	m.observeWorkerByID(worker.ID)
 
 	message := fmt.Sprintf("Worker resumed for probe on soak %s / litestream %s (%s)", shortVersionValue(resumeSHA), shortVersionValue(resumeLitestreamSHA), resumeTrigger)
@@ -615,11 +622,22 @@ func (m *Manager) recreateDormantWorkerForProbe(ctx context.Context, worker mode
 	if err := m.db.MarkWorkerProbing(worker.ID, resumeTrigger); err != nil {
 		return fmt.Errorf("mark recreated worker probing: %w", err)
 	}
+	if err := m.resolveDormantFleetCondition(worker.Source); err != nil {
+		return err
+	}
 	m.observeWorkerByID(worker.ID)
 
 	message = fmt.Sprintf("Worker recreated for probe on soak %s / litestream %s (%s)", shortVersionValue(gitSHA), shortVersionValue(litestreamSHA), resumeTrigger)
 	if err := m.db.RecordEvent(worker.ID, "worker_probe_started", message, imageRef); err != nil {
 		return fmt.Errorf("record probe event: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) resolveDormantFleetCondition(source string) error {
+	source = firstNonEmpty(strings.TrimSpace(source), "main")
+	if _, err := m.db.ResolveActiveAlertCondition(fleetFullyDormantAlertType, source, time.Now().UTC()); err != nil {
+		return fmt.Errorf("resolve dormant fleet condition: %w", err)
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -433,6 +434,62 @@ func TestNotifyDeploymentReadyRejectsMalformedImageRef(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid deployment image ref") {
 		t.Fatalf("NotifyDeploymentReady() error = %q, want invalid image ref", err)
+	}
+}
+
+func TestNotifyDeploymentReadyCanceledWhileSourceLockedDoesNotRecordDeployment(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	source := "custom"
+	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	deployer := NewDeployer(manager, db, "litestream-soak", false)
+	unlockSource, err := manager.lockSource(context.Background(), source)
+	if err != nil {
+		t.Fatalf("lockSource() error = %v", err)
+	}
+	lockHeld := true
+	releaseLock := func() {
+		if lockHeld {
+			unlockSource()
+			lockHeld = false
+		}
+	}
+	defer releaseLock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := deployer.NotifyDeploymentReady(
+			ctx,
+			source,
+			"2222222222222222222222222222222222222222",
+			"3333333333333333333333333333333333333333",
+			"registry.fly.io/litestream-soak:sha-222222222222",
+			"test",
+		)
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("NotifyDeploymentReady() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		releaseLock()
+		<-result
+		t.Fatal("NotifyDeploymentReady() did not abandon source lock acquisition")
+	}
+
+	deployment, err := db.GetLatestDeployment(source)
+	if err != nil {
+		t.Fatalf("GetLatestDeployment() error = %v", err)
+	}
+	if deployment != nil {
+		t.Fatalf("GetLatestDeployment() = %+v, want nil", deployment)
 	}
 }
 

@@ -71,6 +71,31 @@ func TestFlyConfigsDeclareHealthzChecks(t *testing.T) {
 	}
 }
 
+func TestControlFlyConfigDeclaresDormantFleetAlertPolicy(t *testing.T) {
+	t.Parallel()
+
+	contents, err := os.ReadFile("fly.control.toml")
+	if err != nil {
+		t.Fatalf("read fly.control.toml: %v", err)
+	}
+	env, ok := tomlTable(string(contents), "[env]")
+	if !ok {
+		t.Fatal("fly.control.toml is missing [env]")
+	}
+	for key, want := range map[string]string{
+		"SOAK_DORMANT_FLEET_ALERT_THRESHOLD":      "2h",
+		"SOAK_DORMANT_FLEET_ALERT_CHECK_INTERVAL": "10m",
+	} {
+		got, ok := tomlValue(env, key)
+		if !ok {
+			t.Fatalf("fly.control.toml [env] is missing %s", key)
+		}
+		if got != want {
+			t.Fatalf("fly.control.toml [env] %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func tomlTable(contents, header string) (string, bool) {
 	lines := strings.Split(contents, "\n")
 	for i, line := range lines {

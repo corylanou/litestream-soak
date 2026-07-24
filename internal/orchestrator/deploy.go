@@ -17,6 +17,8 @@ import (
 var validSHARe = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 var validImageRefRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`)
 
+const deploymentBuildTimeout = 10 * time.Minute
+
 type Deployer struct {
 	manager           *Manager
 	db                *model.DB
@@ -124,8 +126,14 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 		return "", fmt.Errorf("deployment manager unavailable")
 	}
 
-	unlockSource := d.manager.lockSource(source)
+	unlockSource, err := d.manager.lockSource(ctx, source)
+	if err != nil {
+		return "", fmt.Errorf("lock deployment source: %w", err)
+	}
 	defer unlockSource()
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("start deployment ready rollout: %w", err)
+	}
 
 	if err := d.db.UpsertReadyDeployment(&model.Deployment{
 		GitSHA:        sha,
@@ -151,6 +159,9 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 		slog.Info("Deployment ready superseded, skipping rollout", "source", source, "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "latest_sha", latest.GitSHA, "latest_litestream_sha", latest.LitestreamSHA, "latest_image", latest.ImageRef, "trigger", trigger)
 		return imageRef, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("start deployment rollout: %w", err)
+	}
 
 	slog.Info("Deployment ready, starting rolling update", "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "trigger", trigger)
 	if err := d.manager.EnsureSourceFleet(ctx, source, sha, litestreamSHA, imageRef); err != nil {
@@ -175,7 +186,7 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 }
 
 func (d *Deployer) buildImage(sha string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), deploymentBuildTimeout)
 	defer cancel()
 
 	imageTag := fmt.Sprintf("registry.fly.io/%s:sha-%s", d.appName, trimSHA(sha))

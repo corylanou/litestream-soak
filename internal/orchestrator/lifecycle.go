@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path"
@@ -15,9 +16,10 @@ import (
 )
 
 const (
-	runArchiveTypeSuccess = "success"
-	runArchiveTypeFailure = "failure"
-	runArchiveTypeExpired = "expired"
+	runArchiveTypeSuccess      = "success"
+	runArchiveTypeFailure      = "failure"
+	runArchiveTypeExpired      = "expired"
+	fleetFullyDormantAlertType = "fleet_fully_dormant"
 )
 
 type SuccessTeardownPolicy struct {
@@ -53,6 +55,11 @@ type FailedSourcePausePolicy struct {
 	SingleWorkerMinConsecutiveFailures int
 }
 
+type DormantFleetAlertPolicy struct {
+	Threshold     time.Duration
+	CheckInterval time.Duration
+}
+
 type successTeardownEvaluation struct {
 	Deployment model.Deployment
 	Rollout    DeploymentRolloutResponse
@@ -75,6 +82,14 @@ type failedSourcePauseEvaluation struct {
 	Summary    string
 	Signature  string
 }
+
+type failedSourcePolicyVerdict int
+
+const (
+	failedSourcePolicyInconclusive failedSourcePolicyVerdict = iota
+	failedSourcePolicyCleared
+	failedSourcePolicyKnownBad
+)
 
 type runArchivePayload struct {
 	GeneratedAt time.Time                     `json:"generated_at"`
@@ -117,6 +132,150 @@ func (m *Manager) RunSuccessTeardownLoop(ctx context.Context, policy SuccessTear
 			m.evaluateSuccessTeardown(ctx, policy)
 		}
 	}
+}
+
+func (m *Manager) RunDormantFleetAlertLoop(ctx context.Context, policy DormantFleetAlertPolicy) {
+	policy = normalizeDormantFleetAlertPolicy(policy)
+
+	m.evaluateDormantFleetAlerts(ctx, policy)
+
+	ticker := time.NewTicker(policy.CheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.evaluateDormantFleetAlerts(ctx, policy)
+		}
+	}
+}
+
+func normalizeDormantFleetAlertPolicy(policy DormantFleetAlertPolicy) DormantFleetAlertPolicy {
+	if policy.Threshold <= 0 {
+		policy.Threshold = 2 * time.Hour
+	}
+	if policy.CheckInterval <= 0 {
+		policy.CheckInterval = 10 * time.Minute
+	}
+	return policy
+}
+
+func (m *Manager) evaluateDormantFleetAlerts(ctx context.Context, policy DormantFleetAlertPolicy) {
+	policy = normalizeDormantFleetAlertPolicy(policy)
+	sources, err := m.db.ListActiveWorkerSources()
+	if err != nil {
+		slog.Error("Failed to list active worker sources for dormant fleet alerts", "error", err)
+		return
+	}
+
+	activeSources, err := m.db.ListActiveAlertSources(fleetFullyDormantAlertType)
+	if err != nil {
+		slog.Error("Failed to list active dormant fleet alerts", "error", err)
+		return
+	}
+
+	sourceSet := make(map[string]struct{}, len(sources)+len(activeSources))
+	for _, source := range append(sources, activeSources...) {
+		source = firstNonEmpty(strings.TrimSpace(source), "main")
+		sourceSet[source] = struct{}{}
+	}
+
+	now := time.Now().UTC()
+	for source := range sourceSet {
+		unlockSource, err := m.lockSource(ctx, source)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Error("Failed to lock source for dormant fleet alert", "source", source, "error", err)
+			continue
+		}
+		err = m.evaluateDormantFleetAlertLocked(source, policy, now)
+		unlockSource()
+		if err != nil {
+			slog.Error("Failed to evaluate dormant fleet alert", "source", source, "error", err)
+		}
+	}
+}
+
+func (m *Manager) evaluateDormantFleetAlertLocked(source string, policy DormantFleetAlertPolicy, now time.Time) error {
+	workers, err := m.db.ListWorkersForSource(source)
+	if err != nil {
+		return fmt.Errorf("list source workers: %w", err)
+	}
+
+	epoch, fullyDormant := fullyDormantFleetEpoch(workers)
+	active, err := m.db.GetActiveAlertCondition(fleetFullyDormantAlertType, source)
+	if err != nil {
+		return fmt.Errorf("get active condition: %w", err)
+	}
+
+	if active != nil && (!fullyDormant || active.ConditionStartedAt == nil || !active.ConditionStartedAt.Equal(epoch)) {
+		if _, err := m.db.ResolveActiveAlertCondition(fleetFullyDormantAlertType, source, now); err != nil {
+			return fmt.Errorf("resolve active condition: %w", err)
+		}
+		active = nil
+	}
+	if !fullyDormant || active != nil || now.Sub(epoch) < policy.Threshold {
+		return nil
+	}
+
+	deployment, err := m.db.GetLatestDeployment(source)
+	if err != nil {
+		return fmt.Errorf("get latest deployment: %w", err)
+	}
+	if deploymentBuildInFlight(deployment, now) {
+		return nil
+	}
+
+	var rollout *DeploymentRolloutResponse
+	if deployment != nil {
+		built, err := buildDeploymentRollout(m.db, *deployment)
+		if err != nil {
+			return fmt.Errorf("build deployment rollout: %w", err)
+		}
+		rollout = &built
+	}
+
+	dispatcher := m.alerts
+	if dispatcher == nil {
+		dispatcher = NewAlertDispatcher(m.db, "", "", "")
+	}
+	if err := dispatcher.NotifyFleetFullyDormant(source, epoch, rollout); err != nil {
+		return fmt.Errorf("create dormant fleet alert: %w", err)
+	}
+	return nil
+}
+
+func deploymentBuildInFlight(deployment *model.Deployment, now time.Time) bool {
+	if deployment == nil ||
+		!strings.EqualFold(strings.TrimSpace(deployment.Status), "building") ||
+		deployment.StartedAt.IsZero() {
+		return false
+	}
+	age := now.Sub(deployment.StartedAt.UTC())
+	return age >= 0 && age <= deploymentBuildTimeout
+}
+
+func fullyDormantFleetEpoch(workers []model.Worker) (time.Time, bool) {
+	var latest time.Time
+	activeWorkers := 0
+	for _, worker := range workers {
+		if worker.Status == model.WorkerStopped || worker.Status == model.WorkerFailed {
+			continue
+		}
+		activeWorkers++
+		if worker.Status != model.WorkerDormant || worker.DormantAt == nil || worker.DormantAt.IsZero() {
+			return time.Time{}, false
+		}
+		dormantAt := worker.DormantAt.UTC()
+		if dormantAt.After(latest) {
+			latest = dormantAt
+		}
+	}
+	return latest, activeWorkers > 0
 }
 
 func normalizeSuccessTeardownPolicy(policy SuccessTeardownPolicy) SuccessTeardownPolicy {
@@ -262,42 +421,85 @@ func (m *Manager) evaluateFailedSourcePause(ctx context.Context, policy FailedSo
 	}
 
 	for _, source := range sources {
-		if !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
-			continue
-		}
-
-		deployment, err := m.db.GetLatestDeployment(source)
+		unlockSource, err := m.lockSource(ctx, source)
 		if err != nil {
-			slog.Error("Failed to get latest deployment for failed-source pause", "source", source, "error", err)
-			continue
-		}
-		if deployment == nil {
-			continue
-		}
-
-		evaluation, ok, err := failedSourcePauseCandidate(m.db, *deployment, policy)
-		if err != nil {
-			slog.Error("Failed to evaluate failed-source pause", "source", source, "deployment_id", deployment.ID, "error", err)
-			continue
-		}
-		if !ok {
-			continue
-		}
-
-		archive, created, err := m.archiveFailedSourceRun(evaluation, time.Now().UTC())
-		if err != nil {
-			slog.Warn("Failed to archive failed-source pause evidence", "source", source, "deployment_id", deployment.ID, "error", err)
-		} else if created {
-			_ = m.db.RecordEvent("", "run_failed_source_archived", evaluation.Summary, fmt.Sprintf("archive_id=%d source=%s", archive.ID, source))
-		}
-
-		for _, worker := range evaluation.Workers {
-			slog.Info("Pausing known-bad source worker", "worker_id", worker.ID, "source", source, "deployment_id", deployment.ID)
-			if err := m.DormantWorker(ctx, worker.ID, evaluation.Summary, evaluation.Signature, "known_bad_source"); err != nil {
-				slog.Error("Failed to pause known-bad source worker", "worker_id", worker.ID, "error", err)
+			if ctx.Err() != nil {
+				return
 			}
+			slog.Error("Failed to lock source for failed-source pause", "source", source, "error", err)
+			continue
+		}
+		err = m.evaluateFailedSourcePauseLocked(ctx, source, policy)
+		unlockSource()
+		if err != nil {
+			slog.Error("Failed to evaluate failed-source pause", "source", source, "error", err)
 		}
 	}
+}
+
+func (m *Manager) evaluateFailedSourcePauseLocked(ctx context.Context, source string, policy FailedSourcePausePolicy) error {
+	deployment, err := m.db.GetLatestDeployment(source)
+	if err != nil {
+		return fmt.Errorf("get latest deployment: %w", err)
+	}
+	if deployment == nil {
+		return nil
+	}
+
+	evaluation, verdict, err := failedSourcePolicyEvaluation(m.db, *deployment, policy)
+	if err != nil {
+		return fmt.Errorf("evaluate deployment %d: %w", deployment.ID, err)
+	}
+	if verdict == failedSourcePolicyCleared {
+		workers, err := m.db.ListDormantWorkersForResumeTrigger(source, "known_bad_source")
+		if err != nil {
+			return fmt.Errorf("list known-bad dormant workers: %w", err)
+		}
+		if len(workers) == 0 {
+			return nil
+		}
+
+		if err := m.resumeDormantWorkers(
+			ctx,
+			workers,
+			deployment.ImageRef,
+			deployment.GitSHA,
+			deployment.LitestreamSHA,
+			"known_bad_source_policy_recheck",
+		); err != nil {
+			return fmt.Errorf("resume known-bad dormant workers: %w", err)
+		}
+		return nil
+	}
+	if verdict != failedSourcePolicyKnownBad {
+		return nil
+	}
+
+	workers, err := failedSourcePauseTargets(m.db, *deployment)
+	if err != nil {
+		return err
+	}
+	if len(workers) == 0 {
+		return nil
+	}
+	evaluation.Workers = workers
+
+	archive, created, err := m.archiveFailedSourceRun(evaluation, time.Now().UTC())
+	if err != nil {
+		slog.Warn("Failed to archive failed-source pause evidence", "source", source, "deployment_id", deployment.ID, "error", err)
+	} else if created {
+		_ = m.db.RecordEvent("", "run_failed_source_archived", evaluation.Summary, fmt.Sprintf("archive_id=%d source=%s", archive.ID, source))
+	}
+
+	var pauseErrors []error
+	for _, worker := range evaluation.Workers {
+		slog.Info("Pausing known-bad source worker", "worker_id", worker.ID, "source", source, "deployment_id", deployment.ID)
+		if err := m.DormantWorker(ctx, worker.ID, evaluation.Summary, evaluation.Signature, "known_bad_source"); err != nil {
+			slog.Error("Failed to pause known-bad source worker", "worker_id", worker.ID, "error", err)
+			pauseErrors = append(pauseErrors, fmt.Errorf("%s: %w", worker.ID, err))
+		}
+	}
+	return errors.Join(pauseErrors...)
 }
 
 func (m *Manager) evaluatePRMaxAge(ctx context.Context, policy PRMaxAgePolicy) {
@@ -455,15 +657,34 @@ func workerPassedSuccessWindow(db *model.DB, worker model.Worker, deployment mod
 }
 
 func failedSourcePauseCandidate(db *model.DB, deployment model.Deployment, policy FailedSourcePausePolicy) (failedSourcePauseEvaluation, bool, error) {
+	evaluation, verdict, err := failedSourcePolicyEvaluation(db, deployment, policy)
+	if err != nil || verdict != failedSourcePolicyKnownBad {
+		return evaluation, false, err
+	}
+
+	workers, err := failedSourcePauseTargets(db, deployment)
+	if err != nil {
+		return failedSourcePauseEvaluation{}, false, err
+	}
+	if len(workers) == 0 {
+		return failedSourcePauseEvaluation{}, false, nil
+	}
+	evaluation.Workers = workers
+	return evaluation, true, nil
+}
+
+func failedSourcePolicyEvaluation(db *model.DB, deployment model.Deployment, policy FailedSourcePausePolicy) (failedSourcePauseEvaluation, failedSourcePolicyVerdict, error) {
 	policy = normalizeFailedSourcePausePolicy(policy)
 	source := firstNonEmpty(strings.TrimSpace(deployment.Source), "main")
-	if !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
-		return failedSourcePauseEvaluation{}, false, nil
+	if !sourceAllowedForPolicy(source, policy.SourceAllowlist) ||
+		!strings.EqualFold(strings.TrimSpace(deployment.Status), "ready") ||
+		strings.TrimSpace(deployment.ImageRef) == "" {
+		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, nil
 	}
 
 	rollout, err := buildDeploymentRollout(db, deployment)
 	if err != nil {
-		return failedSourcePauseEvaluation{}, false, err
+		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, err
 	}
 	if rollout.TotalWorkers == 0 ||
 		rollout.Status != "needs_attention" ||
@@ -472,34 +693,20 @@ func failedSourcePauseCandidate(db *model.DB, deployment model.Deployment, polic
 		rollout.AwaitingVerification > 0 ||
 		rollout.UpdatedWorkers != rollout.TotalWorkers ||
 		rollout.AttentionWorkers == 0 {
-		return failedSourcePauseEvaluation{}, false, nil
-	}
-
-	workers, err := db.ListWorkersForSource(source)
-	if err != nil {
-		return failedSourcePauseEvaluation{}, false, err
-	}
-	activeWorkers := make([]model.Worker, 0, len(workers))
-	for _, worker := range workers {
-		if workerActiveForSourcePause(worker, deployment) {
-			activeWorkers = append(activeWorkers, worker)
-		}
-	}
-	if len(activeWorkers) == 0 {
-		return failedSourcePauseEvaluation{}, false, nil
+		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, nil
 	}
 
 	actionableAttention, err := countActionableAttentionWorkers(db, rollout, deployment)
 	if err != nil {
-		return failedSourcePauseEvaluation{}, false, err
+		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, err
 	}
 	if actionableAttention < policy.MinAttentionWorkers {
 		corroborated, err := singleWorkerFailureCorroborated(db, rollout, deployment, policy.SingleWorkerMinConsecutiveFailures)
 		if err != nil {
-			return failedSourcePauseEvaluation{}, false, err
+			return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, err
 		}
 		if !corroborated {
-			return failedSourcePauseEvaluation{}, false, nil
+			return failedSourcePauseEvaluation{}, failedSourcePolicyCleared, nil
 		}
 	}
 
@@ -508,10 +715,25 @@ func failedSourcePauseCandidate(db *model.DB, deployment model.Deployment, polic
 	return failedSourcePauseEvaluation{
 		Deployment: deployment,
 		Rollout:    rollout,
-		Workers:    activeWorkers,
 		Summary:    summary,
 		Signature:  signature,
-	}, true, nil
+	}, failedSourcePolicyKnownBad, nil
+}
+
+func failedSourcePauseTargets(db *model.DB, deployment model.Deployment) ([]model.Worker, error) {
+	source := firstNonEmpty(strings.TrimSpace(deployment.Source), "main")
+	workers, err := db.ListWorkersForSource(source)
+	if err != nil {
+		return nil, fmt.Errorf("list source workers: %w", err)
+	}
+
+	activeWorkers := make([]model.Worker, 0, len(workers))
+	for _, worker := range workers {
+		if workerActiveForSourcePause(worker, deployment) {
+			activeWorkers = append(activeWorkers, worker)
+		}
+	}
+	return activeWorkers, nil
 }
 
 func prMaxAgeCandidate(db *model.DB, deployment model.Deployment, policy PRMaxAgePolicy, now time.Time) (prMaxAgeEvaluation, bool, error) {

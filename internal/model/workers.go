@@ -452,6 +452,14 @@ func (d *DB) ListDormantWorkers(source string) ([]Worker, error) {
 	return d.queryWorkers(query, args...)
 }
 
+func (d *DB) ListDormantWorkersForResumeTrigger(source, resumeTrigger string) ([]Worker, error) {
+	return d.queryWorkers(
+		"SELECT "+workerColumns+" FROM workers WHERE status = 'dormant' AND source = ? AND resume_trigger = ? ORDER BY updated_at DESC",
+		source,
+		resumeTrigger,
+	)
+}
+
 func (d *DB) listWorkersBySource(source string) ([]Worker, error) {
 	return d.queryWorkers("SELECT "+workerColumns+" FROM workers WHERE source = ? AND status NOT IN ('stopped', 'failed', 'dormant') ORDER BY created_at", source)
 }
