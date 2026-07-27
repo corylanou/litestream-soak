@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -115,8 +116,8 @@ func TestReplacementRequestUsesWorkerID(t *testing.T) {
 
 	w := model.Worker{
 		ID:            "11111111-2222-3333-4444-555555555555",
-		Name:          "worker-main-gharchive",
-		Source:        "main",
+		Name:          "worker-pr-7-gharchive",
+		Source:        "pr-7",
 		GitSHA:        "oldsha",
 		LitestreamSHA: "oldls",
 		PRNumber:      7,
@@ -124,7 +125,10 @@ func TestReplacementRequestUsesWorkerID(t *testing.T) {
 		Region:        "ord",
 	}
 
-	req := replacementRequest(w, "registry/img:new", "newsha", "newls")
+	req, err := replacementRequest(w, "registry/img:new", "newsha", "newls")
+	if err != nil {
+		t.Fatalf("replacementRequest() error = %v", err)
+	}
 
 	if req.WorkerID != w.ID {
 		t.Fatalf("WorkerID=%q, want %q", req.WorkerID, w.ID)
@@ -150,12 +154,18 @@ func TestReplacementRequestPreservesExpiresAt(t *testing.T) {
 	t.Parallel()
 
 	expires := time.Now().Add(3 * time.Hour).UTC()
-	withExpiry := replacementRequest(model.Worker{ID: "w1", Name: "w1", ExpiresAt: &expires}, "img", "sha", "ls")
+	withExpiry, err := replacementRequest(model.Worker{ID: "w1", Name: "w1", ExpiresAt: &expires}, "img", "sha", "ls")
+	if err != nil {
+		t.Fatalf("replacementRequest() error = %v", err)
+	}
 	if withExpiry.ExpiresAt == nil || !withExpiry.ExpiresAt.Equal(expires) {
 		t.Fatalf("ExpiresAt=%v, want %v", withExpiry.ExpiresAt, expires)
 	}
 
-	withoutExpiry := replacementRequest(model.Worker{ID: "w2", Name: "w2"}, "img", "sha", "ls")
+	withoutExpiry, err := replacementRequest(model.Worker{ID: "w2", Name: "w2"}, "img", "sha", "ls")
+	if err != nil {
+		t.Fatalf("replacementRequest() error = %v", err)
+	}
 	if withoutExpiry.ExpiresAt != nil {
 		t.Fatalf("ExpiresAt=%v, want nil", withoutExpiry.ExpiresAt)
 	}
@@ -167,12 +177,12 @@ func TestNewWorkerRecordCopiesExpiresAt(t *testing.T) {
 	mgr := &Manager{appName: "litestream-soak"}
 	expires := time.Now().Add(2 * time.Hour).UTC()
 
-	withExpiry := mgr.newWorkerRecord(WorkerRequest{WorkerID: "w1", Name: "w1", Source: "main", ExpiresAt: &expires})
+	withExpiry := mgr.newWorkerRecord(WorkerRequest{WorkerID: "w1", Name: "w1", Source: "main", ExpiresAt: &expires}, "{}")
 	if withExpiry.ExpiresAt == nil || !withExpiry.ExpiresAt.Equal(expires) {
 		t.Fatalf("ExpiresAt=%v, want %v", withExpiry.ExpiresAt, expires)
 	}
 
-	withoutExpiry := mgr.newWorkerRecord(WorkerRequest{WorkerID: "w2", Name: "w2", Source: "main"})
+	withoutExpiry := mgr.newWorkerRecord(WorkerRequest{WorkerID: "w2", Name: "w2", Source: "main"}, "{}")
 	if withoutExpiry.ExpiresAt != nil {
 		t.Fatalf("ExpiresAt=%v, want nil", withoutExpiry.ExpiresAt)
 	}
@@ -238,6 +248,137 @@ func TestCreateWorkerForksPRWorkerFromEligibleMainVolume(t *testing.T) {
 	event := requireWorkerEvent(t, db, worker.ID, "worker_volume_forked")
 	if !strings.Contains(event.Details, "vol-main-001") || !strings.Contains(event.Details, "worker-main-low-vol") {
 		t.Fatalf("fork event details=%q, want source worker and volume", event.Details)
+	}
+}
+
+func TestCreateWorkerRejectsNonFiniteWorkloadBeforePersisting(t *testing.T) {
+	db := openTestDB(t)
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+	_, err := manager.CreateWorker(context.Background(), WorkerRequest{
+		WorkerID:    "worker-main-invalid",
+		Name:        "worker-main-invalid",
+		Source:      "main",
+		ProfileName: "invalid",
+		ImageRef:    "registry.fly.io/litestream-soak:test",
+		Region:      "ord",
+		Workload:    workload.Config{ReadRatio: math.Inf(1)},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported value") {
+		t.Fatalf("CreateWorker() error = %v, want marshal error", err)
+	}
+	if _, err := db.GetWorker("worker-main-invalid"); err == nil {
+		t.Fatal("invalid worker row was persisted")
+	}
+	if got := len(fly.volumeRequests()); got != 0 {
+		t.Fatalf("volume creates = %d, want 0", got)
+	}
+}
+
+func TestReplaceWorkerRejectsNonFiniteWorkloadBeforeDestroying(t *testing.T) {
+	db := openTestDB(t)
+	const workerID = "worker-main-invalid-replacement"
+	worker := model.Worker{
+		ID:            workerID,
+		AppName:       "litestream-soak",
+		Name:          workerID,
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+		Region:        "ord",
+		FlyMachineID:  "old-machine",
+		FlyVolumeID:   "old-volume",
+	}
+	createTestWorker(t, db, worker)
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	_, err := manager.replaceWorkerWithRequest(context.Background(), worker, WorkerRequest{
+		WorkerID:    workerID,
+		Name:        workerID,
+		Source:      "main",
+		ProfileName: "low-volume",
+		ImageRef:    "registry.fly.io/litestream-soak:test",
+		Region:      "ord",
+		Workload:    workload.Config{ReadRatio: math.Inf(-1)},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported value") {
+		t.Fatalf("replaceWorkerWithRequest() error = %v, want marshal error", err)
+	}
+	stops, machineDeletes, volumeDeletes := fly.replacementCounts()
+	if stops != 0 || machineDeletes != 0 || volumeDeletes != 0 {
+		t.Fatalf("replacement operations = stops:%d machine deletes:%d volume deletes:%d, want zero", stops, machineDeletes, volumeDeletes)
+	}
+	stored := mustWorker(t, db, workerID)
+	if stored.FlyMachineID != worker.FlyMachineID || stored.FlyVolumeID != worker.FlyVolumeID || stored.ProfileConfig != worker.ProfileConfig {
+		t.Fatalf("stored worker changed after rejected replacement: %+v", stored)
+	}
+}
+
+func TestCreateWorkerLocksMainSourceDuringVolumeFork(t *testing.T) {
+	db := openTestDB(t)
+	const sourceWorkerID = "worker-main-low-vol"
+	createTestWorker(t, db, model.Worker{
+		ID:            sourceWorkerID,
+		AppName:       "litestream-soak",
+		Name:          sourceWorkerID,
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "main",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+		Region:        "ord",
+		FlyMachineID:  "machine-main",
+		FlyVolumeID:   "vol-main-001",
+	})
+
+	fly := newBlockingForkFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	createDone := make(chan error, 1)
+	go func() {
+		_, err := manager.CreateWorker(context.Background(), WorkerRequest{
+			WorkerID:    "worker-pr-62-low-vol",
+			Name:        "worker-pr-62-low-vol",
+			Source:      "pr-62",
+			GitSHA:      "soak-sha",
+			ProfileName: "low-volume",
+			ImageRef:    "registry.fly.io/litestream-soak:test",
+			Region:      "ord",
+			Workload:    workload.Config{LoadMode: "synthetic"},
+		})
+		createDone <- err
+	}()
+
+	select {
+	case <-fly.forkStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for volume fork")
+	}
+
+	lockCtx, cancelLock := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelLock()
+	unlock, err := manager.lockWorker(lockCtx, sourceWorkerID)
+	lockAvailable := err == nil
+	if err == nil {
+		unlock()
+	}
+
+	fly.unblockFork()
+	select {
+	case err := <-createDone:
+		if err != nil {
+			t.Fatalf("CreateWorker() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for worker creation")
+	}
+	if lockAvailable {
+		t.Fatal("source worker lock was available while its volume was being forked")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("lockWorker() error = %v, want %v", err, context.DeadlineExceeded)
 	}
 }
 
@@ -353,12 +494,12 @@ func TestExpiresAtRoundTripMatchesExpiryQuery(t *testing.T) {
 	mgr := &Manager{db: db, appName: "litestream-soak"}
 
 	past := time.Now().Add(-1 * time.Hour).UTC()
-	expired := mgr.newWorkerRecord(WorkerRequest{WorkerID: "expired", Name: "expired", Source: "main", ExpiresAt: &past})
+	expired := mgr.newWorkerRecord(WorkerRequest{WorkerID: "expired", Name: "expired", Source: "main", ExpiresAt: &past}, "{}")
 	if err := db.CreateWorker(expired); err != nil {
 		t.Fatalf("create expired worker: %v", err)
 	}
 
-	never := mgr.newWorkerRecord(WorkerRequest{WorkerID: "never", Name: "never", Source: "main"})
+	never := mgr.newWorkerRecord(WorkerRequest{WorkerID: "never", Name: "never", Source: "main"}, "{}")
 	if err := db.CreateWorker(never); err != nil {
 		t.Fatalf("create never worker: %v", err)
 	}
@@ -691,9 +832,15 @@ type createWorkerFlyServer struct {
 	client *flyapi.Client
 	server *httptest.Server
 
-	mu       sync.Mutex
-	volumes  []flyapi.CreateVolumeRequest
-	machines []flyapi.CreateMachineRequest
+	mu                sync.Mutex
+	volumes           []flyapi.CreateVolumeRequest
+	machines          []flyapi.CreateMachineRequest
+	stoppedMachines   int
+	destroyedMachines int
+	destroyedVolumes  int
+	forkStarted       chan struct{}
+	releaseFork       chan struct{}
+	releaseForkOnce   sync.Once
 }
 
 func newCreateWorkerFlyServer(t *testing.T) *createWorkerFlyServer {
@@ -704,6 +851,28 @@ func newCreateWorkerFlyServer(t *testing.T) *createWorkerFlyServer {
 	t.Cleanup(fake.server.Close)
 	fake.client = flyapi.NewClientWithBaseURL("litestream-soak", "test-token", fake.server.URL)
 	return fake
+}
+
+func newBlockingForkFlyServer(t *testing.T) *createWorkerFlyServer {
+	t.Helper()
+
+	fake := &createWorkerFlyServer{
+		forkStarted: make(chan struct{}, 1),
+		releaseFork: make(chan struct{}),
+	}
+	fake.server = httptest.NewServer(http.HandlerFunc(fake.handle))
+	t.Cleanup(fake.server.Close)
+	t.Cleanup(fake.unblockFork)
+	fake.client = flyapi.NewClientWithBaseURL("litestream-soak", "test-token", fake.server.URL)
+	return fake
+}
+
+func (f *createWorkerFlyServer) unblockFork() {
+	f.releaseForkOnce.Do(func() {
+		if f.releaseFork != nil {
+			close(f.releaseFork)
+		}
+	})
 }
 
 func (f *createWorkerFlyServer) handle(w http.ResponseWriter, r *http.Request) {
@@ -719,7 +888,13 @@ func (f *createWorkerFlyServer) handle(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.volumes = append(f.volumes, req)
 		id := fmt.Sprintf("vol-%03d", len(f.volumes))
+		forkStarted := f.forkStarted
+		releaseFork := f.releaseFork
 		f.mu.Unlock()
+		if req.SourceID != "" && forkStarted != nil {
+			forkStarted <- struct{}{}
+			<-releaseFork
+		}
 		writeCreateWorkerJSON(w, flyapi.Volume{ID: id, Name: req.Name, SizeGB: req.SizeGB, Region: req.Region, State: "created"})
 	case r.Method == http.MethodPost && r.URL.Path == "/apps/litestream-soak/machines":
 		var req flyapi.CreateMachineRequest
@@ -732,6 +907,21 @@ func (f *createWorkerFlyServer) handle(w http.ResponseWriter, r *http.Request) {
 		id := fmt.Sprintf("machine-%03d", len(f.machines))
 		f.mu.Unlock()
 		writeCreateWorkerJSON(w, flyapi.Machine{ID: id, Name: req.Name, State: "started", Config: req.Config})
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/stop"):
+		f.mu.Lock()
+		f.stoppedMachines++
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/apps/litestream-soak/machines/"):
+		f.mu.Lock()
+		f.destroyedMachines++
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/apps/litestream-soak/volumes/"):
+		f.mu.Lock()
+		f.destroyedVolumes++
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
 	default:
 		http.NotFound(w, r)
 	}
@@ -747,6 +937,12 @@ func (f *createWorkerFlyServer) machineRequests() []flyapi.CreateMachineRequest 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]flyapi.CreateMachineRequest(nil), f.machines...)
+}
+
+func (f *createWorkerFlyServer) replacementCounts() (stoppedMachines, destroyedMachines, destroyedVolumes int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stoppedMachines, f.destroyedMachines, f.destroyedVolumes
 }
 
 func writeCreateWorkerJSON(w http.ResponseWriter, value any) {
@@ -910,6 +1106,170 @@ func TestRollingUpdateSourceSkipsUpToDateWorkers(t *testing.T) {
 
 	unlock := mustLockSource(t, mgr, "main")
 	unlock()
+}
+
+func TestRollingUpdateSourceReplacesSameDeploymentConfigDriftOnce(t *testing.T) {
+	db := openTestDB(t)
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const litestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const imageRef = "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-ls-bbbbbbbbbbbb"
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ImageRef:      imageRef,
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+
+	const workerID = "worker-main-low-vol"
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		AppName:       "litestream-soak",
+		Name:          workerID,
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ProfileName:   "low-volume",
+		ProfileConfig: normalizeWorkloadConfig(workload.Config{
+			LoadMode:         "synthetic",
+			WriteRate:        1,
+			Pattern:          "constant",
+			PayloadSize:      1024,
+			ReadRatio:        0.2,
+			Workers:          1,
+			InitialSize:      "5MB",
+			VerifyInterval:   "30m",
+			VerifyType:       "integrity",
+			SnapshotInterval: "10m",
+			SyncInterval:     "1s",
+			MemoryMB:         1024,
+			CPUs:             1,
+		}).JSON(),
+		Region:       "ord",
+		FlyMachineID: "old-machine",
+		FlyVolumeID:  "old-volume",
+	})
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+	if err := manager.RollingUpdateSource(context.Background(), "main", imageRef, sha, litestreamSHA); err != nil {
+		t.Fatalf("RollingUpdateSource() error = %v", err)
+	}
+
+	machines := fly.machineRequests()
+	if len(machines) != 1 {
+		t.Fatalf("machine creates after first roll = %d, want 1", len(machines))
+	}
+	if machines[0].Config.Env["WRITE_RATE"] != "10" {
+		t.Fatalf("WRITE_RATE = %q, want 10", machines[0].Config.Env["WRITE_RATE"])
+	}
+
+	if err := manager.RollingUpdateSource(context.Background(), "main", imageRef, sha, litestreamSHA); err != nil {
+		t.Fatalf("second RollingUpdateSource() error = %v", err)
+	}
+	if got := len(fly.machineRequests()); got != 1 {
+		t.Fatalf("machine creates after second roll = %d, want unchanged at 1", got)
+	}
+	if got := len(fly.volumeRequests()); got != 1 {
+		t.Fatalf("volume creates after second roll = %d, want unchanged at 1", got)
+	}
+	stops, machineDeletes, volumeDeletes := fly.replacementCounts()
+	if stops != 1 || machineDeletes != 1 || volumeDeletes != 1 {
+		t.Fatalf("replacement operations after second roll = stops:%d machine deletes:%d volume deletes:%d, want unchanged at 1 each", stops, machineDeletes, volumeDeletes)
+	}
+}
+
+func TestRollingUpdateSourceCapsConfigOnlyDriftReplacements(t *testing.T) {
+	db := openTestDB(t)
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const litestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const imageRef = "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-ls-bbbbbbbbbbbb"
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ImageRef:      imageRef,
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+
+	desiredSpec := DefaultFleetForSource("main", sha, litestreamSHA)
+	for i, desired := range desiredSpec.Workers[:3] {
+		applied := desired.Workload
+		applied.SnapshotInterval = "1h"
+		createTestWorker(t, db, model.Worker{
+			ID:            desired.WorkerID,
+			AppName:       "litestream-soak",
+			Name:          desired.Name,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        sha,
+			LitestreamSHA: litestreamSHA,
+			ProfileName:   desired.ProfileName,
+			ProfileConfig: normalizeWorkloadConfig(applied).JSON(),
+			Region:        desired.Region,
+			FlyMachineID:  fmt.Sprintf("old-machine-%d", i),
+			FlyVolumeID:   fmt.Sprintf("old-volume-%d", i),
+		})
+	}
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	if err := manager.RollingUpdateSource(context.Background(), "main", imageRef, sha, litestreamSHA); err != nil {
+		t.Fatalf("RollingUpdateSource() error = %v", err)
+	}
+	if got := len(fly.machineRequests()); got != 1 {
+		t.Fatalf("config-only machine replacements = %d, want 1", got)
+	}
+}
+
+func TestRollingUpdateSourceDoesNotCapDeploymentReplacements(t *testing.T) {
+	db := openTestDB(t)
+	const oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const newSHA = "cccccccccccccccccccccccccccccccccccccccc"
+	const litestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const imageRef = "registry.fly.io/litestream-soak:sha-cccccccccccc-ls-bbbbbbbbbbbb"
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        newSHA,
+		LitestreamSHA: litestreamSHA,
+		ImageRef:      imageRef,
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+
+	desiredSpec := DefaultFleetForSource("main", newSHA, litestreamSHA)
+	for i, desired := range desiredSpec.Workers[:3] {
+		createTestWorker(t, db, model.Worker{
+			ID:            desired.WorkerID,
+			AppName:       "litestream-soak",
+			Name:          desired.Name,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        oldSHA,
+			LitestreamSHA: litestreamSHA,
+			ProfileName:   desired.ProfileName,
+			ProfileConfig: normalizeWorkloadConfig(desired.Workload).JSON(),
+			Region:        desired.Region,
+			FlyMachineID:  fmt.Sprintf("old-machine-%d", i),
+			FlyVolumeID:   fmt.Sprintf("old-volume-%d", i),
+		})
+	}
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	if err := manager.RollingUpdateSource(context.Background(), "main", imageRef, newSHA, litestreamSHA); err != nil {
+		t.Fatalf("RollingUpdateSource() error = %v", err)
+	}
+	if got := len(fly.machineRequests()); got != 3 {
+		t.Fatalf("deployment machine replacements = %d, want 3", got)
+	}
 }
 
 func TestRollWorkerAlwaysReplacesExplicitTarget(t *testing.T) {

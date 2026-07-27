@@ -1,20 +1,25 @@
 package orchestrator
 
 import (
+	"encoding/json"
+	"fmt"
 	"log/slog"
 
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
+func marshalWorkloadConfig(cfg workload.Config) (string, error) {
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("marshal workload config: %w", err)
+	}
+	return string(body), nil
+}
+
 func resolveWorkerWorkload(worker model.Worker) workload.Config {
-	if worker.Source == "main" {
-		if desired, ok := defaultMainFleetWorkload(worker.ID); ok {
-			return desired
-		}
-		if desired, ok := defaultMainFleetWorkload(worker.Name); ok {
-			return desired
-		}
+	if desired, ok := defaultFleetDesiredWorker(worker.Source, worker.ID, worker.Name); ok {
+		return desired.Workload
 	}
 
 	cfg, err := workload.ParseConfig(worker.ProfileConfig)
@@ -31,15 +36,6 @@ func resolveWorkerVolumeSize(worker model.Worker, workloadCfg workload.Config) i
 		return desired.VolumeSizeGB
 	}
 	return workloadCfg.VolumeSizeGB
-}
-
-func defaultMainFleetWorkload(workerID string) (workload.Config, bool) {
-	for _, desired := range DefaultMainFleet().Workers {
-		if desired.WorkerID == workerID || desired.Name == workerID {
-			return desired.Workload, true
-		}
-	}
-	return workload.Config{}, false
 }
 
 func defaultFleetDesiredWorker(source, workerID, workerName string) (DesiredWorker, bool) {

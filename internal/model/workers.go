@@ -349,14 +349,16 @@ func (d *DB) ClearWorkerDormancy(id string) error {
 	return err
 }
 
-func (d *DB) UpdateWorkerMachineVersion(id, machineID, gitSHA, litestreamSHA string) error {
+func (d *DB) UpdateWorkerMachineVersionAndConfig(id, machineID, gitSHA, litestreamSHA, profileName, profileConfig string) error {
 	_, err := d.exec(`
 		UPDATE workers
-		SET fly_machine_id = ?, git_sha = ?, litestream_sha = ?, updated_at = datetime('now')
+		SET fly_machine_id = ?, git_sha = ?, litestream_sha = ?, profile_name = ?, profile_config = ?, updated_at = datetime('now')
 		WHERE id = ?`,
 		nullIntString(machineID),
 		gitSHA,
 		litestreamSHA,
+		profileName,
+		profileConfig,
 		id,
 	)
 	return err

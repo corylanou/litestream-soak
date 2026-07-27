@@ -466,6 +466,12 @@ func detectDormancyCandidate(verifications []model.Verification, now time.Time, 
 }
 
 func (m *Manager) DormantWorker(ctx context.Context, workerID, reason, signature, resumeTrigger string) error {
+	unlock, err := m.lockWorker(ctx, workerID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	worker, err := m.db.GetWorker(workerID)
 	if err != nil {
 		return fmt.Errorf("get worker: %w", err)
@@ -562,12 +568,26 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 		return fmt.Errorf("worker %s resume litestream sha is required", worker.ID)
 	}
 
+	request, err := replacementRequest(worker, imageRef, resumeSHA, resumeLitestreamSHA)
+	if err != nil {
+		return fmt.Errorf("build dormant worker replacement: %w", err)
+	}
+	if desired, ok := defaultFleetDesiredWorker(worker.Source, worker.ID, worker.Name); ok && !workerPhysicalSpecMatchesDesired(worker, desired) {
+		return m.recreateDormantWorkerForProbe(
+			ctx,
+			worker,
+			request,
+			resumeTrigger,
+			errors.New("desired worker region or volume size changed"),
+		)
+	}
+
 	volumeID, err := m.resolveWorkerVolumeID(ctx, worker)
 	if err != nil {
 		return err
 	}
 
-	workloadCfg := normalizeWorkloadConfig(resolveWorkerWorkload(worker))
+	workloadCfg := request.Workload
 
 	if worker.FlyMachineID != "" {
 		if err := m.flyClientForWorker(worker).DestroyMachine(ctx, worker.FlyMachineID, true); err != nil {
@@ -578,10 +598,12 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	resumeWorker := worker
 	resumeWorker.GitSHA = resumeSHA
 	resumeWorker.LitestreamSHA = resumeLitestreamSHA
+	resumeWorker.ProfileName = request.ProfileName
+	resumeWorker.Region = request.Region
 	machine, err := m.createWorkerMachine(ctx, resumeWorker, imageRef, volumeID, workloadCfg)
 	if err != nil {
 		resumeErr := fmt.Errorf("create probe machine: %w", err)
-		if recreateErr := m.recreateDormantWorkerForProbe(ctx, worker, imageRef, resumeSHA, resumeLitestreamSHA, resumeTrigger, resumeErr); recreateErr != nil {
+		if recreateErr := m.recreateDormantWorkerForProbe(ctx, worker, request, resumeTrigger, resumeErr); recreateErr != nil {
 			return fmt.Errorf("%w; recreate dormant worker: %v", resumeErr, recreateErr)
 		}
 		return nil
@@ -590,8 +612,19 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	if err := m.db.UpdateWorkerMachine(worker.ID, machine.ID, volumeID); err != nil {
 		return fmt.Errorf("update worker machine: %w", err)
 	}
-	if err := m.db.UpdateWorkerMachineVersion(worker.ID, machine.ID, resumeSHA, resumeLitestreamSHA); err != nil {
-		return fmt.Errorf("update worker machine version: %w", err)
+	profileConfig, err := marshalWorkloadConfig(normalizeWorkloadConfig(workloadCfg))
+	if err != nil {
+		return err
+	}
+	if err := m.db.UpdateWorkerMachineVersionAndConfig(
+		worker.ID,
+		machine.ID,
+		resumeSHA,
+		resumeLitestreamSHA,
+		request.ProfileName,
+		profileConfig,
+	); err != nil {
+		return fmt.Errorf("update worker machine version and config: %w", err)
 	}
 	if err := m.db.MarkWorkerProbing(worker.ID, resumeTrigger); err != nil {
 		return fmt.Errorf("mark worker probing: %w", err)
@@ -608,7 +641,7 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	return nil
 }
 
-func (m *Manager) recreateDormantWorkerForProbe(ctx context.Context, worker model.Worker, imageRef, gitSHA, litestreamSHA, resumeTrigger string, resumeErr error) error {
+func (m *Manager) recreateDormantWorkerForProbe(ctx context.Context, worker model.Worker, request WorkerRequest, resumeTrigger string, resumeErr error) error {
 	fly := m.flyClientForWorker(worker)
 	if worker.FlyMachineID != "" {
 		if err := fly.DestroyMachine(ctx, worker.FlyMachineID, true); err != nil && !flyapi.IsNotFound(err) {
@@ -621,26 +654,12 @@ func (m *Manager) recreateDormantWorkerForProbe(ctx context.Context, worker mode
 		}
 	}
 
-	workloadCfg := normalizeWorkloadConfig(resolveWorkerWorkload(worker))
-	volumeSizeGB := resolveWorkerVolumeSize(worker, workloadCfg)
-	message := fmt.Sprintf("Recreating dormant worker with a fresh volume after resume failed: %v", resumeErr)
-	if err := m.db.RecordEvent(worker.ID, "worker_probe_recreate", message, imageRef); err != nil {
+	message := fmt.Sprintf("Recreating dormant worker with a fresh volume: %v", resumeErr)
+	if err := m.db.RecordEvent(worker.ID, "worker_probe_recreate", message, request.ImageRef); err != nil {
 		return fmt.Errorf("record recreate event: %w", err)
 	}
 
-	if _, err := m.CreateWorker(ctx, WorkerRequest{
-		WorkerID:      worker.ID,
-		Name:          worker.Name,
-		Source:        worker.Source,
-		GitSHA:        gitSHA,
-		LitestreamSHA: litestreamSHA,
-		PRNumber:      worker.PRNumber,
-		ProfileName:   worker.ProfileName,
-		ImageRef:      imageRef,
-		Region:        worker.Region,
-		VolumeSizeGB:  volumeSizeGB,
-		Workload:      workloadCfg,
-	}); err != nil {
+	if _, err := m.CreateWorker(ctx, request); err != nil {
 		return err
 	}
 
@@ -652,8 +671,8 @@ func (m *Manager) recreateDormantWorkerForProbe(ctx context.Context, worker mode
 	}
 	m.observeWorkerByID(worker.ID)
 
-	message = fmt.Sprintf("Worker recreated for probe on soak %s / litestream %s (%s)", shortVersionValue(gitSHA), shortVersionValue(litestreamSHA), resumeTrigger)
-	if err := m.db.RecordEvent(worker.ID, "worker_probe_started", message, imageRef); err != nil {
+	message = fmt.Sprintf("Worker recreated for probe on soak %s / litestream %s (%s)", shortVersionValue(request.GitSHA), shortVersionValue(request.LitestreamSHA), resumeTrigger)
+	if err := m.db.RecordEvent(worker.ID, "worker_probe_started", message, request.ImageRef); err != nil {
 		return fmt.Errorf("record probe event: %w", err)
 	}
 	return nil

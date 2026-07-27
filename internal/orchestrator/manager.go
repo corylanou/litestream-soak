@@ -149,7 +149,7 @@ func (m *Manager) inventoryProvider() *volumeInventoryProvider {
 	return m.volumeInventory
 }
 
-func (m *Manager) newWorkerRecord(req WorkerRequest) *model.Worker {
+func (m *Manager) newWorkerRecord(req WorkerRequest, profileConfig string) *model.Worker {
 	workerID := strings.TrimSpace(req.WorkerID)
 	if workerID == "" {
 		workerID = uuid.New().String()
@@ -169,7 +169,7 @@ func (m *Manager) newWorkerRecord(req WorkerRequest) *model.Worker {
 		LitestreamSHA: req.LitestreamSHA,
 		PRNumber:      req.PRNumber,
 		ProfileName:   req.ProfileName,
-		ProfileConfig: normalizeWorkloadConfig(req.Workload).JSON(),
+		ProfileConfig: profileConfig,
 		Region:        region,
 		ExpiresAt:     req.ExpiresAt,
 	}
@@ -187,9 +187,14 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 }
 
 func (m *Manager) createWorker(ctx context.Context, req WorkerRequest) (*model.Worker, error) {
-	worker := m.newWorkerRecord(req)
-	workerID := worker.ID
 	workloadCfg := normalizeWorkloadConfig(req.Workload)
+	profileConfig, err := marshalWorkloadConfig(workloadCfg)
+	if err != nil {
+		return nil, err
+	}
+	req.Workload = workloadCfg
+	worker := m.newWorkerRecord(req, profileConfig)
+	workerID := worker.ID
 
 	if err := m.db.CreateWorker(worker); err != nil {
 		return nil, fmt.Errorf("create worker record: %w", err)
@@ -259,7 +264,7 @@ func (m *Manager) createWorker(ctx context.Context, req WorkerRequest) (*model.W
 }
 
 func (m *Manager) createWorkerVolume(ctx context.Context, worker model.Worker, volSize int) (*flyapi.Volume, error) {
-	sourceWorker, freshReason, err := m.forkSourceForWorker(worker)
+	sourceWorker, unlockSource, freshReason, err := m.lockForkSourceForWorker(ctx, worker)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +272,10 @@ func (m *Manager) createWorkerVolume(ctx context.Context, worker model.Worker, v
 	volumeName := flyVolumeName(worker.Name)
 	client := m.flyClientForWorker(worker)
 	if sourceWorker != nil {
-		vol, err := client.ForkVolume(ctx, sourceWorker.FlyVolumeID, volumeName)
+		vol, err := func() (*flyapi.Volume, error) {
+			defer unlockSource()
+			return client.ForkVolume(ctx, sourceWorker.FlyVolumeID, volumeName)
+		}()
 		if err == nil {
 			m.recordWorkerVolumeForked(worker, *sourceWorker, vol.ID)
 			return vol, nil
@@ -289,15 +297,15 @@ func (m *Manager) createWorkerVolume(ctx context.Context, worker model.Worker, v
 	return vol, nil
 }
 
-func (m *Manager) forkSourceForWorker(worker model.Worker) (*model.Worker, string, error) {
+func (m *Manager) lockForkSourceForWorker(ctx context.Context, worker model.Worker) (*model.Worker, func(), string, error) {
 	source := strings.TrimSpace(worker.Source)
 	if source == "" || source == "main" {
-		return nil, "main_source", nil
+		return nil, nil, "main_source", nil
 	}
 
 	mainWorkers, err := m.db.ListWorkersForSource("main")
 	if err != nil {
-		return nil, "", fmt.Errorf("list main workers for volume fork: %w", err)
+		return nil, nil, "", fmt.Errorf("list main workers for volume fork: %w", err)
 	}
 
 	profileName := strings.TrimSpace(worker.ProfileName)
@@ -320,9 +328,38 @@ func (m *Manager) forkSourceForWorker(worker model.Worker) (*model.Worker, strin
 		if strings.TrimSpace(candidate.Region) != region {
 			continue
 		}
-		return &candidate, "", nil
+		unlock, err := m.lockWorker(ctx, candidate.ID)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		lockedCandidate, err := m.db.GetWorker(candidate.ID)
+		if err != nil {
+			unlock()
+			return nil, nil, "", fmt.Errorf("reload main worker for volume fork: %w", err)
+		}
+		if lockedReason := workerVolumeForkIneligibility(*lockedCandidate, worker); lockedReason != "" {
+			unlock()
+			return nil, nil, lockedReason, nil
+		}
+		return lockedCandidate, unlock, "", nil
 	}
-	return nil, reason, nil
+	return nil, nil, reason, nil
+}
+
+func workerVolumeForkIneligibility(candidate, worker model.Worker) string {
+	if strings.TrimSpace(candidate.ProfileName) != strings.TrimSpace(worker.ProfileName) {
+		return "main_worker_profile_mismatch"
+	}
+	if candidate.Status != model.WorkerRunning {
+		return "main_worker_not_running"
+	}
+	if strings.TrimSpace(candidate.FlyVolumeID) == "" {
+		return "main_worker_missing_volume"
+	}
+	if strings.TrimSpace(candidate.Region) != strings.TrimSpace(worker.Region) {
+		return "main_worker_region_mismatch"
+	}
+	return ""
 }
 
 func (m *Manager) recordWorkerVolumeForked(worker, sourceWorker model.Worker, volumeID string) {
@@ -573,30 +610,64 @@ func (m *Manager) rollingUpdateSourceLocked(ctx context.Context, source, newImag
 	}
 
 	deployment := model.Deployment{GitSHA: newSHA, LitestreamSHA: newLitestreamSHA}
+	desiredSpec := DefaultFleetForSource(source, newSHA, newLitestreamSHA)
 	slog.Info("Starting rolling update", "source", source, "workers", len(workers), "sha", newSHA, "image", newImageRef)
 
+	var updateErrors []error
+	configDriftReplacements := 0
+	deferredWorkers := make([]string, 0)
 	for _, listed := range workers {
-		newWorker, err := func() (*model.Worker, error) {
+		newWorker, deferred, err := func() (*model.Worker, bool, error) {
 			unlock, err := m.lockWorker(ctx, listed.ID)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			defer unlock()
 
 			w, err := m.db.GetWorker(listed.ID)
 			if err != nil {
-				return nil, fmt.Errorf("reload worker: %w", err)
+				return nil, false, fmt.Errorf("reload worker: %w", err)
 			}
 			if w.Status == model.WorkerStopped || w.Status == model.WorkerFailed || w.Status == model.WorkerDormant {
-				return nil, nil
+				return nil, false, nil
 			}
-			if workerMatchesDeployment(*w, deployment) {
-				return nil, nil
+			desired, managed := desiredWorkerFor(*w, desiredSpec)
+			deploymentMatches := workerMatchesDeployment(*w, deployment)
+			if !managed {
+				if deploymentMatches {
+					return nil, false, nil
+				}
+				newWorker, err := m.replaceWorker(ctx, *w, newImageRef, newSHA, newLitestreamSHA)
+				return newWorker, false, err
 			}
-			return m.replaceWorker(ctx, *w, newImageRef, newSHA, newLitestreamSHA)
+
+			specMatches, err := workerMatchesDesiredSpec(*w, desired)
+			if err != nil {
+				return nil, false, fmt.Errorf("compare desired worker spec: %w", err)
+			}
+			if deploymentMatches && specMatches {
+				return nil, false, nil
+			}
+			request, err := workerRequestForDesired(desired, newImageRef, w.ID, w.ExpiresAt)
+			if err != nil {
+				return nil, false, err
+			}
+			if deploymentMatches {
+				if configDriftReplacements >= maxConfigDriftReplacementsPerCycle {
+					return nil, true, nil
+				}
+				configDriftReplacements++
+			}
+			newWorker, err := m.replaceWorkerWithRequest(ctx, *w, request)
+			return newWorker, false, err
 		}()
 		if err != nil {
 			slog.Error("Failed to create updated worker", "name", listed.Name, "error", err)
+			updateErrors = append(updateErrors, fmt.Errorf("%s: %w", listed.Name, err))
+			continue
+		}
+		if deferred {
+			deferredWorkers = append(deferredWorkers, listed.Name)
 			continue
 		}
 		if newWorker != nil {
@@ -604,7 +675,16 @@ func (m *Manager) rollingUpdateSourceLocked(ctx context.Context, source, newImag
 		}
 	}
 
-	return nil
+	if len(deferredWorkers) > 0 {
+		slog.Error(
+			"Config drift replacement limit reached during rolling update; deferring workers",
+			"source", source,
+			"limit", maxConfigDriftReplacementsPerCycle,
+			"deferred_count", len(deferredWorkers),
+			"deferred_workers", strings.Join(deferredWorkers, ","),
+		)
+	}
+	return errors.Join(updateErrors...)
 }
 
 func (m *Manager) latestReadyDeploymentMatches(source, imageRef, gitSHA, litestreamSHA string) (bool, *model.Deployment, error) {
@@ -646,8 +726,19 @@ func (m *Manager) RollWorker(ctx context.Context, workerID, newImageRef, newSHA,
 }
 
 func (m *Manager) replaceWorker(ctx context.Context, w model.Worker, newImageRef, newSHA, newLitestreamSHA string) (*model.Worker, error) {
-	slog.Info("Updating worker", "name", w.Name, "old_sha", w.GitSHA, "new_sha", newSHA, "old_litestream_sha", w.LitestreamSHA, "new_litestream_sha", newLitestreamSHA)
-	_ = m.db.RecordEvent(w.ID, "rolling_update", fmt.Sprintf("Updating %s from soak %s / litestream %s to soak %s / litestream %s", w.Name, shortVersionValue(w.GitSHA), shortVersionValue(w.LitestreamSHA), shortVersionValue(newSHA), shortVersionValue(newLitestreamSHA)), "")
+	request, err := replacementRequest(w, newImageRef, newSHA, newLitestreamSHA)
+	if err != nil {
+		return nil, err
+	}
+	return m.replaceWorkerWithRequest(ctx, w, request)
+}
+
+func (m *Manager) replaceWorkerWithRequest(ctx context.Context, w model.Worker, request WorkerRequest) (*model.Worker, error) {
+	if _, err := marshalWorkloadConfig(normalizeWorkloadConfig(request.Workload)); err != nil {
+		return nil, fmt.Errorf("validate replacement workload: %w", err)
+	}
+	slog.Info("Updating worker", "name", w.Name, "old_sha", w.GitSHA, "new_sha", request.GitSHA, "old_litestream_sha", w.LitestreamSHA, "new_litestream_sha", request.LitestreamSHA)
+	_ = m.db.RecordEvent(w.ID, "rolling_update", fmt.Sprintf("Updating %s from soak %s / litestream %s to soak %s / litestream %s", w.Name, shortVersionValue(w.GitSHA), shortVersionValue(w.LitestreamSHA), shortVersionValue(request.GitSHA), shortVersionValue(request.LitestreamSHA)), "")
 
 	if w.FlyMachineID != "" {
 		if err := m.fly.StopMachine(ctx, w.FlyMachineID); err != nil {
@@ -676,11 +767,20 @@ func (m *Manager) replaceWorker(ctx context.Context, w model.Worker, newImageRef
 
 	m.clearOldWorkerReplicaPrefix(ctx, w)
 
-	return m.createWorker(ctx, replacementRequest(w, newImageRef, newSHA, newLitestreamSHA))
+	return m.createWorker(ctx, request)
 }
 
-func replacementRequest(w model.Worker, newImageRef, newSHA, newLitestreamSHA string) WorkerRequest {
+func replacementRequest(w model.Worker, newImageRef, newSHA, newLitestreamSHA string) (WorkerRequest, error) {
+	if desired, ok := defaultFleetDesiredWorker(w.Source, w.ID, w.Name); ok {
+		desired.GitSHA = newSHA
+		desired.LitestreamSHA = newLitestreamSHA
+		return workerRequestForDesired(desired, newImageRef, w.ID, w.ExpiresAt)
+	}
+
 	workloadCfg := resolveWorkerWorkload(w)
+	if _, err := marshalWorkloadConfig(normalizeWorkloadConfig(workloadCfg)); err != nil {
+		return WorkerRequest{}, err
+	}
 	return WorkerRequest{
 		WorkerID:      w.ID,
 		Name:          w.Name,
@@ -694,7 +794,16 @@ func replacementRequest(w model.Worker, newImageRef, newSHA, newLitestreamSHA st
 		VolumeSizeGB:  resolveWorkerVolumeSize(w, workloadCfg),
 		ExpiresAt:     w.ExpiresAt,
 		Workload:      workloadCfg,
+	}, nil
+}
+
+func desiredWorkerFor(worker model.Worker, spec FleetSpec) (DesiredWorker, bool) {
+	for _, desired := range spec.Workers {
+		if desired.WorkerID == worker.ID || desired.WorkerID == worker.Name || desired.Name == worker.ID || desired.Name == worker.Name {
+			return desired, true
+		}
 	}
+	return DesiredWorker{}, false
 }
 
 func (m *Manager) observeWorkerByID(workerID string) {

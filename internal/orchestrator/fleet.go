@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -29,6 +30,8 @@ type DesiredWorker struct {
 type FleetSpec struct {
 	Workers []DesiredWorker
 }
+
+const maxConfigDriftReplacementsPerCycle = 1
 
 func DefaultMainFleet() FleetSpec {
 	workers := []DesiredWorker{
@@ -683,7 +686,9 @@ func (m *Manager) reconcileFleet(ctx context.Context, spec FleetSpec) {
 			desired.PRNumber = sourcePRNumber(source)
 			resolved = append(resolved, desired)
 		}
-		m.ensureFleetSpec(ctx, FleetSpec{Workers: resolved}, deployment.ImageRef)
+		if err := m.ensureFleetSpec(ctx, FleetSpec{Workers: resolved}, deployment.ImageRef); err != nil {
+			slog.Error("Failed to reconcile source fleet", "source", source, "error", err)
+		}
 	}
 }
 
@@ -695,19 +700,20 @@ func (m *Manager) EnsureSourceFleet(ctx context.Context, source, gitSHA, litestr
 	if err != nil {
 		return fmt.Errorf("resolve source fleet deployment: %w", err)
 	}
-	m.ensureFleetSpec(
+	if err := m.ensureFleetSpec(
 		ctx,
 		DefaultFleetForSource(source, deployment.GitSHA, deployment.LitestreamSHA),
 		deployment.ImageRef,
-	)
+	); err != nil {
+		return fmt.Errorf("ensure source fleet: %w", err)
+	}
 	return nil
 }
 
-func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef string) {
+func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef string) error {
 	activeWorkers, err := m.db.ListWorkers("")
 	if err != nil {
-		slog.Error("Failed to list current workers for fleet reconciliation", "error", err)
-		return
+		return fmt.Errorf("list current workers for fleet reconciliation: %w", err)
 	}
 
 	byName := make(map[string]model.Worker, len(activeWorkers))
@@ -718,32 +724,192 @@ func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef 
 		byName[worker.Name] = worker
 	}
 
+	var ensureErrors []error
+	configDriftReplacements := 0
+	deferredWorkers := make([]string, 0)
 	for _, desired := range spec.Workers {
-		if _, ok := byName[desired.Name]; ok {
+		current, ok := byName[desired.Name]
+		if ok && current.Status == model.WorkerDormant {
+			continue
+		}
+		if ok {
+			matches, err := workerMatchesDesiredSpec(current, desired)
+			if err != nil {
+				ensureErrors = append(ensureErrors, fmt.Errorf("%s: compare desired worker spec: %w", desired.Name, err))
+				continue
+			}
+			if matches {
+				continue
+			}
+		}
+		if ok {
+			deferred, err := func() (bool, error) {
+				unlock, err := m.lockWorker(ctx, current.ID)
+				if err != nil {
+					return false, err
+				}
+				defer unlock()
+
+				worker, err := m.db.GetWorker(current.ID)
+				if err != nil {
+					return false, fmt.Errorf("reload worker: %w", err)
+				}
+				if worker.Status == model.WorkerStopped || worker.Status == model.WorkerFailed || worker.Status == model.WorkerDormant {
+					return false, nil
+				}
+				matches, err := workerMatchesDesiredSpec(*worker, desired)
+				if err != nil {
+					return false, fmt.Errorf("compare desired worker spec: %w", err)
+				}
+				if matches {
+					return false, nil
+				}
+
+				request, err := workerRequestForDesired(desired, imageRef, worker.ID, worker.ExpiresAt)
+				if err != nil {
+					return false, err
+				}
+				if configDriftReplacements >= maxConfigDriftReplacementsPerCycle {
+					return true, nil
+				}
+				configDriftReplacements++
+				details := fmt.Sprintf(
+					"profile=%s region=%s volume_size_gb=%d",
+					request.ProfileName,
+					request.Region,
+					effectiveDesiredVolumeSize(desired, request.Workload),
+				)
+				if err := m.db.RecordEvent(worker.ID, "worker_spec_drift", fmt.Sprintf("Reconciling desired fleet spec for %s", worker.Name), details); err != nil {
+					return false, fmt.Errorf("record worker spec drift: %w", err)
+				}
+				_, err = m.replaceWorkerWithRequest(ctx, *worker, request)
+				return false, err
+			}()
+			if err != nil {
+				ensureErrors = append(ensureErrors, fmt.Errorf("%s: %w", desired.Name, err))
+			}
+			if deferred {
+				deferredWorkers = append(deferredWorkers, desired.Name)
+			}
 			continue
 		}
 
-		request := WorkerRequest{
-			WorkerID:      firstNonEmpty(desired.WorkerID, desired.Name),
-			Name:          desired.Name,
-			Source:        firstNonEmpty(desired.Source, "main"),
-			GitSHA:        firstNonEmpty(desired.GitSHA, "main"),
-			LitestreamSHA: strings.TrimSpace(desired.LitestreamSHA),
-			PRNumber:      desired.PRNumber,
-			ProfileName:   desired.ProfileName,
-			ImageRef:      imageRef,
-			Region:        desired.Region,
-			VolumeSizeGB:  desired.VolumeSizeGB,
-			Workload:      desired.Workload,
+		request, err := workerRequestForDesired(desired, imageRef, "", nil)
+		if err != nil {
+			ensureErrors = append(ensureErrors, fmt.Errorf("%s: %w", desired.Name, err))
+			continue
 		}
 
 		if _, err := m.CreateWorker(ctx, request); err != nil {
-			slog.Error("Failed to create desired fleet worker", "name", desired.Name, "source", desired.Source, "error", err)
+			ensureErrors = append(ensureErrors, fmt.Errorf("%s: %w", desired.Name, err))
 			continue
 		}
 
 		slog.Info("Created desired fleet worker", "name", desired.Name, "source", desired.Source, "profile", desired.ProfileName, "load_mode", desired.Workload.LoadMode)
 	}
+	if len(deferredWorkers) > 0 {
+		slog.Error(
+			"Config drift replacement limit reached; deferring workers",
+			"source", firstNonEmpty(spec.Workers[0].Source, "main"),
+			"limit", maxConfigDriftReplacementsPerCycle,
+			"deferred_count", len(deferredWorkers),
+			"deferred_workers", strings.Join(deferredWorkers, ","),
+		)
+	}
+	return errors.Join(ensureErrors...)
+}
+
+func workerRequestForDesired(desired DesiredWorker, imageRef, workerID string, expiresAt *time.Time) (WorkerRequest, error) {
+	workloadCfg := normalizeWorkloadConfig(desired.Workload)
+	volumeSizeGB := effectiveDesiredVolumeSize(desired, workloadCfg)
+	workloadCfg.VolumeSizeGB = volumeSizeGB
+	if _, err := marshalWorkloadConfig(workloadCfg); err != nil {
+		return WorkerRequest{}, err
+	}
+	return WorkerRequest{
+		WorkerID:      firstNonEmpty(workerID, desired.WorkerID, desired.Name),
+		Name:          desired.Name,
+		Source:        firstNonEmpty(desired.Source, "main"),
+		GitSHA:        firstNonEmpty(desired.GitSHA, "main"),
+		LitestreamSHA: strings.TrimSpace(desired.LitestreamSHA),
+		PRNumber:      desired.PRNumber,
+		ProfileName:   desired.ProfileName,
+		ImageRef:      imageRef,
+		Region:        normalizedWorkerRegion(desired.Region),
+		VolumeSizeGB:  volumeSizeGB,
+		ExpiresAt:     expiresAt,
+		Workload:      workloadCfg,
+	}, nil
+}
+
+func workerMatchesDesiredSpec(worker model.Worker, desired DesiredWorker) (bool, error) {
+	wanted := normalizeWorkloadConfig(desired.Workload)
+	wantedVolumeSize := effectiveDesiredVolumeSize(desired, wanted)
+	wanted.VolumeSizeGB = 0
+	wantedJSON, err := marshalWorkloadConfig(wanted)
+	if err != nil {
+		return false, fmt.Errorf("marshal desired workload: %w", err)
+	}
+
+	if firstNonEmpty(strings.TrimSpace(worker.Source), "main") != firstNonEmpty(strings.TrimSpace(desired.Source), "main") {
+		return false, nil
+	}
+	if worker.PRNumber != desired.PRNumber {
+		return false, nil
+	}
+	if strings.TrimSpace(worker.ProfileName) != strings.TrimSpace(desired.ProfileName) {
+		return false, nil
+	}
+	if normalizedWorkerRegion(worker.Region) != normalizedWorkerRegion(desired.Region) {
+		return false, nil
+	}
+
+	applied, err := workload.ParseConfig(worker.ProfileConfig)
+	if err != nil {
+		return false, nil
+	}
+	applied = normalizeWorkloadConfig(applied)
+	if effectiveAppliedVolumeSize(applied) != wantedVolumeSize {
+		return false, nil
+	}
+
+	applied.VolumeSizeGB = 0
+	appliedJSON, err := marshalWorkloadConfig(applied)
+	if err != nil {
+		return false, fmt.Errorf("marshal applied workload: %w", err)
+	}
+	return appliedJSON == wantedJSON, nil
+}
+
+func workerPhysicalSpecMatchesDesired(worker model.Worker, desired DesiredWorker) bool {
+	if normalizedWorkerRegion(worker.Region) != normalizedWorkerRegion(desired.Region) {
+		return false
+	}
+	applied, err := workload.ParseConfig(worker.ProfileConfig)
+	if err != nil {
+		return false
+	}
+	applied = normalizeWorkloadConfig(applied)
+	wanted := normalizeWorkloadConfig(desired.Workload)
+	return effectiveAppliedVolumeSize(applied) == effectiveDesiredVolumeSize(desired, wanted)
+}
+
+func effectiveAppliedVolumeSize(cfg workload.Config) int {
+	if cfg.VolumeSizeGB > 0 {
+		return cfg.VolumeSizeGB
+	}
+	return 10
+}
+
+func effectiveDesiredVolumeSize(desired DesiredWorker, cfg workload.Config) int {
+	if desired.VolumeSizeGB > 0 {
+		return desired.VolumeSizeGB
+	}
+	return effectiveAppliedVolumeSize(cfg)
+}
+
+func normalizedWorkerRegion(region string) string {
+	return firstNonEmpty(strings.TrimSpace(region), "ord")
 }
 
 func firstNonEmpty(values ...string) string {

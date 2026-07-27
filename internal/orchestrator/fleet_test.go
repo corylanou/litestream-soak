@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"strings"
@@ -84,6 +86,497 @@ func TestReconcileFleetWithoutReadyDeploymentWaitsForBootstrap(t *testing.T) {
 		t.Fatalf("len(workers) = %d, want 0 until deployment-ready bootstraps main", len(workers))
 	}
 	fly.assertCreateCounts(t, 0, 0)
+}
+
+func TestEnsureFleetSpecSkipsNonFiniteDesiredConfig(t *testing.T) {
+	db := openTestDB(t)
+	const workerID = "worker-main-low-vol"
+	const profileConfig = `{"load_mode":"synthetic","write_rate":10}`
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		AppName:       "litestream-soak",
+		Name:          workerID,
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		LitestreamSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ProfileName:   "low-volume",
+		ProfileConfig: profileConfig,
+		Region:        "ord",
+		FlyMachineID:  "old-machine",
+		FlyVolumeID:   "old-volume",
+	})
+
+	spec := FleetSpec{Workers: []DesiredWorker{{
+		WorkerID:    workerID,
+		Name:        workerID,
+		Source:      "main",
+		ProfileName: "low-volume",
+		Region:      "ord",
+		Workload: workload.Config{
+			LoadMode:  "synthetic",
+			WriteRate: 10,
+			ReadRatio: math.NaN(),
+		},
+	}}}
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+	for cycle := 1; cycle <= 2; cycle++ {
+		err := manager.ensureFleetSpec(context.Background(), spec, "registry.fly.io/litestream-soak:test")
+		if err == nil || !strings.Contains(err.Error(), "unsupported value") {
+			t.Fatalf("cycle %d ensureFleetSpec() error = %v, want marshal error", cycle, err)
+		}
+	}
+
+	worker := mustWorker(t, db, workerID)
+	if worker.ProfileConfig != profileConfig {
+		t.Fatalf("ProfileConfig = %q, want unchanged %q", worker.ProfileConfig, profileConfig)
+	}
+	if got := len(fly.volumeRequests()); got != 0 {
+		t.Fatalf("volume creates = %d, want 0", got)
+	}
+	if got := len(fly.machineRequests()); got != 0 {
+		t.Fatalf("machine creates = %d, want 0", got)
+	}
+	stops, machineDeletes, volumeDeletes := fly.replacementCounts()
+	if stops != 0 || machineDeletes != 0 || volumeDeletes != 0 {
+		t.Fatalf("replacement operations = stops:%d machine deletes:%d volume deletes:%d, want zero", stops, machineDeletes, volumeDeletes)
+	}
+}
+
+func TestEnsureFleetSpecCapsConfigDriftReplacementsPerCycle(t *testing.T) {
+	db := openTestDB(t)
+	spec := FleetSpec{}
+	for i := 1; i <= 3; i++ {
+		workerID := fmt.Sprintf("worker-main-drift-%d", i)
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			AppName:       "litestream-soak",
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			LitestreamSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			ProfileName:   "low-volume",
+			ProfileConfig: normalizeWorkloadConfig(workload.Config{WriteRate: 1}).JSON(),
+			Region:        "ord",
+			FlyMachineID:  fmt.Sprintf("old-machine-%d", i),
+			FlyVolumeID:   fmt.Sprintf("old-volume-%d", i),
+		})
+		spec.Workers = append(spec.Workers, DesiredWorker{
+			WorkerID:    workerID,
+			Name:        workerID,
+			Source:      "main",
+			ProfileName: "low-volume",
+			Region:      "ord",
+			Workload:    workload.Config{WriteRate: 10},
+		})
+	}
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	if err := manager.ensureFleetSpec(context.Background(), spec, "registry.fly.io/litestream-soak:test"); err != nil {
+		t.Fatalf("first ensureFleetSpec() error = %v", err)
+	}
+	if got := len(fly.machineRequests()); got != 1 {
+		t.Fatalf("machine creates after first cycle = %d, want 1", got)
+	}
+
+	if err := manager.ensureFleetSpec(context.Background(), spec, "registry.fly.io/litestream-soak:test"); err != nil {
+		t.Fatalf("second ensureFleetSpec() error = %v", err)
+	}
+	if got := len(fly.machineRequests()); got != 2 {
+		t.Fatalf("machine creates after second cycle = %d, want 2", got)
+	}
+}
+
+func TestReconcileFleetReplacesConfigDriftOnce(t *testing.T) {
+	db := openTestDB(t)
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const litestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const imageRef = "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-ls-bbbbbbbbbbbb"
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ImageRef:      imageRef,
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+
+	const workerID = "worker-main-many-dbs-100-dir"
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		AppName:       "litestream-soak",
+		Name:          workerID,
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ProfileName:   "many-dbs-100-dir",
+		ProfileConfig: workload.Config{
+			LoadMode:           "many-db",
+			NumDatabases:       100,
+			MaxRowsPerDatabase: 40_000,
+			ConfigMode:         "dir",
+			VolumeSizeGB:       10,
+			MemoryMB:           2048,
+			CPUs:               1,
+		}.JSON(),
+		Region:       "ord",
+		FlyMachineID: "old-machine",
+		FlyVolumeID:  "old-volume",
+	})
+
+	spec := FleetSpec{Workers: []DesiredWorker{{
+		WorkerID:     workerID,
+		Name:         workerID,
+		Source:       "main",
+		ProfileName:  "many-dbs-100-dir",
+		Region:       "ord",
+		VolumeSizeGB: 10,
+		Workload: workload.Config{
+			LoadMode:     "many-db",
+			NumDatabases: 100,
+			ConfigMode:   "dir",
+			VolumeSizeGB: 10,
+			MemoryMB:     2048,
+			CPUs:         1,
+		},
+	}}}
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+	manager.reconcileFleet(context.Background(), spec)
+
+	worker := mustWorker(t, db, workerID)
+	config, err := workload.ParseConfig(worker.ProfileConfig)
+	if err != nil {
+		t.Fatalf("ParseConfig() error = %v", err)
+	}
+	if config.MaxRowsPerDatabase != 50_000 {
+		t.Fatalf("MaxRowsPerDatabase = %d, want 50000", config.MaxRowsPerDatabase)
+	}
+	if got := len(fly.volumeRequests()); got != 1 {
+		t.Fatalf("volume creates after first reconciliation = %d, want 1", got)
+	}
+	if got := len(fly.machineRequests()); got != 1 {
+		t.Fatalf("machine creates after first reconciliation = %d, want 1", got)
+	}
+	stops, machineDeletes, volumeDeletes := fly.replacementCounts()
+	if stops != 1 || machineDeletes != 1 || volumeDeletes != 1 {
+		t.Fatalf("replacement operations after first reconciliation = stops:%d machine deletes:%d volume deletes:%d, want 1 each", stops, machineDeletes, volumeDeletes)
+	}
+
+	manager.reconcileFleet(context.Background(), spec)
+
+	if got := len(fly.volumeRequests()); got != 1 {
+		t.Fatalf("volume creates after second reconciliation = %d, want 1", got)
+	}
+	if got := len(fly.machineRequests()); got != 1 {
+		t.Fatalf("machine creates after second reconciliation = %d, want 1", got)
+	}
+	stops, machineDeletes, volumeDeletes = fly.replacementCounts()
+	if stops != 1 || machineDeletes != 1 || volumeDeletes != 1 {
+		t.Fatalf("replacement operations after second reconciliation = stops:%d machine deletes:%d volume deletes:%d, want unchanged at 1 each", stops, machineDeletes, volumeDeletes)
+	}
+}
+
+func TestReconcileFleetDoesNotReplaceSemanticallyEquivalentConfig(t *testing.T) {
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const litestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const imageRef = "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-ls-bbbbbbbbbbbb"
+
+	tests := []struct {
+		name          string
+		profileName   string
+		profileConfig string
+		workload      workload.Config
+	}{
+		{
+			name:          "omitted and explicit defaults",
+			profileName:   "low-volume",
+			profileConfig: `{"load_mode":"synthetic","initial_size":"5MB","verify_interval":"30m","snapshot_interval":"10m","sync_interval":"1s","memory_mb":1024,"cpus":1}`,
+			workload:      workload.Config{},
+		},
+		{
+			name:          "zero and unset numeric defaults",
+			profileName:   "many-dbs-100-dir",
+			profileConfig: `{"load_mode":"many-db","num_databases":100,"active_percent":2,"active_rotate_interval":"30m","active_set_seed":1,"config_mode":"dir","verify_sample_size":5,"verify_changed_limit":100,"memory_mb":1024,"cpus":1}`,
+			workload: workload.Config{
+				LoadMode:     "many-db",
+				NumDatabases: 100,
+				ConfigMode:   "dir",
+			},
+		},
+		{
+			name:          "empty and absent strings",
+			profileName:   "low-volume",
+			profileConfig: `{"load_mode":"","initial_size":"","verify_interval":"","snapshot_interval":"","sync_interval":"","memory_mb":1024,"cpus":1}`,
+			workload:      workload.Config{},
+		},
+		{
+			name:          "worker defaulted many db retention bound",
+			profileName:   "many-dbs-100-dir",
+			profileConfig: `{"load_mode":"many-db","num_databases":100,"max_rows_per_database":50000,"active_percent":2,"active_rotate_interval":"30m","active_set_seed":1,"config_mode":"dir","verify_sample_size":5,"verify_changed_limit":100,"memory_mb":1024,"cpus":1}`,
+			workload: workload.Config{
+				LoadMode:     "many-db",
+				NumDatabases: 100,
+				ConfigMode:   "dir",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db := openTestDB(t)
+			if err := db.UpsertReadyDeployment(&model.Deployment{
+				GitSHA:        sha,
+				LitestreamSHA: litestreamSHA,
+				ImageRef:      imageRef,
+				Source:        "main",
+				Status:        "ready",
+			}); err != nil {
+				t.Fatalf("UpsertReadyDeployment() error = %v", err)
+			}
+
+			workerID := "worker-main-" + strings.ReplaceAll(test.name, " ", "-")
+			createTestWorker(t, db, model.Worker{
+				ID:            workerID,
+				AppName:       "litestream-soak",
+				Name:          workerID,
+				Status:        model.WorkerRunning,
+				Source:        "main",
+				GitSHA:        sha,
+				LitestreamSHA: litestreamSHA,
+				ProfileName:   test.profileName,
+				ProfileConfig: test.profileConfig,
+				Region:        "ord",
+				FlyMachineID:  "old-machine",
+				FlyVolumeID:   "old-volume",
+			})
+
+			fly := newCreateWorkerFlyServer(t)
+			manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+			spec := FleetSpec{Workers: []DesiredWorker{{
+				WorkerID:    workerID,
+				Name:        workerID,
+				Source:      "main",
+				ProfileName: test.profileName,
+				Region:      "ord",
+				Workload:    test.workload,
+			}}}
+			manager.reconcileFleet(context.Background(), spec)
+			manager.reconcileFleet(context.Background(), spec)
+
+			if got := len(fly.volumeRequests()); got != 0 {
+				t.Fatalf("volume creates = %d, want 0", got)
+			}
+			if got := len(fly.machineRequests()); got != 0 {
+				t.Fatalf("machine creates = %d, want 0", got)
+			}
+			stops, machineDeletes, volumeDeletes := fly.replacementCounts()
+			if stops != 0 || machineDeletes != 0 || volumeDeletes != 0 {
+				t.Fatalf("replacement operations = stops:%d machine deletes:%d volume deletes:%d, want zero", stops, machineDeletes, volumeDeletes)
+			}
+		})
+	}
+}
+
+func TestReconcileFleetReplacesPRWorkerWithDesiredConfigAndResources(t *testing.T) {
+	db := openTestDB(t)
+	const source = "pr-149"
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const litestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const imageRef = "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-pr-149-ls-bbbbbbbbbbbb"
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ImageRef:      imageRef,
+		Source:        source,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+
+	const workerID = "worker-pr-149-many-dbs-100-dir"
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		AppName:       "litestream-soak",
+		Name:          workerID,
+		Status:        model.WorkerRunning,
+		Source:        source,
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		PRNumber:      149,
+		ProfileName:   "many-dbs-100-dir",
+		ProfileConfig: workload.Config{
+			LoadMode:         "many-db",
+			NumDatabases:     100,
+			ConfigMode:       "dir",
+			SnapshotInterval: "1h",
+			VolumeSizeGB:     10,
+			MemoryMB:         1024,
+			CPUs:             1,
+		}.JSON(),
+		Region:       "ord",
+		FlyMachineID: "old-machine",
+		FlyVolumeID:  "old-volume",
+	})
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	manager.reconcileFleet(context.Background(), FleetSpec{Workers: []DesiredWorker{{
+		WorkerID:     workerID,
+		Name:         workerID,
+		Source:       source,
+		ProfileName:  "many-dbs-100-dir",
+		Region:       "syd",
+		VolumeSizeGB: 20,
+		Workload: workload.Config{
+			LoadMode:         "many-db",
+			NumDatabases:     100,
+			ConfigMode:       "dir",
+			SnapshotInterval: "10m",
+			VolumeSizeGB:     10,
+			MemoryMB:         2048,
+			CPUs:             2,
+		},
+	}}})
+
+	volumes := fly.volumeRequests()
+	if len(volumes) != 1 {
+		t.Fatalf("len(volume requests) = %d, want 1", len(volumes))
+	}
+	if volumes[0].Region != "syd" || volumes[0].SizeGB != 20 {
+		t.Fatalf("volume request = region:%q size:%d, want syd/20", volumes[0].Region, volumes[0].SizeGB)
+	}
+	machines := fly.machineRequests()
+	if len(machines) != 1 {
+		t.Fatalf("len(machine requests) = %d, want 1", len(machines))
+	}
+	if machines[0].Region != "syd" {
+		t.Fatalf("machine region = %q, want syd", machines[0].Region)
+	}
+	if machines[0].Config.Guest.CPUs != 2 || machines[0].Config.Guest.MemoryMB != 2048 {
+		t.Fatalf("machine guest = CPUs:%d memory:%d, want 2/2048", machines[0].Config.Guest.CPUs, machines[0].Config.Guest.MemoryMB)
+	}
+	if machines[0].Config.Env["SNAPSHOT_INTERVAL"] != "10m" {
+		t.Fatalf("SNAPSHOT_INTERVAL = %q, want 10m", machines[0].Config.Env["SNAPSHOT_INTERVAL"])
+	}
+	if machines[0].Config.Env["MAX_ROWS_PER_DATABASE"] != "50000" {
+		t.Fatalf("MAX_ROWS_PER_DATABASE = %q, want 50000", machines[0].Config.Env["MAX_ROWS_PER_DATABASE"])
+	}
+
+	worker := mustWorker(t, db, workerID)
+	if worker.Region != "syd" {
+		t.Fatalf("worker.Region = %q, want syd", worker.Region)
+	}
+	config, err := workload.ParseConfig(worker.ProfileConfig)
+	if err != nil {
+		t.Fatalf("ParseConfig() error = %v", err)
+	}
+	if config.SnapshotInterval != "10m" || config.MaxRowsPerDatabase != 50_000 {
+		t.Fatalf("stored config = snapshot:%q max rows:%d, want 10m/50000", config.SnapshotInterval, config.MaxRowsPerDatabase)
+	}
+	if config.VolumeSizeGB != 20 {
+		t.Fatalf("stored volume size = %d, want effective desired size 20", config.VolumeSizeGB)
+	}
+
+	manager.reconcileFleet(context.Background(), FleetSpec{Workers: []DesiredWorker{{
+		WorkerID:     workerID,
+		Name:         workerID,
+		Source:       source,
+		ProfileName:  "many-dbs-100-dir",
+		Region:       "syd",
+		VolumeSizeGB: 20,
+		Workload: workload.Config{
+			LoadMode:         "many-db",
+			NumDatabases:     100,
+			ConfigMode:       "dir",
+			SnapshotInterval: "10m",
+			VolumeSizeGB:     10,
+			MemoryMB:         2048,
+			CPUs:             2,
+		},
+	}}})
+	if got := len(fly.volumeRequests()); got != 1 {
+		t.Fatalf("volume creates after second reconciliation = %d, want unchanged at 1", got)
+	}
+	if got := len(fly.machineRequests()); got != 1 {
+		t.Fatalf("machine creates after second reconciliation = %d, want unchanged at 1", got)
+	}
+}
+
+func TestReconcileFleetDoesNotReplaceDormantWorkerForConfigDrift(t *testing.T) {
+	db := openTestDB(t)
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const litestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const imageRef = "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-ls-bbbbbbbbbbbb"
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ImageRef:      imageRef,
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+
+	const workerID = "worker-main-many-dbs-100-dir"
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		AppName:       "litestream-soak",
+		Name:          workerID,
+		Status:        model.WorkerDormant,
+		Source:        "main",
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ProfileName:   "many-dbs-100-dir",
+		ProfileConfig: workload.Config{
+			LoadMode:           "many-db",
+			NumDatabases:       100,
+			MaxRowsPerDatabase: 40_000,
+			ConfigMode:         "dir",
+		}.JSON(),
+		Region:       "ord",
+		FlyMachineID: "old-machine",
+		FlyVolumeID:  "old-volume",
+	})
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	spec := FleetSpec{Workers: []DesiredWorker{{
+		WorkerID:    workerID,
+		Name:        workerID,
+		Source:      "main",
+		ProfileName: "many-dbs-100-dir",
+		Region:      "ord",
+		Workload: workload.Config{
+			LoadMode:     "many-db",
+			NumDatabases: 100,
+			ConfigMode:   "dir",
+		},
+	}}}
+	manager.reconcileFleet(context.Background(), spec)
+	manager.reconcileFleet(context.Background(), spec)
+
+	worker := mustWorker(t, db, workerID)
+	if worker.Status != model.WorkerDormant {
+		t.Fatalf("worker.Status = %q, want dormant", worker.Status)
+	}
+	if got := len(fly.volumeRequests()); got != 0 {
+		t.Fatalf("volume creates = %d, want 0", got)
+	}
+	if got := len(fly.machineRequests()); got != 0 {
+		t.Fatalf("machine creates = %d, want 0", got)
+	}
+	stops, machineDeletes, volumeDeletes := fly.replacementCounts()
+	if stops != 0 || machineDeletes != 0 || volumeDeletes != 0 {
+		t.Fatalf("replacement operations = stops:%d machine deletes:%d volume deletes:%d, want zero", stops, machineDeletes, volumeDeletes)
+	}
 }
 
 func TestSourcePRNumber(t *testing.T) {
