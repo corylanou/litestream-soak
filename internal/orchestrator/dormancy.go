@@ -50,6 +50,9 @@ func normalizeWorkloadConfig(cfg workload.Config) workload.Config {
 		cfg.MemoryMB = 1024
 	}
 	if cfg.NumDatabases > 0 {
+		if cfg.MaxRowsPerDatabase == 0 {
+			cfg.MaxRowsPerDatabase = workload.DefaultMaxRowsPerDatabase(cfg.NumDatabases)
+		}
 		if cfg.ActivePercent == 0 && !cfg.ActivePercentSet {
 			cfg.ActivePercent = 2
 		}
@@ -200,6 +203,9 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	}
 	if workloadCfg.NumDatabases > 0 {
 		env["NUM_DATABASES"] = fmt.Sprintf("%d", workloadCfg.NumDatabases)
+		if workloadCfg.MaxRowsPerDatabase > 0 {
+			env["MAX_ROWS_PER_DATABASE"] = fmt.Sprintf("%d", workloadCfg.MaxRowsPerDatabase)
+		}
 		env["ACTIVE_PERCENT"] = fmt.Sprintf("%.2f", workloadCfg.ActivePercent)
 	}
 	if strings.TrimSpace(workloadCfg.ActiveRotateInterval) != "" {

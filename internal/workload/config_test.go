@@ -1,6 +1,7 @@
 package workload
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -44,10 +45,11 @@ func TestParseConfig(t *testing.T) {
 		},
 		{
 			name:  "many database knobs",
-			input: `{"load_mode":"many-db","num_databases":1000,"active_percent":2,"active_rotate_interval":"10m","active_set_seed":42,"config_mode":"dir","verify_sample_size":5,"verify_changed_limit":40,"replication_lag_threshold":3}`,
+			input: `{"load_mode":"many-db","num_databases":1000,"max_rows_per_database":5000,"active_percent":2,"active_rotate_interval":"10m","active_set_seed":42,"config_mode":"dir","verify_sample_size":5,"verify_changed_limit":40,"replication_lag_threshold":3}`,
 			want: Config{
 				LoadMode:                "many-db",
 				NumDatabases:            1000,
+				MaxRowsPerDatabase:      5000,
 				ActivePercent:           2,
 				ActivePercentSet:        true,
 				ActiveRotateInterval:    "10m",
@@ -98,6 +100,31 @@ func TestParseConfig(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("ParseConfig(%q) = %+v, want %+v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDefaultMaxRowsPerDatabase(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		numDatabases int
+		want         int
+	}{
+		{numDatabases: 100, want: 50000},
+		{numDatabases: 500, want: 10000},
+		{numDatabases: 1000, want: 5000},
+		{numDatabases: 6000000, want: 1},
+		{numDatabases: 0, want: 0},
+	}
+
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("%d databases", test.numDatabases), func(t *testing.T) {
+			t.Parallel()
+
+			if got := DefaultMaxRowsPerDatabase(test.numDatabases); got != test.want {
+				t.Fatalf("DefaultMaxRowsPerDatabase(%d) = %d, want %d", test.numDatabases, got, test.want)
 			}
 		})
 	}

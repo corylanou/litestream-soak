@@ -242,6 +242,7 @@ func TestWorkloadConfigIncludesCompactionKnobsWhenSet(t *testing.T) {
 
 func TestConfigFromEnvReadsManyDBConfig(t *testing.T) {
 	t.Setenv("NUM_DATABASES", "100")
+	t.Setenv("MAX_ROWS_PER_DATABASE", "1234")
 	t.Setenv("ACTIVE_PERCENT", "2.5")
 	t.Setenv("ACTIVE_ROTATE_INTERVAL", "10m")
 	t.Setenv("ACTIVE_SET_SEED", "42")
@@ -257,6 +258,9 @@ func TestConfigFromEnvReadsManyDBConfig(t *testing.T) {
 
 	if cfg.NumDatabases != 100 {
 		t.Fatalf("NumDatabases = %d, want 100", cfg.NumDatabases)
+	}
+	if cfg.MaxRowsPerDatabase != 1234 {
+		t.Fatalf("MaxRowsPerDatabase = %d, want 1234", cfg.MaxRowsPerDatabase)
 	}
 	if cfg.ActivePercent != 2.5 {
 		t.Fatalf("ActivePercent = %v, want 2.5", cfg.ActivePercent)
@@ -283,17 +287,18 @@ func TestConfigFromEnvReadsManyDBConfig(t *testing.T) {
 
 func TestConfigFromEnvReadsManyDBProfiles(t *testing.T) {
 	tests := []struct {
-		profile      string
-		numDatabases int
-		workers      int
-		configMode   string
+		profile            string
+		numDatabases       int
+		maxRowsPerDatabase int
+		workers            int
+		configMode         string
 	}{
-		{profile: "many-dbs-100-list", numDatabases: 100, workers: 2, configMode: "list"},
-		{profile: "many-dbs-100-dir", numDatabases: 100, workers: 2, configMode: "dir"},
-		{profile: "many-dbs-500-list", numDatabases: 500, workers: 3, configMode: "list"},
-		{profile: "many-dbs-500-dir", numDatabases: 500, workers: 3, configMode: "dir"},
-		{profile: "many-dbs-500-dir-lowfreq", numDatabases: 500, workers: 3, configMode: "dir"},
-		{profile: "many-dbs-1000-dir", numDatabases: 1000, workers: 4, configMode: "dir"},
+		{profile: "many-dbs-100-list", numDatabases: 100, maxRowsPerDatabase: 50000, workers: 2, configMode: "list"},
+		{profile: "many-dbs-100-dir", numDatabases: 100, maxRowsPerDatabase: 50000, workers: 2, configMode: "dir"},
+		{profile: "many-dbs-500-list", numDatabases: 500, maxRowsPerDatabase: 10000, workers: 3, configMode: "list"},
+		{profile: "many-dbs-500-dir", numDatabases: 500, maxRowsPerDatabase: 10000, workers: 3, configMode: "dir"},
+		{profile: "many-dbs-500-dir-lowfreq", numDatabases: 500, maxRowsPerDatabase: 10000, workers: 3, configMode: "dir"},
+		{profile: "many-dbs-1000-dir", numDatabases: 1000, maxRowsPerDatabase: 5000, workers: 4, configMode: "dir"},
 	}
 
 	for _, tc := range tests {
@@ -311,6 +316,9 @@ func TestConfigFromEnvReadsManyDBProfiles(t *testing.T) {
 			if cfg.NumDatabases != tc.numDatabases {
 				t.Fatalf("NumDatabases = %d, want %d", cfg.NumDatabases, tc.numDatabases)
 			}
+			if cfg.MaxRowsPerDatabase != tc.maxRowsPerDatabase {
+				t.Fatalf("MaxRowsPerDatabase = %d, want %d", cfg.MaxRowsPerDatabase, tc.maxRowsPerDatabase)
+			}
 			if cfg.Workers != tc.workers {
 				t.Fatalf("Workers = %d, want %d", cfg.Workers, tc.workers)
 			}
@@ -324,6 +332,28 @@ func TestConfigFromEnvReadsManyDBProfiles(t *testing.T) {
 				t.Fatalf("S3FaultProxyFailFirstAttempts = %d, want 0", cfg.S3FaultProxyFailFirstAttempts)
 			}
 		})
+	}
+}
+
+func TestConfigFromEnvDefaultsMaxRowsForManyDBOverride(t *testing.T) {
+	t.Setenv("NUM_DATABASES", "500")
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v", err)
+	}
+
+	if cfg.MaxRowsPerDatabase != 10000 {
+		t.Fatalf("MaxRowsPerDatabase = %d, want 10000", cfg.MaxRowsPerDatabase)
+	}
+}
+
+func TestConfigFromEnvRejectsInvalidMaxRowsPerDatabase(t *testing.T) {
+	t.Setenv("NUM_DATABASES", "100")
+	t.Setenv("MAX_ROWS_PER_DATABASE", "0")
+
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Fatal("ConfigFromEnv() error = nil, want non-nil")
 	}
 }
 
