@@ -21,6 +21,29 @@ var (
 	keyValuePattern    = regexp.MustCompile(`(?i)\b(operation|http_status|api_code|request_id|bucket|prefix|phase)=("[^"]+"|'[^']+'|[^\s,]+)`)
 )
 
+func (c *FailureClassification) Valid() bool {
+	if c == nil {
+		return false
+	}
+	stage := strings.TrimSpace(c.Stage)
+	signature := strings.TrimSpace(c.Signature)
+	if stage == "" || signature == "" || stage != c.Stage || signature != c.Signature {
+		return false
+	}
+	if c.ObjectStore != nil && stage != "sync" && stage != "restore" {
+		return false
+	}
+	if c.Restore != nil && stage != "restore" {
+		return false
+	}
+	switch signature {
+	case "disk_capacity_full", "soak_fixture_disk_exhausted":
+		return stage == "disk_capacity" && c.ObjectStore == nil && c.Restore == nil
+	default:
+		return stage != "disk_capacity"
+	}
+}
+
 func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassification {
 	text := strings.ToLower(errorMessage)
 	classification := FailureClassification{
@@ -52,9 +75,17 @@ func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassifi
 	return classification
 }
 
-func ClassifyVerificationFailureWithRuntime(checkType, errorMessage string, runtime *RuntimePayload, observedAt time.Time) FailureClassification {
+func ClassifyVerificationFailureWithRuntime(checkType, errorMessage, profileName string, runtime *RuntimePayload, observedAt time.Time) FailureClassification {
 	classification := ClassifyVerificationFailure(checkType, errorMessage)
-	if classification.Signature == "disk_capacity_full" && soakFixtureExhaustedDisk(runtime, observedAt) {
+	if !strings.HasPrefix(strings.TrimSpace(profileName), "many-dbs-") {
+		return classification
+	}
+	if classification.Signature != "disk_capacity_full" && !strings.Contains(strings.ToLower(errorMessage), "disk full") {
+		return classification
+	}
+	classification.Stage = "disk_capacity"
+	classification.Signature = "disk_capacity_full"
+	if soakFixtureExhaustedDisk(runtime, observedAt) {
 		classification.Signature = "soak_fixture_disk_exhausted"
 	}
 	return classification
@@ -242,7 +273,6 @@ func isDiskCapacityFailure(text string) bool {
 	return strings.Contains(text, "no space left on device") ||
 		strings.Contains(text, "database or disk is full") ||
 		strings.Contains(text, "disk is full") ||
-		strings.Contains(text, "disk full") ||
 		strings.Contains(text, "enospc") ||
 		strings.Contains(text, "sqlite_full")
 }

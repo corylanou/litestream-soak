@@ -223,3 +223,86 @@ func TestVerificationWithoutStoredClassificationRemainsReadable(t *testing.T) {
 		t.Fatalf("FailureClassification = %+v, want nil", verifications[0].FailureClassification)
 	}
 }
+
+func TestMalformedStoredClassificationIsIgnored(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	worker := &Worker{
+		ID:            "worker-malformed-classification",
+		Name:          "worker-malformed-classification",
+		Status:        WorkerDegraded,
+		Source:        "main",
+		GitSHA:        "abc123",
+		LitestreamSHA: "ls123",
+		ProfileName:   "many-dbs-100-dir",
+		ProfileConfig: "{}",
+	}
+	if err := db.CreateWorker(worker); err != nil {
+		t.Fatalf("CreateWorker() error = %v", err)
+	}
+
+	startedAt := time.Date(2026, 7, 26, 1, 29, 13, 0, time.UTC)
+	if _, err := db.exec(`
+		INSERT INTO verifications (
+			worker_id, started_at, status, check_type, source_checksum,
+			restored_checksum, passed, duration_ms, error_message,
+			failure_classification_json
+		) VALUES (?, ?, 'failed', 'integrity', '', '', 0, 0,
+			'database or disk is full',
+			'{"signature":"soak_fixture_disk_exhausted"}')`,
+		worker.ID,
+		startedAt,
+	); err != nil {
+		t.Fatalf("insert malformed classification: %v", err)
+	}
+
+	assertMissing := func(t *testing.T, classification *reporting.FailureClassification) {
+		t.Helper()
+		if classification != nil {
+			t.Fatalf("FailureClassification = %+v, want nil", classification)
+		}
+	}
+
+	listed, err := db.ListVerifications(worker.ID, 10)
+	if err != nil {
+		t.Fatalf("ListVerifications() error = %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("len(ListVerifications()) = %d, want 1", len(listed))
+	}
+	assertMissing(t, listed[0].FailureClassification)
+
+	latest, err := db.GetLatestFailedVerification(worker.ID)
+	if err != nil {
+		t.Fatalf("GetLatestFailedVerification() error = %v", err)
+	}
+	if latest == nil {
+		t.Fatal("GetLatestFailedVerification() = nil")
+	}
+	assertMissing(t, latest.FailureClassification)
+
+	recent, err := db.ListRecentFailedVerifications(10)
+	if err != nil {
+		t.Fatalf("ListRecentFailedVerifications() error = %v", err)
+	}
+	if len(recent) != 1 {
+		t.Fatalf("len(ListRecentFailedVerifications()) = %d, want 1", len(recent))
+	}
+	assertMissing(t, recent[0].FailureClassification)
+
+	stats, err := db.ListVerificationStatsSince(worker.Source, startedAt.Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("ListVerificationStatsSince() error = %v", err)
+	}
+	if len(stats) != 1 {
+		t.Fatalf("len(ListVerificationStatsSince()) = %d, want 1", len(stats))
+	}
+	assertMissing(t, stats[0].FailureClassification)
+}

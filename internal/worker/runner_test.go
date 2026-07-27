@@ -993,9 +993,11 @@ func TestFailureClassificationUsesFreshRuntimeDiskEvidence(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		sourceBytes int64
-		want        string
+		name         string
+		profileName  string
+		errorMessage string
+		sourceBytes  int64
+		want         string
 	}{
 		{
 			name:        "fixture exhaustion",
@@ -1007,13 +1009,26 @@ func TestFailureClassificationUsesFreshRuntimeDiskEvidence(t *testing.T) {
 			sourceBytes: 949,
 			want:        "disk_capacity_full",
 		},
+		{
+			name:         "non many-db source dominance remains actionable",
+			profileName:  "overload-truncate0",
+			errorMessage: "checkpoint failed: database or disk is full",
+			sourceBytes:  950,
+			want:         "disk_capacity_full",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			runner := NewRunner(DefaultConfig())
+			profileName := tt.profileName
+			if profileName == "" {
+				profileName = "many-dbs-100-dir"
+			}
+			cfg := DefaultConfig()
+			cfg.ProfileName = profileName
+			runner := NewRunner(cfg)
 			runner.snapshotMu.Lock()
 			runner.snapshot = runtimeSnapshot{RuntimePayload: reporting.RuntimePayload{
 				DataDiskUsedBytes:   1_000,
@@ -1022,7 +1037,11 @@ func TestFailureClassificationUsesFreshRuntimeDiskEvidence(t *testing.T) {
 			}}
 			runner.snapshotMu.Unlock()
 
-			classification := runner.failureClassification(result)
+			testResult := result
+			if tt.errorMessage != "" {
+				testResult.ErrorMessage = tt.errorMessage
+			}
+			classification := runner.failureClassification(testResult)
 			if classification == nil {
 				t.Fatal("failureClassification() = nil")
 			}

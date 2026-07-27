@@ -32,7 +32,7 @@ func classifyVerification(verification *model.Verification) verificationFailure 
 	if verification == nil {
 		return verificationFailure{}
 	}
-	if verification.FailureClassification != nil {
+	if verification.FailureClassification.Valid() {
 		return verificationFailure{
 			Stage:          verification.FailureClassification.Stage,
 			Signature:      verification.FailureClassification.Signature,

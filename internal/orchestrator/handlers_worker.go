@@ -64,7 +64,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	failed := !payload.Passed && !aborted
 	environmental := false
 	if failed {
-		computed := reporting.ClassifyVerificationFailureWithRuntime(payload.CheckType, payload.ErrorMessage, &reportedRuntime, observedAt)
+		computed := reporting.ClassifyVerificationFailureWithRuntime(payload.CheckType, payload.ErrorMessage, payload.ProfileName, &reportedRuntime, observedAt)
 		reportedDiskClassification := payload.FailureClassification != nil &&
 			(payload.FailureClassification.Stage == "disk_capacity" ||
 				payload.FailureClassification.Signature == "disk_capacity_full" ||

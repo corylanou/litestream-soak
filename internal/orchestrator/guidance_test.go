@@ -119,6 +119,7 @@ func TestInferFailureSignatureRestoreS3ListRequestCanceled(t *testing.T) {
 func TestClassifyVerification(t *testing.T) {
 	const syncCheckType = "integrity"
 	const syncErrorMessage = `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`
+	const diskErrorMessage = "checkpoint failed: database or disk is full"
 
 	tests := []struct {
 		name               string
@@ -142,6 +143,47 @@ func TestClassifyVerification(t *testing.T) {
 			},
 			wantStage:          "sync",
 			wantSignature:      "litestream_sync_socket_refused",
+			wantClassification: true,
+		},
+		{
+			name: "complete persisted fixture classification is trusted",
+			verification: &model.Verification{
+				CheckType:    "integrity",
+				ErrorMessage: diskErrorMessage,
+				FailureClassification: &reporting.FailureClassification{
+					Stage:     "disk_capacity",
+					Signature: "soak_fixture_disk_exhausted",
+				},
+			},
+			wantStage:          "disk_capacity",
+			wantSignature:      "soak_fixture_disk_exhausted",
+			wantClassification: true,
+		},
+		{
+			name: "persisted fixture classification without stage falls back",
+			verification: &model.Verification{
+				CheckType:    "integrity",
+				ErrorMessage: diskErrorMessage,
+				FailureClassification: &reporting.FailureClassification{
+					Signature: "soak_fixture_disk_exhausted",
+				},
+			},
+			wantStage:          "disk_capacity",
+			wantSignature:      "disk_capacity_full",
+			wantClassification: true,
+		},
+		{
+			name: "persisted fixture classification with wrong stage falls back",
+			verification: &model.Verification{
+				CheckType:    "integrity",
+				ErrorMessage: diskErrorMessage,
+				FailureClassification: &reporting.FailureClassification{
+					Stage:     "restore",
+					Signature: "soak_fixture_disk_exhausted",
+				},
+			},
+			wantStage:          "disk_capacity",
+			wantSignature:      "disk_capacity_full",
 			wantClassification: true,
 		},
 	}
@@ -185,6 +227,47 @@ func TestClassifyVerification(t *testing.T) {
 			t.Fatalf("classifyFailureMessage().Signature=%q != classifyVerification().Signature=%q", fromMessage.Signature, fromVerification.Signature)
 		}
 	})
+}
+
+func TestBuildPromptEventSummariesUsesPersistedClassification(t *testing.T) {
+	t.Parallel()
+
+	payload, err := json.Marshal(reporting.VerificationPayload{
+		CheckType:    "integrity",
+		Status:       "failed",
+		ErrorMessage: "sync database: db sync: stage-write ltx file: disk full: write header",
+		FailureClassification: &reporting.FailureClassification{
+			Stage:     "disk_capacity",
+			Signature: "soak_fixture_disk_exhausted",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	summaries := buildPromptEventSummaries([]model.Event{{
+		EventType: "verification_failed",
+		Details:   string(payload),
+	}})
+	if len(summaries) != 1 {
+		t.Fatalf("len(summaries) = %d, want 1", len(summaries))
+	}
+	summary := summaries[0]
+	if summary.FailureStage != "disk_capacity" {
+		t.Fatalf("FailureStage = %q, want disk_capacity", summary.FailureStage)
+	}
+	if summary.FailureSignature != "soak_fixture_disk_exhausted" {
+		t.Fatalf("FailureSignature = %q, want soak_fixture_disk_exhausted", summary.FailureSignature)
+	}
+	if summary.FailureClassification == nil {
+		t.Fatal("FailureClassification = nil")
+	}
+	if summary.FailureClassification.Stage != summary.FailureStage {
+		t.Fatalf("FailureClassification.Stage = %q, want %q", summary.FailureClassification.Stage, summary.FailureStage)
+	}
+	if summary.FailureClassification.Signature != summary.FailureSignature {
+		t.Fatalf("FailureClassification.Signature = %q, want %q", summary.FailureClassification.Signature, summary.FailureSignature)
+	}
 }
 
 func TestBuildIncidentGuideSync(t *testing.T) {

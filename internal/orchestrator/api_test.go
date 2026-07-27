@@ -1836,6 +1836,7 @@ func TestHandleVerificationPersistsRuntimeDiskClassification(t *testing.T) {
 	completedAt := time.Date(2026, 7, 26, 1, 29, 13, 0, time.UTC)
 	tests := []struct {
 		name              string
+		profileName       string
 		errorMessage      string
 		reportedSignature string
 		runtime           reporting.RuntimePayload
@@ -1882,6 +1883,17 @@ func TestHandleVerificationPersistsRuntimeDiskClassification(t *testing.T) {
 			reportedSignature: "soak_fixture_disk_exhausted",
 			signature:         "disk_capacity_full",
 		},
+		{
+			name:         "non many-db source dominance remains actionable",
+			profileName:  "overload-truncate0",
+			errorMessage: "checkpoint failed: database or disk is full",
+			runtime: reporting.RuntimePayload{
+				DataDiskUsedBytes:   1_000,
+				DBTotalSizeBytes:    950,
+				SnapshotCollectedAt: completedAt,
+			},
+			signature: "disk_capacity_full",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1890,6 +1902,10 @@ func TestHandleVerificationPersistsRuntimeDiskClassification(t *testing.T) {
 
 			db := openTestDB(t)
 			workerID := "worker-runtime-disk-" + strings.ReplaceAll(tt.name, " ", "-")
+			profileName := tt.profileName
+			if profileName == "" {
+				profileName = "many-dbs-100-dir"
+			}
 			createTestWorker(t, db, model.Worker{
 				ID:            workerID,
 				Name:          workerID,
@@ -1897,7 +1913,7 @@ func TestHandleVerificationPersistsRuntimeDiskClassification(t *testing.T) {
 				Source:        "main",
 				GitSHA:        "abc123",
 				LitestreamSHA: "ls123",
-				ProfileName:   "many-dbs-100-dir",
+				ProfileName:   profileName,
 				ProfileConfig: "{}",
 			})
 
@@ -1916,7 +1932,7 @@ func TestHandleVerificationPersistsRuntimeDiskClassification(t *testing.T) {
 					Source:        "main",
 					GitSHA:        "abc123",
 					LitestreamSHA: "ls123",
-					ProfileName:   "many-dbs-100-dir",
+					ProfileName:   profileName,
 					ProfileConfig: "{}",
 				},
 				StartedAt:    completedAt.Add(-time.Minute),
@@ -2002,6 +2018,71 @@ func TestHandleVerificationPersistsRuntimeDiskClassification(t *testing.T) {
 				t.Fatalf("ProbableSubsystem = %q, want %q", failures[0].ProbableSubsystem, wantSubsystem)
 			}
 		})
+	}
+}
+
+func TestListFailuresRejectsMalformedPersistedClassification(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	workerID := "worker-malformed-classification"
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		Name:          workerID,
+		Status:        model.WorkerDegraded,
+		Source:        "main",
+		GitSHA:        "abc123",
+		LitestreamSHA: "ls123",
+		ProfileName:   "many-dbs-100-dir",
+		ProfileConfig: "{}",
+	})
+	completedAt := time.Date(2026, 7, 26, 1, 29, 13, 0, time.UTC)
+	if err := db.RecordVerification(&model.Verification{
+		WorkerID:     workerID,
+		StartedAt:    completedAt.Add(-time.Minute),
+		CompletedAt:  &completedAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		Passed:       false,
+		ErrorMessage: "checkpoint failed: database or disk is full",
+		FailureClassification: &reporting.FailureClassification{
+			Signature: "soak_fixture_disk_exhausted",
+		},
+	}); err != nil {
+		t.Fatalf("RecordVerification() error = %v", err)
+	}
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/failures", nil)
+	recorder := httptest.NewRecorder()
+	api.handleListFailures(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var failures []FailureResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &failures); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(failures) != 1 {
+		t.Fatalf("len(failures) = %d, want 1", len(failures))
+	}
+	if failures[0].FailureStage != "disk_capacity" {
+		t.Fatalf("FailureStage = %q, want disk_capacity", failures[0].FailureStage)
+	}
+	if failures[0].Verification.FailureClassification != nil {
+		t.Fatalf("Verification.FailureClassification = %+v, want nil", failures[0].Verification.FailureClassification)
+	}
+	if failures[0].FailureSignature != "disk_capacity_full" {
+		t.Fatalf("FailureSignature = %q, want disk_capacity_full", failures[0].FailureSignature)
+	}
+	if failures[0].FailureCategory != "actionable" {
+		t.Fatalf("FailureCategory = %q, want actionable", failures[0].FailureCategory)
+	}
+	if failures[0].FailureSeverity != "bad" {
+		t.Fatalf("FailureSeverity = %q, want bad", failures[0].FailureSeverity)
+	}
+	if failures[0].ProbableSubsystem != "Disk capacity / restore scratch headroom" {
+		t.Fatalf("ProbableSubsystem = %q, want Disk capacity / restore scratch headroom", failures[0].ProbableSubsystem)
 	}
 }
 

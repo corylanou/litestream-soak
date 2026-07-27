@@ -292,5 +292,8 @@ func decodeFailureClassification(raw string) (*reporting.FailureClassification, 
 	if err := json.Unmarshal([]byte(raw), &classification); err != nil {
 		return nil, fmt.Errorf("decode failure classification: %w", err)
 	}
+	if !classification.Valid() {
+		return nil, nil
+	}
 	return &classification, nil
 }
