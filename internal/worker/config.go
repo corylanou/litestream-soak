@@ -45,6 +45,7 @@ type Config struct {
 	InitialSize string
 
 	NumDatabases            int
+	MaxRowsPerDatabase      int
 	ActivePercent           float64
 	ActiveRotateInterval    time.Duration
 	ActiveSetSeed           int64
@@ -429,6 +430,16 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid NUM_DATABASES: must be non-negative")
 		}
 	}
+	if v := os.Getenv("MAX_ROWS_PER_DATABASE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid MAX_ROWS_PER_DATABASE: %w", err)
+		}
+		if n <= 0 {
+			return c, fmt.Errorf("invalid MAX_ROWS_PER_DATABASE: must be positive")
+		}
+		c.MaxRowsPerDatabase = n
+	}
 	if v := os.Getenv("ACTIVE_PERCENT"); v != "" {
 		n, err := strconv.ParseFloat(v, 64)
 		if err != nil {
@@ -790,6 +801,9 @@ func ConfigFromEnv() (Config, error) {
 		c.WorkerName = c.WorkerID
 	}
 	if c.ManyDBEnabled() {
+		if c.MaxRowsPerDatabase == 0 {
+			c.MaxRowsPerDatabase = workload.DefaultMaxRowsPerDatabase(c.NumDatabases)
+		}
 		switch c.manyDBConfigMode() {
 		case "list", "dir":
 		default:
@@ -951,6 +965,13 @@ func (c Config) manyDBConfigMode() string {
 	return mode
 }
 
+func (c Config) manyDBMaxRowsPerDatabase() int {
+	if c.MaxRowsPerDatabase > 0 {
+		return c.MaxRowsPerDatabase
+	}
+	return workload.DefaultMaxRowsPerDatabase(c.NumDatabases)
+}
+
 func (c Config) s3FaultProxyObserveMode() bool {
 	return normalizeS3FaultProxyMode(c.S3FaultProxyMode) == s3FaultProxyModeObserve
 }
@@ -988,6 +1009,7 @@ func (c Config) WorkloadConfig() workload.Config {
 		S3Concurrency:            c.S3Concurrency,
 		ReplicaLevelReporting:    c.ReplicaLevelReporting,
 		NumDatabases:             c.NumDatabases,
+		MaxRowsPerDatabase:       c.MaxRowsPerDatabase,
 		ActivePercent:            c.ActivePercent,
 		ActivePercentSet:         c.ManyDBEnabled(),
 		ConfigMode:               c.manyDBConfigMode(),
@@ -1025,6 +1047,7 @@ func (c Config) WorkloadConfig() workload.Config {
 		cfg.PinnedReaderPause = c.PinnedReaderPause.String()
 	}
 	if c.ManyDBEnabled() {
+		cfg.MaxRowsPerDatabase = c.manyDBMaxRowsPerDatabase()
 		cfg.ActiveRotateInterval = c.manyDBActiveRotateInterval().String()
 		cfg.ActiveSetSeed = c.ActiveSetSeed
 		cfg.VerifyChangedLimit = c.manyDBVerifyChangedLimit()

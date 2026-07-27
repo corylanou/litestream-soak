@@ -48,6 +48,7 @@ type Config struct {
 	ReplaySpeed                               float64 `json:"replay_speed,omitempty"`
 	ReplayLoop                                bool    `json:"replay_loop,omitempty"`
 	NumDatabases                              int     `json:"num_databases,omitempty"`
+	MaxRowsPerDatabase                        int     `json:"max_rows_per_database,omitempty"`
 	ActivePercent                             float64 `json:"active_percent,omitempty"`
 	ActivePercentSet                          bool    `json:"-"`
 	ActiveRotateInterval                      string  `json:"active_rotate_interval,omitempty"`
@@ -62,6 +63,17 @@ type Config struct {
 	VolumeSizeGB                              int     `json:"volume_size_gb,omitempty"`
 	MemoryMB                                  int     `json:"memory_mb,omitempty"`
 	CPUs                                      int     `json:"cpus,omitempty"`
+}
+
+func DefaultMaxRowsPerDatabase(numDatabases int) int {
+	if numDatabases <= 0 {
+		return 0
+	}
+	maxRows := 5_000_000 / numDatabases
+	if maxRows < 1 {
+		return 1
+	}
+	return maxRows
 }
 
 func (c Config) JSON() string {

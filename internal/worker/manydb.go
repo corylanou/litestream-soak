@@ -20,7 +20,7 @@ type manyDBLoad struct {
 	now func() time.Time
 
 	cancel context.CancelFunc
-	jobs   chan string
+	jobs   chan manyDBWrite
 	wg     sync.WaitGroup
 	next   atomic.Uint64
 
@@ -33,12 +33,22 @@ type manyDBLoad struct {
 	stopped bool
 }
 
+type manyDBWrite struct {
+	dbPath  string
+	rowSlot int64
+}
+
+const manyDBPruneBatchSize = 10_000
+
 func populateManyDBs(ctx context.Context, cfg Config) error {
 	if err := os.MkdirAll(cfg.ManyDBDir(), 0755); err != nil {
 		return fmt.Errorf("create many database dir: %w", err)
 	}
 	for _, dbPath := range cfg.ManyDBPaths() {
 		if _, err := os.Stat(dbPath); err == nil {
+			if err := pruneManyDBRows(ctx, dbPath, cfg.manyDBMaxRowsPerDatabase()); err != nil {
+				return fmt.Errorf("prune many database %s: %w", dbPath, err)
+			}
 			continue
 		} else if !os.IsNotExist(err) {
 			return fmt.Errorf("stat many database %s: %w", dbPath, err)
@@ -48,6 +58,40 @@ func populateManyDBs(ctx context.Context, cfg Config) error {
 		}
 	}
 	return nil
+}
+
+func pruneManyDBRows(ctx context.Context, dbPath string, maxRows int) error {
+	if maxRows <= 0 {
+		return fmt.Errorf("max rows must be positive")
+	}
+	db, err := sql.Open("sqlite", manyDBDSN(dbPath))
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+
+	for {
+		result, err := db.ExecContext(ctx, `
+			DELETE FROM soak_writes
+			WHERE id IN (
+				SELECT id FROM soak_writes
+				WHERE id > ?
+				ORDER BY id DESC
+				LIMIT ?
+			)
+		`, maxRows, manyDBPruneBatchSize)
+		if err != nil {
+			return fmt.Errorf("delete rows above retention limit: %w", err)
+		}
+		rowsDeleted, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("read deleted row count: %w", err)
+		}
+		if rowsDeleted < manyDBPruneBatchSize {
+			return nil
+		}
+	}
 }
 
 func seedManyDB(ctx context.Context, dbPath string) error {
@@ -98,7 +142,7 @@ func (l *manyDBLoad) Start(ctx context.Context) error {
 
 	runCtx, cancel := context.WithCancel(ctx)
 	l.cancel = cancel
-	l.jobs = make(chan string)
+	l.jobs = make(chan manyDBWrite)
 
 	workerCount := l.cfg.Workers
 	if workerCount <= 0 {
@@ -148,6 +192,7 @@ func (l *manyDBLoad) dispatch(ctx context.Context) {
 
 	var activePaths []string
 	var activeGeneration int64
+	nextSlots := make(map[string]int64)
 
 	for {
 		select {
@@ -165,10 +210,16 @@ func (l *manyDBLoad) dispatch(ctx context.Context) {
 				continue
 			}
 			idx := int(l.next.Add(1)-1) % len(activePaths)
+			dbPath := activePaths[idx]
+			rowSlot := nextSlots[dbPath] + 1
+			if rowSlot > int64(l.cfg.manyDBMaxRowsPerDatabase()) {
+				rowSlot = 1
+			}
+			nextSlots[dbPath] = rowSlot
 			select {
 			case <-ctx.Done():
 				return
-			case l.jobs <- activePaths[idx]:
+			case l.jobs <- manyDBWrite{dbPath: dbPath, rowSlot: rowSlot}:
 			}
 		}
 	}
@@ -180,17 +231,17 @@ func (l *manyDBLoad) writeWorker(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case dbPath, ok := <-l.jobs:
+		case write, ok := <-l.jobs:
 			if !ok {
 				return
 			}
 			if !l.beginWrite(ctx) {
 				return
 			}
-			if err := writeManyDBRow(ctx, dbPath, l.cfg.PayloadSize); err != nil {
-				slog.Warn("Many database write failed", "db", dbPath, "error", err)
+			if err := writeManyDBRow(ctx, write.dbPath, l.cfg.PayloadSize, write.rowSlot); err != nil {
+				slog.Warn("Many database write failed", "db", write.dbPath, "error", err)
 			} else {
-				l.markChanged(dbPath)
+				l.markChanged(write.dbPath)
 			}
 			l.endWrite()
 		}
@@ -229,9 +280,12 @@ func (l *manyDBLoad) endWrite() {
 	l.mu.Unlock()
 }
 
-func writeManyDBRow(ctx context.Context, dbPath string, payloadSize int) error {
+func writeManyDBRow(ctx context.Context, dbPath string, payloadSize int, rowSlot int64) error {
 	if payloadSize <= 0 {
 		payloadSize = 512
+	}
+	if rowSlot <= 0 {
+		return fmt.Errorf("row slot must be positive")
 	}
 	db, err := sql.Open("sqlite", manyDBDSN(dbPath))
 	if err != nil {
@@ -240,8 +294,11 @@ func writeManyDBRow(ctx context.Context, dbPath string, payloadSize int) error {
 	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(1)
 
-	if _, err := db.ExecContext(ctx, "INSERT INTO soak_writes (body) VALUES (zeroblob(?))", payloadSize); err != nil {
-		return fmt.Errorf("insert write row: %w", err)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO soak_writes (id, body) VALUES (?, randomblob(?))
+		ON CONFLICT(id) DO UPDATE SET body = excluded.body, written_at = CURRENT_TIMESTAMP
+	`, rowSlot, payloadSize); err != nil {
+		return fmt.Errorf("write row slot: %w", err)
 	}
 	return nil
 }

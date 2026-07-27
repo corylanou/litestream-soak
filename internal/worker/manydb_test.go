@@ -100,6 +100,49 @@ func TestManyDBLoadCurrentActivePathsRotates(t *testing.T) {
 	}
 }
 
+func TestManyDBLoadDispatchesCyclicSlotsPerDatabase(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.NumDatabases = 2
+	cfg.MaxRowsPerDatabase = 2
+	cfg.ActivePercent = 100
+	cfg.WriteRate = 1000
+
+	load := newManyDBLoad(&cfg)
+	load.now = func() time.Time { return time.Unix(0, 0) }
+	load.jobs = make(chan manyDBWrite)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	t.Cleanup(cancel)
+	load.wg.Add(1)
+	go load.dispatch(ctx)
+
+	paths := cfg.ManyDBPaths()
+	want := []manyDBWrite{
+		{dbPath: paths[0], rowSlot: 1},
+		{dbPath: paths[1], rowSlot: 1},
+		{dbPath: paths[0], rowSlot: 2},
+		{dbPath: paths[1], rowSlot: 2},
+		{dbPath: paths[0], rowSlot: 1},
+		{dbPath: paths[1], rowSlot: 1},
+	}
+	got := make([]manyDBWrite, 0, len(want))
+	for range want {
+		select {
+		case write := <-load.jobs:
+			got = append(got, write)
+		case <-ctx.Done():
+			t.Fatalf("dispatch timed out after jobs %v", got)
+		}
+	}
+	cancel()
+	load.wg.Wait()
+
+	if !slices.Equal(got, want) {
+		t.Fatalf("dispatched writes = %v, want %v", got, want)
+	}
+}
+
 func TestManyDBLoadChangedPathsReset(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.DataDir = "/data"
@@ -159,6 +202,156 @@ func TestPopulateManyDBCreatesWALDatabases(t *testing.T) {
 		if count == 0 {
 			t.Fatalf("seeded row count for %s = 0, want > 0", dbPath)
 		}
+	}
+}
+
+func TestPopulateManyDBPrunesRowsAboveConfiguredLimit(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.NumDatabases = 1
+	cfg.MaxRowsPerDatabase = 3
+
+	dbPath := cfg.ManyDBPaths()[0]
+	if err := seedManyDB(ctx, dbPath); err != nil {
+		t.Fatalf("seedManyDB() error = %v", err)
+	}
+	db, err := sql.Open("sqlite", manyDBDSN(dbPath))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	for row := 0; row < 5; row++ {
+		if _, err := db.ExecContext(ctx, "INSERT INTO soak_writes (body) VALUES (randomblob(128))"); err != nil {
+			_ = db.Close()
+			t.Fatalf("insert legacy row %d: %v", row+1, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy database: %v", err)
+	}
+
+	if err := populateManyDBs(ctx, cfg); err != nil {
+		t.Fatalf("populateManyDBs() error = %v", err)
+	}
+
+	db, err = sql.Open("sqlite", manyDBDSN(dbPath))
+	if err != nil {
+		t.Fatalf("reopen database: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+	var rowCount int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM soak_writes").Scan(&rowCount); err != nil {
+		t.Fatalf("read retained row count: %v", err)
+	}
+	if rowCount != cfg.MaxRowsPerDatabase {
+		t.Fatalf("retained row count = %d, want %d", rowCount, cfg.MaxRowsPerDatabase)
+	}
+}
+
+func TestWriteManyDBRowRotatesRetainedRowsAndPreservesIntegrity(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "source.db")
+	const maxRows = 3
+	const payloadSize = 128
+
+	if err := seedManyDB(ctx, dbPath); err != nil {
+		t.Fatalf("seedManyDB() error = %v", err)
+	}
+	for writeIndex := 0; writeIndex < maxRows; writeIndex++ {
+		rowSlot := int64(writeIndex%maxRows + 1)
+		if err := writeManyDBRow(ctx, dbPath, payloadSize, rowSlot); err != nil {
+			t.Fatalf("writeManyDBRow() write %d error = %v", writeIndex+1, err)
+		}
+	}
+
+	db, err := sql.Open("sqlite", manyDBDSN(dbPath))
+	if err != nil {
+		t.Fatalf("open source database: %v", err)
+	}
+	var payloadBeforeRotation []byte
+	if err := db.QueryRowContext(ctx, "SELECT body FROM soak_writes WHERE id = 1").Scan(&payloadBeforeRotation); err != nil {
+		_ = db.Close()
+		t.Fatalf("read payload before rotation: %v", err)
+	}
+	for writeIndex := maxRows; writeIndex < maxRows+2; writeIndex++ {
+		rowSlot := int64(writeIndex%maxRows + 1)
+		if err := writeManyDBRow(ctx, dbPath, payloadSize, rowSlot); err != nil {
+			_ = db.Close()
+			t.Fatalf("writeManyDBRow() write %d error = %v", writeIndex+1, err)
+		}
+	}
+	var payloadAfterRotation []byte
+	if err := db.QueryRowContext(ctx, "SELECT body FROM soak_writes WHERE id = 1").Scan(&payloadAfterRotation); err != nil {
+		_ = db.Close()
+		t.Fatalf("read payload after rotation: %v", err)
+	}
+	if slices.Equal(payloadBeforeRotation, payloadAfterRotation) {
+		_ = db.Close()
+		t.Fatal("rotated payload did not change")
+	}
+	var rowCount int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM soak_writes").Scan(&rowCount); err != nil {
+		_ = db.Close()
+		t.Fatalf("read source row count: %v", err)
+	}
+	if rowCount != maxRows {
+		_ = db.Close()
+		t.Fatalf("source row count = %d, want %d", rowCount, maxRows)
+	}
+	var retainedPayloads int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM soak_writes WHERE length(body) = ?", payloadSize).Scan(&retainedPayloads); err != nil {
+		_ = db.Close()
+		t.Fatalf("read retained payload count: %v", err)
+	}
+	if retainedPayloads != maxRows {
+		_ = db.Close()
+		t.Fatalf("retained payload count = %d, want %d", retainedPayloads, maxRows)
+	}
+	var busy, logFrames, checkpointed int
+	if err := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+		_ = db.Close()
+		t.Fatalf("checkpoint source database: %v", err)
+	}
+	if busy != 0 {
+		_ = db.Close()
+		t.Fatalf("checkpoint busy = %d, want 0", busy)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close source database: %v", err)
+	}
+
+	body, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatalf("read source database: %v", err)
+	}
+	copyPath := filepath.Join(dir, "copy.db")
+	if err := os.WriteFile(copyPath, body, 0o600); err != nil {
+		t.Fatalf("copy source database: %v", err)
+	}
+
+	copyDB, err := sql.Open("sqlite", manyDBDSN(copyPath))
+	if err != nil {
+		t.Fatalf("open copied database: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = copyDB.Close()
+	})
+	if err := copyDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM soak_writes").Scan(&rowCount); err != nil {
+		t.Fatalf("read copied row count: %v", err)
+	}
+	if rowCount != maxRows {
+		t.Fatalf("copied row count = %d, want %d", rowCount, maxRows)
+	}
+	var integrity string
+	if err := copyDB.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil {
+		t.Fatalf("integrity check copied database: %v", err)
+	}
+	if integrity != "ok" {
+		t.Fatalf("copied database integrity = %q, want ok", integrity)
 	}
 }
 

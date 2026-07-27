@@ -472,6 +472,7 @@ func TestWorkerEnvIncludesManyDBWorkloadFields(t *testing.T) {
 	}, workload.Config{
 		LoadMode:                "many-db",
 		NumDatabases:            100,
+		MaxRowsPerDatabase:      1234,
 		ActivePercent:           2,
 		ActiveRotateInterval:    "10m",
 		ActiveSetSeed:           42,
@@ -484,6 +485,7 @@ func TestWorkerEnvIncludesManyDBWorkloadFields(t *testing.T) {
 	want := map[string]string{
 		"LOAD_MODE":                 "many-db",
 		"NUM_DATABASES":             "100",
+		"MAX_ROWS_PER_DATABASE":     "1234",
 		"ACTIVE_PERCENT":            "2.00",
 		"ACTIVE_ROTATE_INTERVAL":    "10m",
 		"ACTIVE_SET_SEED":           "42",
@@ -522,6 +524,27 @@ func TestWorkerEnvIncludesZeroActivePercentForManyDBWorkload(t *testing.T) {
 
 	if got := env["ACTIVE_PERCENT"]; got != "0.00" {
 		t.Fatalf("ACTIVE_PERCENT=%q, want 0.00", got)
+	}
+}
+
+func TestWorkerEnvOmitsUnsetMaxRowsPerDatabase(t *testing.T) {
+	t.Parallel()
+
+	mgr := &Manager{
+		replica:        ReplicaConfig{Bucket: "bucket", Endpoint: "endpoint"},
+		controlBaseURL: "https://litestream-soak-ctl.fly.dev",
+	}
+
+	env := mgr.workerEnv(model.Worker{
+		ID:   "worker-main-many-dbs-100-dir",
+		Name: "worker-main-many-dbs-100-dir",
+	}, workload.Config{
+		LoadMode:     "many-db",
+		NumDatabases: 100,
+	})
+
+	if _, ok := env["MAX_ROWS_PER_DATABASE"]; ok {
+		t.Fatal("MAX_ROWS_PER_DATABASE should be omitted when unset")
 	}
 }
 
@@ -585,6 +608,9 @@ func TestNormalizeWorkloadConfigDefaultsManyDBActivePercent(t *testing.T) {
 	if got.VerifyChangedLimit != 100 {
 		t.Fatalf("VerifyChangedLimit=%d want 100", got.VerifyChangedLimit)
 	}
+	if got.MaxRowsPerDatabase != 50000 {
+		t.Fatalf("MaxRowsPerDatabase=%d want 50000", got.MaxRowsPerDatabase)
+	}
 }
 
 func TestNormalizeWorkloadConfigPreservesExplicitZeroActivePercent(t *testing.T) {
@@ -637,6 +663,20 @@ func TestNormalizeWorkloadConfigPreservesExplicitValues(t *testing.T) {
 	}
 	if got.MemoryMB != 2048 {
 		t.Fatalf("MemoryMB=%d want 2048", got.MemoryMB)
+	}
+}
+
+func TestNormalizeWorkloadConfigPreservesMaxRowsPerDatabase(t *testing.T) {
+	t.Parallel()
+
+	got := normalizeWorkloadConfig(workload.Config{
+		LoadMode:           "many-db",
+		NumDatabases:       100,
+		MaxRowsPerDatabase: 1234,
+	})
+
+	if got.MaxRowsPerDatabase != 1234 {
+		t.Fatalf("MaxRowsPerDatabase=%d want 1234", got.MaxRowsPerDatabase)
 	}
 }
 
