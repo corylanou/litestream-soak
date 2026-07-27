@@ -269,7 +269,7 @@
         <div class="feed-item">
           <div class="feed-row">
             <div class="feed-body">
-              <span class="badge badge-{{if eq (eventClass .EventType) "status-good"}}good{{else if eq (eventClass .EventType) "status-bad"}}bad{{else}}neutral{{end}}">{{.EventType}}</span>
+              <span class="badge badge-{{if eq (eventClass .EventType) "status-good"}}good{{else if eq (eventClass .EventType) "status-bad"}}bad{{else if eq (eventClass .EventType) "status-warn"}}warn{{else}}neutral{{end}}">{{.EventType}}</span>
               <div class="feed-msg">{{shorten .Message 140}}</div>
               {{if .WorkerID}}<div class="feed-meta"><code class="mono">{{.WorkerID}}</code></div>{{end}}
             </div>

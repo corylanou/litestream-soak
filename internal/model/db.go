@@ -113,6 +113,20 @@ CREATE TABLE IF NOT EXISTS run_archives (
     archived_at DATETIME NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS volume_gc_attempts (
+    volume_id TEXT PRIMARY KEY,
+    app_name TEXT NOT NULL DEFAULT '',
+    volume_name TEXT NOT NULL DEFAULT '',
+    region TEXT NOT NULL DEFAULT '',
+    size_gb INTEGER NOT NULL DEFAULT 0,
+    volume_created_at DATETIME NOT NULL,
+    first_attempt_at DATETIME NOT NULL,
+    last_attempt_at DATETIME NOT NULL,
+    next_retry_at DATETIME NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    request_accepted BOOLEAN NOT NULL DEFAULT FALSE
+);
+
 CREATE INDEX IF NOT EXISTS idx_verifications_worker ON verifications(worker_id);
 CREATE INDEX IF NOT EXISTS idx_verifications_worker_started ON verifications(worker_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_verifications_worker_failed_started ON verifications(worker_id, passed, status, started_at DESC);
@@ -131,6 +145,7 @@ CREATE INDEX IF NOT EXISTS idx_deployments_source_status_started ON deployments(
 CREATE INDEX IF NOT EXISTS idx_deployments_source_version_started ON deployments(source, git_sha, litestream_sha, started_at DESC, id DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_run_archives_unique ON run_archives(deployment_id, archive_type, worker_id);
 CREATE INDEX IF NOT EXISTS idx_run_archives_source_type_archived ON run_archives(source, archive_type, archived_at DESC);
+CREATE INDEX IF NOT EXISTS idx_volume_gc_attempts_app_retry ON volume_gc_attempts(app_name, next_retry_at);
 `
 
 type DB struct {

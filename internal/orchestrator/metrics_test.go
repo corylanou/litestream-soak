@@ -618,6 +618,7 @@ func TestControlMetricsExposeVolumeInventory(t *testing.T) {
 		{Region: "ord", SizeGB: 10},
 		{Region: "ord", SizeGB: 10},
 		{Region: "ord", State: "pending_destroy", SizeGB: 100},
+		{Region: "ord", State: "scheduling_destroy", SizeGB: 100},
 	})
 
 	assertGatheredGaugeValue(t, "soak_control_app_volume_count", map[string]string{

@@ -83,6 +83,10 @@ type Manager struct {
 
 	volumeInventoryOnce sync.Once
 	volumeInventory     *volumeInventoryProvider
+
+	volumeGCMu             sync.Mutex
+	volumeGCAttempts       map[string]*model.VolumeGCAttempt
+	volumeGCAttemptsLoaded bool
 }
 
 func (m *Manager) lockWorker(ctx context.Context, id string) (func(), error) {

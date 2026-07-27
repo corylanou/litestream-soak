@@ -82,3 +82,39 @@ func TestListVolumesBoundsOversizedErrorResponse(t *testing.T) {
 		t.Fatalf("APIError.Body = %q, want %q", apiErr.Body, want)
 	}
 }
+
+func TestGetVolume(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/apps/litestream-soak/volumes/volume-one" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"volume-one","name":"soak_worker_main_low_vol","state":"pending_destroy"}`)
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewClientWithBaseURL("litestream-soak", "test-token", server.URL)
+	volume, err := client.GetVolume(t.Context(), "volume-one")
+	if err != nil {
+		t.Fatalf("GetVolume() error = %v", err)
+	}
+	if volume.ID != "volume-one" || volume.State != "pending_destroy" {
+		t.Fatalf("GetVolume() = %+v", volume)
+	}
+}
+
+func TestGetVolumePreservesNotFound(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(server.Close)
+
+	client := NewClientWithBaseURL("litestream-soak", "test-token", server.URL)
+	_, err := client.GetVolume(t.Context(), "missing-volume")
+	if !IsNotFound(err) {
+		t.Fatalf("GetVolume() error = %v, want not found", err)
+	}
+}

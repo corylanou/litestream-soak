@@ -101,6 +101,20 @@ type Event struct {
 	CollapsedWindowEnd   *time.Time `json:"collapsed_window_end,omitempty"`
 }
 
+type VolumeGCAttempt struct {
+	VolumeID        string    `json:"volume_id"`
+	AppName         string    `json:"app_name"`
+	VolumeName      string    `json:"volume_name"`
+	Region          string    `json:"region"`
+	SizeGB          int       `json:"size_gb"`
+	VolumeCreatedAt time.Time `json:"volume_created_at"`
+	FirstAttemptAt  time.Time `json:"first_attempt_at"`
+	LastAttemptAt   time.Time `json:"last_attempt_at"`
+	NextRetryAt     time.Time `json:"next_retry_at"`
+	RequestCount    int       `json:"request_count"`
+	RequestAccepted bool      `json:"request_accepted"`
+}
+
 type RunArchive struct {
 	ID            int       `json:"id"`
 	DeploymentID  int       `json:"deployment_id"`
