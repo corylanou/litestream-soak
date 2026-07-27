@@ -573,8 +573,10 @@ func (m *Manager) rollingUpdateSourceLocked(ctx context.Context, source, newImag
 	}
 
 	deployment := model.Deployment{GitSHA: newSHA, LitestreamSHA: newLitestreamSHA}
+	desiredSpec := DefaultFleetForSource(source, newSHA, newLitestreamSHA)
 	slog.Info("Starting rolling update", "source", source, "workers", len(workers), "sha", newSHA, "image", newImageRef)
 
+	var updateErrors []error
 	for _, listed := range workers {
 		newWorker, err := func() (*model.Worker, error) {
 			unlock, err := m.lockWorker(ctx, listed.ID)
@@ -590,13 +592,18 @@ func (m *Manager) rollingUpdateSourceLocked(ctx context.Context, source, newImag
 			if w.Status == model.WorkerStopped || w.Status == model.WorkerFailed || w.Status == model.WorkerDormant {
 				return nil, nil
 			}
-			if workerMatchesDeployment(*w, deployment) {
+			desired, managed := desiredWorkerFor(*w, desiredSpec)
+			if workerMatchesDeployment(*w, deployment) && (!managed || workerMatchesDesiredSpec(*w, desired)) {
 				return nil, nil
+			}
+			if managed {
+				return m.replaceWorkerWithRequest(ctx, *w, workerRequestForDesired(desired, newImageRef, w.ID, w.ExpiresAt))
 			}
 			return m.replaceWorker(ctx, *w, newImageRef, newSHA, newLitestreamSHA)
 		}()
 		if err != nil {
 			slog.Error("Failed to create updated worker", "name", listed.Name, "error", err)
+			updateErrors = append(updateErrors, fmt.Errorf("%s: %w", listed.Name, err))
 			continue
 		}
 		if newWorker != nil {
@@ -604,7 +611,7 @@ func (m *Manager) rollingUpdateSourceLocked(ctx context.Context, source, newImag
 		}
 	}
 
-	return nil
+	return errors.Join(updateErrors...)
 }
 
 func (m *Manager) latestReadyDeploymentMatches(source, imageRef, gitSHA, litestreamSHA string) (bool, *model.Deployment, error) {
@@ -646,8 +653,12 @@ func (m *Manager) RollWorker(ctx context.Context, workerID, newImageRef, newSHA,
 }
 
 func (m *Manager) replaceWorker(ctx context.Context, w model.Worker, newImageRef, newSHA, newLitestreamSHA string) (*model.Worker, error) {
-	slog.Info("Updating worker", "name", w.Name, "old_sha", w.GitSHA, "new_sha", newSHA, "old_litestream_sha", w.LitestreamSHA, "new_litestream_sha", newLitestreamSHA)
-	_ = m.db.RecordEvent(w.ID, "rolling_update", fmt.Sprintf("Updating %s from soak %s / litestream %s to soak %s / litestream %s", w.Name, shortVersionValue(w.GitSHA), shortVersionValue(w.LitestreamSHA), shortVersionValue(newSHA), shortVersionValue(newLitestreamSHA)), "")
+	return m.replaceWorkerWithRequest(ctx, w, replacementRequest(w, newImageRef, newSHA, newLitestreamSHA))
+}
+
+func (m *Manager) replaceWorkerWithRequest(ctx context.Context, w model.Worker, request WorkerRequest) (*model.Worker, error) {
+	slog.Info("Updating worker", "name", w.Name, "old_sha", w.GitSHA, "new_sha", request.GitSHA, "old_litestream_sha", w.LitestreamSHA, "new_litestream_sha", request.LitestreamSHA)
+	_ = m.db.RecordEvent(w.ID, "rolling_update", fmt.Sprintf("Updating %s from soak %s / litestream %s to soak %s / litestream %s", w.Name, shortVersionValue(w.GitSHA), shortVersionValue(w.LitestreamSHA), shortVersionValue(request.GitSHA), shortVersionValue(request.LitestreamSHA)), "")
 
 	if w.FlyMachineID != "" {
 		if err := m.fly.StopMachine(ctx, w.FlyMachineID); err != nil {
@@ -676,10 +687,16 @@ func (m *Manager) replaceWorker(ctx context.Context, w model.Worker, newImageRef
 
 	m.clearOldWorkerReplicaPrefix(ctx, w)
 
-	return m.createWorker(ctx, replacementRequest(w, newImageRef, newSHA, newLitestreamSHA))
+	return m.createWorker(ctx, request)
 }
 
 func replacementRequest(w model.Worker, newImageRef, newSHA, newLitestreamSHA string) WorkerRequest {
+	if desired, ok := defaultFleetDesiredWorker(w.Source, w.ID, w.Name); ok {
+		desired.GitSHA = newSHA
+		desired.LitestreamSHA = newLitestreamSHA
+		return workerRequestForDesired(desired, newImageRef, w.ID, w.ExpiresAt)
+	}
+
 	workloadCfg := resolveWorkerWorkload(w)
 	return WorkerRequest{
 		WorkerID:      w.ID,
@@ -695,6 +712,15 @@ func replacementRequest(w model.Worker, newImageRef, newSHA, newLitestreamSHA st
 		ExpiresAt:     w.ExpiresAt,
 		Workload:      workloadCfg,
 	}
+}
+
+func desiredWorkerFor(worker model.Worker, spec FleetSpec) (DesiredWorker, bool) {
+	for _, desired := range spec.Workers {
+		if desired.WorkerID == worker.ID || desired.WorkerID == worker.Name || desired.Name == worker.ID || desired.Name == worker.Name {
+			return desired, true
+		}
+	}
+	return DesiredWorker{}, false
 }
 
 func (m *Manager) observeWorkerByID(workerID string) {

@@ -244,6 +244,163 @@ func TestResumeDormantWorkersReturnsWorkerFailures(t *testing.T) {
 	}
 }
 
+func TestResumeDormantPRWorkerAppliesDesiredConfigWithoutReplacingVolume(t *testing.T) {
+	db := openTestDB(t)
+	const source = "pr-149"
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const litestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const imageRef = "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-pr-149-ls-bbbbbbbbbbbb"
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ImageRef:      imageRef,
+		Source:        source,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+
+	const workerID = "worker-pr-149-low-vol"
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		AppName:       "litestream-soak",
+		Name:          workerID,
+		Status:        model.WorkerDormant,
+		Source:        source,
+		GitSHA:        "old-sha",
+		LitestreamSHA: "old-litestream",
+		PRNumber:      149,
+		ProfileName:   "low-volume",
+		ProfileConfig: normalizeWorkloadConfig(workload.Config{
+			LoadMode:         "synthetic",
+			WriteRate:        1,
+			Pattern:          "constant",
+			PayloadSize:      1024,
+			ReadRatio:        0.2,
+			Workers:          1,
+			InitialSize:      "5MB",
+			VerifyInterval:   "30m",
+			VerifyType:       "integrity",
+			SnapshotInterval: "10m",
+			SyncInterval:     "1s",
+			MemoryMB:         1024,
+			CPUs:             1,
+		}).JSON(),
+		Region:       "ord",
+		FlyMachineID: "old-machine",
+		FlyVolumeID:  "old-volume",
+	})
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	if err := manager.ResumeDormantWorkers(context.Background(), source, imageRef, sha, litestreamSHA, "deployment_ready"); err != nil {
+		t.Fatalf("ResumeDormantWorkers() error = %v", err)
+	}
+
+	if got := len(fly.volumeRequests()); got != 0 {
+		t.Fatalf("volume creates = %d, want 0", got)
+	}
+	machines := fly.machineRequests()
+	if len(machines) != 1 {
+		t.Fatalf("len(machine requests) = %d, want 1", len(machines))
+	}
+	if machines[0].Config.Env["WRITE_RATE"] != "10" {
+		t.Fatalf("WRITE_RATE = %q, want 10", machines[0].Config.Env["WRITE_RATE"])
+	}
+	worker := mustWorker(t, db, workerID)
+	config, err := workload.ParseConfig(worker.ProfileConfig)
+	if err != nil {
+		t.Fatalf("ParseConfig() error = %v", err)
+	}
+	if config.WriteRate != 10 {
+		t.Fatalf("stored WriteRate = %d, want 10", config.WriteRate)
+	}
+	if worker.Status != model.WorkerProbing {
+		t.Fatalf("worker.Status = %q, want probing", worker.Status)
+	}
+	_, _, volumeDeletes := fly.replacementCounts()
+	if volumeDeletes != 0 {
+		t.Fatalf("volume deletes = %d, want 0", volumeDeletes)
+	}
+}
+
+func TestResumeDormantPRWorkerRecreatesDesiredPhysicalResources(t *testing.T) {
+	db := openTestDB(t)
+	const source = "pr-149"
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const litestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const imageRef = "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-pr-149-ls-bbbbbbbbbbbb"
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ImageRef:      imageRef,
+		Source:        source,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+
+	const workerID = "worker-pr-149-low-vol"
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		AppName:       "litestream-soak",
+		Name:          workerID,
+		Status:        model.WorkerDormant,
+		Source:        source,
+		GitSHA:        "old-sha",
+		LitestreamSHA: "old-litestream",
+		PRNumber:      149,
+		ProfileName:   "low-volume",
+		ProfileConfig: normalizeWorkloadConfig(workload.Config{
+			LoadMode:         "synthetic",
+			WriteRate:        10,
+			Pattern:          "constant",
+			PayloadSize:      1024,
+			ReadRatio:        0.2,
+			Workers:          1,
+			InitialSize:      "5MB",
+			VerifyInterval:   "30m",
+			VerifyType:       "integrity",
+			SnapshotInterval: "10m",
+			SyncInterval:     "1s",
+			MemoryMB:         1024,
+			CPUs:             1,
+		}).JSON(),
+		Region:       "syd",
+		FlyMachineID: "old-machine",
+		FlyVolumeID:  "old-volume",
+	})
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	if err := manager.ResumeDormantWorkers(context.Background(), source, imageRef, sha, litestreamSHA, "deployment_ready"); err != nil {
+		t.Fatalf("ResumeDormantWorkers() error = %v", err)
+	}
+
+	volumes := fly.volumeRequests()
+	if len(volumes) != 1 {
+		t.Fatalf("len(volume requests) = %d, want 1", len(volumes))
+	}
+	if volumes[0].Region != "ord" || volumes[0].SizeGB != 10 {
+		t.Fatalf("volume request = region:%q size:%d, want ord/10", volumes[0].Region, volumes[0].SizeGB)
+	}
+	machines := fly.machineRequests()
+	if len(machines) != 1 || machines[0].Region != "ord" {
+		t.Fatalf("machine requests = %+v, want one in ord", machines)
+	}
+	worker := mustWorker(t, db, workerID)
+	if worker.Region != "ord" {
+		t.Fatalf("worker.Region = %q, want ord", worker.Region)
+	}
+	if worker.Status != model.WorkerProbing {
+		t.Fatalf("worker.Status = %q, want probing", worker.Status)
+	}
+	_, _, volumeDeletes := fly.replacementCounts()
+	if volumeDeletes != 1 {
+		t.Fatalf("volume deletes = %d, want 1", volumeDeletes)
+	}
+}
+
 func TestWorkerEnvIncludesWorkerToken(t *testing.T) {
 	t.Setenv("SOAK_WORKER_TOKEN", "test-worker-token")
 

@@ -8,13 +8,8 @@ import (
 )
 
 func resolveWorkerWorkload(worker model.Worker) workload.Config {
-	if worker.Source == "main" {
-		if desired, ok := defaultMainFleetWorkload(worker.ID); ok {
-			return desired
-		}
-		if desired, ok := defaultMainFleetWorkload(worker.Name); ok {
-			return desired
-		}
+	if desired, ok := defaultFleetDesiredWorker(worker.Source, worker.ID, worker.Name); ok {
+		return desired.Workload
 	}
 
 	cfg, err := workload.ParseConfig(worker.ProfileConfig)
@@ -31,15 +26,6 @@ func resolveWorkerVolumeSize(worker model.Worker, workloadCfg workload.Config) i
 		return desired.VolumeSizeGB
 	}
 	return workloadCfg.VolumeSizeGB
-}
-
-func defaultMainFleetWorkload(workerID string) (workload.Config, bool) {
-	for _, desired := range DefaultMainFleet().Workers {
-		if desired.WorkerID == workerID || desired.Name == workerID {
-			return desired.Workload, true
-		}
-	}
-	return workload.Config{}, false
 }
 
 func defaultFleetDesiredWorker(source, workerID, workerName string) (DesiredWorker, bool) {

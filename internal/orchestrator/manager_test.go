@@ -115,8 +115,8 @@ func TestReplacementRequestUsesWorkerID(t *testing.T) {
 
 	w := model.Worker{
 		ID:            "11111111-2222-3333-4444-555555555555",
-		Name:          "worker-main-gharchive",
-		Source:        "main",
+		Name:          "worker-pr-7-gharchive",
+		Source:        "pr-7",
 		GitSHA:        "oldsha",
 		LitestreamSHA: "oldls",
 		PRNumber:      7,
@@ -691,9 +691,12 @@ type createWorkerFlyServer struct {
 	client *flyapi.Client
 	server *httptest.Server
 
-	mu       sync.Mutex
-	volumes  []flyapi.CreateVolumeRequest
-	machines []flyapi.CreateMachineRequest
+	mu                sync.Mutex
+	volumes           []flyapi.CreateVolumeRequest
+	machines          []flyapi.CreateMachineRequest
+	stoppedMachines   int
+	destroyedMachines int
+	destroyedVolumes  int
 }
 
 func newCreateWorkerFlyServer(t *testing.T) *createWorkerFlyServer {
@@ -732,6 +735,21 @@ func (f *createWorkerFlyServer) handle(w http.ResponseWriter, r *http.Request) {
 		id := fmt.Sprintf("machine-%03d", len(f.machines))
 		f.mu.Unlock()
 		writeCreateWorkerJSON(w, flyapi.Machine{ID: id, Name: req.Name, State: "started", Config: req.Config})
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/stop"):
+		f.mu.Lock()
+		f.stoppedMachines++
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/apps/litestream-soak/machines/"):
+		f.mu.Lock()
+		f.destroyedMachines++
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/apps/litestream-soak/volumes/"):
+		f.mu.Lock()
+		f.destroyedVolumes++
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
 	default:
 		http.NotFound(w, r)
 	}
@@ -747,6 +765,12 @@ func (f *createWorkerFlyServer) machineRequests() []flyapi.CreateMachineRequest 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]flyapi.CreateMachineRequest(nil), f.machines...)
+}
+
+func (f *createWorkerFlyServer) replacementCounts() (stoppedMachines, destroyedMachines, destroyedVolumes int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stoppedMachines, f.destroyedMachines, f.destroyedVolumes
 }
 
 func writeCreateWorkerJSON(w http.ResponseWriter, value any) {
@@ -910,6 +934,81 @@ func TestRollingUpdateSourceSkipsUpToDateWorkers(t *testing.T) {
 
 	unlock := mustLockSource(t, mgr, "main")
 	unlock()
+}
+
+func TestRollingUpdateSourceReplacesSameDeploymentConfigDriftOnce(t *testing.T) {
+	db := openTestDB(t)
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const litestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const imageRef = "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-ls-bbbbbbbbbbbb"
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ImageRef:      imageRef,
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+
+	const workerID = "worker-main-low-vol"
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		AppName:       "litestream-soak",
+		Name:          workerID,
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ProfileName:   "low-volume",
+		ProfileConfig: normalizeWorkloadConfig(workload.Config{
+			LoadMode:         "synthetic",
+			WriteRate:        1,
+			Pattern:          "constant",
+			PayloadSize:      1024,
+			ReadRatio:        0.2,
+			Workers:          1,
+			InitialSize:      "5MB",
+			VerifyInterval:   "30m",
+			VerifyType:       "integrity",
+			SnapshotInterval: "10m",
+			SyncInterval:     "1s",
+			MemoryMB:         1024,
+			CPUs:             1,
+		}).JSON(),
+		Region:       "ord",
+		FlyMachineID: "old-machine",
+		FlyVolumeID:  "old-volume",
+	})
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+	if err := manager.RollingUpdateSource(context.Background(), "main", imageRef, sha, litestreamSHA); err != nil {
+		t.Fatalf("RollingUpdateSource() error = %v", err)
+	}
+
+	machines := fly.machineRequests()
+	if len(machines) != 1 {
+		t.Fatalf("machine creates after first roll = %d, want 1", len(machines))
+	}
+	if machines[0].Config.Env["WRITE_RATE"] != "10" {
+		t.Fatalf("WRITE_RATE = %q, want 10", machines[0].Config.Env["WRITE_RATE"])
+	}
+
+	if err := manager.RollingUpdateSource(context.Background(), "main", imageRef, sha, litestreamSHA); err != nil {
+		t.Fatalf("second RollingUpdateSource() error = %v", err)
+	}
+	if got := len(fly.machineRequests()); got != 1 {
+		t.Fatalf("machine creates after second roll = %d, want unchanged at 1", got)
+	}
+	if got := len(fly.volumeRequests()); got != 1 {
+		t.Fatalf("volume creates after second roll = %d, want unchanged at 1", got)
+	}
+	stops, machineDeletes, volumeDeletes := fly.replacementCounts()
+	if stops != 1 || machineDeletes != 1 || volumeDeletes != 1 {
+		t.Fatalf("replacement operations after second roll = stops:%d machine deletes:%d volume deletes:%d, want unchanged at 1 each", stops, machineDeletes, volumeDeletes)
+	}
 }
 
 func TestRollWorkerAlwaysReplacesExplicitTarget(t *testing.T) {
