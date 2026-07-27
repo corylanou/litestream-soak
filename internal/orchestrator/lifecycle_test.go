@@ -495,6 +495,90 @@ func TestPRMaxAgeCandidateTriggersAfterThreshold(t *testing.T) {
 	}
 }
 
+func TestEvaluatePRMaxAgeDestroyReclaimsRunningAndDormantWorkers(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	source := "pr-161"
+	deployment := createTeardownTestDeployment(t, db, source)
+	for _, worker := range []model.Worker{
+		{
+			ID:            "worker-pr-161-running",
+			AppName:       "litestream-soak",
+			Name:          "worker-pr-161-running",
+			Status:        model.WorkerRunning,
+			Source:        source,
+			GitSHA:        deployment.GitSHA,
+			LitestreamSHA: deployment.LitestreamSHA,
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+			FlyMachineID:  "machine-pr-161-running",
+			FlyVolumeID:   "volume-pr-161-running",
+		},
+		{
+			ID:            "worker-pr-161-dormant",
+			AppName:       "litestream-soak",
+			Name:          "worker-pr-161-dormant",
+			Status:        model.WorkerRunning,
+			Source:        source,
+			GitSHA:        deployment.GitSHA,
+			LitestreamSHA: deployment.LitestreamSHA,
+			ProfileName:   "high-volume",
+			ProfileConfig: "{}",
+			FlyMachineID:  "machine-pr-161-dormant",
+			FlyVolumeID:   "volume-pr-161-dormant",
+		},
+	} {
+		createTestWorker(t, db, worker)
+	}
+	if err := db.MarkWorkerDormant("worker-pr-161-dormant", "known bad", "integrity_check_mismatch", "known_bad_source"); err != nil {
+		t.Fatalf("MarkWorkerDormant() error = %v", err)
+	}
+
+	fly := newTeardownTestServer(t, nil)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{
+		Bucket:    "bucket",
+		Endpoint:  fly.server.URL,
+		AccessKey: "access",
+		SecretKey: "secret",
+		Region:    "auto",
+	}, "", "")
+
+	manager.evaluatePRMaxAge(context.Background(), PRMaxAgePolicy{
+		Threshold: time.Nanosecond,
+		Action:    PRMaxAgeActionDestroy,
+	})
+
+	for _, workerID := range []string{"worker-pr-161-running", "worker-pr-161-dormant"} {
+		worker := mustWorker(t, db, workerID)
+		if worker.Status != model.WorkerStopped {
+			t.Fatalf("%s Status = %q, want %q", workerID, worker.Status, model.WorkerStopped)
+		}
+	}
+	for _, machineID := range []string{"machine-pr-161-running", "machine-pr-161-dormant"} {
+		if !fly.machineDestroyed(machineID) {
+			t.Fatalf("machine %s was not destroyed", machineID)
+		}
+	}
+	for _, volumeID := range []string{"volume-pr-161-running", "volume-pr-161-dormant"} {
+		if !fly.volumeDestroyed(volumeID) {
+			t.Fatalf("volume %s was not destroyed", volumeID)
+		}
+	}
+	prefixes := make(map[string]bool)
+	for _, prefix := range fly.prefixes() {
+		prefixes[prefix] = true
+	}
+	for _, prefix := range []string{
+		"soak/worker-pr-161-running/volume-pr-161-running/",
+		"soak/worker-pr-161-dormant/volume-pr-161-dormant/",
+	} {
+		if !prefixes[prefix] {
+			t.Fatalf("replica prefix %q was not cleared; got %v", prefix, fly.prefixes())
+		}
+	}
+}
+
 func TestPRMaxAgeCandidateRejectsFreshDeployment(t *testing.T) {
 	t.Parallel()
 
