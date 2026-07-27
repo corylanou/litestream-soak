@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"strings"
@@ -84,6 +86,109 @@ func TestReconcileFleetWithoutReadyDeploymentWaitsForBootstrap(t *testing.T) {
 		t.Fatalf("len(workers) = %d, want 0 until deployment-ready bootstraps main", len(workers))
 	}
 	fly.assertCreateCounts(t, 0, 0)
+}
+
+func TestEnsureFleetSpecSkipsNonFiniteDesiredConfig(t *testing.T) {
+	db := openTestDB(t)
+	const workerID = "worker-main-low-vol"
+	const profileConfig = `{"load_mode":"synthetic","write_rate":10}`
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		AppName:       "litestream-soak",
+		Name:          workerID,
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		LitestreamSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ProfileName:   "low-volume",
+		ProfileConfig: profileConfig,
+		Region:        "ord",
+		FlyMachineID:  "old-machine",
+		FlyVolumeID:   "old-volume",
+	})
+
+	spec := FleetSpec{Workers: []DesiredWorker{{
+		WorkerID:    workerID,
+		Name:        workerID,
+		Source:      "main",
+		ProfileName: "low-volume",
+		Region:      "ord",
+		Workload: workload.Config{
+			LoadMode:  "synthetic",
+			WriteRate: 10,
+			ReadRatio: math.NaN(),
+		},
+	}}}
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+	for cycle := 1; cycle <= 2; cycle++ {
+		err := manager.ensureFleetSpec(context.Background(), spec, "registry.fly.io/litestream-soak:test")
+		if err == nil || !strings.Contains(err.Error(), "unsupported value") {
+			t.Fatalf("cycle %d ensureFleetSpec() error = %v, want marshal error", cycle, err)
+		}
+	}
+
+	worker := mustWorker(t, db, workerID)
+	if worker.ProfileConfig != profileConfig {
+		t.Fatalf("ProfileConfig = %q, want unchanged %q", worker.ProfileConfig, profileConfig)
+	}
+	if got := len(fly.volumeRequests()); got != 0 {
+		t.Fatalf("volume creates = %d, want 0", got)
+	}
+	if got := len(fly.machineRequests()); got != 0 {
+		t.Fatalf("machine creates = %d, want 0", got)
+	}
+	stops, machineDeletes, volumeDeletes := fly.replacementCounts()
+	if stops != 0 || machineDeletes != 0 || volumeDeletes != 0 {
+		t.Fatalf("replacement operations = stops:%d machine deletes:%d volume deletes:%d, want zero", stops, machineDeletes, volumeDeletes)
+	}
+}
+
+func TestEnsureFleetSpecCapsConfigDriftReplacementsPerCycle(t *testing.T) {
+	db := openTestDB(t)
+	spec := FleetSpec{}
+	for i := 1; i <= 3; i++ {
+		workerID := fmt.Sprintf("worker-main-drift-%d", i)
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			AppName:       "litestream-soak",
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			LitestreamSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			ProfileName:   "low-volume",
+			ProfileConfig: normalizeWorkloadConfig(workload.Config{WriteRate: 1}).JSON(),
+			Region:        "ord",
+			FlyMachineID:  fmt.Sprintf("old-machine-%d", i),
+			FlyVolumeID:   fmt.Sprintf("old-volume-%d", i),
+		})
+		spec.Workers = append(spec.Workers, DesiredWorker{
+			WorkerID:    workerID,
+			Name:        workerID,
+			Source:      "main",
+			ProfileName: "low-volume",
+			Region:      "ord",
+			Workload:    workload.Config{WriteRate: 10},
+		})
+	}
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	if err := manager.ensureFleetSpec(context.Background(), spec, "registry.fly.io/litestream-soak:test"); err != nil {
+		t.Fatalf("first ensureFleetSpec() error = %v", err)
+	}
+	if got := len(fly.machineRequests()); got != 1 {
+		t.Fatalf("machine creates after first cycle = %d, want 1", got)
+	}
+
+	if err := manager.ensureFleetSpec(context.Background(), spec, "registry.fly.io/litestream-soak:test"); err != nil {
+		t.Fatalf("second ensureFleetSpec() error = %v", err)
+	}
+	if got := len(fly.machineRequests()); got != 2 {
+		t.Fatalf("machine creates after second cycle = %d, want 2", got)
+	}
 }
 
 func TestReconcileFleetReplacesConfigDriftOnce(t *testing.T) {

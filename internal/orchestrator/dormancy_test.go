@@ -244,6 +244,42 @@ func TestResumeDormantWorkersReturnsWorkerFailures(t *testing.T) {
 	}
 }
 
+func TestDormantWorkerHonorsWorkerLock(t *testing.T) {
+	db := openTestDB(t)
+	const workerID = "worker-main-low-vol"
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		AppName:       "litestream-soak",
+		Name:          workerID,
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+		Region:        "ord",
+		FlyMachineID:  "old-machine",
+		FlyVolumeID:   "old-volume",
+	})
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	unlock := mustLockWorker(t, manager, workerID)
+	defer unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := manager.DormantWorker(ctx, workerID, "test dormancy", "test_signature", "test")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("DormantWorker() error = %v, want %v", err, context.Canceled)
+	}
+	if worker := mustWorker(t, db, workerID); worker.Status != model.WorkerRunning {
+		t.Fatalf("worker status = %q, want running", worker.Status)
+	}
+	stops, _, _ := fly.replacementCounts()
+	if stops != 0 {
+		t.Fatalf("machine stops = %d, want 0", stops)
+	}
+}
+
 func TestResumeDormantPRWorkerAppliesDesiredConfigWithoutReplacingVolume(t *testing.T) {
 	db := openTestDB(t)
 	const source = "pr-149"

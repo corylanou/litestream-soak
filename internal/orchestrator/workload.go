@@ -1,11 +1,21 @@
 package orchestrator
 
 import (
+	"encoding/json"
+	"fmt"
 	"log/slog"
 
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/workload"
 )
+
+func marshalWorkloadConfig(cfg workload.Config) (string, error) {
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("marshal workload config: %w", err)
+	}
+	return string(body), nil
+}
 
 func resolveWorkerWorkload(worker model.Worker) workload.Config {
 	if desired, ok := defaultFleetDesiredWorker(worker.Source, worker.ID, worker.Name); ok {

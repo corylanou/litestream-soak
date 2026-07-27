@@ -466,6 +466,12 @@ func detectDormancyCandidate(verifications []model.Verification, now time.Time, 
 }
 
 func (m *Manager) DormantWorker(ctx context.Context, workerID, reason, signature, resumeTrigger string) error {
+	unlock, err := m.lockWorker(ctx, workerID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	worker, err := m.db.GetWorker(workerID)
 	if err != nil {
 		return fmt.Errorf("get worker: %w", err)
@@ -562,7 +568,10 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 		return fmt.Errorf("worker %s resume litestream sha is required", worker.ID)
 	}
 
-	request := replacementRequest(worker, imageRef, resumeSHA, resumeLitestreamSHA)
+	request, err := replacementRequest(worker, imageRef, resumeSHA, resumeLitestreamSHA)
+	if err != nil {
+		return fmt.Errorf("build dormant worker replacement: %w", err)
+	}
 	if desired, ok := defaultFleetDesiredWorker(worker.Source, worker.ID, worker.Name); ok && !workerPhysicalSpecMatchesDesired(worker, desired) {
 		return m.recreateDormantWorkerForProbe(
 			ctx,
@@ -603,13 +612,17 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	if err := m.db.UpdateWorkerMachine(worker.ID, machine.ID, volumeID); err != nil {
 		return fmt.Errorf("update worker machine: %w", err)
 	}
+	profileConfig, err := marshalWorkloadConfig(normalizeWorkloadConfig(workloadCfg))
+	if err != nil {
+		return err
+	}
 	if err := m.db.UpdateWorkerMachineVersionAndConfig(
 		worker.ID,
 		machine.ID,
 		resumeSHA,
 		resumeLitestreamSHA,
 		request.ProfileName,
-		normalizeWorkloadConfig(workloadCfg).JSON(),
+		profileConfig,
 	); err != nil {
 		return fmt.Errorf("update worker machine version and config: %w", err)
 	}

@@ -31,6 +31,8 @@ type FleetSpec struct {
 	Workers []DesiredWorker
 }
 
+const maxConfigDriftReplacementsPerCycle = 1
+
 func DefaultMainFleet() FleetSpec {
 	workers := []DesiredWorker{
 		{
@@ -723,34 +725,54 @@ func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef 
 	}
 
 	var ensureErrors []error
+	configDriftReplacements := 0
+	deferredWorkers := make([]string, 0)
 	for _, desired := range spec.Workers {
 		current, ok := byName[desired.Name]
 		if ok && current.Status == model.WorkerDormant {
 			continue
 		}
-		if ok && workerMatchesDesiredSpec(current, desired) {
-			continue
+		if ok {
+			matches, err := workerMatchesDesiredSpec(current, desired)
+			if err != nil {
+				ensureErrors = append(ensureErrors, fmt.Errorf("%s: compare desired worker spec: %w", desired.Name, err))
+				continue
+			}
+			if matches {
+				continue
+			}
 		}
 		if ok {
-			_, err := func() (*model.Worker, error) {
+			deferred, err := func() (bool, error) {
 				unlock, err := m.lockWorker(ctx, current.ID)
 				if err != nil {
-					return nil, err
+					return false, err
 				}
 				defer unlock()
 
 				worker, err := m.db.GetWorker(current.ID)
 				if err != nil {
-					return nil, fmt.Errorf("reload worker: %w", err)
+					return false, fmt.Errorf("reload worker: %w", err)
 				}
 				if worker.Status == model.WorkerStopped || worker.Status == model.WorkerFailed || worker.Status == model.WorkerDormant {
-					return nil, nil
+					return false, nil
 				}
-				if workerMatchesDesiredSpec(*worker, desired) {
-					return nil, nil
+				matches, err := workerMatchesDesiredSpec(*worker, desired)
+				if err != nil {
+					return false, fmt.Errorf("compare desired worker spec: %w", err)
+				}
+				if matches {
+					return false, nil
 				}
 
-				request := workerRequestForDesired(desired, imageRef, worker.ID, worker.ExpiresAt)
+				request, err := workerRequestForDesired(desired, imageRef, worker.ID, worker.ExpiresAt)
+				if err != nil {
+					return false, err
+				}
+				if configDriftReplacements >= maxConfigDriftReplacementsPerCycle {
+					return true, nil
+				}
+				configDriftReplacements++
 				details := fmt.Sprintf(
 					"profile=%s region=%s volume_size_gb=%d",
 					request.ProfileName,
@@ -758,17 +780,25 @@ func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef 
 					effectiveDesiredVolumeSize(desired, request.Workload),
 				)
 				if err := m.db.RecordEvent(worker.ID, "worker_spec_drift", fmt.Sprintf("Reconciling desired fleet spec for %s", worker.Name), details); err != nil {
-					return nil, fmt.Errorf("record worker spec drift: %w", err)
+					return false, fmt.Errorf("record worker spec drift: %w", err)
 				}
-				return m.replaceWorkerWithRequest(ctx, *worker, request)
+				_, err = m.replaceWorkerWithRequest(ctx, *worker, request)
+				return false, err
 			}()
 			if err != nil {
 				ensureErrors = append(ensureErrors, fmt.Errorf("%s: %w", desired.Name, err))
 			}
+			if deferred {
+				deferredWorkers = append(deferredWorkers, desired.Name)
+			}
 			continue
 		}
 
-		request := workerRequestForDesired(desired, imageRef, "", nil)
+		request, err := workerRequestForDesired(desired, imageRef, "", nil)
+		if err != nil {
+			ensureErrors = append(ensureErrors, fmt.Errorf("%s: %w", desired.Name, err))
+			continue
+		}
 
 		if _, err := m.CreateWorker(ctx, request); err != nil {
 			ensureErrors = append(ensureErrors, fmt.Errorf("%s: %w", desired.Name, err))
@@ -777,13 +807,25 @@ func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef 
 
 		slog.Info("Created desired fleet worker", "name", desired.Name, "source", desired.Source, "profile", desired.ProfileName, "load_mode", desired.Workload.LoadMode)
 	}
+	if len(deferredWorkers) > 0 {
+		slog.Error(
+			"Config drift replacement limit reached; deferring workers",
+			"source", firstNonEmpty(spec.Workers[0].Source, "main"),
+			"limit", maxConfigDriftReplacementsPerCycle,
+			"deferred_count", len(deferredWorkers),
+			"deferred_workers", strings.Join(deferredWorkers, ","),
+		)
+	}
 	return errors.Join(ensureErrors...)
 }
 
-func workerRequestForDesired(desired DesiredWorker, imageRef, workerID string, expiresAt *time.Time) WorkerRequest {
+func workerRequestForDesired(desired DesiredWorker, imageRef, workerID string, expiresAt *time.Time) (WorkerRequest, error) {
 	workloadCfg := normalizeWorkloadConfig(desired.Workload)
 	volumeSizeGB := effectiveDesiredVolumeSize(desired, workloadCfg)
 	workloadCfg.VolumeSizeGB = volumeSizeGB
+	if _, err := marshalWorkloadConfig(workloadCfg); err != nil {
+		return WorkerRequest{}, err
+	}
 	return WorkerRequest{
 		WorkerID:      firstNonEmpty(workerID, desired.WorkerID, desired.Name),
 		Name:          desired.Name,
@@ -797,36 +839,46 @@ func workerRequestForDesired(desired DesiredWorker, imageRef, workerID string, e
 		VolumeSizeGB:  volumeSizeGB,
 		ExpiresAt:     expiresAt,
 		Workload:      workloadCfg,
-	}
+	}, nil
 }
 
-func workerMatchesDesiredSpec(worker model.Worker, desired DesiredWorker) bool {
+func workerMatchesDesiredSpec(worker model.Worker, desired DesiredWorker) (bool, error) {
+	wanted := normalizeWorkloadConfig(desired.Workload)
+	wantedVolumeSize := effectiveDesiredVolumeSize(desired, wanted)
+	wanted.VolumeSizeGB = 0
+	wantedJSON, err := marshalWorkloadConfig(wanted)
+	if err != nil {
+		return false, fmt.Errorf("marshal desired workload: %w", err)
+	}
+
 	if firstNonEmpty(strings.TrimSpace(worker.Source), "main") != firstNonEmpty(strings.TrimSpace(desired.Source), "main") {
-		return false
+		return false, nil
 	}
 	if worker.PRNumber != desired.PRNumber {
-		return false
+		return false, nil
 	}
 	if strings.TrimSpace(worker.ProfileName) != strings.TrimSpace(desired.ProfileName) {
-		return false
+		return false, nil
 	}
 	if normalizedWorkerRegion(worker.Region) != normalizedWorkerRegion(desired.Region) {
-		return false
+		return false, nil
 	}
 
 	applied, err := workload.ParseConfig(worker.ProfileConfig)
 	if err != nil {
-		return false
+		return false, nil
 	}
 	applied = normalizeWorkloadConfig(applied)
-	wanted := normalizeWorkloadConfig(desired.Workload)
-	if effectiveAppliedVolumeSize(applied) != effectiveDesiredVolumeSize(desired, wanted) {
-		return false
+	if effectiveAppliedVolumeSize(applied) != wantedVolumeSize {
+		return false, nil
 	}
 
 	applied.VolumeSizeGB = 0
-	wanted.VolumeSizeGB = 0
-	return applied.JSON() == wanted.JSON()
+	appliedJSON, err := marshalWorkloadConfig(applied)
+	if err != nil {
+		return false, fmt.Errorf("marshal applied workload: %w", err)
+	}
+	return appliedJSON == wantedJSON, nil
 }
 
 func workerPhysicalSpecMatchesDesired(worker model.Worker, desired DesiredWorker) bool {
