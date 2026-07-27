@@ -2892,6 +2892,409 @@ func TestHandlePauseSourceWorkers(t *testing.T) {
 	})
 }
 
+func TestHandleTeardownSourceValidation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("requires source", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/teardown-source", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleTeardownSource(recorder, request)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("requires main confirmation", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		createTeardownTestDeployment(t, db, "main")
+		createTestWorker(t, db, model.Worker{
+			ID:            "worker-main-low-vol",
+			Name:          "worker-main-low-vol",
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "soak-sha",
+			LitestreamSHA: "litestream-sha",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+		manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/teardown-source?source=main", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleTeardownSource(recorder, request)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+		worker := mustWorker(t, db, "worker-main-low-vol")
+		if worker.Status != model.WorkerRunning {
+			t.Fatalf("Status = %q, want %q", worker.Status, model.WorkerRunning)
+		}
+	})
+
+	t.Run("accepts explicit main confirmation", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		createTeardownTestDeployment(t, db, "main")
+		createTestWorker(t, db, model.Worker{
+			ID:            "worker-main-confirmed",
+			Name:          "worker-main-confirmed",
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        "soak-sha",
+			LitestreamSHA: "litestream-sha",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+		manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/teardown-source?source=main&confirm_main=true", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleTeardownSource(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+		worker := mustWorker(t, db, "worker-main-confirmed")
+		if worker.Status != model.WorkerStopped {
+			t.Fatalf("Status = %q, want %q", worker.Status, model.WorkerStopped)
+		}
+	})
+
+	t.Run("unknown source returns not found", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/teardown-source?source=pr-404", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleTeardownSource(recorder, request)
+
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("source without deployment returns conflict", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		createTestWorker(t, db, model.Worker{
+			ID:            "worker-pr-no-deployment",
+			Name:          "worker-pr-no-deployment",
+			Status:        model.WorkerRunning,
+			Source:        "pr-no-deployment",
+			GitSHA:        "soak-sha",
+			LitestreamSHA: "litestream-sha",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		})
+		manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/teardown-source?source=pr-no-deployment", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleTeardownSource(recorder, request)
+
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusConflict)
+		}
+		worker := mustWorker(t, db, "worker-pr-no-deployment")
+		if worker.Status != model.WorkerRunning {
+			t.Fatalf("Status = %q, want %q", worker.Status, model.WorkerRunning)
+		}
+	})
+}
+
+func TestHandleTeardownSourceArchivesAndDestroysRunningAndDormantWorkers(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	source := "pr-158"
+	createTeardownTestDeployment(t, db, source)
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-158-running",
+		AppName:       "litestream-soak",
+		Name:          "worker-pr-158-running",
+		Status:        model.WorkerRunning,
+		Source:        source,
+		GitSHA:        "soak-sha",
+		LitestreamSHA: "litestream-sha",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+		FlyMachineID:  "machine-pr-158-running",
+		FlyVolumeID:   "volume-pr-158-running",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-158-dormant",
+		AppName:       "litestream-soak",
+		Name:          "worker-pr-158-dormant",
+		Status:        model.WorkerRunning,
+		Source:        source,
+		GitSHA:        "soak-sha",
+		LitestreamSHA: "litestream-sha",
+		ProfileName:   "high-volume",
+		ProfileConfig: "{}",
+		FlyMachineID:  "machine-pr-158-dormant",
+		FlyVolumeID:   "volume-pr-158-dormant",
+	})
+	if err := db.MarkWorkerDormant("worker-pr-158-dormant", "known bad", "integrity_check_mismatch", "known_bad_source"); err != nil {
+		t.Fatalf("MarkWorkerDormant() error = %v", err)
+	}
+
+	fly := newTeardownTestServer(t, nil)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{
+		Bucket:    "bucket",
+		Endpoint:  fly.server.URL,
+		AccessKey: "access",
+		SecretKey: "secret",
+		Region:    "auto",
+	}, "", "")
+	api := NewAPI(db, fly.client, nil, nil, manager, nil)
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/teardown-source?source="+source, nil)
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var response SourceTeardownResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !response.Complete {
+		t.Fatalf("Complete = false, want true: %+v", response.Workers)
+	}
+	if response.ArchiveID == 0 || !response.ArchiveCreated {
+		t.Fatalf("archive = (%d, created=%t), want new archive", response.ArchiveID, response.ArchiveCreated)
+	}
+	if response.ArchiveType != runArchiveTypeTeardown {
+		t.Fatalf("ArchiveType = %q, want %q", response.ArchiveType, runArchiveTypeTeardown)
+	}
+	if response.TotalWorkers != 2 || response.DestroyedWorkers != 2 || response.FailedWorkers != 0 {
+		t.Fatalf("worker counts = total:%d destroyed:%d failed:%d, want 2/2/0", response.TotalWorkers, response.DestroyedWorkers, response.FailedWorkers)
+	}
+
+	outcomes := teardownOutcomesByWorker(response.Workers)
+	if outcomes["worker-pr-158-running"].PreviousStatus != model.WorkerRunning {
+		t.Fatalf("running previous status = %q, want %q", outcomes["worker-pr-158-running"].PreviousStatus, model.WorkerRunning)
+	}
+	if outcomes["worker-pr-158-dormant"].PreviousStatus != model.WorkerDormant {
+		t.Fatalf("dormant previous status = %q, want %q", outcomes["worker-pr-158-dormant"].PreviousStatus, model.WorkerDormant)
+	}
+	for _, workerID := range []string{"worker-pr-158-running", "worker-pr-158-dormant"} {
+		if outcomes[workerID].Outcome != sourceTeardownOutcomeDestroyed {
+			t.Fatalf("%s outcome = %q, want %q", workerID, outcomes[workerID].Outcome, sourceTeardownOutcomeDestroyed)
+		}
+		worker := mustWorker(t, db, workerID)
+		if worker.Status != model.WorkerStopped {
+			t.Fatalf("%s Status = %q, want %q", workerID, worker.Status, model.WorkerStopped)
+		}
+	}
+
+	for _, machineID := range []string{"machine-pr-158-running", "machine-pr-158-dormant"} {
+		if !fly.machineDestroyed(machineID) {
+			t.Fatalf("machine %s was not destroyed", machineID)
+		}
+	}
+	for _, volumeID := range []string{"volume-pr-158-running", "volume-pr-158-dormant"} {
+		if !fly.volumeDestroyed(volumeID) {
+			t.Fatalf("volume %s was not destroyed", volumeID)
+		}
+	}
+	prefixes := make(map[string]bool)
+	for _, prefix := range fly.prefixes() {
+		prefixes[prefix] = true
+	}
+	for _, prefix := range []string{
+		"soak/worker-pr-158-running/volume-pr-158-running/",
+		"soak/worker-pr-158-dormant/volume-pr-158-dormant/",
+	} {
+		if !prefixes[prefix] {
+			t.Fatalf("replica prefix %q was not cleared; got %v", prefix, fly.prefixes())
+		}
+	}
+
+	archiveRequest := httptest.NewRequest(http.MethodGet, "/api/run-archives?source="+source+"&type="+runArchiveTypeTeardown, nil)
+	archiveRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(archiveRecorder, archiveRequest)
+	if archiveRecorder.Code != http.StatusOK {
+		t.Fatalf("archive status code = %d, want %d", archiveRecorder.Code, http.StatusOK)
+	}
+	var archives []model.RunArchive
+	if err := json.NewDecoder(archiveRecorder.Body).Decode(&archives); err != nil {
+		t.Fatalf("decode archives: %v", err)
+	}
+	if len(archives) != 1 || archives[0].ID != response.ArchiveID {
+		t.Fatalf("archives = %+v, want archive %d", archives, response.ArchiveID)
+	}
+	var payload runArchivePayload
+	if err := json.Unmarshal([]byte(archives[0].Payload), &payload); err != nil {
+		t.Fatalf("decode archive payload: %v", err)
+	}
+	if payload.Reason != "operator_teardown" {
+		t.Fatalf("archive reason = %q, want operator_teardown", payload.Reason)
+	}
+	archivedStatuses := make(map[string]model.WorkerStatus)
+	for _, evidence := range payload.Workers {
+		archivedStatuses[evidence.Worker.ID] = evidence.Worker.Status
+	}
+	if archivedStatuses["worker-pr-158-running"] != model.WorkerRunning {
+		t.Fatalf("archived running status = %q, want %q", archivedStatuses["worker-pr-158-running"], model.WorkerRunning)
+	}
+	if archivedStatuses["worker-pr-158-dormant"] != model.WorkerDormant {
+		t.Fatalf("archived dormant status = %q, want %q", archivedStatuses["worker-pr-158-dormant"], model.WorkerDormant)
+	}
+
+	retryRequest := httptest.NewRequest(http.MethodPost, "/api/admin/teardown-source?source="+source, nil)
+	retryRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(retryRecorder, retryRequest)
+	if retryRecorder.Code != http.StatusOK {
+		t.Fatalf("retry status code = %d, want %d; body: %s", retryRecorder.Code, http.StatusOK, retryRecorder.Body.String())
+	}
+	var retryResponse SourceTeardownResponse
+	if err := json.NewDecoder(retryRecorder.Body).Decode(&retryResponse); err != nil {
+		t.Fatalf("decode retry response: %v", err)
+	}
+	if retryResponse.ArchiveID != response.ArchiveID || retryResponse.ArchiveCreated {
+		t.Fatalf("retry archive = (%d, created=%t), want existing %d", retryResponse.ArchiveID, retryResponse.ArchiveCreated, response.ArchiveID)
+	}
+	if retryResponse.AlreadyStoppedWorkers != 2 || retryResponse.DestroyedWorkers != 0 {
+		t.Fatalf("retry counts = already_stopped:%d destroyed:%d, want 2/0", retryResponse.AlreadyStoppedWorkers, retryResponse.DestroyedWorkers)
+	}
+}
+
+func TestHandleTeardownSourceReportsFailuresAndSupportsRetry(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	source := "pr-159"
+	createTeardownTestDeployment(t, db, source)
+	for _, worker := range []model.Worker{
+		{
+			ID: "worker-pr-159-fails", Name: "worker-pr-159-fails",
+			FlyMachineID: "machine-pr-159-fails", FlyVolumeID: "volume-pr-159-fails",
+		},
+		{
+			ID: "worker-pr-159-succeeds", Name: "worker-pr-159-succeeds",
+			FlyMachineID: "machine-pr-159-succeeds", FlyVolumeID: "volume-pr-159-succeeds",
+		},
+	} {
+		worker.AppName = "litestream-soak"
+		worker.Status = model.WorkerRunning
+		worker.Source = source
+		worker.GitSHA = "soak-sha"
+		worker.LitestreamSHA = "litestream-sha"
+		worker.ProfileName = "low-volume"
+		worker.ProfileConfig = "{}"
+		createTestWorker(t, db, worker)
+	}
+
+	fly := newTeardownTestServer(t, map[string]int{"volume-pr-159-fails": 1})
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	api := NewAPI(db, fly.client, nil, nil, manager, nil)
+
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/teardown-source?source="+source, nil)
+	recorder := httptest.NewRecorder()
+	api.handleTeardownSource(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var response SourceTeardownResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Complete || response.FailedWorkers != 1 || response.DestroyedWorkers != 1 {
+		t.Fatalf("response = complete:%t failed:%d destroyed:%d, want false/1/1", response.Complete, response.FailedWorkers, response.DestroyedWorkers)
+	}
+	outcomes := teardownOutcomesByWorker(response.Workers)
+	failed := outcomes["worker-pr-159-fails"]
+	if failed.Outcome != sourceTeardownOutcomeFailed || !strings.Contains(failed.Error, "volume cleanup") {
+		t.Fatalf("failed outcome = %+v, want volume cleanup failure", failed)
+	}
+	if failed.Status == model.WorkerStopped {
+		t.Fatalf("failed worker Status = %q, must not be stopped", failed.Status)
+	}
+	if outcomes["worker-pr-159-succeeds"].Outcome != sourceTeardownOutcomeDestroyed {
+		t.Fatalf("successful outcome = %+v, want destroyed", outcomes["worker-pr-159-succeeds"])
+	}
+
+	retryRequest := httptest.NewRequest(http.MethodPost, "/api/admin/teardown-source?source="+source, nil)
+	retryRecorder := httptest.NewRecorder()
+	api.handleTeardownSource(retryRecorder, retryRequest)
+	if retryRecorder.Code != http.StatusOK {
+		t.Fatalf("retry status code = %d, want %d; body: %s", retryRecorder.Code, http.StatusOK, retryRecorder.Body.String())
+	}
+	var retryResponse SourceTeardownResponse
+	if err := json.NewDecoder(retryRecorder.Body).Decode(&retryResponse); err != nil {
+		t.Fatalf("decode retry response: %v", err)
+	}
+	if !retryResponse.Complete || retryResponse.FailedWorkers != 0 || retryResponse.DestroyedWorkers != 1 || retryResponse.AlreadyStoppedWorkers != 1 {
+		t.Fatalf(
+			"retry = complete:%t failed:%d destroyed:%d already_stopped:%d, want true/0/1/1",
+			retryResponse.Complete,
+			retryResponse.FailedWorkers,
+			retryResponse.DestroyedWorkers,
+			retryResponse.AlreadyStoppedWorkers,
+		)
+	}
+	if retryResponse.ArchiveCreated {
+		t.Fatal("retry ArchiveCreated = true, want existing archive")
+	}
+	for _, workerID := range []string{"worker-pr-159-fails", "worker-pr-159-succeeds"} {
+		worker := mustWorker(t, db, workerID)
+		if worker.Status != model.WorkerStopped {
+			t.Fatalf("%s Status = %q, want %q", workerID, worker.Status, model.WorkerStopped)
+		}
+	}
+}
+
+func createTeardownTestDeployment(t *testing.T, db *model.DB, source string) *model.Deployment {
+	t.Helper()
+
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "soak-sha",
+		LitestreamSHA: "litestream-sha",
+		ImageRef:      "registry.fly.io/litestream-soak:soak-sha",
+		Source:        source,
+		PRNumber:      sourcePRNumber(source),
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+	deployment, err := db.GetLatestDeployment(source)
+	if err != nil {
+		t.Fatalf("GetLatestDeployment() error = %v", err)
+	}
+	return deployment
+}
+
+func teardownOutcomesByWorker(outcomes []SourceTeardownWorkerOutcome) map[string]SourceTeardownWorkerOutcome {
+	byWorker := make(map[string]SourceTeardownWorkerOutcome, len(outcomes))
+	for _, outcome := range outcomes {
+		byWorker[outcome.WorkerID] = outcome
+	}
+	return byWorker
+}
+
 func TestRespondError(t *testing.T) {
 	t.Parallel()
 

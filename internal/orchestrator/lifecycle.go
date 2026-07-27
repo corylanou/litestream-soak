@@ -19,7 +19,18 @@ const (
 	runArchiveTypeSuccess      = "success"
 	runArchiveTypeFailure      = "failure"
 	runArchiveTypeExpired      = "expired"
+	runArchiveTypeTeardown     = "teardown"
 	fleetFullyDormantAlertType = "fleet_fully_dormant"
+
+	sourceTeardownOutcomeDestroyed      = "destroyed"
+	sourceTeardownOutcomeAlreadyStopped = "already_stopped"
+	sourceTeardownOutcomeFailed         = "failed"
+)
+
+var (
+	errSourceRequired           = errors.New("source is required")
+	errSourceNotFound           = errors.New("source not found")
+	errSourceDeploymentNotFound = errors.New("source deployment not found")
 )
 
 type SuccessTeardownPolicy struct {
@@ -807,6 +818,100 @@ func (m *Manager) archiveFailedSourceRun(evaluation failedSourcePauseEvaluation,
 	return m.archiveDeploymentRun(runArchiveTypeFailure, "failed_source_pause", evaluation.Deployment, &evaluation.Rollout, evaluation.Workers, evaluation.Summary, now)
 }
 
+func (m *Manager) archiveAndDestroySource(ctx context.Context, source string) (SourceTeardownResponse, error) {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return SourceTeardownResponse{}, errSourceRequired
+	}
+
+	unlockSource, err := m.lockSource(ctx, source)
+	if err != nil {
+		return SourceTeardownResponse{}, err
+	}
+	defer unlockSource()
+
+	workers, err := m.db.ListWorkersFiltered("", source)
+	if err != nil {
+		return SourceTeardownResponse{}, fmt.Errorf("list source workers: %w", err)
+	}
+	if len(workers) == 0 {
+		return SourceTeardownResponse{}, errSourceNotFound
+	}
+
+	deployment, err := m.db.GetLatestDeployment(source)
+	if err != nil {
+		return SourceTeardownResponse{}, fmt.Errorf("get latest source deployment: %w", err)
+	}
+	if deployment == nil {
+		return SourceTeardownResponse{}, errSourceDeploymentNotFound
+	}
+
+	rollout, err := buildDeploymentRollout(m.db, *deployment)
+	if err != nil {
+		return SourceTeardownResponse{}, fmt.Errorf("build source rollout: %w", err)
+	}
+
+	now := time.Now().UTC()
+	summary := fmt.Sprintf("%s was retired by an operator; archiving current evidence and destroying worker compute, volumes, and replica prefix data.", sourceHumanLabel(source))
+	archive, created, err := m.archiveDeploymentRun(runArchiveTypeTeardown, "operator_teardown", *deployment, &rollout, workers, summary, now)
+	if err != nil {
+		return SourceTeardownResponse{}, fmt.Errorf("archive source teardown: %w", err)
+	}
+	if created {
+		if err := m.db.RecordEvent("", "run_operator_teardown_archived", summary, fmt.Sprintf("archive_id=%d source=%s", archive.ID, source)); err != nil {
+			slog.Warn("Failed to record operator teardown archive event", "source", source, "archive_id", archive.ID, "error", err)
+		}
+	}
+
+	result := SourceTeardownResponse{
+		Source:         source,
+		ArchiveID:      archive.ID,
+		ArchiveType:    archive.ArchiveType,
+		ArchiveCreated: created,
+		Complete:       true,
+		TotalWorkers:   len(workers),
+		Workers:        make([]SourceTeardownWorkerOutcome, 0, len(workers)),
+	}
+	for _, worker := range workers {
+		outcome := SourceTeardownWorkerOutcome{
+			WorkerID:       worker.ID,
+			Name:           worker.Name,
+			PreviousStatus: worker.Status,
+			Status:         worker.Status,
+		}
+		if worker.Status == model.WorkerStopped {
+			outcome.Outcome = sourceTeardownOutcomeAlreadyStopped
+			result.AlreadyStoppedWorkers++
+			result.Workers = append(result.Workers, outcome)
+			continue
+		}
+
+		if err := m.DestroyWorker(ctx, worker.ID); err != nil {
+			outcome.Outcome = sourceTeardownOutcomeFailed
+			outcome.Error = err.Error()
+			result.Complete = false
+			result.FailedWorkers++
+		} else {
+			outcome.Outcome = sourceTeardownOutcomeDestroyed
+			outcome.Status = model.WorkerStopped
+			result.DestroyedWorkers++
+		}
+		result.Workers = append(result.Workers, outcome)
+	}
+
+	eventType := "operator_source_teardown_completed"
+	message := fmt.Sprintf("Completed cleanup for %d %s worker(s) after archiving evidence; destroyed %d and skipped %d already stopped", result.TotalWorkers, source, result.DestroyedWorkers, result.AlreadyStoppedWorkers)
+	if !result.Complete {
+		eventType = "operator_source_teardown_incomplete"
+		message = fmt.Sprintf("Failed to destroy %d of %d %s worker(s) after archiving evidence", result.FailedWorkers, result.TotalWorkers, source)
+	}
+	if err := m.db.RecordEvent("", eventType, message, fmt.Sprintf("archive_id=%d source=%s", archive.ID, source)); err != nil {
+		slog.Warn("Failed to record operator source teardown event", "source", source, "archive_id", archive.ID, "error", err)
+	}
+
+	return result, nil
+}
+
 func (m *Manager) archiveDeploymentRun(archiveType, reason string, deployment model.Deployment, rollout *DeploymentRolloutResponse, workers []model.Worker, summary string, now time.Time) (*model.RunArchive, bool, error) {
 	payload := runArchivePayload{
 		GeneratedAt: now,
@@ -829,7 +934,7 @@ func (m *Manager) archiveDeploymentRun(archiveType, reason string, deployment mo
 
 	body, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
-		return nil, false, fmt.Errorf("marshal success archive: %w", err)
+		return nil, false, fmt.Errorf("marshal run archive: %w", err)
 	}
 
 	archive := &model.RunArchive{
