@@ -11,7 +11,30 @@ import (
 	"github.com/corylanou/litestream-soak/internal/flyapi"
 )
 
-const workerVolumeNamePrefix = "soak_worker_"
+const (
+	workerVolumeNamePrefix        = "soak_worker_"
+	volumeGCInitialRetryBackoff   = time.Hour
+	volumeGCMaximumRetryBackoff   = 24 * time.Hour
+	volumeGCOperatorEventWindow   = 24 * time.Hour
+	volumeGCStateCreated          = "created"
+	volumeGCStateUnknown          = "unknown"
+	volumeGCEventDestroyRequested = "volume_gc_destroy_requested"
+	volumeGCEventDestroyScheduled = "volume_gc_destroy_scheduled"
+	volumeGCEventDestroyConfirmed = "volume_gc_destroy_confirmed"
+	volumeGCEventDestroyFailed    = "volume_gc_destroy_failed"
+	volumeGCEventDestroyStalled   = "volume_gc_destroy_stalled"
+	volumeGCEventUnexpectedState  = "volume_gc_skipped_state"
+)
+
+type volumeGCAttempt struct {
+	volume              flyapi.Volume
+	firstAttemptAt      time.Time
+	lastAttemptAt       time.Time
+	nextRetryAt         time.Time
+	requestCount        int
+	requestAccepted     bool
+	transitionConfirmed bool
+}
 
 type volumeInventoryProvider struct {
 	client   *flyapi.Client
@@ -154,21 +177,47 @@ func (m *Manager) syncVolumeInventory(ctx context.Context, unattachedVolumeTTL t
 }
 
 func (m *Manager) destroyStaleUnattachedWorkerVolumes(ctx context.Context, volumes []flyapi.Volume, ttl time.Duration) {
-	staleVolumes := staleUnattachedWorkerVolumes(volumes, time.Now().UTC(), ttl)
-	for _, volume := range staleVolumes {
-		if err := m.fly.DestroyVolume(ctx, volume.ID); err != nil {
-			if flyapi.IsNotFound(err) {
-				slog.Warn("Unattached worker volume already gone", "volume_id", volume.ID, "volume_name", volume.Name)
-				continue
-			}
-			slog.Warn("Failed to destroy stale unattached worker volume", "volume_id", volume.ID, "volume_name", volume.Name, "size_gb", volume.SizeGB, "created_at", volume.CreatedAt, "error", err)
+	if ttl <= 0 {
+		return
+	}
+
+	now := time.Now().UTC()
+	cutoff := now.Add(-ttl)
+	inventory := make(map[string]flyapi.Volume, len(volumes))
+	for _, volume := range volumes {
+		inventory[volume.ID] = volume
+	}
+
+	m.volumeGCMu.Lock()
+	defer m.volumeGCMu.Unlock()
+
+	for volumeID, attempt := range m.volumeGCAttempts {
+		volume, ok := inventory[volumeID]
+		if !ok {
+			m.confirmStaleVolumeAbsent(*attempt, now)
+			delete(m.volumeGCAttempts, volumeID)
 			continue
 		}
-		message := fmt.Sprintf("Destroyed unattached worker volume %s (%s, %dGB)", volume.Name, volume.ID, volume.SizeGB)
-		if m.db != nil {
-			_ = m.db.RecordEvent("", "volume_gc_destroyed", message, "")
+		m.reconcileVolumeGCAttempt(ctx, volume, attempt, cutoff, now)
+	}
+
+	for _, volume := range volumes {
+		if !isStaleUnattachedWorkerVolumeCandidate(volume, cutoff) {
+			continue
 		}
-		slog.Info("Destroyed stale unattached worker volume", "volume_id", volume.ID, "volume_name", volume.Name, "size_gb", volume.SizeGB, "created_at", volume.CreatedAt)
+		if _, ok := m.volumeGCAttempts[volume.ID]; ok {
+			continue
+		}
+
+		state := normalizeVolumeState(volume.State)
+		switch {
+		case state == volumeGCStateCreated:
+			m.requestStaleVolumeDestruction(ctx, volume, nil, now)
+		case isVolumeDeletionState(state):
+			continue
+		default:
+			m.surfaceUnexpectedStaleVolumeState(volume, false, now)
+		}
 	}
 }
 
@@ -189,6 +238,11 @@ func staleUnattachedWorkerVolumes(volumes []flyapi.Volume, now time.Time, ttl ti
 }
 
 func isStaleUnattachedWorkerVolume(volume flyapi.Volume, cutoff time.Time) bool {
+	return isStaleUnattachedWorkerVolumeCandidate(volume, cutoff) &&
+		normalizeVolumeState(volume.State) == volumeGCStateCreated
+}
+
+func isStaleUnattachedWorkerVolumeCandidate(volume flyapi.Volume, cutoff time.Time) bool {
 	if strings.TrimSpace(volume.AttachedMachineID) != "" {
 		return false
 	}
@@ -199,4 +253,145 @@ func isStaleUnattachedWorkerVolume(volume flyapi.Volume, cutoff time.Time) bool 
 		return false
 	}
 	return !volume.CreatedAt.After(cutoff)
+}
+
+func (m *Manager) reconcileVolumeGCAttempt(ctx context.Context, volume flyapi.Volume, attempt *volumeGCAttempt, cutoff, now time.Time) {
+	state := normalizeVolumeState(volume.State)
+	switch {
+	case isVolumeDeletionState(state):
+		if !attempt.transitionConfirmed {
+			attempt.transitionConfirmed = true
+			attempt.volume = volume
+			message := fmt.Sprintf("Destruction scheduled for stale unattached worker volume %s (%s, %dGB)", volume.Name, volume.ID, volume.SizeGB)
+			details := fmt.Sprintf("state=%s requests=%d", state, attempt.requestCount)
+			m.recordVolumeGCEvent(volumeGCEventDestroyScheduled, message, details, now, 0)
+			slog.Info("Stale unattached worker volume destruction scheduled", "volume_id", volume.ID, "volume_name", volume.Name, "volume_state", state, "request_count", attempt.requestCount)
+		}
+		return
+	case state != volumeGCStateCreated:
+		m.surfaceUnexpectedStaleVolumeState(volume, true, now)
+		return
+	case !isStaleUnattachedWorkerVolumeCandidate(volume, cutoff):
+		message := fmt.Sprintf("Destroy request target %s (%s) remains created but is no longer eligible for volume GC", volume.Name, volume.ID)
+		details := fmt.Sprintf("state=%s attached_machine_id=%s requests=%d", state, strings.TrimSpace(volume.AttachedMachineID), attempt.requestCount)
+		m.recordVolumeGCEvent(volumeGCEventDestroyStalled, message, details, now, volumeGCOperatorEventWindow)
+		slog.Warn("Stale worker volume remains created after accepted destroy request but is no longer eligible for GC", "volume_id", volume.ID, "volume_name", volume.Name, "volume_state", state, "attached_machine_id", volume.AttachedMachineID, "request_count", attempt.requestCount)
+		return
+	}
+
+	if attempt.requestAccepted {
+		message := fmt.Sprintf("Stale unattached worker volume %s (%s) remains created after an accepted destroy request", volume.Name, volume.ID)
+		details := fmt.Sprintf("state=%s requests=%d first_requested_at=%s last_requested_at=%s next_retry_at=%s", state, attempt.requestCount, attempt.firstAttemptAt.Format(time.RFC3339), attempt.lastAttemptAt.Format(time.RFC3339), attempt.nextRetryAt.Format(time.RFC3339))
+		m.recordVolumeGCEvent(volumeGCEventDestroyStalled, message, details, now, volumeGCOperatorEventWindow)
+		slog.Warn("Stale unattached worker volume remains created after accepted destroy request", "volume_id", volume.ID, "volume_name", volume.Name, "volume_state", state, "request_count", attempt.requestCount, "first_requested_at", attempt.firstAttemptAt, "last_requested_at", attempt.lastAttemptAt, "next_retry_at", attempt.nextRetryAt)
+	}
+	if now.Before(attempt.nextRetryAt) {
+		return
+	}
+	m.requestStaleVolumeDestruction(ctx, volume, attempt, now)
+}
+
+func (m *Manager) requestStaleVolumeDestruction(ctx context.Context, volume flyapi.Volume, attempt *volumeGCAttempt, now time.Time) {
+	if attempt == nil {
+		attempt = &volumeGCAttempt{
+			volume:         volume,
+			firstAttemptAt: now,
+		}
+		if m.volumeGCAttempts == nil {
+			m.volumeGCAttempts = make(map[string]*volumeGCAttempt)
+		}
+		m.volumeGCAttempts[volume.ID] = attempt
+	}
+
+	attempt.volume = volume
+	attempt.lastAttemptAt = now
+	attempt.requestCount++
+	attempt.nextRetryAt = now.Add(volumeGCRetryBackoff(attempt.requestCount))
+	attempt.transitionConfirmed = false
+
+	if err := m.fly.DestroyVolume(ctx, volume.ID); err != nil {
+		attempt.requestAccepted = false
+		if flyapi.IsNotFound(err) {
+			message := fmt.Sprintf("Stale unattached worker volume %s (%s) was already absent when destruction was requested", volume.Name, volume.ID)
+			m.recordVolumeGCEvent(volumeGCEventDestroyConfirmed, message, "result=not_found", now, 0)
+			slog.Info("Stale unattached worker volume already absent at destroy time", "volume_id", volume.ID, "volume_name", volume.Name)
+			delete(m.volumeGCAttempts, volume.ID)
+			return
+		}
+
+		message := fmt.Sprintf("Failed to request destruction of stale unattached worker volume %s (%s)", volume.Name, volume.ID)
+		details := fmt.Sprintf("state=%s requests=%d next_retry_at=%s error=%v", normalizeVolumeState(volume.State), attempt.requestCount, attempt.nextRetryAt.Format(time.RFC3339), err)
+		m.recordVolumeGCEvent(volumeGCEventDestroyFailed, message, details, now, volumeGCOperatorEventWindow)
+		slog.Warn("Failed to request destruction of stale unattached worker volume", "volume_id", volume.ID, "volume_name", volume.Name, "volume_state", normalizeVolumeState(volume.State), "size_gb", volume.SizeGB, "created_at", volume.CreatedAt, "request_count", attempt.requestCount, "next_retry_at", attempt.nextRetryAt, "error", err)
+		return
+	}
+
+	attempt.requestAccepted = true
+	message := fmt.Sprintf("Destroy request accepted for stale unattached worker volume %s (%s, %dGB)", volume.Name, volume.ID, volume.SizeGB)
+	details := fmt.Sprintf("state=%s requests=%d next_confirmation=next_fresh_inventory next_retry_at=%s", normalizeVolumeState(volume.State), attempt.requestCount, attempt.nextRetryAt.Format(time.RFC3339))
+	m.recordVolumeGCEvent(volumeGCEventDestroyRequested, message, details, now, 0)
+	if attempt.requestCount == 1 {
+		slog.Info("Stale unattached worker volume destroy request accepted", "volume_id", volume.ID, "volume_name", volume.Name, "volume_state", normalizeVolumeState(volume.State), "size_gb", volume.SizeGB, "created_at", volume.CreatedAt, "next_confirmation", "next_fresh_inventory")
+		return
+	}
+	slog.Warn("Retry destroy request accepted for stale unattached worker volume still in created state", "volume_id", volume.ID, "volume_name", volume.Name, "volume_state", normalizeVolumeState(volume.State), "request_count", attempt.requestCount, "next_retry_at", attempt.nextRetryAt)
+}
+
+func (m *Manager) confirmStaleVolumeAbsent(attempt volumeGCAttempt, now time.Time) {
+	message := fmt.Sprintf("Stale unattached worker volume %s (%s) is no longer present after a destroy request", attempt.volume.Name, attempt.volume.ID)
+	details := fmt.Sprintf("requests=%d first_requested_at=%s last_requested_at=%s", attempt.requestCount, attempt.firstAttemptAt.Format(time.RFC3339), attempt.lastAttemptAt.Format(time.RFC3339))
+	m.recordVolumeGCEvent(volumeGCEventDestroyConfirmed, message, details, now, 0)
+	slog.Info("Stale unattached worker volume no longer present after destroy request", "volume_id", attempt.volume.ID, "volume_name", attempt.volume.Name, "request_count", attempt.requestCount)
+}
+
+func (m *Manager) surfaceUnexpectedStaleVolumeState(volume flyapi.Volume, destroyRequested bool, now time.Time) {
+	state := normalizeVolumeState(volume.State)
+	message := fmt.Sprintf("Skipped stale unattached worker volume %s (%s) in unexpected state %s", volume.Name, volume.ID, state)
+	details := fmt.Sprintf("state=%s destroy_requested=%t created_at=%s", state, destroyRequested, volume.CreatedAt.Format(time.RFC3339))
+	m.recordVolumeGCEvent(volumeGCEventUnexpectedState, message, details, now, volumeGCOperatorEventWindow)
+	slog.Warn("Skipping stale unattached worker volume in unexpected state", "volume_id", volume.ID, "volume_name", volume.Name, "volume_state", state, "size_gb", volume.SizeGB, "created_at", volume.CreatedAt, "destroy_requested", destroyRequested)
+}
+
+func (m *Manager) recordVolumeGCEvent(eventType, message, details string, now time.Time, window time.Duration) {
+	if m.db == nil {
+		return
+	}
+
+	var err error
+	if window > 0 {
+		_, err = m.db.RecordWindowedEventAt("", eventType, message, details, now, window)
+	} else {
+		err = m.db.RecordEventAt("", eventType, message, details, now)
+	}
+	if err != nil {
+		slog.Warn("Failed to record volume GC event", "event_type", eventType, "error", err)
+	}
+}
+
+func volumeGCRetryBackoff(requestCount int) time.Duration {
+	backoff := volumeGCInitialRetryBackoff
+	for request := 1; request < requestCount; request++ {
+		if backoff >= volumeGCMaximumRetryBackoff/2 {
+			return volumeGCMaximumRetryBackoff
+		}
+		backoff *= 2
+	}
+	return backoff
+}
+
+func normalizeVolumeState(state string) string {
+	state = strings.ToLower(strings.TrimSpace(state))
+	if state == "" {
+		return volumeGCStateUnknown
+	}
+	return state
+}
+
+func isVolumeDeletionState(state string) bool {
+	switch normalizeVolumeState(state) {
+	case "destroyed", "deleting", "scheduling_destroy", "pending_destroy":
+		return true
+	default:
+		return false
+	}
 }

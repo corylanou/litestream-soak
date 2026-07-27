@@ -1154,7 +1154,7 @@ func (m *controlMetrics) observeVolumes(appName string, volumes []flyapi.Volume)
 	appName = metricValueOrUnknown(appName)
 	next := make(map[string]volumeMetricState)
 	for _, volume := range volumes {
-		if skipVolumeInventoryState(volume.State) {
+		if isVolumeDeletionState(volume.State) {
 			continue
 		}
 		attachmentState := "unattached"
@@ -1198,16 +1198,6 @@ func (m *controlMetrics) observeVolumes(appName string, volumes []flyapi.Volume)
 		controlAppVolumeSizeGB.WithLabelValues(state.labels...).Set(state.totalGB)
 	}
 }
-
-func skipVolumeInventoryState(state string) bool {
-	switch strings.TrimSpace(strings.ToLower(state)) {
-	case "destroyed", "deleting", "pending_destroy":
-		return true
-	default:
-		return false
-	}
-}
-
 func metricValueOrUnknown(v string) string {
 	if v == "" {
 		return "unknown"
