@@ -872,6 +872,23 @@ func (m *Manager) archiveFailedSourceRun(evaluation failedSourcePauseEvaluation,
 }
 
 func (m *Manager) archiveAndDestroySource(ctx context.Context, source string) (SourceTeardownResponse, error) {
+	summary := fmt.Sprintf("%s was retired by an operator; archiving current evidence and destroying worker compute, volumes, and replica prefix data.", sourceHumanLabel(source))
+	return m.archiveAndDestroySourceWithReason(ctx, source, "operator_teardown", "operator", summary)
+}
+
+func (m *Manager) archiveAndDestroyTerminalPRSource(ctx context.Context, repository string, prNumber int, merged bool) (SourceTeardownResponse, error) {
+	source := fmt.Sprintf("pr-%d", prNumber)
+	state := "closed"
+	reason := "upstream_pr_closed"
+	if merged {
+		state = "merged"
+		reason = "upstream_pr_merged"
+	}
+	summary := fmt.Sprintf("Upstream PR %s#%d was %s; archiving current evidence and destroying worker compute, volumes, and replica prefix data.", repository, prNumber, state)
+	return m.archiveAndDestroySourceWithReason(ctx, source, reason, "upstream_pr", summary)
+}
+
+func (m *Manager) archiveAndDestroySourceWithReason(ctx context.Context, source, reason, eventPrefix, summary string) (SourceTeardownResponse, error) {
 	source = strings.TrimSpace(source)
 	if source == "" {
 		return SourceTeardownResponse{}, errSourceRequired
@@ -905,14 +922,13 @@ func (m *Manager) archiveAndDestroySource(ctx context.Context, source string) (S
 	}
 
 	now := time.Now().UTC()
-	summary := fmt.Sprintf("%s was retired by an operator; archiving current evidence and destroying worker compute, volumes, and replica prefix data.", sourceHumanLabel(source))
-	archive, created, err := m.archiveDeploymentRun(runArchiveTypeTeardown, "operator_teardown", *deployment, &rollout, workers, summary, now)
+	archive, created, err := m.archiveDeploymentRun(runArchiveTypeTeardown, reason, *deployment, &rollout, workers, summary, now)
 	if err != nil {
 		return SourceTeardownResponse{}, fmt.Errorf("archive source teardown: %w", err)
 	}
 	if created {
-		if err := m.db.RecordEvent("", "run_operator_teardown_archived", summary, fmt.Sprintf("archive_id=%d source=%s", archive.ID, source)); err != nil {
-			slog.Warn("Failed to record operator teardown archive event", "source", source, "archive_id", archive.ID, "error", err)
+		if err := m.db.RecordEvent("", fmt.Sprintf("run_%s_teardown_archived", eventPrefix), summary, fmt.Sprintf("archive_id=%d source=%s", archive.ID, source)); err != nil {
+			slog.Warn("Failed to record source teardown archive event", "source", source, "archive_id", archive.ID, "error", err)
 		}
 	}
 
@@ -952,14 +968,14 @@ func (m *Manager) archiveAndDestroySource(ctx context.Context, source string) (S
 		result.Workers = append(result.Workers, outcome)
 	}
 
-	eventType := "operator_source_teardown_completed"
+	eventType := fmt.Sprintf("%s_source_teardown_completed", eventPrefix)
 	message := fmt.Sprintf("Completed cleanup for %d %s worker(s) after archiving evidence; destroyed %d and skipped %d already stopped", result.TotalWorkers, source, result.DestroyedWorkers, result.AlreadyStoppedWorkers)
 	if !result.Complete {
-		eventType = "operator_source_teardown_incomplete"
+		eventType = fmt.Sprintf("%s_source_teardown_incomplete", eventPrefix)
 		message = fmt.Sprintf("Failed to destroy %d of %d %s worker(s) after archiving evidence", result.FailedWorkers, result.TotalWorkers, source)
 	}
 	if err := m.db.RecordEvent("", eventType, message, fmt.Sprintf("archive_id=%d source=%s", archive.ID, source)); err != nil {
-		slog.Warn("Failed to record operator source teardown event", "source", source, "archive_id", archive.ID, "error", err)
+		slog.Warn("Failed to record source teardown event", "source", source, "archive_id", archive.ID, "error", err)
 	}
 
 	return result, nil

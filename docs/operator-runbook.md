@@ -224,6 +224,30 @@ curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
   "https://litestream-soak-ctl.fly.dev/api/run-archives?source=pr-1228&type=success" | jq .
 ```
 
+## Upstream PR Retirement
+
+The signed GitHub webhook at `/webhooks/github` retires a `pr-N` soak fleet
+when upstream PR `N` is merged or closed. It archives the latest deployment and
+worker evidence before destroying Machines, volumes, and S3 replica prefixes.
+Failures in the soak fleet do not block this terminal cleanup.
+
+Configure the upstream repository webhook to send `pull_request` events and use
+the same `GITHUB_WEBHOOK_SECRET` configured on `soakctl`. Only repositories in
+the allowlist can trigger retirement:
+
+```bash
+SOAK_PR_REPO_ALLOWLIST=benbjohnson/litestream
+SOAK_PR_KEEP_ALIVE_LABEL=soak:keep-alive
+```
+
+Apply the keep-alive label before closing a long-lived fixture PR when its soak
+fleet must remain active. Label comparison is case-insensitive. Removing the
+label does not retire an already-closed fixture automatically; reopen and close
+the PR again or use the operator teardown endpoint when it is ready to retire.
+
+Terminal PR archives use type `teardown` with reason
+`upstream_pr_merged` or `upstream_pr_closed`.
+
 ## Operator Source Teardown
 
 Retire a failed or otherwise obsolete source fleet with the authenticated
