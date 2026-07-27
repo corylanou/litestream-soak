@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -586,24 +587,31 @@ func TestLockWorkerSerializesSameID(t *testing.T) {
 	t.Parallel()
 
 	mgr := &Manager{}
-	unlock := mgr.lockWorker("w1")
+	unlock := mustLockWorker(t, mgr, "w1")
 
-	acquired := make(chan struct{})
+	acquired := make(chan error, 1)
 	go func() {
-		unlock2 := mgr.lockWorker("w1")
-		close(acquired)
+		unlock2, err := mgr.lockWorker(context.Background(), "w1")
+		if err != nil {
+			acquired <- err
+			return
+		}
 		unlock2()
+		acquired <- nil
 	}()
 
 	select {
-	case <-acquired:
-		t.Fatal("second lockWorker(w1) acquired while first held")
+	case err := <-acquired:
+		t.Fatalf("second lockWorker(w1) returned while first held: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 
 	unlock()
 	select {
-	case <-acquired:
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("second lockWorker(w1) error = %v", err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("second lockWorker(w1) did not acquire after unlock")
 	}
@@ -613,20 +621,69 @@ func TestLockWorkerDistinctIDsDoNotBlock(t *testing.T) {
 	t.Parallel()
 
 	mgr := &Manager{}
-	unlock := mgr.lockWorker("w1")
+	unlock := mustLockWorker(t, mgr, "w1")
 	defer unlock()
 
-	acquired := make(chan struct{})
+	acquired := make(chan error, 1)
 	go func() {
-		unlock2 := mgr.lockWorker("w2")
+		unlock2, err := mgr.lockWorker(context.Background(), "w2")
+		if err != nil {
+			acquired <- err
+			return
+		}
 		unlock2()
-		close(acquired)
+		acquired <- nil
 	}()
 
 	select {
-	case <-acquired:
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("lockWorker(w2) error = %v", err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("lockWorker(w2) blocked behind lockWorker(w1)")
+	}
+}
+
+func mustLockWorker(t *testing.T, manager *Manager, workerID string) func() {
+	t.Helper()
+	unlock, err := manager.lockWorker(context.Background(), workerID)
+	if err != nil {
+		t.Fatalf("lockWorker(%s) error = %v", workerID, err)
+	}
+	return unlock
+}
+
+func TestDestroyWorkerLockAcquisitionHonorsContext(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	unlock := mustLockWorker(t, manager, "worker-locked")
+	locked := true
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- manager.DestroyWorker(ctx, "worker-locked")
+	}()
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("DestroyWorker() error = %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(100 * time.Millisecond):
+		unlock()
+		locked = false
+		err := <-errCh
+		t.Fatalf("DestroyWorker() waited for worker lock after cancellation; returned %v after unlock", err)
 	}
 }
 

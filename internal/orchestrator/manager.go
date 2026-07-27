@@ -78,28 +78,27 @@ type Manager struct {
 	platformLogToken string
 
 	locks       sync.Mutex
-	workerLocks map[string]*sync.Mutex
+	workerLocks map[string]*contextLock
 	sourceLocks map[string]*contextLock
 }
 
-func (m *Manager) keyedLock(table *map[string]*sync.Mutex, key string) func() {
+func (m *Manager) lockWorker(ctx context.Context, id string) (func(), error) {
 	m.locks.Lock()
-	if *table == nil {
-		*table = make(map[string]*sync.Mutex)
+	if m.workerLocks == nil {
+		m.workerLocks = make(map[string]*contextLock)
 	}
-	mu, ok := (*table)[key]
+	lock, ok := m.workerLocks[id]
 	if !ok {
-		mu = &sync.Mutex{}
-		(*table)[key] = mu
+		lock = newContextLock()
+		m.workerLocks[id] = lock
 	}
 	m.locks.Unlock()
 
-	mu.Lock()
-	return mu.Unlock
-}
-
-func (m *Manager) lockWorker(id string) func() {
-	return m.keyedLock(&m.workerLocks, id)
+	unlock, err := lock.lock(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire worker lock for %s: %w", id, err)
+	}
+	return unlock, nil
 }
 
 func (m *Manager) lockSource(ctx context.Context, source string) (func(), error) {
@@ -162,7 +161,10 @@ func (m *Manager) newWorkerRecord(req WorkerRequest) *model.Worker {
 
 func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.Worker, error) {
 	if id := strings.TrimSpace(req.WorkerID); id != "" {
-		unlock := m.lockWorker(id)
+		unlock, err := m.lockWorker(ctx, id)
+		if err != nil {
+			return nil, err
+		}
 		defer unlock()
 	}
 	return m.createWorker(ctx, req)
@@ -436,7 +438,10 @@ func flyVolumeName(workerName string) string {
 }
 
 func (m *Manager) StopWorker(ctx context.Context, workerID string) error {
-	unlock := m.lockWorker(workerID)
+	unlock, err := m.lockWorker(ctx, workerID)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	return m.stopWorker(ctx, workerID)
 }
@@ -462,7 +467,10 @@ func (m *Manager) stopWorker(ctx context.Context, workerID string) error {
 }
 
 func (m *Manager) DestroyWorker(ctx context.Context, workerID string) error {
-	unlock := m.lockWorker(workerID)
+	unlock, err := m.lockWorker(ctx, workerID)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	return m.destroyWorker(ctx, workerID)
 }
@@ -553,7 +561,10 @@ func (m *Manager) rollingUpdateSourceLocked(ctx context.Context, source, newImag
 
 	for _, listed := range workers {
 		newWorker, err := func() (*model.Worker, error) {
-			unlock := m.lockWorker(listed.ID)
+			unlock, err := m.lockWorker(ctx, listed.ID)
+			if err != nil {
+				return nil, err
+			}
 			defer unlock()
 
 			w, err := m.db.GetWorker(listed.ID)
@@ -601,7 +612,10 @@ func deploymentMatchesTarget(deployment model.Deployment, imageRef, gitSHA, lite
 }
 
 func (m *Manager) RollWorker(ctx context.Context, workerID, newImageRef, newSHA, newLitestreamSHA string) (*model.Worker, error) {
-	unlock := m.lockWorker(workerID)
+	unlock, err := m.lockWorker(ctx, workerID)
+	if err != nil {
+		return nil, err
+	}
 	defer unlock()
 
 	worker, err := m.db.GetWorker(workerID)

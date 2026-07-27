@@ -259,12 +259,18 @@ curl -X POST -sS \
   "https://litestream-soak-ctl.fly.dev/api/admin/teardown-source?source=pr-1228" | jq .
 ```
 
-The request requires an explicit `source`. It archives the latest deployment
-and worker evidence before deleting any resources, then destroys every
-non-stopped worker's Machine, volume, and S3 replica prefix. The response
-contains an outcome for each worker. Workers are marked `stopped` only after
-all three cleanup operations succeed; failed outcomes remain retryable by
-calling the endpoint again.
+The request requires an explicit `source` and remains synchronous while the
+control plane archives the latest deployment and worker evidence before
+deleting any resources. It has a 30-minute operation budget, with one
+additional minute reserved for writing the response, so keep the client
+connection open until the structured result returns.
+
+The result contains an outcome for every worker after the endpoint attempts to
+destroy each non-stopped worker's Machine, volume, and S3 replica prefix.
+Workers are marked `stopped` only after all three cleanup operations succeed.
+If the request is interrupted or reports failed outcomes, calling the endpoint
+again is safe: the existing archive is reused, stopped workers are skipped,
+and incomplete workers remain retryable.
 
 Operator teardown archives use type `teardown`:
 
