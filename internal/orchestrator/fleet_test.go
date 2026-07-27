@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"reflect"
 	"sort"
 	"strings"
@@ -9,6 +10,81 @@ import (
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/workload"
 )
+
+func TestReconcileFleetUsesLatestReadySourceDeployment(t *testing.T) {
+	db := openTestDB(t)
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const litestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const imageRef = "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-ls-bbbbbbbbbbbb"
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ImageRef:      imageRef,
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	manager.reconcileFleet(context.Background(), FleetSpec{Workers: []DesiredWorker{{
+		WorkerID:    "worker-main-low-vol",
+		Name:        "worker-main-low-vol",
+		Source:      "main",
+		GitSHA:      "main",
+		ProfileName: "low-volume",
+		Region:      "ord",
+		Workload:    workload.Config{LoadMode: "synthetic", InitialSize: "5MB"},
+	}}})
+
+	worker := mustWorker(t, db, "worker-main-low-vol")
+	if worker.GitSHA != sha {
+		t.Fatalf("GitSHA = %q, want %q", worker.GitSHA, sha)
+	}
+	if worker.LitestreamSHA != litestreamSHA {
+		t.Fatalf("LitestreamSHA = %q, want %q", worker.LitestreamSHA, litestreamSHA)
+	}
+	machines := fly.machineRequests()
+	if len(machines) != 1 {
+		t.Fatalf("len(machine requests) = %d, want 1", len(machines))
+	}
+	if machines[0].Config.Image != imageRef {
+		t.Fatalf("machine image = %q, want %q", machines[0].Config.Image, imageRef)
+	}
+}
+
+func TestReconcileFleetWithoutReadyDeploymentWaitsForBootstrap(t *testing.T) {
+	db := openTestDB(t)
+	const unrelatedImageRef = "registry.fly.io/litestream-soak:sha-cccccccccccc-pr-1345-ls-dddddddddddd"
+	fly := newDeployTestFlyServer(
+		t,
+		db,
+		"pr-1345",
+		"cccccccccccccccccccccccccccccccccccccccc",
+		"dddddddddddddddddddddddddddddddddddddddd",
+		unrelatedImageRef,
+	)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	manager.reconcileFleet(context.Background(), FleetSpec{Workers: []DesiredWorker{{
+		WorkerID:    "worker-main-low-vol",
+		Name:        "worker-main-low-vol",
+		Source:      "main",
+		GitSHA:      "main",
+		ProfileName: "low-volume",
+		Region:      "ord",
+		Workload:    workload.Config{LoadMode: "synthetic", InitialSize: "5MB"},
+	}}})
+
+	workers, err := db.ListWorkersForSource("main")
+	if err != nil {
+		t.Fatalf("ListWorkersForSource() error = %v", err)
+	}
+	if len(workers) != 0 {
+		t.Fatalf("len(workers) = %d, want 0 until deployment-ready bootstraps main", len(workers))
+	}
+	fly.assertCreateCounts(t, 0, 0)
+}
 
 func TestSourcePRNumber(t *testing.T) {
 	t.Parallel()

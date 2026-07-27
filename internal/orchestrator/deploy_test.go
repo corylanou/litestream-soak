@@ -70,6 +70,74 @@ func TestNotifyDeploymentReadyRejectsInvalidSHA(t *testing.T) {
 	}
 }
 
+func TestNotifyDeploymentReadyRequiresSourceBoundImage(t *testing.T) {
+	t.Parallel()
+
+	deployer := &Deployer{db: openTestDB(t)}
+	_, err := deployer.NotifyDeploymentReady(
+		context.Background(),
+		"main",
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"",
+		"test",
+	)
+	if err == nil || !strings.Contains(err.Error(), "image ref is required") {
+		t.Fatalf("NotifyDeploymentReady() error = %v, want required image error", err)
+	}
+}
+
+func TestNotifyDeploymentReadyRejectsImageVersionMismatch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		source   string
+		imageRef string
+		want     string
+	}{
+		{
+			name:     "other source",
+			source:   "main",
+			imageRef: "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-pr-1345-ls-bbbbbbbbbbbb",
+			want:     "image source pr-1345",
+		},
+		{
+			name:     "other litestream sha",
+			source:   "main",
+			imageRef: "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-ls-cccccccccccc",
+			want:     "image litestream sha cccccccccccc",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := openTestDB(t)
+			deployer := &Deployer{db: db}
+			_, err := deployer.NotifyDeploymentReady(
+				context.Background(),
+				test.source,
+				"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				test.imageRef,
+				"test",
+			)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("NotifyDeploymentReady() error = %v, want %q", err, test.want)
+			}
+			deployment, getErr := db.GetLatestDeployment(test.source)
+			if getErr != nil {
+				t.Fatalf("GetLatestDeployment() error = %v", getErr)
+			}
+			if deployment != nil {
+				t.Fatalf("GetLatestDeployment() = %+v, want nil after rejected target", deployment)
+			}
+		})
+	}
+}
+
 func TestDeployNewSHARequiresRuntimeBuild(t *testing.T) {
 	t.Parallel()
 
@@ -308,6 +376,42 @@ func TestNotifyDeploymentReadyRecordsReadyDeploymentBeforeRolloutAndIsIdempotent
 	}
 }
 
+func TestNotifyDeploymentReadyBootstrapsFreshSource(t *testing.T) {
+	db := openTestDB(t)
+	const source = "pr-2000"
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const litestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const imageRef = "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-pr-2000-ls-bbbbbbbbbbbb"
+
+	fly := newDeployTestFlyServer(t, db, source, sha, litestreamSHA, imageRef)
+	deployer := NewDeployer(
+		NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", ""),
+		db,
+		"litestream-soak",
+		false,
+	)
+
+	if _, err := deployer.NotifyDeploymentReady(context.Background(), source, sha, litestreamSHA, imageRef, "test_bootstrap"); err != nil {
+		t.Fatalf("NotifyDeploymentReady() error = %v", err)
+	}
+
+	deployment := mustDeploymentByVersion(t, db, source, sha, litestreamSHA)
+	if deployment.Status != "ready" {
+		t.Fatalf("deployment.Status = %q, want ready", deployment.Status)
+	}
+	workers := mustWorkersForSource(t, db, source)
+	if len(workers) != len(DefaultMainFleet().Workers) {
+		t.Fatalf("len(workers) = %d, want %d", len(workers), len(DefaultMainFleet().Workers))
+	}
+	for _, worker := range workers {
+		if worker.GitSHA != sha || worker.LitestreamSHA != litestreamSHA {
+			t.Fatalf("worker %s versions = %s/%s, want %s/%s", worker.ID, worker.GitSHA, worker.LitestreamSHA, sha, litestreamSHA)
+		}
+	}
+	fly.assertCreateCounts(t, len(DefaultMainFleet().Workers), len(DefaultMainFleet().Workers))
+	fly.assertNoErrors(t)
+}
+
 func TestNotifyDeploymentReadySkipsSupersededDeployment(t *testing.T) {
 	db := openTestDB(t)
 	source := "pr-1228"
@@ -494,18 +598,19 @@ func TestNotifyDeploymentReadyCanceledWhileSourceLockedDoesNotRecordDeployment(t
 }
 
 type deployTestFlyServer struct {
-	client         *flyapi.Client
-	server         *httptest.Server
-	db             *model.DB
-	source         string
-	sha            string
-	litestreamSHA  string
-	imageRef       string
-	mu             sync.Mutex
-	errors         []string
-	machines       int
-	volumes        int
-	readyBeforeFly bool
+	client          *flyapi.Client
+	server          *httptest.Server
+	db              *model.DB
+	source          string
+	sha             string
+	litestreamSHA   string
+	imageRef        string
+	currentImageRef string
+	mu              sync.Mutex
+	errors          []string
+	machines        int
+	volumes         int
+	readyBeforeFly  bool
 }
 
 func newDeployTestFlyServer(t *testing.T, db *model.DB, source, sha, litestreamSHA, imageRef string) *deployTestFlyServer {
@@ -530,10 +635,14 @@ func (f *deployTestFlyServer) handle(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/apps/litestream-soak/machines":
+		imageRef := f.imageRef
+		if strings.TrimSpace(f.currentImageRef) != "" {
+			imageRef = f.currentImageRef
+		}
 		f.writeJSON(w, []flyapi.Machine{{
 			ID:        "current-machine",
 			State:     "started",
-			Config:    flyapi.MachineConfig{Image: f.imageRef},
+			Config:    flyapi.MachineConfig{Image: imageRef},
 			UpdatedAt: time.Now().UTC(),
 		}})
 	case r.Method == http.MethodPost && r.URL.Path == "/apps/litestream-soak/volumes":

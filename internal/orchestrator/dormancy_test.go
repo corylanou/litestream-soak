@@ -208,6 +208,16 @@ func TestResumeDormantWorkersReturnsWorkerFailures(t *testing.T) {
 	if err := db.MarkWorkerDormant(worker.ID, "stale failure", "sqlite_index_mismatch", "test"); err != nil {
 		t.Fatalf("MarkWorkerDormant() error = %v", err)
 	}
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "new-soak",
+		LitestreamSHA: "new-litestream",
+		ImageRef:      "image",
+		Source:        "pr-1228",
+		PRNumber:      1228,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
 
 	manager := &Manager{db: db, appName: "litestream-soak"}
 	err = manager.ResumeDormantWorkers(context.Background(), "pr-1228", "image", "new-soak", "new-litestream", "test")

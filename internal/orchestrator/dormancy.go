@@ -514,17 +514,31 @@ func (m *Manager) PauseSourceWorkers(ctx context.Context, source, reason, signat
 }
 
 func (m *Manager) ResumeDormantWorkers(ctx context.Context, source, imageRef, gitSHA, litestreamSHA, resumeTrigger string) error {
+	source = firstNonEmpty(strings.TrimSpace(source), "main")
 	workers, err := m.db.ListDormantWorkers(source)
 	if err != nil {
 		return fmt.Errorf("list dormant workers: %w", err)
 	}
 
-	return m.resumeDormantWorkers(ctx, workers, imageRef, gitSHA, litestreamSHA, resumeTrigger)
+	return m.resumeDormantWorkers(ctx, source, workers, imageRef, gitSHA, litestreamSHA, resumeTrigger)
 }
 
-func (m *Manager) resumeDormantWorkers(ctx context.Context, workers []model.Worker, imageRef, gitSHA, litestreamSHA, resumeTrigger string) error {
+func (m *Manager) resumeDormantWorkers(ctx context.Context, source string, workers []model.Worker, imageRef, gitSHA, litestreamSHA, resumeTrigger string) error {
+	deployment, err := resolveReadyDeploymentTarget(m.db, source, imageRef, gitSHA, litestreamSHA)
+	if err != nil {
+		return fmt.Errorf("validate dormant resume target: %w", err)
+	}
+	imageRef = deployment.ImageRef
+	gitSHA = deployment.GitSHA
+	litestreamSHA = deployment.LitestreamSHA
+
 	var resumeErrors []error
 	for _, worker := range workers {
+		workerSource := firstNonEmpty(strings.TrimSpace(worker.Source), "main")
+		if workerSource != source {
+			resumeErrors = append(resumeErrors, fmt.Errorf("%s: worker source %s does not match resume source %s", worker.ID, workerSource, source))
+			continue
+		}
 		if err := m.resumeDormantWorker(ctx, worker, imageRef, gitSHA, litestreamSHA, resumeTrigger); err != nil {
 			slog.Error("Failed to resume dormant worker", "worker_id", worker.ID, "error", err)
 			_ = m.db.RecordEvent(worker.ID, "worker_probe_start_failed", err.Error(), imageRef)
@@ -535,17 +549,22 @@ func (m *Manager) resumeDormantWorkers(ctx context.Context, workers []model.Work
 }
 
 func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, imageRef, gitSHA, litestreamSHA, resumeTrigger string) error {
-	volumeID, err := m.resolveWorkerVolumeID(ctx, worker)
-	if err != nil {
-		return err
+	imageRef = strings.TrimSpace(imageRef)
+	if imageRef == "" {
+		return fmt.Errorf("worker %s resume image is required", worker.ID)
 	}
 	resumeSHA := strings.TrimSpace(gitSHA)
 	if resumeSHA == "" {
-		resumeSHA = worker.GitSHA
+		return fmt.Errorf("worker %s resume git sha is required", worker.ID)
 	}
 	resumeLitestreamSHA := strings.TrimSpace(litestreamSHA)
 	if resumeLitestreamSHA == "" {
-		resumeLitestreamSHA = worker.LitestreamSHA
+		return fmt.Errorf("worker %s resume litestream sha is required", worker.ID)
+	}
+
+	volumeID, err := m.resolveWorkerVolumeID(ctx, worker)
+	if err != nil {
+		return err
 	}
 
 	workloadCfg := normalizeWorkloadConfig(resolveWorkerWorkload(worker))

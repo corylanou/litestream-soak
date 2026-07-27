@@ -38,10 +38,31 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusBadRequest, nil, "sha is required")
 		return
 	}
+	if strings.TrimSpace(request.LitestreamSHA) == "" {
+		respondError(w, r, http.StatusBadRequest, nil, "litestream_sha is required")
+		return
+	}
+	if strings.TrimSpace(request.ImageRef) == "" {
+		respondError(w, r, http.StatusBadRequest, nil, "image_ref is required")
+		return
+	}
 
 	source := strings.TrimSpace(request.Source)
 	if source == "" {
 		source = "main"
+	}
+	request.SHA = strings.TrimSpace(request.SHA)
+	request.LitestreamSHA = strings.TrimSpace(request.LitestreamSHA)
+	request.ImageRef = strings.TrimSpace(request.ImageRef)
+	if err := validateReadyDeploymentTarget(model.Deployment{
+		GitSHA:        request.SHA,
+		LitestreamSHA: request.LitestreamSHA,
+		ImageRef:      request.ImageRef,
+		Source:        source,
+		Status:        "ready",
+	}); err != nil {
+		respondError(w, r, http.StatusBadRequest, err, "invalid deployment target")
+		return
 	}
 	trigger := strings.TrimSpace(request.Trigger)
 	if trigger == "" {
@@ -120,26 +141,20 @@ func (a *API) handleRollWorker(w http.ResponseWriter, r *http.Request) {
 	if trigger == "" {
 		trigger = "manual_worker_roll"
 	}
-	imageRef := strings.TrimSpace(request.ImageRef)
-	if imageRef == "" {
-		imageRef, err = a.manager.currentWorkerImage(r.Context())
-		if err != nil {
-			respondError(w, r, http.StatusInternalServerError, err, "failed to resolve worker image")
-			return
-		}
-	}
-
-	if err := a.db.UpsertReadyDeployment(&model.Deployment{
-		GitSHA:        strings.TrimSpace(request.SHA),
-		LitestreamSHA: strings.TrimSpace(request.LitestreamSHA),
-		ImageRef:      imageRef,
-		Source:        source,
-		PRNumber:      sourcePRNumber(source),
-		Status:        "ready",
-	}); err != nil {
-		respondError(w, r, http.StatusInternalServerError, err, "failed to record ready deployment")
+	deployment, err := resolveReadyDeploymentTarget(
+		a.db,
+		source,
+		request.ImageRef,
+		request.SHA,
+		request.LitestreamSHA,
+	)
+	if err != nil {
+		respondError(w, r, http.StatusConflict, err, "failed to resolve ready deployment target")
 		return
 	}
+	imageRef := deployment.ImageRef
+	request.SHA = deployment.GitSHA
+	request.LitestreamSHA = deployment.LitestreamSHA
 
 	message := fmt.Sprintf("Targeted rollout for %s to soak %s / litestream %s via %s", workerID, shortVersionValue(request.SHA), shortVersionValue(request.LitestreamSHA), trigger)
 	_ = a.db.RecordEvent(workerID, "targeted_rollout_requested", message, imageRef)
@@ -179,16 +194,16 @@ func (a *API) handleResumeDormantWorkers(w http.ResponseWriter, r *http.Request)
 		source = "main"
 	}
 	imageRef := strings.TrimSpace(r.URL.Query().Get("image"))
-	if imageRef == "" {
-		var err error
-		imageRef, err = a.manager.currentWorkerImage(r.Context())
-		if err != nil {
-			respondError(w, r, http.StatusInternalServerError, err, "failed to resolve worker image")
-			return
-		}
-	}
 	sha := strings.TrimSpace(r.URL.Query().Get("sha"))
 	litestreamSHA := strings.TrimSpace(r.URL.Query().Get("litestream_sha"))
+	deployment, err := resolveReadyDeploymentTarget(a.db, source, imageRef, sha, litestreamSHA)
+	if err != nil {
+		respondError(w, r, http.StatusConflict, err, "failed to resolve ready deployment target")
+		return
+	}
+	imageRef = deployment.ImageRef
+	sha = deployment.GitSHA
+	litestreamSHA = deployment.LitestreamSHA
 	trigger := strings.TrimSpace(r.URL.Query().Get("trigger"))
 	if trigger == "" {
 		trigger = "manual_resume"
