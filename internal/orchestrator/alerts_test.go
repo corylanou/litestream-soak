@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 type capturedAlert struct {
@@ -640,6 +641,53 @@ func TestNotifyVerificationFailureSendsWebhook(t *testing.T) {
 	wantFingerprint := fmt.Sprintf("verification_failed:%d", v.ID)
 	if a.Fingerprint != wantFingerprint {
 		t.Errorf("fingerprint = %q, want %q", a.Fingerprint, wantFingerprint)
+	}
+}
+
+func TestNotifyFixtureFailureSendsAttributedWarning(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	server, ch := newAlertWebhookServer(t, http.StatusOK)
+
+	createTestWorker(t, db, model.Worker{
+		ID:            "fixture-fail-webhook",
+		Name:          "fixture-fail-webhook",
+		Status:        model.WorkerDegraded,
+		Source:        "main",
+		ProfileName:   "low",
+		ProfileConfig: "{}",
+	})
+	worker, err := db.GetWorker("fixture-fail-webhook")
+	if err != nil {
+		t.Fatalf("GetWorker error = %v", err)
+	}
+
+	verification := failedVerification(worker.ID, time.Now(), "sync database: db sync: stage-write ltx file: disk full: write header")
+	verification.FailureClassification = &reporting.FailureClassification{
+		Stage:     "disk_capacity",
+		Signature: "soak_fixture_disk_exhausted",
+	}
+	mustRecordVerification(t, db, verification)
+
+	dispatcher := NewAlertDispatcher(db, "http://ctl.example", server.URL, "")
+	dispatcher.notifyVerificationFailure(*worker, *verification)
+
+	got := waitForAlert(t, ch)
+	if got.payload.Alert.AlertType != "verification_failed" {
+		t.Fatalf("AlertType = %q, want verification_failed", got.payload.Alert.AlertType)
+	}
+	if got.payload.Alert.Severity != "warning" {
+		t.Fatalf("Severity = %q, want warning", got.payload.Alert.Severity)
+	}
+	if got.payload.Alert.FailureCategory != "soak-fixture" {
+		t.Fatalf("FailureCategory = %q, want soak-fixture", got.payload.Alert.FailureCategory)
+	}
+	if got.payload.Alert.ProbableSubsystem != "Soak fixture disk consumption" {
+		t.Fatalf("ProbableSubsystem = %q, want Soak fixture disk consumption", got.payload.Alert.ProbableSubsystem)
+	}
+	if got.payload.Alert.FailureSignature != "soak_fixture_disk_exhausted" {
+		t.Fatalf("FailureSignature = %q, want soak_fixture_disk_exhausted", got.payload.Alert.FailureSignature)
 	}
 }
 

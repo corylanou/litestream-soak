@@ -224,12 +224,13 @@ func (a *API) handleListFailures(w http.ResponseWriter, r *http.Request) {
 	failures := make([]FailureResponse, 0, len(verifications))
 	for _, verification := range verifications {
 		vf := classifyVerification(&verification)
+		category := failureCategoryForSignature(vf.Signature)
 		failure := FailureResponse{
 			Verification:      verification,
 			FailureStage:      vf.Stage,
 			FailureSignature:  vf.Signature,
-			FailureCategory:   failureCategoryActionable,
-			FailureSeverity:   failureSeverityBad,
+			FailureCategory:   category,
+			FailureSeverity:   failureSeverityForCategory(category),
 			ProbableSubsystem: vf.probableSubsystem(),
 		}
 		worker, err := a.db.GetWorker(verification.WorkerID)

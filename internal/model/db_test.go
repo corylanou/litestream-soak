@@ -1,6 +1,7 @@
 package model
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -56,6 +57,72 @@ func TestPoolSizing(t *testing.T) {
 	}
 	if got := db.reader.Stats().MaxOpenConnections; got < 2 {
 		t.Fatalf("reader MaxOpenConnections = %d, want >= 2 for read concurrency", got)
+	}
+}
+
+func TestOpenAddsVerificationClassificationColumn(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	legacy, err := sql.Open("sqlite", dbPath+dsnParams)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, err := legacy.Exec(`
+		CREATE TABLE verifications (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			worker_id TEXT NOT NULL,
+			started_at DATETIME NOT NULL,
+			completed_at DATETIME,
+			status TEXT NOT NULL DEFAULT 'running',
+			check_type TEXT NOT NULL,
+			source_checksum TEXT,
+			restored_checksum TEXT,
+			passed BOOLEAN,
+			duration_ms INTEGER,
+			error_message TEXT
+		)`); err != nil {
+		_ = legacy.Close()
+		t.Fatalf("create legacy verifications table: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy database: %v", err)
+	}
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	rows, err := db.query(`PRAGMA table_info(verifications)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(verifications): %v", err)
+	}
+	t.Cleanup(func() { _ = rows.Close() })
+
+	found := false
+	for rows.Next() {
+		var (
+			cid          int
+			name         string
+			columnType   string
+			notNull      int
+			defaultValue sql.NullString
+			primaryKey   int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatalf("scan table info: %v", err)
+		}
+		if name == "failure_classification_json" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("table info rows: %v", err)
+	}
+	if !found {
+		t.Fatal("failure_classification_json column not found")
 	}
 }
 

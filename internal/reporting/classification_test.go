@@ -1,6 +1,9 @@
 package reporting
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestClassifyVerificationFailureS3ListRequestCanceled(t *testing.T) {
 	errMsg := "validation failed (exit 1): time=2026-04-26T19:00:05.722Z level=ERROR msg=\"Validation failed\" check_type=restore error=\"restore failed: exit status 1\\nOutput: time=2026-04-26T19:00:05.719Z level=ERROR msg=\\\"failed to run\\\" error=\\\"get LTX time bounds: operation error S3: ListObjectsV2, https response error StatusCode: 408, RequestID: 1777230002707552565, HostID: , api error RequestCanceled: Request is canceled.\\\"\\n\""
@@ -241,6 +244,134 @@ func TestClassifyVerificationFailureDiskCapacity(t *testing.T) {
 	}
 	if got.ObjectStore != nil {
 		t.Fatalf("ObjectStore = %#v, want nil", got.ObjectStore)
+	}
+}
+
+func TestClassifyVerificationFailureWithRuntimeDiskCapacity(t *testing.T) {
+	t.Parallel()
+
+	completedAt := time.Date(2026, 7, 26, 1, 29, 13, 0, time.UTC)
+	errorMessage := `sync database: db sync: stage-write ltx file /data/dbs/.db-00005.db-litestream/ltx/0/000000000000f6b4.ltx.tmp: disk full: write header`
+
+	tests := []struct {
+		name      string
+		runtime   *RuntimePayload
+		want      string
+		wantStage string
+	}{
+		{
+			name: "99.6 percent source usage is fixture exhaustion",
+			runtime: &RuntimePayload{
+				DataDiskUsedBytes:   9_894_000_000,
+				DBTotalSizeBytes:    9_700_000_000,
+				WALTotalSizeBytes:   158_000_000,
+				SnapshotCollectedAt: completedAt.Add(-15 * time.Second),
+			},
+			want:      "soak_fixture_disk_exhausted",
+			wantStage: "disk_capacity",
+		},
+		{
+			name: "exactly 95 percent source usage is fixture exhaustion",
+			runtime: &RuntimePayload{
+				DataDiskUsedBytes:   1_000,
+				DBTotalSizeBytes:    900,
+				WALTotalSizeBytes:   50,
+				SnapshotCollectedAt: completedAt,
+			},
+			want:      "soak_fixture_disk_exhausted",
+			wantStage: "disk_capacity",
+		},
+		{
+			name: "just below 95 percent remains actionable",
+			runtime: &RuntimePayload{
+				DataDiskUsedBytes:   1_000,
+				DBTotalSizeBytes:    900,
+				WALTotalSizeBytes:   49,
+				SnapshotCollectedAt: completedAt,
+			},
+			want:      "disk_capacity_full",
+			wantStage: "disk_capacity",
+		},
+		{
+			name: "non-dominant source usage remains actionable",
+			runtime: &RuntimePayload{
+				DataDiskUsedBytes:   1_000,
+				DBTotalSizeBytes:    500,
+				WALTotalSizeBytes:   50,
+				SnapshotCollectedAt: completedAt,
+			},
+			want:      "disk_capacity_full",
+			wantStage: "disk_capacity",
+		},
+		{
+			name:      "missing telemetry remains actionable",
+			want:      "disk_capacity_full",
+			wantStage: "disk_capacity",
+		},
+		{
+			name: "missing collection time remains actionable",
+			runtime: &RuntimePayload{
+				DataDiskUsedBytes: 1_000,
+				DBTotalSizeBytes:  950,
+			},
+			want:      "disk_capacity_full",
+			wantStage: "disk_capacity",
+		},
+		{
+			name: "stale telemetry remains actionable",
+			runtime: &RuntimePayload{
+				DataDiskUsedBytes:   1_000,
+				DBTotalSizeBytes:    950,
+				SnapshotCollectedAt: completedAt.Add(-61 * time.Second),
+			},
+			want:      "disk_capacity_full",
+			wantStage: "disk_capacity",
+		},
+		{
+			name: "future-skewed telemetry remains actionable",
+			runtime: &RuntimePayload{
+				DataDiskUsedBytes:   1_000,
+				DBTotalSizeBytes:    950,
+				SnapshotCollectedAt: completedAt.Add(61 * time.Second),
+			},
+			want:      "disk_capacity_full",
+			wantStage: "disk_capacity",
+		},
+		{
+			name: "source bytes exceeding used bytes remains actionable",
+			runtime: &RuntimePayload{
+				DataDiskUsedBytes:   1_000,
+				DBTotalSizeBytes:    1_001,
+				SnapshotCollectedAt: completedAt,
+			},
+			want:      "disk_capacity_full",
+			wantStage: "disk_capacity",
+		},
+		{
+			name: "single database telemetry is supported",
+			runtime: &RuntimePayload{
+				DataDiskUsedBytes:   1_000,
+				DBSizeBytes:         925,
+				WALSizeBytes:        25,
+				SnapshotCollectedAt: completedAt,
+			},
+			want:      "soak_fixture_disk_exhausted",
+			wantStage: "disk_capacity",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ClassifyVerificationFailureWithRuntime("integrity", errorMessage, tt.runtime, completedAt)
+			if got.Stage != tt.wantStage {
+				t.Errorf("Stage = %q, want %q", got.Stage, tt.wantStage)
+			}
+			if got.Signature != tt.want {
+				t.Errorf("Signature = %q, want %q", got.Signature, tt.want)
+			}
+		})
 	}
 }
 

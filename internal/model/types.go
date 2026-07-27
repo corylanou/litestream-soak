@@ -3,6 +3,8 @@ package model
 import (
 	"strings"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 type WorkerStatus string
@@ -48,17 +50,18 @@ type Worker struct {
 }
 
 type Verification struct {
-	ID               int        `json:"id"`
-	WorkerID         string     `json:"worker_id"`
-	StartedAt        time.Time  `json:"started_at"`
-	CompletedAt      *time.Time `json:"completed_at,omitempty"`
-	Status           string     `json:"status"`
-	CheckType        string     `json:"check_type"`
-	SourceChecksum   string     `json:"source_checksum,omitempty"`
-	RestoredChecksum string     `json:"restored_checksum,omitempty"`
-	Passed           bool       `json:"passed"`
-	DurationMS       int        `json:"duration_ms,omitempty"`
-	ErrorMessage     string     `json:"error_message,omitempty"`
+	ID                    int                              `json:"id"`
+	WorkerID              string                           `json:"worker_id"`
+	StartedAt             time.Time                        `json:"started_at"`
+	CompletedAt           *time.Time                       `json:"completed_at,omitempty"`
+	Status                string                           `json:"status"`
+	CheckType             string                           `json:"check_type"`
+	SourceChecksum        string                           `json:"source_checksum,omitempty"`
+	RestoredChecksum      string                           `json:"restored_checksum,omitempty"`
+	Passed                bool                             `json:"passed"`
+	DurationMS            int                              `json:"duration_ms,omitempty"`
+	ErrorMessage          string                           `json:"error_message,omitempty"`
+	FailureClassification *reporting.FailureClassification `json:"failure_classification,omitempty"`
 }
 
 func (v Verification) Aborted() bool {

@@ -2,7 +2,11 @@ package model
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 type VerificationTick struct {
@@ -14,17 +18,18 @@ type VerificationTick struct {
 }
 
 type VerificationStat struct {
-	ID              int       `json:"id"`
-	WorkerID        string    `json:"worker_id"`
-	Source          string    `json:"source"`
-	WorkerCreatedAt time.Time `json:"worker_created_at"`
-	StartedAt       time.Time `json:"started_at"`
-	Status          string    `json:"status"`
-	CheckType       string    `json:"check_type"`
-	Passed          bool      `json:"passed"`
-	DurationMS      int       `json:"duration_ms"`
-	ErrorMessage    string    `json:"error_message,omitempty"`
-	HasPriorPass    bool      `json:"has_prior_pass"`
+	ID                    int                              `json:"id"`
+	WorkerID              string                           `json:"worker_id"`
+	Source                string                           `json:"source"`
+	WorkerCreatedAt       time.Time                        `json:"worker_created_at"`
+	StartedAt             time.Time                        `json:"started_at"`
+	Status                string                           `json:"status"`
+	CheckType             string                           `json:"check_type"`
+	Passed                bool                             `json:"passed"`
+	DurationMS            int                              `json:"duration_ms"`
+	ErrorMessage          string                           `json:"error_message,omitempty"`
+	HasPriorPass          bool                             `json:"has_prior_pass"`
+	FailureClassification *reporting.FailureClassification `json:"failure_classification,omitempty"`
 }
 
 func (d *DB) ListVerificationTicks(perWorker int, since time.Time) (map[string][]VerificationTick, error) {
@@ -84,6 +89,7 @@ func (d *DB) ListVerificationStatsSince(source string, since time.Time) ([]Verif
 			v.passed,
 			v.duration_ms,
 			COALESCE(v.error_message, ''),
+			COALESCE(v.failure_classification_json, ''),
 			(fp.first_pass_at IS NOT NULL AND fp.first_pass_at < v.started_at)
 		FROM verifications v
 		JOIN workers w ON w.id = v.worker_id
@@ -101,6 +107,7 @@ func (d *DB) ListVerificationStatsSince(source string, since time.Time) ([]Verif
 	for rows.Next() {
 		var stat VerificationStat
 		var hasPriorPass int
+		var failureClassificationJSON string
 		if err := rows.Scan(
 			&stat.ID,
 			&stat.WorkerID,
@@ -112,8 +119,13 @@ func (d *DB) ListVerificationStatsSince(source string, since time.Time) ([]Verif
 			&stat.Passed,
 			&stat.DurationMS,
 			&stat.ErrorMessage,
+			&failureClassificationJSON,
 			&hasPriorPass,
 		); err != nil {
+			return nil, err
+		}
+		stat.FailureClassification, err = decodeFailureClassification(failureClassificationJSON)
+		if err != nil {
 			return nil, err
 		}
 		stat.HasPriorPass = hasPriorPass != 0
@@ -126,10 +138,14 @@ func (d *DB) ListVerificationStatsSince(source string, since time.Time) ([]Verif
 }
 
 func (d *DB) RecordVerification(v *Verification) error {
+	failureClassificationJSON, err := encodeFailureClassification(v.FailureClassification)
+	if err != nil {
+		return err
+	}
 	result, err := d.exec(`
-		INSERT INTO verifications (worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		v.WorkerID, v.StartedAt, v.CompletedAt, v.Status, v.CheckType, v.SourceChecksum, v.RestoredChecksum, v.Passed, v.DurationMS, v.ErrorMessage,
+		INSERT INTO verifications (worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message, failure_classification_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		v.WorkerID, v.StartedAt, v.CompletedAt, v.Status, v.CheckType, v.SourceChecksum, v.RestoredChecksum, v.Passed, v.DurationMS, v.ErrorMessage, failureClassificationJSON,
 	)
 	if err != nil {
 		return err
@@ -145,7 +161,7 @@ func (d *DB) RecordVerification(v *Verification) error {
 
 func (d *DB) ListVerifications(workerID string, limit int) ([]Verification, error) {
 	rows, err := d.query(`
-		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message
+		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message, failure_classification_json
 		FROM verifications WHERE worker_id = ? ORDER BY started_at DESC LIMIT ?`,
 		workerID, limit,
 	)
@@ -158,7 +174,12 @@ func (d *DB) ListVerifications(workerID string, limit int) ([]Verification, erro
 	for rows.Next() {
 		var v Verification
 		var completedAt sql.NullTime
-		if err := rows.Scan(&v.ID, &v.WorkerID, &v.StartedAt, &completedAt, &v.Status, &v.CheckType, &v.SourceChecksum, &v.RestoredChecksum, &v.Passed, &v.DurationMS, &v.ErrorMessage); err != nil {
+		var failureClassificationJSON string
+		if err := rows.Scan(&v.ID, &v.WorkerID, &v.StartedAt, &completedAt, &v.Status, &v.CheckType, &v.SourceChecksum, &v.RestoredChecksum, &v.Passed, &v.DurationMS, &v.ErrorMessage, &failureClassificationJSON); err != nil {
+			return nil, err
+		}
+		v.FailureClassification, err = decodeFailureClassification(failureClassificationJSON)
+		if err != nil {
 			return nil, err
 		}
 		if completedAt.Valid {
@@ -176,14 +197,16 @@ func (d *DB) GetLatestFailedVerification(workerID string) (*Verification, error)
 	var verification Verification
 	var completedAt sql.NullTime
 
-	err := d.queryRow(`
-		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message
+	row := d.queryRow(`
+		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message, failure_classification_json
 		FROM verifications
 		WHERE worker_id = ? AND (passed = 0 OR lower(trim(status)) = 'failed') AND lower(trim(status)) <> 'aborted'
 		ORDER BY started_at DESC
 		LIMIT 1`,
 		workerID,
-	).Scan(
+	)
+	var failureClassificationJSON string
+	err := row.Scan(
 		&verification.ID,
 		&verification.WorkerID,
 		&verification.StartedAt,
@@ -195,6 +218,7 @@ func (d *DB) GetLatestFailedVerification(workerID string) (*Verification, error)
 		&verification.Passed,
 		&verification.DurationMS,
 		&verification.ErrorMessage,
+		&failureClassificationJSON,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -205,12 +229,16 @@ func (d *DB) GetLatestFailedVerification(workerID string) (*Verification, error)
 	if completedAt.Valid {
 		verification.CompletedAt = &completedAt.Time
 	}
+	verification.FailureClassification, err = decodeFailureClassification(failureClassificationJSON)
+	if err != nil {
+		return nil, err
+	}
 	return &verification, nil
 }
 
 func (d *DB) ListRecentFailedVerifications(limit int) ([]Verification, error) {
 	rows, err := d.query(`
-		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message
+		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message, failure_classification_json
 		FROM verifications
 		WHERE (passed = 0 OR lower(trim(status)) = 'failed') AND lower(trim(status)) <> 'aborted'
 		ORDER BY started_at DESC
@@ -226,7 +254,12 @@ func (d *DB) ListRecentFailedVerifications(limit int) ([]Verification, error) {
 	for rows.Next() {
 		var v Verification
 		var completedAt sql.NullTime
-		if err := rows.Scan(&v.ID, &v.WorkerID, &v.StartedAt, &completedAt, &v.Status, &v.CheckType, &v.SourceChecksum, &v.RestoredChecksum, &v.Passed, &v.DurationMS, &v.ErrorMessage); err != nil {
+		var failureClassificationJSON string
+		if err := rows.Scan(&v.ID, &v.WorkerID, &v.StartedAt, &completedAt, &v.Status, &v.CheckType, &v.SourceChecksum, &v.RestoredChecksum, &v.Passed, &v.DurationMS, &v.ErrorMessage, &failureClassificationJSON); err != nil {
+			return nil, err
+		}
+		v.FailureClassification, err = decodeFailureClassification(failureClassificationJSON)
+		if err != nil {
 			return nil, err
 		}
 		if completedAt.Valid {
@@ -238,4 +271,26 @@ func (d *DB) ListRecentFailedVerifications(limit int) ([]Verification, error) {
 		return nil, err
 	}
 	return verifications, nil
+}
+
+func encodeFailureClassification(classification *reporting.FailureClassification) (string, error) {
+	if classification == nil {
+		return "", nil
+	}
+	body, err := json.Marshal(classification)
+	if err != nil {
+		return "", fmt.Errorf("encode failure classification: %w", err)
+	}
+	return string(body), nil
+}
+
+func decodeFailureClassification(raw string) (*reporting.FailureClassification, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	var classification reporting.FailureClassification
+	if err := json.Unmarshal([]byte(raw), &classification); err != nil {
+		return nil, fmt.Errorf("decode failure classification: %w", err)
+	}
+	return &classification, nil
 }

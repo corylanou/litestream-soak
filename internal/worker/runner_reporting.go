@@ -113,7 +113,8 @@ func (r *Runner) failureClassification(result VerificationResult) *reporting.Fai
 	if result.Passed || result.Status == "aborted" {
 		return nil
 	}
-	classification := reporting.ClassifyVerificationFailure(result.CheckType, result.ErrorMessage)
+	snapshot := r.currentSnapshot()
+	classification := reporting.ClassifyVerificationFailureWithRuntime(result.CheckType, result.ErrorMessage, &snapshot.RuntimePayload, result.CompletedAt)
 	if classification.ObjectStore != nil {
 		classification.ObjectStore.Bucket = firstNonEmpty(classification.ObjectStore.Bucket, r.cfg.S3Bucket)
 		classification.ObjectStore.Prefix = firstNonEmpty(classification.ObjectStore.Prefix, strings.Trim(strings.TrimPrefix(r.cfg.S3Path, "/"), "/"))

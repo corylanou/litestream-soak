@@ -165,6 +165,7 @@ type DeploymentScorecard struct {
 	PassedWorkers           int                       `json:"passed_workers"`
 	FailedWorkers           int                       `json:"failed_workers"`
 	ActionableFailedWorkers int                       `json:"actionable_failed_workers"`
+	FixtureFailures         int                       `json:"fixture_failures"`
 	EnvironmentalFailures   int                       `json:"environmental_failures"`
 	RampUpFailures          int                       `json:"ramp_up_failures"`
 	AwaitingWorkers         int                       `json:"awaiting_workers"`

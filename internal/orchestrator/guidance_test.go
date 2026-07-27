@@ -223,6 +223,36 @@ func TestBuildIncidentGuideSync(t *testing.T) {
 	}
 }
 
+func TestBuildIncidentGuideFixtureDisk(t *testing.T) {
+	t.Parallel()
+
+	bundle := &IncidentBundle{
+		ActiveFailure:    true,
+		FailureStage:     "disk_capacity",
+		FailureSignature: "soak_fixture_disk_exhausted",
+		Worker: model.Worker{
+			ID:     "worker-main-fixture-disk",
+			Status: model.WorkerDegraded,
+		},
+		Workload: workload.Config{LoadMode: "synthetic"},
+	}
+
+	guide := buildIncidentGuide(bundle)
+	if guide.ProbableSubsystem != "Soak fixture disk consumption" {
+		t.Fatalf("ProbableSubsystem = %q, want Soak fixture disk consumption", guide.ProbableSubsystem)
+	}
+	if guide.RecommendedPromptMode != "harness" {
+		t.Fatalf("RecommendedPromptMode = %q, want harness", guide.RecommendedPromptMode)
+	}
+	steps := strings.Join(guide.NextSteps, " ")
+	if !strings.Contains(steps, "source database and WAL growth") {
+		t.Fatalf("NextSteps = %q, want source database and WAL guidance", steps)
+	}
+	if strings.Contains(steps, "increasing disk headroom") {
+		t.Fatalf("NextSteps = %q, should not use Litestream scratch-headroom guidance", steps)
+	}
+}
+
 func TestBuildIncidentGuideLegacyRuntimeTelemetry(t *testing.T) {
 	bundle := &IncidentBundle{
 		Worker: model.Worker{

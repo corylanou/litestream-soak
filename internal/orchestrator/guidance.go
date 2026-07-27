@@ -863,7 +863,7 @@ func recommendedPromptModeForSubsystem(subsystem string) promptMode {
 		return promptModeHealthy
 	case "Litestream DB sync executor", "Litestream sync/control socket", "Replication or restore path", "Restore correctness / integrity validation":
 		return promptModeLitestream
-	case "Soak harness or worker runtime", "Disk capacity / restore scratch headroom":
+	case "Soak harness or worker runtime", "Soak fixture disk consumption", "Disk capacity / restore scratch headroom":
 		return promptModeHarness
 	default:
 		return promptModeTriage
@@ -926,6 +926,12 @@ func incidentNextSteps(subsystem string, bundle *IncidentBundle) []string {
 		)
 	}
 	switch subsystem {
+	case "Soak fixture disk consumption":
+		steps = append(steps,
+			"Treat source database and WAL growth as the primary disk consumer while keeping this failed verification visible in release-quality signals.",
+			"Confirm the reported source-byte share and telemetry timestamp before changing Litestream restore or replication code.",
+			"Inspect the workload retention and volume lifecycle that allowed fixture data to exhaust the disk.",
+		)
 	case "Disk capacity / restore scratch headroom":
 		steps = append(steps,
 			"Treat disk pressure as the current blocker. Check /data usage, restore temp files, and source DB size before investigating Litestream sync internals.",

@@ -82,7 +82,7 @@
       </div>
       <div class="kpi">
         <div class="kpi-label">Failures 24h{{template "info" "Failed checks in the last 24 hours. A small steady number on main is the known baseline - what matters is a sudden burst, or a failure signature you have not seen before. Compare against the failures-per-hour chart to see whether they cluster."}}</div>
-        <div class="kpi-value {{if gt .KPIs.ActionableFailures24h 0}}kpi-bad{{else if gt .KPIs.Failures24h 0}}kpi-warn{{end}}">{{.KPIs.Failures24h}}{{if or (gt .KPIs.EnvironmentalFailures24h 0) (gt .KPIs.RampUpFailures24h 0)}} <span class="kpi-unit">({{if gt .KPIs.EnvironmentalFailures24h 0}}{{.KPIs.EnvironmentalFailures24h}} environmental{{end}}{{if and (gt .KPIs.EnvironmentalFailures24h 0) (gt .KPIs.RampUpFailures24h 0)}}, {{end}}{{if gt .KPIs.RampUpFailures24h 0}}{{.KPIs.RampUpFailures24h}} ramp-up{{end}})</span>{{end}}</div>
+        <div class="kpi-value {{if gt .KPIs.ActionableFailures24h 0}}kpi-bad{{else if gt .KPIs.Failures24h 0}}kpi-warn{{end}}">{{.KPIs.Failures24h}}{{if or (gt .KPIs.FixtureFailures24h 0) (gt .KPIs.EnvironmentalFailures24h 0) (gt .KPIs.RampUpFailures24h 0)}} <span class="kpi-unit">({{if gt .KPIs.FixtureFailures24h 0}}{{.KPIs.FixtureFailures24h}} fixture{{end}}{{if gt .KPIs.EnvironmentalFailures24h 0}}{{if gt .KPIs.FixtureFailures24h 0}}, {{end}}{{.KPIs.EnvironmentalFailures24h}} environmental{{end}}{{if gt .KPIs.RampUpFailures24h 0}}{{if or (gt .KPIs.FixtureFailures24h 0) (gt .KPIs.EnvironmentalFailures24h 0)}}, {{end}}{{.KPIs.RampUpFailures24h}} ramp-up{{end}})</span>{{end}}</div>
         <div class="kpi-sub">{{if gt .Summary.ActiveVerifications 0}}{{.Summary.ActiveVerifications}} check(s) running{{else}}no checks running{{end}}</div>
       </div>
       <div class="kpi">

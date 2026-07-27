@@ -1830,6 +1830,181 @@ func TestHandleVerificationAbortedReportIsNeutral(t *testing.T) {
 	}
 }
 
+func TestHandleVerificationPersistsRuntimeDiskClassification(t *testing.T) {
+	t.Parallel()
+
+	completedAt := time.Date(2026, 7, 26, 1, 29, 13, 0, time.UTC)
+	tests := []struct {
+		name              string
+		errorMessage      string
+		reportedSignature string
+		runtime           reporting.RuntimePayload
+		signature         string
+	}{
+		{
+			name: "fresh fixture-dominant telemetry overrides old worker classification",
+			runtime: reporting.RuntimePayload{
+				DataDiskUsedBytes:   1_000,
+				DBTotalSizeBytes:    950,
+				SnapshotCollectedAt: completedAt,
+			},
+			signature: "soak_fixture_disk_exhausted",
+		},
+		{
+			name: "fresh non-dominant telemetry remains actionable",
+			runtime: reporting.RuntimePayload{
+				DataDiskUsedBytes:   1_000,
+				DBTotalSizeBytes:    949,
+				SnapshotCollectedAt: completedAt,
+			},
+			signature: "disk_capacity_full",
+		},
+		{
+			name: "missing timestamp remains actionable before normalization",
+			runtime: reporting.RuntimePayload{
+				DataDiskUsedBytes: 1_000,
+				DBTotalSizeBytes:  950,
+			},
+			signature: "disk_capacity_full",
+		},
+		{
+			name: "stale telemetry remains actionable",
+			runtime: reporting.RuntimePayload{
+				DataDiskUsedBytes:   1_000,
+				DBTotalSizeBytes:    950,
+				SnapshotCollectedAt: completedAt.Add(-61 * time.Second),
+			},
+			signature: "disk_capacity_full",
+		},
+		{
+			name:              "unsupported fixture claim remains actionable",
+			errorMessage:      "verification failed",
+			reportedSignature: "soak_fixture_disk_exhausted",
+			signature:         "disk_capacity_full",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := openTestDB(t)
+			workerID := "worker-runtime-disk-" + strings.ReplaceAll(tt.name, " ", "-")
+			createTestWorker(t, db, model.Worker{
+				ID:            workerID,
+				Name:          workerID,
+				Status:        model.WorkerRunning,
+				Source:        "main",
+				GitSHA:        "abc123",
+				LitestreamSHA: "ls123",
+				ProfileName:   "many-dbs-100-dir",
+				ProfileConfig: "{}",
+			})
+
+			errorMessage := tt.errorMessage
+			if errorMessage == "" {
+				errorMessage = "sync database: db sync: stage-write ltx file: disk full: write header"
+			}
+			reportedSignature := tt.reportedSignature
+			if reportedSignature == "" {
+				reportedSignature = "disk_capacity_full"
+			}
+			payload := reporting.VerificationPayload{
+				WorkerIdentity: reporting.WorkerIdentity{
+					WorkerID:      workerID,
+					Name:          workerID,
+					Source:        "main",
+					GitSHA:        "abc123",
+					LitestreamSHA: "ls123",
+					ProfileName:   "many-dbs-100-dir",
+					ProfileConfig: "{}",
+				},
+				StartedAt:    completedAt.Add(-time.Minute),
+				CompletedAt:  completedAt,
+				CheckType:    "integrity",
+				Status:       "failed",
+				Passed:       false,
+				Summary:      "verification failed",
+				ErrorMessage: errorMessage,
+				FailureClassification: &reporting.FailureClassification{
+					Stage:     "disk_capacity",
+					Signature: reportedSignature,
+				},
+				RuntimePayload: tt.runtime,
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal payload: %v", err)
+			}
+
+			api := NewAPI(db, nil, nil, nil, nil, nil)
+			request := httptest.NewRequest(http.MethodPost, "/api/workers/"+workerID+"/verifications", bytes.NewReader(body))
+			request.SetPathValue("id", workerID)
+			recorder := httptest.NewRecorder()
+			api.handleVerification(recorder, request)
+
+			if recorder.Code != http.StatusAccepted {
+				t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+			}
+
+			verifications, err := db.ListVerifications(workerID, 10)
+			if err != nil {
+				t.Fatalf("ListVerifications() error = %v", err)
+			}
+			if len(verifications) != 1 {
+				t.Fatalf("len(verifications) = %d, want 1", len(verifications))
+			}
+			if verifications[0].FailureClassification == nil {
+				t.Fatal("FailureClassification = nil")
+			}
+			if got := verifications[0].FailureClassification.Signature; got != tt.signature {
+				t.Fatalf("stored Signature = %q, want %q", got, tt.signature)
+			}
+
+			summary, err := api.buildWorkerSummary(model.Worker{
+				ID:        workerID,
+				CreatedAt: completedAt.Add(-time.Hour),
+			})
+			if err != nil {
+				t.Fatalf("buildWorkerSummary() error = %v", err)
+			}
+			if summary.CurrentFailureSignature != tt.signature {
+				t.Fatalf("CurrentFailureSignature = %q, want %q", summary.CurrentFailureSignature, tt.signature)
+			}
+			failuresRequest := httptest.NewRequest(http.MethodGet, "/api/failures", nil)
+			failuresRecorder := httptest.NewRecorder()
+			api.handleListFailures(failuresRecorder, failuresRequest)
+			if failuresRecorder.Code != http.StatusOK {
+				t.Fatalf("failures status code = %d, want %d", failuresRecorder.Code, http.StatusOK)
+			}
+			var failures []FailureResponse
+			if err := json.Unmarshal(failuresRecorder.Body.Bytes(), &failures); err != nil {
+				t.Fatalf("decode failures response: %v", err)
+			}
+			if len(failures) != 1 {
+				t.Fatalf("len(failures) = %d, want 1", len(failures))
+			}
+			wantCategory := "actionable"
+			wantSeverity := "bad"
+			wantSubsystem := "Disk capacity / restore scratch headroom"
+			if tt.signature == "soak_fixture_disk_exhausted" {
+				wantCategory = "soak-fixture"
+				wantSeverity = "warn"
+				wantSubsystem = "Soak fixture disk consumption"
+			}
+			if failures[0].FailureCategory != wantCategory {
+				t.Fatalf("FailureCategory = %q, want %q", failures[0].FailureCategory, wantCategory)
+			}
+			if failures[0].FailureSeverity != wantSeverity {
+				t.Fatalf("FailureSeverity = %q, want %q", failures[0].FailureSeverity, wantSeverity)
+			}
+			if failures[0].ProbableSubsystem != wantSubsystem {
+				t.Fatalf("ProbableSubsystem = %q, want %q", failures[0].ProbableSubsystem, wantSubsystem)
+			}
+		})
+	}
+}
+
 func TestHandleHeartbeatRuntimeAtGating(t *testing.T) {
 	t.Parallel()
 

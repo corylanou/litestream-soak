@@ -981,6 +981,58 @@ func TestPollDBStatsClearsStaleLitestreamStateOnFailure(t *testing.T) {
 	}
 }
 
+func TestFailureClassificationUsesFreshRuntimeDiskEvidence(t *testing.T) {
+	t.Parallel()
+
+	completedAt := time.Date(2026, 7, 26, 1, 29, 13, 0, time.UTC)
+	result := VerificationResult{
+		CompletedAt:  completedAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		ErrorMessage: "sync database: db sync: stage-write ltx file: disk full: write header",
+	}
+
+	tests := []struct {
+		name        string
+		sourceBytes int64
+		want        string
+	}{
+		{
+			name:        "fixture exhaustion",
+			sourceBytes: 950,
+			want:        "soak_fixture_disk_exhausted",
+		},
+		{
+			name:        "actionable disk capacity",
+			sourceBytes: 949,
+			want:        "disk_capacity_full",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			runner := NewRunner(DefaultConfig())
+			runner.snapshotMu.Lock()
+			runner.snapshot = runtimeSnapshot{RuntimePayload: reporting.RuntimePayload{
+				DataDiskUsedBytes:   1_000,
+				DBTotalSizeBytes:    tt.sourceBytes,
+				SnapshotCollectedAt: completedAt,
+			}}
+			runner.snapshotMu.Unlock()
+
+			classification := runner.failureClassification(result)
+			if classification == nil {
+				t.Fatal("failureClassification() = nil")
+			}
+			if classification.Signature != tt.want {
+				t.Fatalf("Signature = %q, want %q", classification.Signature, tt.want)
+			}
+		})
+	}
+}
+
 func TestPollLitestreamLocalState(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, ".test.db-litestream")

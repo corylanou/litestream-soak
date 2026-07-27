@@ -4,6 +4,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+)
+
+const (
+	soakFixtureSourceUsedPercent = 95.0
+	diskTelemetryMaxAge          = time.Minute
 )
 
 var (
@@ -44,6 +50,43 @@ func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassifi
 		classification.Restore = &RestoreFailure{Phase: inferRestorePhase(text)}
 	}
 	return classification
+}
+
+func ClassifyVerificationFailureWithRuntime(checkType, errorMessage string, runtime *RuntimePayload, observedAt time.Time) FailureClassification {
+	classification := ClassifyVerificationFailure(checkType, errorMessage)
+	if classification.Signature == "disk_capacity_full" && soakFixtureExhaustedDisk(runtime, observedAt) {
+		classification.Signature = "soak_fixture_disk_exhausted"
+	}
+	return classification
+}
+
+func soakFixtureExhaustedDisk(runtime *RuntimePayload, observedAt time.Time) bool {
+	if runtime == nil || observedAt.IsZero() || runtime.SnapshotCollectedAt.IsZero() || runtime.DataDiskUsedBytes == 0 {
+		return false
+	}
+	age := observedAt.Sub(runtime.SnapshotCollectedAt)
+	if age < -diskTelemetryMaxAge || age > diskTelemetryMaxAge {
+		return false
+	}
+	sourceBytes, ok := soakSourceDataBytes(*runtime)
+	if !ok || sourceBytes == 0 || sourceBytes > runtime.DataDiskUsedBytes {
+		return false
+	}
+	return float64(sourceBytes)/float64(runtime.DataDiskUsedBytes)*100 >= soakFixtureSourceUsedPercent
+}
+
+func soakSourceDataBytes(runtime RuntimePayload) (uint64, bool) {
+	if runtime.DBTotalSizeBytes != 0 || runtime.WALTotalSizeBytes != 0 {
+		return sumSourceDataBytes(runtime.DBTotalSizeBytes, runtime.WALTotalSizeBytes)
+	}
+	return sumSourceDataBytes(runtime.DBSizeBytes, runtime.WALSizeBytes)
+}
+
+func sumSourceDataBytes(dbBytes, walBytes int64) (uint64, bool) {
+	if dbBytes < 0 || walBytes < 0 || dbBytes > (1<<63-1)-walBytes {
+		return 0, false
+	}
+	return uint64(dbBytes + walBytes), true
 }
 
 func InferFailureStage(checkType, errorMessage string) string {
@@ -199,6 +242,7 @@ func isDiskCapacityFailure(text string) bool {
 	return strings.Contains(text, "no space left on device") ||
 		strings.Contains(text, "database or disk is full") ||
 		strings.Contains(text, "disk is full") ||
+		strings.Contains(text, "disk full") ||
 		strings.Contains(text, "enospc") ||
 		strings.Contains(text, "sqlite_full")
 }
