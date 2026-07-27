@@ -432,6 +432,85 @@ func TestClearOldWorkerReplicaPrefix(t *testing.T) {
 	}
 }
 
+func TestClearWorkerReplicaPrefixRejectsEmptyWorkerName(t *testing.T) {
+	t.Parallel()
+
+	manager := &Manager{
+		replica: ReplicaConfig{
+			Bucket:    "bucket",
+			Endpoint:  "http://127.0.0.1",
+			AccessKey: "access",
+			SecretKey: "secret",
+		},
+	}
+
+	err := manager.clearWorkerReplicaPrefix(t.Context(), model.Worker{FlyVolumeID: "volume-without-worker"})
+	if err == nil {
+		t.Fatal("clearWorkerReplicaPrefix() error = nil, want worker name error")
+	}
+	if !strings.Contains(err.Error(), "worker name is required") {
+		t.Fatalf("clearWorkerReplicaPrefix() error = %v, want worker name error", err)
+	}
+}
+
+func TestDestroyWorkerPreservesStatusUntilCleanupCompletes(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-158-low-vol",
+		AppName:       "litestream-soak",
+		Name:          "worker-pr-158-low-vol",
+		Status:        model.WorkerRunning,
+		Source:        "pr-158",
+		GitSHA:        "soak-sha",
+		LitestreamSHA: "litestream-sha",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+		FlyMachineID:  "machine-pr-158-low-vol",
+		FlyVolumeID:   "volume-pr-158-low-vol",
+	})
+
+	fly := newTeardownTestServer(t, map[string]int{"volume-pr-158-low-vol": 1})
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+	err := manager.DestroyWorker(t.Context(), "worker-pr-158-low-vol")
+	if err == nil {
+		t.Fatal("DestroyWorker() error = nil, want volume cleanup error")
+	}
+	if !strings.Contains(err.Error(), "volume cleanup") {
+		t.Fatalf("DestroyWorker() error = %v, want volume cleanup context", err)
+	}
+
+	worker := mustWorker(t, db, "worker-pr-158-low-vol")
+	if worker.Status != model.WorkerRunning {
+		t.Fatalf("Status after failed cleanup = %q, want %q", worker.Status, model.WorkerRunning)
+	}
+	if !strings.Contains(worker.ErrorMessage, "worker cleanup incomplete") {
+		t.Fatalf("ErrorMessage = %q, want cleanup incomplete", worker.ErrorMessage)
+	}
+	requireWorkerEvent(t, db, worker.ID, "worker_destroy_failed")
+
+	if err := manager.DestroyWorker(t.Context(), worker.ID); err != nil {
+		t.Fatalf("DestroyWorker() retry error = %v", err)
+	}
+
+	worker = mustWorker(t, db, worker.ID)
+	if worker.Status != model.WorkerStopped {
+		t.Fatalf("Status after successful retry = %q, want %q", worker.Status, model.WorkerStopped)
+	}
+	if worker.ErrorMessage != "" {
+		t.Fatalf("ErrorMessage after successful retry = %q, want empty", worker.ErrorMessage)
+	}
+	if !fly.machineDestroyed("machine-pr-158-low-vol") {
+		t.Fatal("machine was not destroyed")
+	}
+	if !fly.volumeDestroyed("volume-pr-158-low-vol") {
+		t.Fatal("volume was not destroyed")
+	}
+	requireWorkerEvent(t, db, worker.ID, "worker_destroyed")
+}
+
 func TestLockSourceSerializesSameSource(t *testing.T) {
 	t.Parallel()
 
@@ -615,6 +694,98 @@ func (f *createWorkerFlyServer) machineRequests() []flyapi.CreateMachineRequest 
 
 func writeCreateWorkerJSON(w http.ResponseWriter, value any) {
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+type teardownTestServer struct {
+	client *flyapi.Client
+	server *httptest.Server
+
+	mu                sync.Mutex
+	destroyedMachines map[string]bool
+	destroyedVolumes  map[string]bool
+	volumeFailures    map[string]int
+	replicaPrefixes   []string
+}
+
+func newTeardownTestServer(t *testing.T, volumeFailures map[string]int) *teardownTestServer {
+	t.Helper()
+
+	fake := &teardownTestServer{
+		destroyedMachines: make(map[string]bool),
+		destroyedVolumes:  make(map[string]bool),
+		volumeFailures:    make(map[string]int, len(volumeFailures)),
+	}
+	for volumeID, failures := range volumeFailures {
+		fake.volumeFailures[volumeID] = failures
+	}
+	fake.server = httptest.NewServer(http.HandlerFunc(fake.handle))
+	t.Cleanup(fake.server.Close)
+	fake.client = flyapi.NewClientWithBaseURL("litestream-soak", "test-token", fake.server.URL)
+	return fake
+}
+
+func (f *teardownTestServer) handle(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/apps/litestream-soak/machines/"):
+		machineID := strings.TrimPrefix(r.URL.Path, "/apps/litestream-soak/machines/")
+		f.mu.Lock()
+		alreadyDestroyed := f.destroyedMachines[machineID]
+		f.destroyedMachines[machineID] = true
+		f.mu.Unlock()
+		if alreadyDestroyed {
+			http.Error(w, "machine not found", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/apps/litestream-soak/volumes/"):
+		volumeID := strings.TrimPrefix(r.URL.Path, "/apps/litestream-soak/volumes/")
+		f.mu.Lock()
+		failures := f.volumeFailures[volumeID]
+		if failures > 0 {
+			f.volumeFailures[volumeID] = failures - 1
+			f.mu.Unlock()
+			http.Error(w, "volume busy", http.StatusInternalServerError)
+			return
+		}
+		alreadyDestroyed := f.destroyedVolumes[volumeID]
+		f.destroyedVolumes[volumeID] = true
+		f.mu.Unlock()
+		if alreadyDestroyed {
+			http.Error(w, "volume not found", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case r.Method == http.MethodGet && r.URL.Path == "/bucket":
+		prefix := r.URL.Query().Get("prefix")
+		f.mu.Lock()
+		f.replicaPrefixes = append(f.replicaPrefixes, prefix)
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = fmt.Fprintf(w, "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>%sgeneration</Key></Contents></ListBucketResult>", prefix)
+	case r.Method == http.MethodPost && r.URL.Path == "/bucket":
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte("<DeleteResult/>"))
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (f *teardownTestServer) machineDestroyed(machineID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.destroyedMachines[machineID]
+}
+
+func (f *teardownTestServer) volumeDestroyed(volumeID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.destroyedVolumes[volumeID]
+}
+
+func (f *teardownTestServer) prefixes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.replicaPrefixes...)
 }
 
 func requireWorkerEvent(t *testing.T, db *model.DB, workerID, eventType string) model.Event {

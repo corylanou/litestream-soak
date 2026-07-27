@@ -224,6 +224,34 @@ curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
   "https://litestream-soak-ctl.fly.dev/api/run-archives?source=pr-1228&type=success" | jq .
 ```
 
+## Operator Source Teardown
+
+Retire a failed or otherwise obsolete source fleet with the authenticated
+archive-and-destroy endpoint:
+
+```bash
+curl -X POST -sS \
+  -H "Authorization: Bearer $SOAK_ADMIN_BEARER_TOKEN" \
+  "https://litestream-soak-ctl.fly.dev/api/admin/teardown-source?source=pr-1228" | jq .
+```
+
+The request requires an explicit `source`. It archives the latest deployment
+and worker evidence before deleting any resources, then destroys every
+non-stopped worker's Machine, volume, and S3 replica prefix. The response
+contains an outcome for each worker. Workers are marked `stopped` only after
+all three cleanup operations succeed; failed outcomes remain retryable by
+calling the endpoint again.
+
+Operator teardown archives use type `teardown`:
+
+```bash
+curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  "https://litestream-soak-ctl.fly.dev/api/run-archives?source=pr-1228&type=teardown" | jq .
+```
+
+The `main` fleet has an additional safeguard and is rejected unless the
+request includes `confirm_main=true`.
+
 If you want to inspect dormant workers quickly:
 
 ```bash

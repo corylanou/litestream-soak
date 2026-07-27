@@ -134,6 +134,28 @@ type DeploymentWorkerOutcome struct {
 	ProbableSubsystem string     `json:"probable_subsystem,omitempty"`
 }
 
+type SourceTeardownWorkerOutcome struct {
+	WorkerID       string             `json:"worker_id"`
+	Name           string             `json:"name"`
+	PreviousStatus model.WorkerStatus `json:"previous_status"`
+	Status         model.WorkerStatus `json:"status"`
+	Outcome        string             `json:"outcome"`
+	Error          string             `json:"error,omitempty"`
+}
+
+type SourceTeardownResponse struct {
+	Source                string                        `json:"source"`
+	ArchiveID             int                           `json:"archive_id"`
+	ArchiveType           string                        `json:"archive_type"`
+	ArchiveCreated        bool                          `json:"archive_created"`
+	Complete              bool                          `json:"complete"`
+	TotalWorkers          int                           `json:"total_workers"`
+	DestroyedWorkers      int                           `json:"destroyed_workers"`
+	AlreadyStoppedWorkers int                           `json:"already_stopped_workers"`
+	FailedWorkers         int                           `json:"failed_workers"`
+	Workers               []SourceTeardownWorkerOutcome `json:"workers"`
+}
+
 type DeploymentScorecard struct {
 	Deployment              model.Deployment          `json:"deployment"`
 	WindowStart             time.Time                 `json:"window_start"`
@@ -234,6 +256,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/workers/{id}/roll", a.handleRollWorker)
 	mux.HandleFunc("POST /api/admin/resume-dormant", a.handleResumeDormantWorkers)
 	mux.HandleFunc("POST /api/admin/pause-source", a.handlePauseSourceWorkers)
+	mux.HandleFunc("POST /api/admin/teardown-source", a.handleTeardownSource)
 	mux.HandleFunc("GET /api/workers/{id}", a.handleGetWorker)
 	mux.HandleFunc("GET /api/workers/{id}/incident", a.handleGetIncident)
 	mux.HandleFunc("GET /api/workers/{id}/prompt", a.handleGetPrompt)

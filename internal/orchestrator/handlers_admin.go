@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -262,6 +263,39 @@ func (a *API) handlePauseSourceWorkers(w http.ResponseWriter, r *http.Request) {
 		"signature":      signature,
 		"trigger":        trigger,
 	})
+}
+
+func (a *API) handleTeardownSource(w http.ResponseWriter, r *http.Request) {
+	if a.manager == nil {
+		respondError(w, r, http.StatusInternalServerError, nil, "teardown manager unavailable")
+		return
+	}
+
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	if source == "" {
+		respondError(w, r, http.StatusBadRequest, nil, "source is required")
+		return
+	}
+	if source == "main" && !strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("confirm_main")), "true") {
+		respondError(w, r, http.StatusBadRequest, nil, "confirm_main=true is required to tear down main")
+		return
+	}
+
+	result, err := a.manager.archiveAndDestroySource(r.Context(), source)
+	if err != nil {
+		switch {
+		case errors.Is(err, errSourceNotFound):
+			respondError(w, r, http.StatusNotFound, err, "source not found")
+		case errors.Is(err, errSourceDeploymentNotFound):
+			respondError(w, r, http.StatusConflict, err, "source has no deployment to archive")
+		default:
+			respondError(w, r, http.StatusInternalServerError, err, "failed to tear down source")
+		}
+		return
+	}
+
+	a.observeLatestDeploymentState(source)
+	writeAPIJSON(w, result)
 }
 
 func readDeploymentReadyRequest(r *http.Request) (deploymentReadyRequest, error) {

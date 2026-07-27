@@ -356,6 +356,9 @@ func (m *Manager) clearWorkerReplicaPrefix(ctx context.Context, worker model.Wor
 	if bucket == "" {
 		return nil
 	}
+	if strings.TrimSpace(worker.Name) == "" {
+		return errors.New("worker name is required for replica cleanup")
+	}
 
 	prefix := strings.Trim(workerReplicaPath(worker), "/")
 	if prefix == "" {
@@ -470,26 +473,47 @@ func (m *Manager) destroyWorker(ctx context.Context, workerID string) error {
 		return fmt.Errorf("get worker: %w", err)
 	}
 
+	var cleanupErrors []error
 	if worker.FlyMachineID != "" {
-		if err := m.fly.DestroyMachine(ctx, worker.FlyMachineID, true); err != nil {
-			slog.Warn("Failed to destroy machine", "machine_id", worker.FlyMachineID, "error", err)
+		if m.fly == nil {
+			cleanupErrors = append(cleanupErrors, errors.New("fly client unavailable for machine cleanup"))
+		} else if err := m.fly.DestroyMachine(ctx, worker.FlyMachineID, true); err != nil && !flyapi.IsNotFound(err) {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("machine cleanup: %w", err))
 		}
 	}
 
 	if worker.FlyVolumeID != "" {
-		if err := m.fly.DestroyVolume(ctx, worker.FlyVolumeID); err != nil {
-			slog.Warn("Failed to destroy volume", "volume_id", worker.FlyVolumeID, "error", err)
+		if m.fly == nil {
+			cleanupErrors = append(cleanupErrors, errors.New("fly client unavailable for volume cleanup"))
+		} else if err := m.fly.DestroyVolume(ctx, worker.FlyVolumeID); err != nil && !flyapi.IsNotFound(err) {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("volume cleanup: %w", err))
 		}
 	}
 	if err := m.clearWorkerReplicaPrefix(ctx, *worker); err != nil {
-		slog.Warn("Failed to clear worker replica prefix", "worker_id", workerID, "error", err)
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("replica cleanup: %w", err))
+	}
+
+	if cleanupErr := errors.Join(cleanupErrors...); cleanupErr != nil {
+		statusErr := m.db.UpdateWorkerStatus(workerID, worker.Status, fmt.Sprintf("worker cleanup incomplete: %v", cleanupErr))
+		if statusErr == nil {
+			m.observeWorkerByID(workerID)
+		}
+		if err := m.db.RecordEvent(workerID, "worker_destroy_failed", "Worker cleanup incomplete", cleanupErr.Error()); err != nil {
+			slog.Warn("Failed to record worker cleanup failure", "worker_id", workerID, "error", err)
+		}
+		if statusErr != nil {
+			return errors.Join(cleanupErr, fmt.Errorf("record cleanup failure: %w", statusErr))
+		}
+		return cleanupErr
 	}
 
 	if err := m.db.UpdateWorkerStatus(workerID, model.WorkerStopped, ""); err != nil {
 		return fmt.Errorf("mark worker stopped: %w", err)
 	}
 	m.observeWorkerByID(workerID)
-	_ = m.db.RecordEvent(workerID, "worker_destroyed", fmt.Sprintf("Worker %s destroyed", worker.Name), "")
+	if err := m.db.RecordEvent(workerID, "worker_destroyed", fmt.Sprintf("Worker %s destroyed", worker.Name), ""); err != nil {
+		slog.Warn("Failed to record worker destruction", "worker_id", workerID, "error", err)
+	}
 	return nil
 }
 
