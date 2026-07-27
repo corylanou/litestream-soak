@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS verifications (
     restored_checksum TEXT,
     passed BOOLEAN,
     duration_ms INTEGER,
-    error_message TEXT
+    error_message TEXT,
+    failure_classification_json TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS deployments (
@@ -154,6 +155,10 @@ func Open(path string) (*DB, error) {
 	if _, err := writer.Exec(migrationSQL); err != nil {
 		_ = writer.Close()
 		return nil, fmt.Errorf("run migrations: %w", err)
+	}
+	if err := ensureVerificationColumns(writer); err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("ensure verification columns: %w", err)
 	}
 	if err := ensureWorkerColumns(writer); err != nil {
 		_ = writer.Close()
@@ -283,6 +288,20 @@ func ensureWorkerColumns(db *sql.DB) error {
 		`ALTER TABLE workers ADD COLUMN dormant_signature TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE workers ADD COLUMN resume_trigger TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE workers ADD COLUMN last_probe_at DATETIME`,
+	}
+
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func ensureVerificationColumns(db *sql.DB) error {
+	statements := []string{
+		`ALTER TABLE verifications ADD COLUMN failure_classification_json TEXT NOT NULL DEFAULT ''`,
 	}
 
 	for _, statement := range statements {

@@ -119,6 +119,7 @@ func TestInferFailureSignatureRestoreS3ListRequestCanceled(t *testing.T) {
 func TestClassifyVerification(t *testing.T) {
 	const syncCheckType = "integrity"
 	const syncErrorMessage = `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`
+	const diskErrorMessage = "checkpoint failed: database or disk is full"
 
 	tests := []struct {
 		name               string
@@ -142,6 +143,47 @@ func TestClassifyVerification(t *testing.T) {
 			},
 			wantStage:          "sync",
 			wantSignature:      "litestream_sync_socket_refused",
+			wantClassification: true,
+		},
+		{
+			name: "complete persisted fixture classification is trusted",
+			verification: &model.Verification{
+				CheckType:    "integrity",
+				ErrorMessage: diskErrorMessage,
+				FailureClassification: &reporting.FailureClassification{
+					Stage:     "disk_capacity",
+					Signature: "soak_fixture_disk_exhausted",
+				},
+			},
+			wantStage:          "disk_capacity",
+			wantSignature:      "soak_fixture_disk_exhausted",
+			wantClassification: true,
+		},
+		{
+			name: "persisted fixture classification without stage falls back",
+			verification: &model.Verification{
+				CheckType:    "integrity",
+				ErrorMessage: diskErrorMessage,
+				FailureClassification: &reporting.FailureClassification{
+					Signature: "soak_fixture_disk_exhausted",
+				},
+			},
+			wantStage:          "disk_capacity",
+			wantSignature:      "disk_capacity_full",
+			wantClassification: true,
+		},
+		{
+			name: "persisted fixture classification with wrong stage falls back",
+			verification: &model.Verification{
+				CheckType:    "integrity",
+				ErrorMessage: diskErrorMessage,
+				FailureClassification: &reporting.FailureClassification{
+					Stage:     "restore",
+					Signature: "soak_fixture_disk_exhausted",
+				},
+			},
+			wantStage:          "disk_capacity",
+			wantSignature:      "disk_capacity_full",
 			wantClassification: true,
 		},
 	}
@@ -187,6 +229,47 @@ func TestClassifyVerification(t *testing.T) {
 	})
 }
 
+func TestBuildPromptEventSummariesUsesPersistedClassification(t *testing.T) {
+	t.Parallel()
+
+	payload, err := json.Marshal(reporting.VerificationPayload{
+		CheckType:    "integrity",
+		Status:       "failed",
+		ErrorMessage: "sync database: db sync: stage-write ltx file: disk full: write header",
+		FailureClassification: &reporting.FailureClassification{
+			Stage:     "disk_capacity",
+			Signature: "soak_fixture_disk_exhausted",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	summaries := buildPromptEventSummaries([]model.Event{{
+		EventType: "verification_failed",
+		Details:   string(payload),
+	}})
+	if len(summaries) != 1 {
+		t.Fatalf("len(summaries) = %d, want 1", len(summaries))
+	}
+	summary := summaries[0]
+	if summary.FailureStage != "disk_capacity" {
+		t.Fatalf("FailureStage = %q, want disk_capacity", summary.FailureStage)
+	}
+	if summary.FailureSignature != "soak_fixture_disk_exhausted" {
+		t.Fatalf("FailureSignature = %q, want soak_fixture_disk_exhausted", summary.FailureSignature)
+	}
+	if summary.FailureClassification == nil {
+		t.Fatal("FailureClassification = nil")
+	}
+	if summary.FailureClassification.Stage != summary.FailureStage {
+		t.Fatalf("FailureClassification.Stage = %q, want %q", summary.FailureClassification.Stage, summary.FailureStage)
+	}
+	if summary.FailureClassification.Signature != summary.FailureSignature {
+		t.Fatalf("FailureClassification.Signature = %q, want %q", summary.FailureClassification.Signature, summary.FailureSignature)
+	}
+}
+
 func TestBuildIncidentGuideSync(t *testing.T) {
 	bundle := &IncidentBundle{
 		Worker: model.Worker{
@@ -220,6 +303,36 @@ func TestBuildIncidentGuideSync(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(guide.WhyLikely, "\n"), "runtime snapshot is unhealthy") {
 		t.Fatalf("expected runtime snapshot note in why_likely, got %v", guide.WhyLikely)
+	}
+}
+
+func TestBuildIncidentGuideFixtureDisk(t *testing.T) {
+	t.Parallel()
+
+	bundle := &IncidentBundle{
+		ActiveFailure:    true,
+		FailureStage:     "disk_capacity",
+		FailureSignature: "soak_fixture_disk_exhausted",
+		Worker: model.Worker{
+			ID:     "worker-main-fixture-disk",
+			Status: model.WorkerDegraded,
+		},
+		Workload: workload.Config{LoadMode: "synthetic"},
+	}
+
+	guide := buildIncidentGuide(bundle)
+	if guide.ProbableSubsystem != "Soak fixture disk consumption" {
+		t.Fatalf("ProbableSubsystem = %q, want Soak fixture disk consumption", guide.ProbableSubsystem)
+	}
+	if guide.RecommendedPromptMode != "harness" {
+		t.Fatalf("RecommendedPromptMode = %q, want harness", guide.RecommendedPromptMode)
+	}
+	steps := strings.Join(guide.NextSteps, " ")
+	if !strings.Contains(steps, "source database and WAL growth") {
+		t.Fatalf("NextSteps = %q, want source database and WAL guidance", steps)
+	}
+	if strings.Contains(steps, "increasing disk headroom") {
+		t.Fatalf("NextSteps = %q, should not use Litestream scratch-headroom guidance", steps)
 	}
 }
 

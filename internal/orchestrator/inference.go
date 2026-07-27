@@ -13,6 +13,7 @@ const (
 	failureCategoryActionable    = "actionable"
 	failureCategoryEnvironmental = "environmental"
 	failureCategoryRampUp        = "ramp-up"
+	failureCategorySoakFixture   = "soak-fixture"
 	failureSeverityBad           = "bad"
 	failureSeverityWarn          = "warn"
 	rampUpFailureDeadline        = 90 * time.Minute
@@ -30,6 +31,13 @@ type verificationFailure struct {
 func classifyVerification(verification *model.Verification) verificationFailure {
 	if verification == nil {
 		return verificationFailure{}
+	}
+	if verification.FailureClassification.Valid() {
+		return verificationFailure{
+			Stage:          verification.FailureClassification.Stage,
+			Signature:      verification.FailureClassification.Signature,
+			Classification: verification.FailureClassification,
+		}
 	}
 	return classifyFailureMessage(verification.CheckType, verification.ErrorMessage)
 }
@@ -58,6 +66,8 @@ func inferFailureSignature(verification *model.Verification) string {
 func inferProbableSubsystem(stage, signature string) string {
 	text := strings.ToLower(stage + " " + signature)
 	switch {
+	case strings.Contains(text, "soak_fixture_disk_exhausted"):
+		return "Soak fixture disk consumption"
 	case strings.Contains(text, "disk_capacity") || strings.Contains(text, "disk_full"):
 		return "Disk capacity / restore scratch headroom"
 	case strings.Contains(text, "s3_bucket_missing") || strings.Contains(text, "s3_slowdown"):
@@ -77,6 +87,13 @@ func inferProbableSubsystem(stage, signature string) string {
 	default:
 		return "Needs operator triage"
 	}
+}
+
+func failureCategoryForSignature(signature string) string {
+	if signature == "soak_fixture_disk_exhausted" {
+		return failureCategorySoakFixture
+	}
+	return failureCategoryActionable
 }
 
 func activeFailure(verification *model.Verification) bool {
@@ -104,17 +121,19 @@ func buildFailureClassificationContext(stats []model.VerificationStat) failureCl
 		if !verification.Failed() {
 			continue
 		}
-		failure := classifyFailureMessage(stat.CheckType, stat.ErrorMessage)
-		category := failureCategoryActionable
-		switch {
-		case isTransientObjectStoreFailure(failure.Classification, policy) && !escalated[stat.ID]:
-			category = failureCategoryEnvironmental
-			ctx.addEnvironmentalSource(failure.Signature, stat.Source, stat.StartedAt)
-		case failure.Signature == "s3_transport" && hasCorrelatedS3TransportFailure(stat, stats):
-			category = failureCategoryEnvironmental
-			ctx.addEnvironmentalSource(failure.Signature, stat.Source, stat.StartedAt)
-		case isRampUpFailureStat(stat):
-			category = failureCategoryRampUp
+		failure := classifyVerification(&verification)
+		category := failureCategoryForSignature(failure.Signature)
+		if category != failureCategorySoakFixture {
+			switch {
+			case isTransientObjectStoreFailure(failure.Classification, policy) && !escalated[stat.ID]:
+				category = failureCategoryEnvironmental
+				ctx.addEnvironmentalSource(failure.Signature, stat.Source, stat.StartedAt)
+			case failure.Signature == "s3_transport" && hasCorrelatedS3TransportFailure(stat, stats):
+				category = failureCategoryEnvironmental
+				ctx.addEnvironmentalSource(failure.Signature, stat.Source, stat.StartedAt)
+			case isRampUpFailureStat(stat):
+				category = failureCategoryRampUp
+			}
 		}
 		ctx.categoryByVerificationID[stat.ID] = category
 	}
@@ -176,7 +195,7 @@ func (ctx failureClassificationContext) environmentalSourceLabels(signature stri
 
 func failureSeverityForCategory(category string) string {
 	switch category {
-	case failureCategoryEnvironmental, failureCategoryRampUp:
+	case failureCategoryEnvironmental, failureCategoryRampUp, failureCategorySoakFixture:
 		return failureSeverityWarn
 	default:
 		return failureSeverityBad
@@ -185,14 +204,15 @@ func failureSeverityForCategory(category string) string {
 
 func verificationFromStat(stat model.VerificationStat) model.Verification {
 	return model.Verification{
-		ID:           stat.ID,
-		WorkerID:     stat.WorkerID,
-		StartedAt:    stat.StartedAt,
-		Status:       stat.Status,
-		CheckType:    stat.CheckType,
-		Passed:       stat.Passed,
-		DurationMS:   stat.DurationMS,
-		ErrorMessage: stat.ErrorMessage,
+		ID:                    stat.ID,
+		WorkerID:              stat.WorkerID,
+		StartedAt:             stat.StartedAt,
+		Status:                stat.Status,
+		CheckType:             stat.CheckType,
+		Passed:                stat.Passed,
+		DurationMS:            stat.DurationMS,
+		ErrorMessage:          stat.ErrorMessage,
+		FailureClassification: stat.FailureClassification,
 	}
 }
 

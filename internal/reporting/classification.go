@@ -4,6 +4,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+)
+
+const (
+	soakFixtureSourceUsedPercent = 95.0
+	diskTelemetryMaxAge          = time.Minute
 )
 
 var (
@@ -14,6 +20,29 @@ var (
 	s3URLPattern       = regexp.MustCompile(`s3://([^/\s]+)/([^"'\s]+)`)
 	keyValuePattern    = regexp.MustCompile(`(?i)\b(operation|http_status|api_code|request_id|bucket|prefix|phase)=("[^"]+"|'[^']+'|[^\s,]+)`)
 )
+
+func (c *FailureClassification) Valid() bool {
+	if c == nil {
+		return false
+	}
+	stage := strings.TrimSpace(c.Stage)
+	signature := strings.TrimSpace(c.Signature)
+	if stage == "" || signature == "" || stage != c.Stage || signature != c.Signature {
+		return false
+	}
+	if c.ObjectStore != nil && stage != "sync" && stage != "restore" {
+		return false
+	}
+	if c.Restore != nil && stage != "restore" {
+		return false
+	}
+	switch signature {
+	case "disk_capacity_full", "soak_fixture_disk_exhausted":
+		return stage == "disk_capacity" && c.ObjectStore == nil && c.Restore == nil
+	default:
+		return stage != "disk_capacity"
+	}
+}
 
 func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassification {
 	text := strings.ToLower(errorMessage)
@@ -44,6 +73,51 @@ func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassifi
 		classification.Restore = &RestoreFailure{Phase: inferRestorePhase(text)}
 	}
 	return classification
+}
+
+func ClassifyVerificationFailureWithRuntime(checkType, errorMessage, profileName string, runtime *RuntimePayload, observedAt time.Time) FailureClassification {
+	classification := ClassifyVerificationFailure(checkType, errorMessage)
+	if !strings.HasPrefix(strings.TrimSpace(profileName), "many-dbs-") {
+		return classification
+	}
+	if classification.Signature != "disk_capacity_full" && !strings.Contains(strings.ToLower(errorMessage), "disk full") {
+		return classification
+	}
+	classification.Stage = "disk_capacity"
+	classification.Signature = "disk_capacity_full"
+	if soakFixtureExhaustedDisk(runtime, observedAt) {
+		classification.Signature = "soak_fixture_disk_exhausted"
+	}
+	return classification
+}
+
+func soakFixtureExhaustedDisk(runtime *RuntimePayload, observedAt time.Time) bool {
+	if runtime == nil || observedAt.IsZero() || runtime.SnapshotCollectedAt.IsZero() || runtime.DataDiskUsedBytes == 0 {
+		return false
+	}
+	age := observedAt.Sub(runtime.SnapshotCollectedAt)
+	if age < -diskTelemetryMaxAge || age > diskTelemetryMaxAge {
+		return false
+	}
+	sourceBytes, ok := soakSourceDataBytes(*runtime)
+	if !ok || sourceBytes == 0 || sourceBytes > runtime.DataDiskUsedBytes {
+		return false
+	}
+	return float64(sourceBytes)/float64(runtime.DataDiskUsedBytes)*100 >= soakFixtureSourceUsedPercent
+}
+
+func soakSourceDataBytes(runtime RuntimePayload) (uint64, bool) {
+	if runtime.DBTotalSizeBytes != 0 || runtime.WALTotalSizeBytes != 0 {
+		return sumSourceDataBytes(runtime.DBTotalSizeBytes, runtime.WALTotalSizeBytes)
+	}
+	return sumSourceDataBytes(runtime.DBSizeBytes, runtime.WALSizeBytes)
+}
+
+func sumSourceDataBytes(dbBytes, walBytes int64) (uint64, bool) {
+	if dbBytes < 0 || walBytes < 0 || dbBytes > (1<<63-1)-walBytes {
+		return 0, false
+	}
+	return uint64(dbBytes + walBytes), true
 }
 
 func InferFailureStage(checkType, errorMessage string) string {

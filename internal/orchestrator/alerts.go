@@ -39,6 +39,8 @@ type alertWebhookDetail struct {
 	ConditionStartedAt *time.Time                 `json:"condition_started_at,omitempty"`
 	FailureStage       string                     `json:"failure_stage,omitempty"`
 	FailureSignature   string                     `json:"failure_signature,omitempty"`
+	FailureCategory    string                     `json:"failure_category,omitempty"`
+	ProbableSubsystem  string                     `json:"probable_subsystem,omitempty"`
 	Message            string                     `json:"message"`
 	Worker             *model.Worker              `json:"worker,omitempty"`
 	Deployment         *model.Deployment          `json:"deployment,omitempty"`
@@ -246,6 +248,11 @@ func (d *AlertDispatcher) shouldAlertVerificationFailure(workerID string, curren
 func (d *AlertDispatcher) buildVerificationPayload(id int64, worker model.Worker, verification model.Verification) alertWebhookPayload {
 	stage := inferFailureStage(&verification)
 	signature := inferFailureSignature(&verification)
+	category := failureCategoryForSignature(signature)
+	severity := "critical"
+	if failureSeverityForCategory(category) == failureSeverityWarn {
+		severity = "warning"
+	}
 	text := fmt.Sprintf(
 		"Litestream soak alert: %s failed %s (%s)",
 		worker.ID,
@@ -256,17 +263,19 @@ func (d *AlertDispatcher) buildVerificationPayload(id int64, worker model.Worker
 	return alertWebhookPayload{
 		Text: text,
 		Alert: alertWebhookDetail{
-			AlertID:          id,
-			AlertType:        "verification_failed",
-			Severity:         "critical",
-			GeneratedAt:      time.Now().UTC(),
-			FailureStage:     stage,
-			FailureSignature: signature,
-			Message:          firstMeaningfulLine(verification.ErrorMessage),
-			Worker:           &worker,
-			Verification:     &verification,
-			TriageCommands:   buildTriageCommands(worker, worker.FlyMachineID != ""),
-			URLs:             d.alertURLs(worker.ID),
+			AlertID:           id,
+			AlertType:         "verification_failed",
+			Severity:          severity,
+			GeneratedAt:       time.Now().UTC(),
+			FailureStage:      stage,
+			FailureSignature:  signature,
+			FailureCategory:   category,
+			ProbableSubsystem: inferProbableSubsystem(stage, signature),
+			Message:           firstMeaningfulLine(verification.ErrorMessage),
+			Worker:            &worker,
+			Verification:      &verification,
+			TriageCommands:    buildTriageCommands(worker, worker.FlyMachineID != ""),
+			URLs:              d.alertURLs(worker.ID),
 		},
 	}
 }

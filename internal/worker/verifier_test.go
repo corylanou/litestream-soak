@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -372,7 +373,16 @@ func TestWaitForSyncReportsDiskPressureWhenLagPersists(t *testing.T) {
 	if err := os.WriteFile(cfg.DBPath, []byte("db"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Truncate(cfg.DBPath, 1<<40); err != nil {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(dir, &stat); err != nil {
+		t.Fatalf("stat filesystem: %v", err)
+	}
+	availableBytes := stat.Bavail * uint64(stat.Bsize)
+	const pressureMargin = uint64(1 << 30)
+	if availableBytes > uint64(1<<63-1)-pressureMargin {
+		t.Skipf("filesystem available bytes exceed sparse pressure fixture limit: %d", availableBytes)
+	}
+	if err := os.Truncate(cfg.DBPath, int64(availableBytes+pressureMargin)); err != nil {
 		t.Skipf("filesystem does not support sparse pressure fixture: %v", err)
 	}
 

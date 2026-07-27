@@ -292,7 +292,7 @@ func comparisonPassedWorkers(scorecard DeploymentScorecard) int {
 }
 
 func comparisonFailedWorkers(scorecard DeploymentScorecard) int {
-	return scorecard.ActionableFailedWorkers
+	return scorecard.ActionableFailedWorkers + scorecard.FixtureFailures
 }
 
 func failureExcludedFromComparison(category string) bool {
@@ -411,6 +411,8 @@ func countDeploymentScorecardOutcome(scorecard *DeploymentScorecard, failureCoun
 			scorecard.RampUpFailures++
 		case failureCategoryEnvironmental:
 			scorecard.EnvironmentalFailures++
+		case failureCategorySoakFixture:
+			scorecard.FixtureFailures++
 		default:
 			scorecard.ActionableFailedWorkers++
 		}
@@ -428,6 +430,9 @@ func countDeploymentScorecardOutcome(scorecard *DeploymentScorecard, failureCoun
 func deploymentFailureCategory(worker model.Worker, verification model.Verification, verifications []model.Verification) string {
 	policy := currentEnvironmentalFailurePolicy()
 	failure := classifyVerification(&verification)
+	if failure.Signature == "soak_fixture_disk_exhausted" {
+		return failureCategorySoakFixture
+	}
 	if isTransientObjectStoreFailure(failure.Classification, policy) &&
 		!environmentalStreakEscalated(verificationsBefore(verifications, verification), verification.StartedAt, policy) {
 		return failureCategoryEnvironmental

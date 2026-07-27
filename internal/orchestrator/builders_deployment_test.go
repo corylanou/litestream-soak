@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 func TestDeploymentScorecardSourceDefaultsToMain(t *testing.T) {
@@ -369,6 +370,104 @@ func TestCountDeploymentScorecardOutcomeCountsFailuresBySignature(t *testing.T) 
 	}
 	if failureCounts["litestream_sync_timeout"].Count != 2 {
 		t.Fatalf("failure count = %d, want 2", failureCounts["litestream_sync_timeout"].Count)
+	}
+}
+
+func TestFixtureFailureRemainsReleaseBlocking(t *testing.T) {
+	t.Parallel()
+
+	completedAt := timeMustParse("2026-07-26T01:29:13Z")
+	worker := model.Worker{
+		ID:          "worker-main-low",
+		Name:        "worker-main-low",
+		ProfileName: "low-volume",
+	}
+	deployment := model.Deployment{StartedAt: completedAt.Add(-time.Hour)}
+	verification := model.Verification{
+		WorkerID:     worker.ID,
+		StartedAt:    completedAt.Add(-time.Minute),
+		CompletedAt:  &completedAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		Passed:       false,
+		ErrorMessage: "sync database: db sync: stage-write ltx file: disk full: write header",
+		FailureClassification: &reporting.FailureClassification{
+			Stage:     "disk_capacity",
+			Signature: "soak_fixture_disk_exhausted",
+		},
+	}
+
+	outcome, verified := scoreDeploymentWorker(worker, deployment, []model.Verification{verification}, nil)
+	if !verified {
+		t.Fatal("verified = false, want true")
+	}
+	if outcome.Passed {
+		t.Fatal("Passed = true, want false")
+	}
+	if outcome.FailureCategory != "soak-fixture" {
+		t.Fatalf("FailureCategory = %q, want soak-fixture", outcome.FailureCategory)
+	}
+	if outcome.FailureSeverity != "warn" {
+		t.Fatalf("FailureSeverity = %q, want warn", outcome.FailureSeverity)
+	}
+	if outcome.ProbableSubsystem != "Soak fixture disk consumption" {
+		t.Fatalf("ProbableSubsystem = %q, want Soak fixture disk consumption", outcome.ProbableSubsystem)
+	}
+	if !comparisonOutcomeFailed(outcome) {
+		t.Fatal("comparisonOutcomeFailed() = false, want true")
+	}
+	if comparisonOutcomePassed(outcome) {
+		t.Fatal("comparisonOutcomePassed() = true, want false")
+	}
+
+	head := DeploymentScorecard{TotalWorkers: 1}
+	failureCounts := make(map[string]DeploymentFailureCount)
+	countDeploymentScorecardOutcome(&head, failureCounts, outcome, true)
+	finalizeDeploymentScorecard(&head, failureCounts)
+	if head.FailedWorkers != 1 {
+		t.Fatalf("FailedWorkers = %d, want 1", head.FailedWorkers)
+	}
+	if head.FixtureFailures != 1 {
+		t.Fatalf("FixtureFailures = %d, want 1", head.FixtureFailures)
+	}
+	if head.ActionableFailedWorkers != 0 {
+		t.Fatalf("ActionableFailedWorkers = %d, want 0", head.ActionableFailedWorkers)
+	}
+	if head.PassRate != 0 {
+		t.Fatalf("PassRate = %v, want 0", head.PassRate)
+	}
+	if comparisonFailedWorkers(head) != 1 {
+		t.Fatalf("comparisonFailedWorkers() = %d, want 1", comparisonFailedWorkers(head))
+	}
+
+	baseOutcome := DeploymentWorkerOutcome{
+		WorkerID: worker.ID,
+		Name:     worker.Name,
+		Profile:  worker.ProfileName,
+		Passed:   true,
+	}
+	comparison := &DeploymentComparisonResponse{
+		Base: &DeploymentScorecard{
+			TotalWorkers:    1,
+			VerifiedWorkers: 1,
+			PassedWorkers:   1,
+			PassRate:        1,
+			Outcomes:        []DeploymentWorkerOutcome{baseOutcome},
+		},
+		Head: head,
+	}
+	finalizeDeploymentComparison(comparison, false)
+	if comparison.Verdict != "worse" {
+		t.Fatalf("Verdict = %q, want worse", comparison.Verdict)
+	}
+	if comparison.FailDelta != 1 {
+		t.Fatalf("FailDelta = %d, want 1", comparison.FailDelta)
+	}
+	if len(comparison.RegressedWorkers) != 1 {
+		t.Fatalf("len(RegressedWorkers) = %d, want 1", len(comparison.RegressedWorkers))
+	}
+	if len(comparison.NewFailures) != 1 || comparison.NewFailures[0].Signature != "soak_fixture_disk_exhausted" {
+		t.Fatalf("NewFailures = %+v, want soak_fixture_disk_exhausted", comparison.NewFailures)
 	}
 }
 

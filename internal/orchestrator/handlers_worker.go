@@ -57,15 +57,33 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	if observedAt.IsZero() {
 		observedAt = time.Now().UTC()
 	}
+	reportedRuntime := payload.RuntimePayload
 	payload.RuntimePayload = payload.Normalize(observedAt)
 	var vf verificationFailure
 	aborted := verificationStatusAborted(payload.Status)
 	failed := !payload.Passed && !aborted
 	environmental := false
 	if failed {
-		vf = classifyFailureMessage(payload.CheckType, payload.ErrorMessage)
-		if payload.FailureClassification == nil {
-			payload.FailureClassification = vf.Classification
+		computed := reporting.ClassifyVerificationFailureWithRuntime(payload.CheckType, payload.ErrorMessage, payload.ProfileName, &reportedRuntime, observedAt)
+		reportedDiskClassification := payload.FailureClassification != nil &&
+			(payload.FailureClassification.Stage == "disk_capacity" ||
+				payload.FailureClassification.Signature == "disk_capacity_full" ||
+				payload.FailureClassification.Signature == "soak_fixture_disk_exhausted")
+		if computed.Stage == "disk_capacity" || reportedDiskClassification {
+			if computed.Stage != "disk_capacity" {
+				computed = reporting.FailureClassification{
+					Stage:     "disk_capacity",
+					Signature: "disk_capacity_full",
+				}
+			}
+			payload.FailureClassification = &computed
+		} else if payload.FailureClassification == nil {
+			payload.FailureClassification = &computed
+		}
+		vf = verificationFailure{
+			Stage:          payload.FailureClassification.Stage,
+			Signature:      payload.FailureClassification.Signature,
+			Classification: payload.FailureClassification,
 		}
 		environmental = a.environmentalWithoutEscalation(workerID, vf, payload.StartedAt)
 	}
@@ -87,13 +105,14 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 
 	completedAt := payload.CompletedAt
 	verification := &model.Verification{
-		WorkerID:     workerID,
-		StartedAt:    payload.StartedAt,
-		Status:       payload.Status,
-		CheckType:    payload.CheckType,
-		Passed:       payload.Passed,
-		DurationMS:   payload.DurationMS,
-		ErrorMessage: payload.ErrorMessage,
+		WorkerID:              workerID,
+		StartedAt:             payload.StartedAt,
+		Status:                payload.Status,
+		CheckType:             payload.CheckType,
+		Passed:                payload.Passed,
+		DurationMS:            payload.DurationMS,
+		ErrorMessage:          payload.ErrorMessage,
+		FailureClassification: payload.FailureClassification,
 	}
 	if !completedAt.IsZero() {
 		verification.CompletedAt = &completedAt

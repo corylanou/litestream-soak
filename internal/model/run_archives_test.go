@@ -27,7 +27,7 @@ func TestRecordRunArchiveIsIdempotent(t *testing.T) {
 		ImageRef:      "registry.fly.io/litestream-soak:soak-sha",
 		Status:        "stable",
 		Summary:       "PR #1228 completed cleanly.",
-		Payload:       `{"ok":true}`,
+		Payload:       `{"current_failure_signature":"disk_capacity_full"}`,
 	}
 
 	created, err := db.RecordRunArchive(archive)
@@ -43,6 +43,7 @@ func TestRecordRunArchiveIsIdempotent(t *testing.T) {
 
 	second := *archive
 	second.Summary = "different summary should not replace existing archive"
+	second.Payload = `{"current_failure_signature":"soak_fixture_disk_exhausted"}`
 	created, err = db.RecordRunArchive(&second)
 	if err != nil {
 		t.Fatalf("RecordRunArchive(second) error = %v", err)
@@ -69,7 +70,7 @@ func TestRecordRunArchiveIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRunArchive() error = %v", err)
 	}
-	if stored.Payload != `{"ok":true}` {
+	if stored.Payload != `{"current_failure_signature":"disk_capacity_full"}` {
 		t.Fatalf("Payload = %q", stored.Payload)
 	}
 }

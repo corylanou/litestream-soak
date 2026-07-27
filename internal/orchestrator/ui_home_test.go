@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 func TestBuildAttentionItemsFlagsStaleHeartbeats(t *testing.T) {
@@ -597,6 +598,69 @@ func TestBuildHomePageDataSplitsRampUpFailures(t *testing.T) {
 	}
 	if data.Spotlight.FailureSeverity != "warn" {
 		t.Fatalf("FailureSeverity = %q, want warn", data.Spotlight.FailureSeverity)
+	}
+}
+
+func TestBuildHomePageDataKeepsFixtureFailuresVisible(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-fixture-disk",
+		Name:          "worker-main-fixture-disk",
+		Status:        model.WorkerDegraded,
+		Source:        "main",
+		GitSHA:        "sha-main",
+		LitestreamSHA: "litestream-main",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+
+	failedAt := time.Now().UTC().Add(-time.Minute)
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:     "worker-main-fixture-disk",
+		StartedAt:    failedAt.Add(-15 * time.Second),
+		CompletedAt:  &failedAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		Passed:       false,
+		ErrorMessage: "sync database: db sync: stage-write ltx file: disk full: write header",
+		FailureClassification: &reporting.FailureClassification{
+			Stage:     "disk_capacity",
+			Signature: "soak_fixture_disk_exhausted",
+		},
+	})
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/ui?source=main", nil)
+	data, err := api.buildHomePageData(request)
+	if err != nil {
+		t.Fatalf("buildHomePageData() error = %v", err)
+	}
+
+	if data.KPIs.Failures24h != 1 {
+		t.Fatalf("Failures24h = %d, want 1", data.KPIs.Failures24h)
+	}
+	if data.KPIs.FixtureFailures24h != 1 {
+		t.Fatalf("FixtureFailures24h = %d, want 1", data.KPIs.FixtureFailures24h)
+	}
+	if data.KPIs.ActionableFailures24h != 0 {
+		t.Fatalf("ActionableFailures24h = %d, want 0", data.KPIs.ActionableFailures24h)
+	}
+	if !data.KPIs.HasPassRate || data.KPIs.PassRatePct != 0 {
+		t.Fatalf("PassRate = (has=%t, value=%v), want visible 0%% failure", data.KPIs.HasPassRate, data.KPIs.PassRatePct)
+	}
+	if data.Spotlight == nil {
+		t.Fatal("Spotlight = nil, want fixture failure")
+	}
+	if data.Spotlight.FailureCategory != "soak-fixture" {
+		t.Fatalf("FailureCategory = %q, want soak-fixture", data.Spotlight.FailureCategory)
+	}
+	if data.Spotlight.FailureSeverity != "warn" {
+		t.Fatalf("FailureSeverity = %q, want warn", data.Spotlight.FailureSeverity)
+	}
+	if data.Spotlight.ProbableSubsystem != "Soak fixture disk consumption" {
+		t.Fatalf("ProbableSubsystem = %q, want Soak fixture disk consumption", data.Spotlight.ProbableSubsystem)
 	}
 }
 

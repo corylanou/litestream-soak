@@ -35,6 +35,7 @@ type homeKPIs struct {
 	Checks24h                int
 	Failures24h              int
 	ActionableFailures24h    int
+	FixtureFailures24h       int
 	EnvironmentalFailures24h int
 	RampUpFailures24h        int
 	RolloutUpdated           int
@@ -130,6 +131,8 @@ func buildHomeKPIs(summary homeSummary, windowStats, previousStats []model.Verif
 				kpis.EnvironmentalFailures24h++
 			case failureCategoryRampUp:
 				kpis.RampUpFailures24h++
+			case failureCategorySoakFixture:
+				kpis.FixtureFailures24h++
 			default:
 				kpis.ActionableFailures24h++
 			}
