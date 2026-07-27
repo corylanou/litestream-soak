@@ -13,6 +13,7 @@ import (
 
 	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestStaleUnattachedWorkerVolumes(t *testing.T) {
@@ -53,7 +54,7 @@ func TestStaleUnattachedWorkerVolumesDisabled(t *testing.T) {
 	}
 }
 
-func TestVolumeInventoryGCConfirmsDeletionOnNextFreshInventory(t *testing.T) {
+func TestVolumeInventoryGCSchedulesDeletionOnNextFreshInventory(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
@@ -70,7 +71,7 @@ func TestVolumeInventoryGCConfirmsDeletionOnNextFreshInventory(t *testing.T) {
 
 	manager.syncVolumeInventory(t.Context(), time.Hour)
 
-	gets, deletes := fake.requestCounts()
+	gets, _, deletes := fake.requestCounts()
 	if gets != 1 {
 		t.Fatalf("volume list requests after destroy = %d, want 1", gets)
 	}
@@ -86,7 +87,7 @@ func TestVolumeInventoryGCConfirmsDeletionOnNextFreshInventory(t *testing.T) {
 
 	manager.syncVolumeInventory(t.Context(), time.Hour)
 
-	gets, deletes = fake.requestCounts()
+	gets, _, deletes = fake.requestCounts()
 	if gets != 2 {
 		t.Fatalf("volume list requests after confirmation = %d, want 2", gets)
 	}
@@ -96,12 +97,99 @@ func TestVolumeInventoryGCConfirmsDeletionOnNextFreshInventory(t *testing.T) {
 	if got := len(volumeGCEventsOfType(t, db, volumeGCEventDestroyScheduled)); got != 1 {
 		t.Fatalf("destroy scheduled events after confirmation = %d, want 1", got)
 	}
+}
+
+func TestVolumeInventoryGCRequiresTargetedNotFoundBeforeConfirmingAbsence(t *testing.T) {
+	t.Parallel()
+
+	volume := flyapi.Volume{
+		ID:        "targeted-confirmation-volume",
+		Name:      "soak_worker_main_low_vol",
+		State:     "created",
+		SizeGB:    10,
+		CreatedAt: time.Now().UTC().Add(-3 * time.Hour),
+	}
+	fake := newVolumeGCInventoryTestServer(t, volume, "")
+	db := openTestDB(t)
+	manager := NewManager(fake.client, db, NewControlMetrics(db), nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+	manager.syncVolumeInventory(t.Context(), time.Hour)
+	fake.hideVolumeFromList()
+	manager.syncVolumeInventory(t.Context(), time.Hour)
+
+	listGets, volumeGets, deletes := fake.requestCounts()
+	if listGets != 2 {
+		t.Fatalf("volume list requests = %d, want 2", listGets)
+	}
+	if volumeGets != 1 {
+		t.Fatalf("targeted volume verification requests = %d, want 1", volumeGets)
+	}
+	if deletes != 1 {
+		t.Fatalf("volume delete requests during backoff = %d, want 1", deletes)
+	}
+	if got := len(volumeGCEventsOfType(t, db, volumeGCEventDestroyConfirmed)); got != 0 {
+		t.Fatalf("destroy confirmed events for partial inventory = %d, want 0", got)
+	}
+	if got := len(volumeGCEventsOfType(t, db, volumeGCEventDestroyStalled)); got != 1 {
+		t.Fatalf("destroy stalled events after positive created response = %d, want 1", got)
+	}
 
 	fake.removeVolume()
 	manager.syncVolumeInventory(t.Context(), time.Hour)
 
+	_, volumeGets, _ = fake.requestCounts()
+	if volumeGets != 2 {
+		t.Fatalf("targeted volume verification requests after removal = %d, want 2", volumeGets)
+	}
 	if got := len(volumeGCEventsOfType(t, db, volumeGCEventDestroyConfirmed)); got != 1 {
-		t.Fatalf("destroy confirmed events after volume absence = %d, want 1", got)
+		t.Fatalf("destroy confirmed events after targeted not found = %d, want 1", got)
+	}
+	attempts, err := db.ListVolumeGCAttempts("litestream-soak")
+	if err != nil {
+		t.Fatalf("ListVolumeGCAttempts() error = %v", err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("persisted attempts after targeted not found = %+v, want none", attempts)
+	}
+}
+
+func TestVolumeInventoryGCRejectsEmptyConfirmationResponses(t *testing.T) {
+	t.Parallel()
+
+	volume := flyapi.Volume{
+		ID:        "empty-confirmation-volume",
+		Name:      "soak_worker_main_low_vol",
+		State:     "created",
+		SizeGB:    10,
+		CreatedAt: time.Now().UTC().Add(-3 * time.Hour),
+	}
+	fake := newVolumeGCInventoryTestServer(t, volume, "")
+	db := openTestDB(t)
+	manager := NewManager(fake.client, db, NewControlMetrics(db), nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+	manager.syncVolumeInventory(t.Context(), time.Hour)
+	fake.returnEmptyInventoryResponses()
+	manager.syncVolumeInventory(t.Context(), time.Hour)
+
+	_, volumeGets, deletes := fake.requestCounts()
+	if volumeGets != 1 {
+		t.Fatalf("targeted volume verification requests = %d, want 1", volumeGets)
+	}
+	if deletes != 1 {
+		t.Fatalf("volume delete requests during backoff = %d, want 1", deletes)
+	}
+	if got := len(volumeGCEventsOfType(t, db, volumeGCEventDestroyConfirmed)); got != 0 {
+		t.Fatalf("destroy confirmed events for empty responses = %d, want 0", got)
+	}
+	if got := len(volumeGCEventsOfType(t, db, volumeGCEventConfirmFailed)); got != 1 {
+		t.Fatalf("confirmation failed events for empty responses = %d, want 1", got)
+	}
+	attempts, err := db.ListVolumeGCAttempts("litestream-soak")
+	if err != nil {
+		t.Fatalf("ListVolumeGCAttempts() error = %v", err)
+	}
+	if len(attempts) != 1 || attempts[0].VolumeID != volume.ID {
+		t.Fatalf("persisted attempts after empty responses = %+v, want %s retained", attempts, volume.ID)
 	}
 }
 
@@ -124,7 +212,7 @@ func TestVolumeInventoryGCSkipsPendingVolumeAfterManagerRestart(t *testing.T) {
 	secondManager := NewManager(fake.client, secondDB, NewControlMetrics(secondDB), nil, "litestream-soak", ReplicaConfig{}, "", "")
 	secondManager.syncVolumeInventory(t.Context(), time.Hour)
 
-	gets, deletes := fake.requestCounts()
+	gets, _, deletes := fake.requestCounts()
 	if gets != 2 {
 		t.Fatalf("volume list requests across manager restart = %d, want 2", gets)
 	}
@@ -154,7 +242,7 @@ func TestVolumeInventoryGCBacksOffWhenAcceptedDeleteDoesNotTransition(t *testing
 	manager.syncVolumeInventory(t.Context(), time.Hour)
 	manager.syncVolumeInventory(t.Context(), time.Hour)
 
-	gets, deletes := fake.requestCounts()
+	gets, _, deletes := fake.requestCounts()
 	if gets != 3 {
 		t.Fatalf("volume list requests = %d, want 3", gets)
 	}
@@ -167,6 +255,43 @@ func TestVolumeInventoryGCBacksOffWhenAcceptedDeleteDoesNotTransition(t *testing
 	}
 	if !strings.Contains(stalled[0].Message, "remains created") {
 		t.Fatalf("destroy stalled message = %q, want remains-created context", stalled[0].Message)
+	}
+}
+
+func TestVolumeInventoryGCBackoffSurvivesManagerRestart(t *testing.T) {
+	t.Parallel()
+
+	volume := flyapi.Volume{
+		ID:        "persistent-backoff-volume",
+		Name:      "soak_worker_main_low_vol",
+		State:     "created",
+		SizeGB:    10,
+		CreatedAt: time.Now().UTC().Add(-3 * time.Hour),
+	}
+	fake := newVolumeGCInventoryTestServer(t, volume, "")
+	db := openTestDB(t)
+	firstManager := NewManager(fake.client, db, NewControlMetrics(db), nil, "litestream-soak", ReplicaConfig{}, "", "")
+	firstManager.syncVolumeInventory(t.Context(), time.Hour)
+
+	secondManager := NewManager(fake.client, db, NewControlMetrics(db), nil, "litestream-soak", ReplicaConfig{}, "", "")
+	secondManager.syncVolumeInventory(t.Context(), time.Hour)
+
+	listGets, volumeGets, deletes := fake.requestCounts()
+	if listGets != 2 {
+		t.Fatalf("volume list requests across manager restart = %d, want 2", listGets)
+	}
+	if volumeGets != 0 {
+		t.Fatalf("targeted volume verification requests across manager restart = %d, want 0", volumeGets)
+	}
+	if deletes != 1 {
+		t.Fatalf("volume delete requests across manager restart = %d, want persisted backoff to keep 1", deletes)
+	}
+	attempts, err := db.ListVolumeGCAttempts("litestream-soak")
+	if err != nil {
+		t.Fatalf("ListVolumeGCAttempts() error = %v", err)
+	}
+	if len(attempts) != 1 || attempts[0].VolumeID != volume.ID || attempts[0].RequestCount != 1 {
+		t.Fatalf("persisted attempts = %+v, want one request for %s", attempts, volume.ID)
 	}
 }
 
@@ -183,11 +308,13 @@ func TestVolumeInventoryGCSurfacesUnexpectedStaleState(t *testing.T) {
 	fake := newVolumeGCInventoryTestServer(t, volume, "")
 	db := openTestDB(t)
 	manager := NewManager(fake.client, db, NewControlMetrics(db), nil, "litestream-soak", ReplicaConfig{}, "", "")
+	counter := controlVolumeGCSkipped.WithLabelValues("litestream-soak", volume.Region, volume.ID, volume.Name, volume.State, "false")
+	before := testutil.ToFloat64(counter)
 
 	manager.syncVolumeInventory(t.Context(), time.Hour)
 	manager.syncVolumeInventory(t.Context(), time.Hour)
 
-	_, deletes := fake.requestCounts()
+	_, _, deletes := fake.requestCounts()
 	if deletes != 0 {
 		t.Fatalf("volume delete requests for unexpected state = %d, want 0", deletes)
 	}
@@ -197,6 +324,9 @@ func TestVolumeInventoryGCSurfacesUnexpectedStaleState(t *testing.T) {
 	}
 	if !strings.Contains(events[0].Message, "hydrating") {
 		t.Fatalf("unexpected state message = %q, want observed state", events[0].Message)
+	}
+	if got := testutil.ToFloat64(counter) - before; got != 2 {
+		t.Fatalf("volume GC skipped metric increase = %v, want 2", got)
 	}
 }
 
@@ -486,8 +616,12 @@ type volumeGCInventoryTestServer struct {
 
 	mu               sync.Mutex
 	volume           *flyapi.Volume
+	listVolume       bool
+	emptyList        bool
+	emptyVolume      bool
 	deleteTransition string
-	gets             int
+	listGets         int
+	volumeGets       int
 	deletes          int
 }
 
@@ -496,6 +630,7 @@ func newVolumeGCInventoryTestServer(t *testing.T, volume flyapi.Volume, deleteTr
 
 	fake := &volumeGCInventoryTestServer{
 		volume:           &volume,
+		listVolume:       true,
 		deleteTransition: deleteTransition,
 	}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.handle))
@@ -508,15 +643,28 @@ func (f *volumeGCInventoryTestServer) handle(w http.ResponseWriter, r *http.Requ
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	switch r.Method {
-	case http.MethodGet:
-		f.gets++
-		if f.volume == nil {
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/apps/litestream-soak/volumes":
+		f.listGets++
+		if f.emptyList {
+			return
+		}
+		if f.volume == nil || !f.listVolume {
 			_ = json.NewEncoder(w).Encode([]flyapi.Volume{})
 			return
 		}
 		_ = json.NewEncoder(w).Encode([]flyapi.Volume{*f.volume})
-	case http.MethodDelete:
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/apps/litestream-soak/volumes/"):
+		f.volumeGets++
+		if f.emptyVolume {
+			return
+		}
+		if f.volume == nil {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(f.volume)
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/apps/litestream-soak/volumes/"):
 		f.deletes++
 		if f.volume != nil && f.deleteTransition != "" {
 			f.volume.State = f.deleteTransition
@@ -527,10 +675,23 @@ func (f *volumeGCInventoryTestServer) handle(w http.ResponseWriter, r *http.Requ
 	}
 }
 
-func (f *volumeGCInventoryTestServer) requestCounts() (int, int) {
+func (f *volumeGCInventoryTestServer) requestCounts() (int, int, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.gets, f.deletes
+	return f.listGets, f.volumeGets, f.deletes
+}
+
+func (f *volumeGCInventoryTestServer) hideVolumeFromList() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listVolume = false
+}
+
+func (f *volumeGCInventoryTestServer) returnEmptyInventoryResponses() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.emptyList = true
+	f.emptyVolume = true
 }
 
 func (f *volumeGCInventoryTestServer) removeVolume() {

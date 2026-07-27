@@ -346,6 +346,11 @@ var (
 		Name: "soak_control_app_volume_size_gb",
 		Help: "Total Fly volume size in gigabytes grouped by app, region, attachment state, and configured size.",
 	}, []string{"app_name", "region", "attachment_state", "size_gb"})
+
+	controlVolumeGCSkipped = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_control_volume_gc_skipped_total",
+		Help: "Number of times stale unattached worker volumes were skipped because their Fly state was not safe for deletion.",
+	}, []string{"app_name", "region", "volume_id", "volume_name", "volume_state", "destroy_requested"})
 )
 
 func NewControlMetrics(db *model.DB) *controlMetrics {

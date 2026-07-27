@@ -142,6 +142,14 @@ func (c *Client) ListVolumes(ctx context.Context) ([]Volume, error) {
 	return volumes, nil
 }
 
+func (c *Client) GetVolume(ctx context.Context, id string) (*Volume, error) {
+	var volume Volume
+	if err := c.do(ctx, "GET", fmt.Sprintf("/apps/%s/volumes/%s", c.appName, id), nil, &volume); err != nil {
+		return nil, fmt.Errorf("get volume %s: %w", id, err)
+	}
+	return &volume, nil
+}
+
 func (c *Client) CreateVolume(ctx context.Context, req CreateVolumeRequest) (*Volume, error) {
 	var volume Volume
 	if err := c.do(ctx, "POST", fmt.Sprintf("/apps/%s/volumes", c.appName), req, &volume); err != nil {

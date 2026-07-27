@@ -211,7 +211,7 @@
           <div class="tl-item">
             <div class="tl-head">
               <div class="tl-left">
-                <span class="badge badge-{{if eq (eventClass .EventType) "status-good"}}good{{else if eq (eventClass .EventType) "status-bad"}}bad{{else}}neutral{{end}}">{{.EventType}}</span>
+                <span class="badge badge-{{if eq (eventClass .EventType) "status-good"}}good{{else if eq (eventClass .EventType) "status-bad"}}bad{{else if eq (eventClass .EventType) "status-warn"}}warn{{else}}neutral{{end}}">{{.EventType}}</span>
               </div>
               <span class="tl-time">{{timeAgoValue .CreatedAt}}</span>
             </div>

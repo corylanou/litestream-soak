@@ -38,6 +38,22 @@ func TestCommitURLs(t *testing.T) {
 	}
 }
 
+func TestEventClassMarksVolumeGCProblems(t *testing.T) {
+	t.Parallel()
+
+	for _, eventType := range []string{
+		volumeGCEventUnexpectedState,
+		volumeGCEventDestroyStalled,
+	} {
+		if got := eventClass(eventType); got != "status-warn" {
+			t.Fatalf("eventClass(%q) = %q, want status-warn", eventType, got)
+		}
+	}
+	if got := eventClass(volumeGCEventConfirmFailed); got != "status-bad" {
+		t.Fatalf("eventClass(%q) = %q, want status-bad", volumeGCEventConfirmFailed, got)
+	}
+}
+
 func TestDeploymentSourceSummaryAndCopyText(t *testing.T) {
 	t.Parallel()
 

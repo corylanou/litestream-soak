@@ -349,6 +349,8 @@ func eventClass(value string) string {
 		return "status-bad"
 	case strings.HasPrefix(strings.TrimSpace(value), "platform_restart"):
 		return "status-warn"
+	case strings.HasPrefix(strings.TrimSpace(value), "volume_gc_skipped_state"), strings.HasPrefix(strings.TrimSpace(value), "volume_gc_destroy_stalled"):
+		return "status-warn"
 	case strings.Contains(value, "failed"):
 		return "status-bad"
 	case strings.Contains(value, "passed"):

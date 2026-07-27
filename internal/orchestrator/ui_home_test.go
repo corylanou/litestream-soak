@@ -171,6 +171,25 @@ func TestHomeBodyRendersStalestHeartbeatState(t *testing.T) {
 	}
 }
 
+func TestHomeBodyRendersVolumeGCSkippedStateAsWarning(t *testing.T) {
+	t.Parallel()
+
+	var body bytes.Buffer
+	data := homePageData{
+		Events: []model.Event{{
+			EventType: volumeGCEventUnexpectedState,
+			Message:   "Skipped stale unattached worker volume in unexpected state",
+			CreatedAt: time.Now().UTC(),
+		}},
+	}
+	if err := uiTemplates.ExecuteTemplate(&body, "home_body", data); err != nil {
+		t.Fatalf("ExecuteTemplate(home_body) error = %v", err)
+	}
+	if rendered := body.String(); !strings.Contains(rendered, `badge badge-warn">volume_gc_skipped_state</span>`) {
+		t.Fatalf("rendered home body does not mark skipped volume GC event as warning: %s", rendered)
+	}
+}
+
 func homeKPITile(t *testing.T, rendered, label string) string {
 	t.Helper()
 
