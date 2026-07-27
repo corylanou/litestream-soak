@@ -217,7 +217,7 @@ func (m *Manager) evaluateDormantFleetAlertLocked(ctx context.Context, source st
 		return fmt.Errorf("list source workers: %w", err)
 	}
 
-	resumableWorkers, inventoryErr := m.resumableWorkers(ctx, workers)
+	resumableWorkers, inventoryErr := m.resumableWorkers(ctx, workers, policy.CheckInterval)
 	if inventoryErr != nil {
 		slog.Error(
 			"Dormant fleet alert evaluation degraded; using database-only fallback",
@@ -270,11 +270,12 @@ func (m *Manager) evaluateDormantFleetAlertLocked(ctx context.Context, source st
 	return nil
 }
 
-func (m *Manager) resumableWorkers(ctx context.Context, workers []model.Worker) ([]model.Worker, error) {
+func (m *Manager) resumableWorkers(ctx context.Context, workers []model.Worker, inventoryMaxAge time.Duration) ([]model.Worker, error) {
 	if len(workers) == 0 {
 		return nil, nil
 	}
-	if m.fly == nil {
+	inventory := m.inventoryProvider()
+	if inventory == nil {
 		return workers, fmt.Errorf("fly client is not configured")
 	}
 
@@ -286,7 +287,7 @@ func (m *Manager) resumableWorkers(ctx context.Context, workers []model.Worker) 
 
 	resumable := make([]model.Worker, 0, len(workers))
 	for appName, appWorkers := range workersByApp {
-		volumes, err := m.fly.ForApp(appName).ListVolumes(ctx)
+		volumes, err := inventory.listCached(ctx, appName, inventoryMaxAge)
 		if err != nil {
 			return workers, fmt.Errorf("list volumes for app %s: %w", appName, err)
 		}

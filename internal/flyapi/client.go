@@ -14,6 +14,11 @@ import (
 
 const defaultBaseURL = "https://api.machines.dev/v1"
 
+const (
+	maxResponseBodyBytes = 8 << 20
+	maxErrorBodyBytes    = 64 << 10
+)
+
 type Client struct {
 	baseURL    string
 	appName    string
@@ -191,20 +196,76 @@ func (c *Client) doAbsolute(ctx context.Context, method, endpoint string, body i
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read response: %w", err)
-	}
-
 	if resp.StatusCode >= 400 {
-		return &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
+		body, err := readBoundedBody(resp.Body, maxErrorBodyBytes)
+		if err != nil {
+			return fmt.Errorf("read error response: %w", err)
+		}
+		return &APIError{StatusCode: resp.StatusCode, Body: body}
 	}
 
-	if result != nil && len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, result); err != nil {
-			return fmt.Errorf("decode response: %w", err)
+	if result == nil {
+		if err := discardBoundedBody(resp.Body, maxResponseBodyBytes); err != nil {
+			return fmt.Errorf("read response: %w", err)
 		}
+		return nil
+	}
+	if err := decodeBoundedJSON(resp.Body, result, maxResponseBodyBytes); err != nil {
+		return fmt.Errorf("decode response: %w", err)
 	}
 
 	return nil
+}
+
+func readBoundedBody(r io.Reader, limit int64) (string, error) {
+	body, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(body)) > limit {
+		return responseBodyTooLarge(limit), nil
+	}
+	return string(body), nil
+}
+
+func discardBoundedBody(r io.Reader, limit int64) error {
+	n, err := io.Copy(io.Discard, io.LimitReader(r, limit+1))
+	if err != nil {
+		return err
+	}
+	if n > limit {
+		return errors.New(responseBodyTooLarge(limit))
+	}
+	return nil
+}
+
+func decodeBoundedJSON(r io.Reader, result interface{}, limit int64) error {
+	limited := &io.LimitedReader{R: r, N: limit + 1}
+	decoder := json.NewDecoder(limited)
+	if err := decoder.Decode(result); err != nil {
+		if limited.N == 0 {
+			return errors.New(responseBodyTooLarge(limit))
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+
+	var trailing json.RawMessage
+	err := decoder.Decode(&trailing)
+	if limited.N == 0 {
+		return errors.New(responseBodyTooLarge(limit))
+	}
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return errors.New("response contains multiple JSON values")
+}
+
+func responseBodyTooLarge(limit int64) string {
+	return fmt.Sprintf("response body exceeds %d-byte limit", limit)
 }

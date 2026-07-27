@@ -5,12 +5,91 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/flyapi"
 )
 
 const workerVolumeNamePrefix = "soak_worker_"
+
+type volumeInventoryProvider struct {
+	client   *flyapi.Client
+	mu       sync.Mutex
+	cache    map[string]cachedVolumeInventory
+	inFlight map[string]*volumeInventoryCall
+}
+
+type cachedVolumeInventory struct {
+	volumes   []flyapi.Volume
+	fetchedAt time.Time
+}
+
+type volumeInventoryCall struct {
+	done    chan struct{}
+	volumes []flyapi.Volume
+	err     error
+}
+
+func newVolumeInventoryProvider(client *flyapi.Client) *volumeInventoryProvider {
+	return &volumeInventoryProvider{
+		client:   client,
+		cache:    make(map[string]cachedVolumeInventory),
+		inFlight: make(map[string]*volumeInventoryCall),
+	}
+}
+
+func (p *volumeInventoryProvider) listFresh(ctx context.Context, appName string) ([]flyapi.Volume, error) {
+	return p.list(ctx, appName, 0, true)
+}
+
+func (p *volumeInventoryProvider) listCached(ctx context.Context, appName string, maxAge time.Duration) ([]flyapi.Volume, error) {
+	return p.list(ctx, appName, maxAge, false)
+}
+
+func (p *volumeInventoryProvider) list(ctx context.Context, appName string, maxAge time.Duration, force bool) ([]flyapi.Volume, error) {
+	appName = strings.TrimSpace(appName)
+	if appName == "" {
+		appName = p.client.AppName()
+	}
+
+	p.mu.Lock()
+	if !force {
+		if cached, ok := p.cache[appName]; ok && maxAge > 0 && time.Since(cached.fetchedAt) <= maxAge {
+			p.mu.Unlock()
+			return cached.volumes, nil
+		}
+	}
+	if call, ok := p.inFlight[appName]; ok {
+		p.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-call.done:
+			return call.volumes, call.err
+		}
+	}
+
+	call := &volumeInventoryCall{done: make(chan struct{})}
+	p.inFlight[appName] = call
+	p.mu.Unlock()
+
+	volumes, err := p.client.ForApp(appName).ListVolumes(ctx)
+
+	p.mu.Lock()
+	call.volumes = volumes
+	call.err = err
+	if err == nil {
+		p.cache[appName] = cachedVolumeInventory{
+			volumes:   volumes,
+			fetchedAt: time.Now(),
+		}
+	}
+	delete(p.inFlight, appName)
+	close(call.done)
+	p.mu.Unlock()
+	return volumes, err
+}
 
 func (m *Manager) RunVolumeInventoryMonitor(ctx context.Context, interval, unattachedVolumeTTL time.Duration) {
 	if interval <= 0 || m.metrics == nil || m.fly == nil {
@@ -32,7 +111,7 @@ func (m *Manager) RunVolumeInventoryMonitor(ctx context.Context, interval, unatt
 }
 
 func (m *Manager) syncVolumeInventory(ctx context.Context, unattachedVolumeTTL time.Duration) {
-	volumes, err := m.fly.ListVolumes(ctx)
+	volumes, err := m.inventoryProvider().listFresh(ctx, m.appName)
 	if err != nil {
 		slog.Warn("Failed to list Fly volumes", "app", m.appName, "error", err)
 		return

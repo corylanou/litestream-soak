@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -343,11 +344,50 @@ func TestEvaluateDormantFleetAlertsWaitsForThresholdAndActiveDeployment(t *testi
 	}
 }
 
+func TestEvaluateDormantFleetAlertsReusesInventoryAcrossSources(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	volumes := make([]flyapi.Volume, 0, 2)
+	for _, source := range []string{"main", "pr-171"} {
+		workerID := "worker-" + source
+		volumeID := "volume-" + source
+		volumes = append(volumes, flyapi.Volume{ID: volumeID, State: "created"})
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			AppName:       "litestream-soak",
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        source,
+			GitSHA:        "soak-sha",
+			LitestreamSHA: "litestream-sha",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+			FlyVolumeID:   volumeID,
+		})
+		if err := db.MarkWorkerDormant(workerID, "known bad", "integrity_check_mismatch", "known_bad_source"); err != nil {
+			t.Fatalf("MarkWorkerDormant(%s) error = %v", workerID, err)
+		}
+	}
+
+	fly := newDormantFleetFlyServer(t, volumes, http.StatusOK)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	manager.evaluateDormantFleetAlerts(t.Context(), DormantFleetAlertPolicy{
+		Threshold:     24 * time.Hour,
+		CheckInterval: 10 * time.Minute,
+	})
+
+	if got := fly.requests.Load(); got != 1 {
+		t.Fatalf("volume list requests = %d, want 1 across sources", got)
+	}
+}
+
 type dormantFleetFlyServer struct {
-	client  *flyapi.Client
-	server  *httptest.Server
-	volumes []flyapi.Volume
-	status  int
+	client   *flyapi.Client
+	server   *httptest.Server
+	volumes  []flyapi.Volume
+	status   int
+	requests atomic.Int64
 }
 
 func newDormantFleetFlyServer(t *testing.T, volumes []flyapi.Volume, status int) *dormantFleetFlyServer {
@@ -368,6 +408,7 @@ func (f *dormantFleetFlyServer) handle(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	f.requests.Add(1)
 	if f.status != 0 && f.status != http.StatusOK {
 		http.Error(w, "rate limit exceeded", f.status)
 		return

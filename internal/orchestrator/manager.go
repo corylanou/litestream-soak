@@ -80,6 +80,9 @@ type Manager struct {
 	locks       sync.Mutex
 	workerLocks map[string]*contextLock
 	sourceLocks map[string]*contextLock
+
+	volumeInventoryOnce sync.Once
+	volumeInventory     *volumeInventoryProvider
 }
 
 func (m *Manager) lockWorker(ctx context.Context, id string) (func(), error) {
@@ -131,6 +134,15 @@ func NewManager(fly *flyapi.Client, db *model.DB, metrics *controlMetrics, alert
 		controlBaseURL:   controlBaseURL,
 		platformLogToken: platformLogToken,
 	}
+}
+
+func (m *Manager) inventoryProvider() *volumeInventoryProvider {
+	m.volumeInventoryOnce.Do(func() {
+		if m.fly != nil {
+			m.volumeInventory = newVolumeInventoryProvider(m.fly)
+		}
+	})
+	return m.volumeInventory
 }
 
 func (m *Manager) newWorkerRecord(req WorkerRequest) *model.Worker {
