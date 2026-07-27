@@ -85,8 +85,16 @@ func main() {
 	if !unattachedVolumeGCEnabled {
 		unattachedVolumeTTL = 0
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	webhookDeployEnabled := envOrDefault("GITHUB_WEBHOOK_DEPLOY_ENABLED", "false") == "true"
+	prRepositoryAllowlist := listEnvOrDefault("SOAK_PR_REPO_ALLOWLIST", []string{"benbjohnson/litestream"})
+	prKeepAliveLabel := envOrDefault("SOAK_PR_KEEP_ALIVE_LABEL", "soak:keep-alive")
+	if len(prRepositoryAllowlist) > 1 {
+		slog.Warn("Multiple upstream PR repositories can collide on pr-N source names; keep SOAK_PR_REPO_ALLOWLIST single-repository until source names include the repository", "repositories", strings.Join(prRepositoryAllowlist, ","))
+	}
 	listenAddr := envOrDefault("LISTEN_ADDR", ":8080")
 
 	db, err := model.Open(dbPath)
@@ -111,7 +119,13 @@ func main() {
 		Region:    s3Region,
 	}, controlBaseURL, platformLogToken)
 	deployer := orchestrator.NewDeployer(mgr, db, workerAppName, webhookDeployEnabled)
-	webhookHandler := orchestrator.NewWebhookHandler(webhookSecret, deployer, webhookDeployEnabled)
+	webhookHandler := orchestrator.NewWebhookHandler(orchestrator.WebhookHandlerConfig{
+		Context:               ctx,
+		Secret:                webhookSecret,
+		DeployEnabled:         webhookDeployEnabled,
+		PRRepositoryAllowlist: prRepositoryAllowlist,
+		PRKeepAliveLabel:      prKeepAliveLabel,
+	}, deployer, mgr)
 	api := orchestrator.NewAPI(db, fly, metrics, alerts, mgr, deployer)
 
 	mux := http.NewServeMux()
@@ -138,9 +152,6 @@ func main() {
 		handler = newAuthMiddleware(basicAuthUsername, basicAuthPassword, adminBearerToken, adminBasicFallbackEnabled)(handler)
 	}
 	handler = newWorkerAuthMiddleware(workerToken)(handler)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -233,6 +244,8 @@ func main() {
 		"unattached_volume_ttl", unattachedVolumeTTL,
 		"platform_log_token_overridden", platformLogToken != flyToken,
 		"webhook_deploy_enabled", webhookDeployEnabled,
+		"pr_repository_allowlist", strings.Join(prRepositoryAllowlist, ","),
+		"pr_keep_alive_label", prKeepAliveLabel,
 	)
 
 	server := &http.Server{
@@ -258,6 +271,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	webhookHandler.WaitForRetirements()
 }
 
 func shutdownOnCancel(ctx context.Context, server shutdowner, timeout time.Duration) error {
