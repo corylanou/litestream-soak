@@ -17,25 +17,31 @@ type volumeInventoryProvider struct {
 	client   *flyapi.Client
 	mu       sync.Mutex
 	cache    map[string]cachedVolumeInventory
-	inFlight map[string]*volumeInventoryCall
+	inFlight map[string]volumeInventoryFlights
 }
 
 type cachedVolumeInventory struct {
 	volumes   []flyapi.Volume
-	fetchedAt time.Time
+	startedAt time.Time
+}
+
+type volumeInventoryFlights struct {
+	cached *volumeInventoryCall
+	fresh  *volumeInventoryCall
 }
 
 type volumeInventoryCall struct {
-	done    chan struct{}
-	volumes []flyapi.Volume
-	err     error
+	done      chan struct{}
+	startedAt time.Time
+	volumes   []flyapi.Volume
+	err       error
 }
 
 func newVolumeInventoryProvider(client *flyapi.Client) *volumeInventoryProvider {
 	return &volumeInventoryProvider{
 		client:   client,
 		cache:    make(map[string]cachedVolumeInventory),
-		inFlight: make(map[string]*volumeInventoryCall),
+		inFlight: make(map[string]volumeInventoryFlights),
 	}
 }
 
@@ -55,12 +61,17 @@ func (p *volumeInventoryProvider) list(ctx context.Context, appName string, maxA
 
 	p.mu.Lock()
 	if !force {
-		if cached, ok := p.cache[appName]; ok && maxAge > 0 && time.Since(cached.fetchedAt) <= maxAge {
+		if cached, ok := p.cache[appName]; ok && maxAge > 0 && time.Since(cached.startedAt) <= maxAge {
 			p.mu.Unlock()
 			return cached.volumes, nil
 		}
 	}
-	if call, ok := p.inFlight[appName]; ok {
+	flights := p.inFlight[appName]
+	call := flights.fresh
+	if call == nil && !force {
+		call = flights.cached
+	}
+	if call != nil {
 		p.mu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -70,8 +81,16 @@ func (p *volumeInventoryProvider) list(ctx context.Context, appName string, maxA
 		}
 	}
 
-	call := &volumeInventoryCall{done: make(chan struct{})}
-	p.inFlight[appName] = call
+	call = &volumeInventoryCall{
+		done:      make(chan struct{}),
+		startedAt: time.Now(),
+	}
+	if force {
+		flights.fresh = call
+	} else {
+		flights.cached = call
+	}
+	p.inFlight[appName] = flights
 	p.mu.Unlock()
 
 	volumes, err := p.client.ForApp(appName).ListVolumes(ctx)
@@ -80,12 +99,26 @@ func (p *volumeInventoryProvider) list(ctx context.Context, appName string, maxA
 	call.volumes = volumes
 	call.err = err
 	if err == nil {
-		p.cache[appName] = cachedVolumeInventory{
-			volumes:   volumes,
-			fetchedAt: time.Now(),
+		cached, ok := p.cache[appName]
+		if !ok || !call.startedAt.Before(cached.startedAt) {
+			p.cache[appName] = cachedVolumeInventory{
+				volumes:   volumes,
+				startedAt: call.startedAt,
+			}
 		}
 	}
-	delete(p.inFlight, appName)
+	flights = p.inFlight[appName]
+	if force && flights.fresh == call {
+		flights.fresh = nil
+	}
+	if !force && flights.cached == call {
+		flights.cached = nil
+	}
+	if flights.cached == nil && flights.fresh == nil {
+		delete(p.inFlight, appName)
+	} else {
+		p.inFlight[appName] = flights
+	}
 	close(call.done)
 	p.mu.Unlock()
 	return volumes, err

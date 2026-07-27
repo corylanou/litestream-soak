@@ -81,26 +81,23 @@ func TestVolumeInventoryCoalescesMonitorAndAlertRefresh(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	t.Cleanup(cancel)
-	start := make(chan struct{})
 	monitorDone := make(chan struct{})
-	alertDone := make(chan error, 1)
 	go func() {
-		<-start
 		manager.syncVolumeInventory(ctx, 0)
 		close(monitorDone)
 	}()
-	go func() {
-		<-start
-		_, err := manager.resumableWorkers(ctx, workers, 10*time.Minute)
-		alertDone <- err
-	}()
-	close(start)
 
 	select {
 	case <-ctx.Done():
 		t.Fatalf("volume request did not start: %v", ctx.Err())
 	case <-requestStarted:
 	}
+
+	alertDone := make(chan error, 1)
+	go func() {
+		_, err := manager.resumableWorkers(ctx, workers, 10*time.Minute)
+		alertDone <- err
+	}()
 	releaseOnce.Do(func() { close(releaseRequest) })
 
 	select {
@@ -118,6 +115,120 @@ func TestVolumeInventoryCoalescesMonitorAndAlertRefresh(t *testing.T) {
 	}
 	if got := requests.Load(); got != 1 {
 		t.Fatalf("volume list requests = %d, want 1", got)
+	}
+}
+
+func TestVolumeInventoryGCFreshReadDoesNotJoinAlertRefresh(t *testing.T) {
+	t.Parallel()
+
+	alertRequestStarted := make(chan struct{}, 1)
+	freshRequestStarted := make(chan struct{}, 1)
+	releaseAlertRequest := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseAlertRequest) })
+	})
+
+	staleVolume := flyapi.Volume{
+		ID:        "stale-volume",
+		Name:      "soak_worker_main_low_vol",
+		SizeGB:    10,
+		State:     "created",
+		CreatedAt: time.Now().Add(-3 * time.Hour),
+	}
+	var gets atomic.Int64
+	var deletes atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+
+		switch gets.Add(1) {
+		case 1:
+			alertRequestStarted <- struct{}{}
+			<-releaseAlertRequest
+			_ = json.NewEncoder(w).Encode([]flyapi.Volume{staleVolume})
+		case 2:
+			freshRequestStarted <- struct{}{}
+			_ = json.NewEncoder(w).Encode([]flyapi.Volume{})
+		default:
+			http.Error(w, "unexpected volume list request", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	db := openTestDB(t)
+	client := flyapi.NewClientWithBaseURL("litestream-soak", "test-token", server.URL)
+	manager := NewManager(client, db, NewControlMetrics(db), nil, "litestream-soak", ReplicaConfig{}, "", "")
+	workers := []model.Worker{{
+		ID:          "worker-main",
+		AppName:     "litestream-soak",
+		FlyVolumeID: staleVolume.ID,
+	}}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	t.Cleanup(cancel)
+	alertDone := make(chan error, 1)
+	go func() {
+		_, err := manager.resumableWorkers(ctx, workers, 10*time.Minute)
+		alertDone <- err
+	}()
+
+	select {
+	case <-ctx.Done():
+		t.Fatalf("alert volume request did not start: %v", ctx.Err())
+	case <-alertRequestStarted:
+	}
+
+	monitorDone := make(chan struct{})
+	go func() {
+		manager.syncVolumeInventory(ctx, time.Hour)
+		close(monitorDone)
+	}()
+
+	select {
+	case <-ctx.Done():
+		t.Fatalf("fresh GC volume request did not start: %v", ctx.Err())
+	case <-freshRequestStarted:
+	}
+	select {
+	case <-ctx.Done():
+		t.Fatalf("volume monitor did not finish: %v", ctx.Err())
+	case <-monitorDone:
+	}
+
+	if got := gets.Load(); got != 2 {
+		t.Fatalf("volume list requests = %d, want separate alert and fresh GC requests", got)
+	}
+	if got := deletes.Load(); got != 0 {
+		t.Fatalf("volume delete requests = %d, want 0 from in-flight alert inventory", got)
+	}
+
+	releaseOnce.Do(func() { close(releaseAlertRequest) })
+	select {
+	case <-ctx.Done():
+		t.Fatalf("alert inventory did not finish: %v", ctx.Err())
+	case err := <-alertDone:
+		if err != nil {
+			t.Fatalf("resumableWorkers() error = %v", err)
+		}
+	}
+
+	resumable, err := manager.resumableWorkers(ctx, workers, 10*time.Minute)
+	if err != nil {
+		t.Fatalf("resumableWorkers() after refresh error = %v", err)
+	}
+	if len(resumable) != 0 {
+		t.Fatalf("resumableWorkers() after refresh = %+v, want newer empty inventory", resumable)
+	}
+	if got := gets.Load(); got != 2 {
+		t.Fatalf("volume list requests after cached read = %d, want 2", got)
 	}
 }
 
