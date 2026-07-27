@@ -607,7 +607,7 @@ func (m *Manager) evaluatePRMaxAge(ctx context.Context, policy PRMaxAgePolicy) {
 		}
 
 		for _, worker := range evaluation.Workers {
-			if !workerActiveForPRMaxAge(worker, evaluation.Deployment) {
+			if !workerEligibleForPRMaxAge(worker, evaluation.Deployment, evaluation.Action) {
 				continue
 			}
 
@@ -819,13 +819,13 @@ func prMaxAgeCandidate(db *model.DB, deployment model.Deployment, policy PRMaxAg
 		return prMaxAgeEvaluation{}, false, err
 	}
 
-	activeWorkers := make([]model.Worker, 0, len(workers))
+	targetedWorkers := make([]model.Worker, 0, len(workers))
 	for _, worker := range workers {
-		if workerActiveForPRMaxAge(worker, deployment) {
-			activeWorkers = append(activeWorkers, worker)
+		if workerEligibleForPRMaxAge(worker, deployment, policy.Action) {
+			targetedWorkers = append(targetedWorkers, worker)
 		}
 	}
-	if len(activeWorkers) == 0 {
+	if len(targetedWorkers) == 0 {
 		return prMaxAgeEvaluation{}, false, nil
 	}
 
@@ -833,7 +833,7 @@ func prMaxAgeCandidate(db *model.DB, deployment model.Deployment, policy PRMaxAg
 	return prMaxAgeEvaluation{
 		Deployment: deployment,
 		Rollout:    rollout,
-		Workers:    activeWorkers,
+		Workers:    targetedWorkers,
 		Summary:    summary,
 		Action:     policy.Action,
 	}, true, nil
@@ -1126,13 +1126,15 @@ func (m *Manager) workerRunEvidence(worker model.Worker) (workerRunEvidence, err
 	return evidence, nil
 }
 
-func workerActiveForPRMaxAge(worker model.Worker, deployment model.Deployment) bool {
+func workerEligibleForPRMaxAge(worker model.Worker, deployment model.Deployment, action PRMaxAgeAction) bool {
 	if !workerMatchesDeployment(worker, deployment) {
 		return false
 	}
 	switch worker.Status {
 	case model.WorkerRunning, model.WorkerDegraded, model.WorkerProbing:
 		return true
+	case model.WorkerDormant:
+		return action == PRMaxAgeActionDestroy
 	default:
 		return false
 	}
