@@ -526,6 +526,7 @@ func (m *Manager) evaluateFailedSourcePauseLocked(ctx context.Context, source st
 
 		if err := m.resumeDormantWorkers(
 			ctx,
+			source,
 			workers,
 			deployment.ImageRef,
 			deployment.GitSHA,

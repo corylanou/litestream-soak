@@ -2508,6 +2508,46 @@ func TestHandleDeploymentReady(t *testing.T) {
 		}
 	})
 
+	t.Run("missing image returns 400", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		deployer := &Deployer{db: db}
+		api := NewAPI(db, nil, nil, nil, nil, deployer)
+		request := httptest.NewRequest(
+			http.MethodPost,
+			"/api/admin/deployments/ready?sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&litestream_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			nil,
+		)
+		recorder := httptest.NewRecorder()
+
+		api.handleDeploymentReady(recorder, request)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("mismatched versioned image returns 400", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		deployer := &Deployer{db: db}
+		api := NewAPI(db, nil, nil, nil, nil, deployer)
+		request := httptest.NewRequest(
+			http.MethodPost,
+			"/api/admin/deployments/ready?source=main&sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&litestream_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&image=registry.fly.io%2Flitestream-soak%3Asha-aaaaaaaaaaaa-pr-1345-ls-bbbbbbbbbbbb",
+			nil,
+		)
+		recorder := httptest.NewRecorder()
+
+		api.handleDeploymentReady(recorder, request)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+		}
+	})
+
 	t.Run("malformed JSON body returns 400", func(t *testing.T) {
 		t.Parallel()
 
@@ -2703,18 +2743,30 @@ func TestHandleRollWorker(t *testing.T) {
 		}
 	})
 
-	t.Run("success returns 202 and records state", func(t *testing.T) {
+	t.Run("missing image uses matching ready source deployment", func(t *testing.T) {
 		t.Parallel()
 
 		db := openTestDB(t)
-		manager := &Manager{db: db, appName: "litestream-soak"}
-		api := NewAPI(db, nil, nil, nil, manager, nil)
-		workerID := "worker-roll-success"
-		const sha = "abc1234def56789"
-		const litestreamSHA = "ls123abc456def7"
-		const imageRef = "registry.fly.io/litestream-soak:abc1234"
+		const workerID = "worker-roll-source-image"
+		const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		const litestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		const imageRef = "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-ls-bbbbbbbbbbbb"
+		const unrelatedImageRef = "registry.fly.io/litestream-soak:sha-cccccccccccc-pr-1345-ls-dddddddddddd"
+		if err := db.UpsertReadyDeployment(&model.Deployment{
+			GitSHA:        sha,
+			LitestreamSHA: litestreamSHA,
+			ImageRef:      imageRef,
+			Source:        "main",
+			Status:        "ready",
+		}); err != nil {
+			t.Fatalf("UpsertReadyDeployment() error = %v", err)
+		}
+		if err := db.RecordEvent("", "deploy_ready_received", "test", imageRef); err != nil {
+			t.Fatalf("RecordEvent() error = %v", err)
+		}
 		createTestWorker(t, db, model.Worker{
 			ID:            workerID,
+			AppName:       "litestream-soak",
 			Name:          workerID,
 			Status:        model.WorkerRunning,
 			Source:        "main",
@@ -2722,7 +2774,93 @@ func TestHandleRollWorker(t *testing.T) {
 			LitestreamSHA: litestreamSHA,
 			ProfileName:   "low-volume",
 			ProfileConfig: "{}",
+			FlyMachineID:  "old-machine",
+			FlyVolumeID:   "old-volume",
 		})
+		fly := newDeployTestFlyServer(t, db, "main", sha, litestreamSHA, imageRef)
+		fly.currentImageRef = unrelatedImageRef
+		manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+		api := NewAPI(db, fly.client, nil, nil, manager, nil)
+
+		request := httptest.NewRequest(
+			http.MethodPost,
+			"/api/admin/workers/"+workerID+"/roll?sha="+sha+"&litestream_sha="+litestreamSHA,
+			nil,
+		)
+		request.SetPathValue("id", workerID)
+		recorder := httptest.NewRecorder()
+
+		api.handleRollWorker(recorder, request)
+
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+		}
+		var resp map[string]any
+		if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp["image_ref"] != imageRef {
+			t.Fatalf("image_ref = %v, want source deployment image %s", resp["image_ref"], imageRef)
+		}
+
+		deadline := time.NewTimer(time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			worker, err := db.GetWorker(workerID)
+			if err != nil {
+				t.Fatalf("GetWorker() error = %v", err)
+			}
+			if worker.FlyMachineID != "old-machine" {
+				break
+			}
+			select {
+			case <-deadline.C:
+				t.Fatal("targeted rollout did not replace worker")
+			case <-ticker.C:
+			}
+		}
+		fly.assertCreateCounts(t, 1, 1)
+		fly.assertNoErrors(t)
+	})
+
+	t.Run("success returns 202 and records state", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		workerID := "worker-roll-success"
+		const sha = "abc1234def56789"
+		const litestreamSHA = "ls123abc456def7"
+		const imageRef = "registry.fly.io/litestream-soak:abc1234"
+		if err := db.UpsertReadyDeployment(&model.Deployment{
+			GitSHA:        sha,
+			LitestreamSHA: litestreamSHA,
+			ImageRef:      imageRef,
+			Source:        "main",
+			Status:        "ready",
+		}); err != nil {
+			t.Fatalf("UpsertReadyDeployment() error = %v", err)
+		}
+		if err := db.RecordEvent("", "deploy_ready_received", "test", imageRef); err != nil {
+			t.Fatalf("RecordEvent() error = %v", err)
+		}
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			AppName:       "litestream-soak",
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        sha,
+			LitestreamSHA: litestreamSHA,
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+			FlyMachineID:  "old-machine",
+			FlyVolumeID:   "old-volume",
+		})
+		fly := newDeployTestFlyServer(t, db, "main", sha, litestreamSHA, imageRef)
+		manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+		api := NewAPI(db, fly.client, nil, nil, manager, nil)
 
 		request := httptest.NewRequest(http.MethodPost, "/api/admin/workers/"+workerID+"/roll?sha="+sha+"&litestream_sha="+litestreamSHA+"&image="+imageRef, nil)
 		request.SetPathValue("id", workerID)
@@ -2759,6 +2897,27 @@ func TestHandleRollWorker(t *testing.T) {
 		if !found {
 			t.Fatalf("targeted_rollout_requested event not recorded; got: %+v", events)
 		}
+
+		deadline := time.NewTimer(time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			worker, err := db.GetWorker(workerID)
+			if err != nil {
+				t.Fatalf("GetWorker() error = %v", err)
+			}
+			if worker.FlyMachineID != "old-machine" {
+				break
+			}
+			select {
+			case <-deadline.C:
+				t.Fatal("targeted rollout did not replace worker")
+			case <-ticker.C:
+			}
+		}
+		fly.assertCreateCounts(t, 1, 1)
+		fly.assertNoErrors(t)
 	})
 }
 
@@ -2780,10 +2939,162 @@ func TestHandleResumeDormantWorkers(t *testing.T) {
 		}
 	})
 
+	t.Run("uses latest ready deployment for requested source", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		const mainSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		const mainLitestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		const mainImageRef = "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-ls-bbbbbbbbbbbb"
+		const prSHA = "cccccccccccccccccccccccccccccccccccccccc"
+		const prLitestreamSHA = "dddddddddddddddddddddddddddddddddddddddd"
+		const prImageRef = "registry.fly.io/litestream-soak:sha-cccccccccccc-pr-1345-ls-dddddddddddd"
+
+		for _, deployment := range []model.Deployment{
+			{
+				GitSHA:        mainSHA,
+				LitestreamSHA: mainLitestreamSHA,
+				ImageRef:      mainImageRef,
+				Source:        "main",
+				Status:        "ready",
+			},
+			{
+				GitSHA:        prSHA,
+				LitestreamSHA: prLitestreamSHA,
+				ImageRef:      prImageRef,
+				Source:        "pr-1345",
+				PRNumber:      1345,
+				Status:        "ready",
+			},
+		} {
+			if err := db.UpsertReadyDeployment(&deployment); err != nil {
+				t.Fatalf("UpsertReadyDeployment(%s) error = %v", deployment.Source, err)
+			}
+		}
+		if err := db.RecordEvent("", "deploy_ready_received", "test", mainImageRef); err != nil {
+			t.Fatalf("RecordEvent() error = %v", err)
+		}
+		createTestWorker(t, db, model.Worker{
+			ID:            "worker-main-low-vol",
+			AppName:       "litestream-soak",
+			Name:          "worker-main-low-vol",
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        mainSHA,
+			LitestreamSHA: mainLitestreamSHA,
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+			FlyVolumeID:   "main-volume",
+		})
+		if err := db.MarkWorkerDormant("worker-main-low-vol", "known bad", "integrity_check_mismatch", "known_bad_source"); err != nil {
+			t.Fatalf("MarkWorkerDormant() error = %v", err)
+		}
+
+		fly := newDeployTestFlyServer(t, db, "main", mainSHA, mainLitestreamSHA, mainImageRef)
+		fly.currentImageRef = prImageRef
+		manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+		api := NewAPI(db, fly.client, nil, nil, manager, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/resume-dormant?source=main", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleResumeDormantWorkers(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+
+		var resp map[string]any
+		if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp["image_ref"] != mainImageRef {
+			t.Fatalf("image_ref = %v, want source deployment image %s", resp["image_ref"], mainImageRef)
+		}
+		if resp["git_sha"] != mainSHA {
+			t.Fatalf("git_sha = %v, want %s", resp["git_sha"], mainSHA)
+		}
+		if resp["litestream_sha"] != mainLitestreamSHA {
+			t.Fatalf("litestream_sha = %v, want %s", resp["litestream_sha"], mainLitestreamSHA)
+		}
+		if resp["resumed_workers"] != float64(1) {
+			t.Fatalf("resumed_workers = %v, want 1", resp["resumed_workers"])
+		}
+		worker := mustWorker(t, db, "worker-main-low-vol")
+		if worker.GitSHA != mainSHA || worker.LitestreamSHA != mainLitestreamSHA {
+			t.Fatalf("worker versions = %s/%s, want %s/%s", worker.GitSHA, worker.LitestreamSHA, mainSHA, mainLitestreamSHA)
+		}
+		fly.assertCreateCounts(t, 0, 1)
+		fly.assertNoErrors(t)
+	})
+
+	t.Run("missing source deployment fails closed", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		const prImageRef = "registry.fly.io/litestream-soak:sha-cccccccccccc-pr-1345-ls-dddddddddddd"
+		fly := newDeployTestFlyServer(
+			t,
+			db,
+			"pr-1345",
+			"cccccccccccccccccccccccccccccccccccccccc",
+			"dddddddddddddddddddddddddddddddddddddddd",
+			prImageRef,
+		)
+		manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+		api := NewAPI(db, fly.client, nil, nil, manager, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/resume-dormant?source=main", nil)
+		recorder := httptest.NewRecorder()
+
+		api.handleResumeDormantWorkers(recorder, request)
+
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusConflict, recorder.Body.String())
+		}
+	})
+
+	t.Run("conflicting deployment override fails closed", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		if err := db.UpsertReadyDeployment(&model.Deployment{
+			GitSHA:        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			LitestreamSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			ImageRef:      "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-ls-bbbbbbbbbbbb",
+			Source:        "main",
+			Status:        "ready",
+		}); err != nil {
+			t.Fatalf("UpsertReadyDeployment() error = %v", err)
+		}
+
+		manager := &Manager{db: db, appName: "litestream-soak"}
+		api := NewAPI(db, nil, nil, nil, manager, nil)
+		request := httptest.NewRequest(
+			http.MethodPost,
+			"/api/admin/resume-dormant?source=main&image=registry.fly.io%2Flitestream-soak%3Asha-cccccccccccc-pr-1345-ls-dddddddddddd",
+			nil,
+		)
+		recorder := httptest.NewRecorder()
+
+		api.handleResumeDormantWorkers(recorder, request)
+
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusConflict, recorder.Body.String())
+		}
+	})
+
 	t.Run("no dormant workers returns 200 with zero count and event", func(t *testing.T) {
 		t.Parallel()
 
 		db := openTestDB(t)
+		if err := db.UpsertReadyDeployment(&model.Deployment{
+			GitSHA:        "abc1234",
+			LitestreamSHA: "ls123",
+			ImageRef:      "reg/img:tag",
+			Source:        "main",
+			Status:        "ready",
+		}); err != nil {
+			t.Fatalf("UpsertReadyDeployment() error = %v", err)
+		}
 		manager := &Manager{db: db, appName: "litestream-soak"}
 		api := NewAPI(db, nil, nil, nil, manager, nil)
 		request := httptest.NewRequest(http.MethodPost, "/api/admin/resume-dormant?image=reg%2Fimg%3Atag", nil)
@@ -2823,6 +3134,15 @@ func TestHandleResumeDormantWorkers(t *testing.T) {
 		t.Parallel()
 
 		db := openTestDB(t)
+		if err := db.UpsertReadyDeployment(&model.Deployment{
+			GitSHA:        "abc1234",
+			LitestreamSHA: "ls123",
+			ImageRef:      "reg/img:tag",
+			Source:        "main",
+			Status:        "ready",
+		}); err != nil {
+			t.Fatalf("UpsertReadyDeployment() error = %v", err)
+		}
 		manager := &Manager{db: db, appName: "litestream-soak"}
 		api := NewAPI(db, nil, nil, nil, manager, nil)
 		workerID := "worker-resume-no-vol"
@@ -2877,6 +3197,15 @@ func TestHandleResumeDormantWorkers(t *testing.T) {
 		t.Parallel()
 
 		db := openTestDB(t)
+		if err := db.UpsertReadyDeployment(&model.Deployment{
+			GitSHA:        "main123",
+			LitestreamSHA: "mainls123",
+			ImageRef:      "reg/img:tag",
+			Source:        "main",
+			Status:        "ready",
+		}); err != nil {
+			t.Fatalf("UpsertReadyDeployment() error = %v", err)
+		}
 		manager := &Manager{db: db, appName: "litestream-soak"}
 		api := NewAPI(db, nil, nil, nil, manager, nil)
 		workerID := "worker-pr7-dormant"

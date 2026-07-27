@@ -912,6 +912,53 @@ func TestRollingUpdateSourceSkipsUpToDateWorkers(t *testing.T) {
 	unlock()
 }
 
+func TestRollWorkerAlwaysReplacesExplicitTarget(t *testing.T) {
+	db := openTestDB(t)
+	const source = "main"
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const litestreamSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const imageRef = "registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-ls-bbbbbbbbbbbb"
+
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ImageRef:      imageRef,
+		Source:        source,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+	if err := db.RecordEvent("", "deploy_ready_received", "test", imageRef); err != nil {
+		t.Fatalf("RecordEvent() error = %v", err)
+	}
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-low-vol",
+		AppName:       "litestream-soak",
+		Name:          "worker-main-low-vol",
+		Status:        model.WorkerRunning,
+		Source:        source,
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ProfileName:   "low-volume",
+		ProfileConfig: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}.JSON(),
+		FlyMachineID:  "old-machine",
+		FlyVolumeID:   "old-volume",
+	})
+
+	fly := newDeployTestFlyServer(t, db, source, sha, litestreamSHA, imageRef)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+	worker, err := manager.RollWorker(context.Background(), "worker-main-low-vol", imageRef, sha, litestreamSHA)
+	if err != nil {
+		t.Fatalf("RollWorker() error = %v", err)
+	}
+	if worker.FlyMachineID == "old-machine" {
+		t.Fatalf("FlyMachineID = %q, want replacement machine", worker.FlyMachineID)
+	}
+	fly.assertCreateCounts(t, 1, 1)
+	fly.assertNoErrors(t)
+}
+
 func TestRollingUpdateSourceSkipsSupersededTarget(t *testing.T) {
 	db := openTestDB(t)
 	source := "main"

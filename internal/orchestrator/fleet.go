@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/workload"
 )
@@ -659,27 +658,48 @@ func (m *Manager) reconcileFleet(ctx context.Context, spec FleetSpec) {
 		return
 	}
 
-	imageRef, err := m.currentWorkerImage(ctx)
-	if err != nil {
-		slog.Error("Failed to resolve worker image for fleet reconciliation", "error", err)
-		return
+	workersBySource := make(map[string][]DesiredWorker)
+	sources := make([]string, 0)
+	for _, desired := range spec.Workers {
+		source := firstNonEmpty(strings.TrimSpace(desired.Source), "main")
+		if _, ok := workersBySource[source]; !ok {
+			sources = append(sources, source)
+		}
+		workersBySource[source] = append(workersBySource[source], desired)
 	}
 
-	m.ensureFleetSpec(ctx, spec, imageRef)
+	for _, source := range sources {
+		deployment, err := resolveReadyDeploymentTarget(m.db, source, "", "", "")
+		if err != nil {
+			slog.Warn("Skipping fleet reconciliation without a ready source deployment", "source", source, "error", err)
+			continue
+		}
+
+		resolved := make([]DesiredWorker, 0, len(workersBySource[source]))
+		for _, desired := range workersBySource[source] {
+			desired.Source = source
+			desired.GitSHA = deployment.GitSHA
+			desired.LitestreamSHA = deployment.LitestreamSHA
+			desired.PRNumber = sourcePRNumber(source)
+			resolved = append(resolved, desired)
+		}
+		m.ensureFleetSpec(ctx, FleetSpec{Workers: resolved}, deployment.ImageRef)
+	}
 }
 
 func (m *Manager) EnsureSourceFleet(ctx context.Context, source, gitSHA, litestreamSHA, imageRef string) error {
 	if !supportsDefaultFleetSource(source) {
 		return nil
 	}
-	if strings.TrimSpace(imageRef) == "" {
-		currentImage, err := m.currentWorkerImage(ctx)
-		if err != nil {
-			return err
-		}
-		imageRef = currentImage
+	deployment, err := resolveReadyDeploymentTarget(m.db, source, imageRef, gitSHA, litestreamSHA)
+	if err != nil {
+		return fmt.Errorf("resolve source fleet deployment: %w", err)
 	}
-	m.ensureFleetSpec(ctx, DefaultFleetForSource(source, gitSHA, litestreamSHA), imageRef)
+	m.ensureFleetSpec(
+		ctx,
+		DefaultFleetForSource(source, deployment.GitSHA, deployment.LitestreamSHA),
+		deployment.ImageRef,
+	)
 	return nil
 }
 
@@ -724,43 +744,6 @@ func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef 
 
 		slog.Info("Created desired fleet worker", "name", desired.Name, "source", desired.Source, "profile", desired.ProfileName, "load_mode", desired.Workload.LoadMode)
 	}
-}
-
-func (m *Manager) currentWorkerImage(ctx context.Context) (string, error) {
-	machines, err := m.fly.ListMachines(ctx)
-	if err != nil {
-		return "", fmt.Errorf("list machines: %w", err)
-	}
-
-	var newestStarted *flyapi.Machine
-	for _, machine := range machines {
-		if strings.TrimSpace(machine.Config.Image) == "" || machine.State != "started" {
-			continue
-		}
-		if newestStarted == nil || machine.UpdatedAt.After(newestStarted.UpdatedAt) {
-			candidate := machine
-			newestStarted = &candidate
-		}
-	}
-	if newestStarted != nil {
-		return newestStarted.Config.Image, nil
-	}
-
-	var newestAny *flyapi.Machine
-	for _, machine := range machines {
-		if strings.TrimSpace(machine.Config.Image) == "" {
-			continue
-		}
-		if newestAny == nil || machine.UpdatedAt.After(newestAny.UpdatedAt) {
-			candidate := machine
-			newestAny = &candidate
-		}
-	}
-	if newestAny != nil {
-		return newestAny.Config.Image, nil
-	}
-
-	return "", fmt.Errorf("no worker image found in %s", m.fly.AppName())
 }
 
 func firstNonEmpty(values ...string) string {

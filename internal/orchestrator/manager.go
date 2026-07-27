@@ -638,10 +638,11 @@ func (m *Manager) RollWorker(ctx context.Context, workerID, newImageRef, newSHA,
 	if err != nil {
 		return nil, fmt.Errorf("get worker: %w", err)
 	}
-	if workerMatchesDeployment(*worker, model.Deployment{GitSHA: newSHA, LitestreamSHA: newLitestreamSHA}) {
-		return worker, nil
+	deployment, err := resolveReadyDeploymentTarget(m.db, worker.Source, newImageRef, newSHA, newLitestreamSHA)
+	if err != nil {
+		return nil, fmt.Errorf("validate targeted roll deployment: %w", err)
 	}
-	return m.replaceWorker(ctx, *worker, newImageRef, newSHA, newLitestreamSHA)
+	return m.replaceWorker(ctx, *worker, deployment.ImageRef, deployment.GitSHA, deployment.LitestreamSHA)
 }
 
 func (m *Manager) replaceWorker(ctx context.Context, w model.Worker, newImageRef, newSHA, newLitestreamSHA string) (*model.Worker, error) {

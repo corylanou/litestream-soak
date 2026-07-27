@@ -16,6 +16,7 @@ import (
 
 var validSHARe = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 var validImageRefRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`)
+var versionedWorkerImageRe = regexp.MustCompile(`(^|:)sha-([0-9a-fA-F]{7,40})(-pr-([1-9][0-9]*))?-ls-([0-9a-fA-F]{7,40})(@sha256:[0-9a-fA-F]{32,})?$`)
 
 const deploymentBuildTimeout = 10 * time.Minute
 
@@ -104,22 +105,26 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 		return "", fmt.Errorf("invalid deployment sha %q: must be 7-40 hex characters", sha)
 	}
 	litestreamSHA = strings.TrimSpace(litestreamSHA)
+	if litestreamSHA == "" {
+		return "", fmt.Errorf("litestream sha is required")
+	}
 	trigger = strings.TrimSpace(trigger)
 	if trigger == "" {
 		trigger = "deploy_ready"
 	}
 	imageRef = strings.TrimSpace(imageRef)
 	if imageRef == "" {
-		if d.manager == nil {
-			return "", fmt.Errorf("deployment manager unavailable")
-		}
-		var err error
-		imageRef, err = d.manager.currentWorkerImage(ctx)
-		if err != nil {
-			return "", fmt.Errorf("resolve worker image: %w", err)
-		}
+		return "", fmt.Errorf("deployment image ref is required")
 	}
-	if err := validateDeploymentImageRef(imageRef); err != nil {
+	target := model.Deployment{
+		GitSHA:        sha,
+		LitestreamSHA: litestreamSHA,
+		ImageRef:      imageRef,
+		Source:        source,
+		PRNumber:      sourcePRNumber(source),
+		Status:        "ready",
+	}
+	if err := validateReadyDeploymentTarget(target); err != nil {
 		return "", err
 	}
 	if d.manager == nil {
@@ -135,14 +140,7 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 		return "", fmt.Errorf("start deployment ready rollout: %w", err)
 	}
 
-	if err := d.db.UpsertReadyDeployment(&model.Deployment{
-		GitSHA:        sha,
-		LitestreamSHA: litestreamSHA,
-		ImageRef:      imageRef,
-		Source:        source,
-		PRNumber:      sourcePRNumber(source),
-		Status:        "ready",
-	}); err != nil {
+	if err := d.db.UpsertReadyDeployment(&target); err != nil {
 		return "", fmt.Errorf("record ready deployment: %w", err)
 	}
 
@@ -232,6 +230,79 @@ func validateDeploymentImageRef(imageRef string) error {
 		return fmt.Errorf("invalid deployment image ref %q", imageRef)
 	}
 	return nil
+}
+
+func validateReadyDeploymentTarget(deployment model.Deployment) error {
+	source := firstNonEmpty(strings.TrimSpace(deployment.Source), "main")
+	if !strings.EqualFold(strings.TrimSpace(deployment.Status), "ready") {
+		return fmt.Errorf("%s deployment is not ready", source)
+	}
+
+	gitSHA := strings.TrimSpace(deployment.GitSHA)
+	if gitSHA == "" {
+		return fmt.Errorf("%s ready deployment has no git sha", source)
+	}
+	litestreamSHA := strings.TrimSpace(deployment.LitestreamSHA)
+	if litestreamSHA == "" {
+		return fmt.Errorf("%s ready deployment has no litestream sha", source)
+	}
+	imageRef := strings.TrimSpace(deployment.ImageRef)
+	if err := validateDeploymentImageRef(imageRef); err != nil {
+		return err
+	}
+
+	match := versionedWorkerImageRe.FindStringSubmatch(imageRef)
+	if match == nil {
+		return nil
+	}
+	if !strings.HasPrefix(strings.ToLower(gitSHA), strings.ToLower(match[2])) {
+		return fmt.Errorf("deployment image git sha %s does not match recorded git sha %s", match[2], gitSHA)
+	}
+	if !strings.HasPrefix(strings.ToLower(litestreamSHA), strings.ToLower(match[5])) {
+		return fmt.Errorf("deployment image litestream sha %s does not match recorded litestream sha %s", match[5], litestreamSHA)
+	}
+
+	imageSource := "main"
+	if match[4] != "" {
+		imageSource = "pr-" + match[4]
+	}
+	if source != imageSource {
+		return fmt.Errorf("deployment image source %s does not match requested source %s", imageSource, source)
+	}
+	return nil
+}
+
+func resolveReadyDeploymentTarget(db *model.DB, source, imageRef, gitSHA, litestreamSHA string) (*model.Deployment, error) {
+	source = firstNonEmpty(strings.TrimSpace(source), "main")
+	imageRef = strings.TrimSpace(imageRef)
+	gitSHA = strings.TrimSpace(gitSHA)
+	litestreamSHA = strings.TrimSpace(litestreamSHA)
+	if (gitSHA == "") != (litestreamSHA == "") {
+		return nil, fmt.Errorf("git sha and litestream sha must be provided together")
+	}
+
+	var (
+		deployment *model.Deployment
+		err        error
+	)
+	if gitSHA == "" {
+		deployment, err = db.GetLatestReadyDeployment(source)
+	} else {
+		deployment, err = db.GetDeploymentByVersion(source, gitSHA, litestreamSHA)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get ready deployment for %s: %w", source, err)
+	}
+	if deployment == nil {
+		return nil, fmt.Errorf("no ready deployment exists for %s", source)
+	}
+	if err := validateReadyDeploymentTarget(*deployment); err != nil {
+		return nil, err
+	}
+	if imageRef != "" && imageRef != strings.TrimSpace(deployment.ImageRef) {
+		return nil, fmt.Errorf("image override %s does not match ready %s deployment image %s", imageRef, source, deployment.ImageRef)
+	}
+	return deployment, nil
 }
 
 func resolveLitestreamBuildSHA(ctx context.Context, ref string) (string, error) {
