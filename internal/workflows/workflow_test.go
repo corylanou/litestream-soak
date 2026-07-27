@@ -2,6 +2,7 @@ package workflows
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -147,6 +148,49 @@ func TestSoakPRDoesNotInterpolateDispatchInputsIntoShell(t *testing.T) {
 		if !strings.Contains(content, required) {
 			t.Fatalf("soak-pr.yml is missing input hardening %q", required)
 		}
+	}
+}
+
+func TestNotifyDeploymentReadyRequiresImageAndLitestreamSHA(t *testing.T) {
+	t.Parallel()
+
+	script := filepath.Join("..", "..", "scripts", "notify-deployment-ready.sh")
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "missing image and litestream SHA",
+			args: []string{"abc123"},
+		},
+		{
+			name: "missing image",
+			args: []string{"abc123", "main", "manual", "", "litestream123"},
+		},
+		{
+			name: "missing litestream SHA",
+			args: []string{"abc123", "main", "manual", "registry.fly.io/example:image", ""},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			output, err := exec.Command(script, tt.args...).CombinedOutput()
+			if err == nil {
+				t.Fatal("notify-deployment-ready.sh succeeded with incomplete deployment metadata")
+			}
+			for _, expected := range []string{
+				"sha, image-ref, and litestream-sha are required",
+				"usage:",
+				"<image-ref> <litestream-sha>",
+			} {
+				if !strings.Contains(string(output), expected) {
+					t.Fatalf("output %q does not contain %q", output, expected)
+				}
+			}
+		})
 	}
 }
 

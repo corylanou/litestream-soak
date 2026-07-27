@@ -298,9 +298,11 @@ curl -X POST -sS \
   "https://litestream-soak-ctl.fly.dev/api/admin/resume-dormant?source=main&trigger=manual_resume" | jq .
 ```
 
-That resumes dormant workers using the current worker image already running in
-Fly. If you want the probe to carry explicit version tracking, add
-`&sha=<soak-git-sha>&litestream_sha=<upstream-litestream-sha>` to the request.
+That resumes dormant workers using the latest ready deployment recorded for the
+requested source. If no ready deployment exists for that source, the request
+returns `409` without creating machines. To select a specific ready deployment,
+add both `&sha=<soak-git-sha>` and
+`&litestream_sha=<upstream-litestream-sha>` to the request.
 
 ## Trusted Main Deployment Path
 
@@ -331,7 +333,9 @@ SOAK_LITESTREAM_SHA=<optional upstream litestream commit or tag>
 
 Do not set `SOAK_LITESTREAM_SHA` to the soak repo commit. That value is only
 for the upstream `benbjohnson/litestream` checkout performed inside
-`Dockerfile.worker`.
+`Dockerfile.worker`. The workflow variable is optional because the build
+resolves its default of upstream `main` to a concrete commit; the resolved SHA
+is still required in every deployment-ready notification.
 
 The post-build handoff command is:
 
@@ -345,6 +349,10 @@ SOAK_ADMIN_BEARER_TOKEN=... \
   <image-ref> \
   <upstream-litestream-sha>
 ```
+
+The image ref and upstream Litestream SHA are required. The script rejects the
+notification locally when either value is missing instead of sending an
+incomplete deployment to the control plane.
 
 If you need to test the same path manually without merging anything:
 
@@ -392,8 +400,8 @@ SOAK_ADMIN_BEARER_TOKEN=... \
   "$LITESTREAM_SHA"
 ```
 
-If you only need to wake dormant workers with the current image already running
-in Fly:
+If you only need to wake dormant workers with the latest ready deployment
+recorded for `main`:
 
 ```bash
 curl -X POST -sS \
