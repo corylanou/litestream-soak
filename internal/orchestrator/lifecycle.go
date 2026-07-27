@@ -203,7 +203,7 @@ func (m *Manager) evaluateDormantFleetAlerts(ctx context.Context, policy Dormant
 			slog.Error("Failed to lock source for dormant fleet alert", "source", source, "error", err)
 			continue
 		}
-		err = m.evaluateDormantFleetAlertLocked(source, policy, now)
+		err = m.evaluateDormantFleetAlertLocked(ctx, source, policy, now)
 		unlockSource()
 		if err != nil {
 			slog.Error("Failed to evaluate dormant fleet alert", "source", source, "error", err)
@@ -211,13 +211,23 @@ func (m *Manager) evaluateDormantFleetAlerts(ctx context.Context, policy Dormant
 	}
 }
 
-func (m *Manager) evaluateDormantFleetAlertLocked(source string, policy DormantFleetAlertPolicy, now time.Time) error {
+func (m *Manager) evaluateDormantFleetAlertLocked(ctx context.Context, source string, policy DormantFleetAlertPolicy, now time.Time) error {
 	workers, err := m.db.ListWorkersForSource(source)
 	if err != nil {
 		return fmt.Errorf("list source workers: %w", err)
 	}
 
-	epoch, fullyDormant := fullyDormantFleetEpoch(workers)
+	resumableWorkers, inventoryErr := m.resumableWorkers(ctx, workers)
+	if inventoryErr != nil {
+		slog.Error(
+			"Dormant fleet alert evaluation degraded; using database-only fallback",
+			"source", source,
+			"alert_type", fleetFullyDormantAlertType,
+			"fallback", "database_only",
+			"error", inventoryErr,
+		)
+	}
+	epoch, fullyDormant := fullyDormantFleetEpoch(resumableWorkers)
 	active, err := m.db.GetActiveAlertCondition(fleetFullyDormantAlertType, source)
 	if err != nil {
 		return fmt.Errorf("get active condition: %w", err)
@@ -258,6 +268,49 @@ func (m *Manager) evaluateDormantFleetAlertLocked(source string, policy DormantF
 		return fmt.Errorf("create dormant fleet alert: %w", err)
 	}
 	return nil
+}
+
+func (m *Manager) resumableWorkers(ctx context.Context, workers []model.Worker) ([]model.Worker, error) {
+	if len(workers) == 0 {
+		return nil, nil
+	}
+	if m.fly == nil {
+		return workers, fmt.Errorf("fly client is not configured")
+	}
+
+	workersByApp := make(map[string][]model.Worker)
+	for _, worker := range workers {
+		appName := firstNonEmpty(strings.TrimSpace(worker.AppName), m.appName)
+		workersByApp[appName] = append(workersByApp[appName], worker)
+	}
+
+	resumable := make([]model.Worker, 0, len(workers))
+	for appName, appWorkers := range workersByApp {
+		volumes, err := m.fly.ForApp(appName).ListVolumes(ctx)
+		if err != nil {
+			return workers, fmt.Errorf("list volumes for app %s: %w", appName, err)
+		}
+
+		volumeIDs := make(map[string]struct{}, len(volumes))
+		attachedMachineIDs := make(map[string]struct{}, len(volumes))
+		for _, volume := range volumes {
+			if volumeID := strings.TrimSpace(volume.ID); volumeID != "" {
+				volumeIDs[volumeID] = struct{}{}
+			}
+			if machineID := strings.TrimSpace(volume.AttachedMachineID); machineID != "" {
+				attachedMachineIDs[machineID] = struct{}{}
+			}
+		}
+
+		for _, worker := range appWorkers {
+			_, hasVolume := volumeIDs[strings.TrimSpace(worker.FlyVolumeID)]
+			_, hasAttachedMachine := attachedMachineIDs[strings.TrimSpace(worker.FlyMachineID)]
+			if hasVolume || hasAttachedMachine {
+				resumable = append(resumable, worker)
+			}
+		}
+	}
+	return resumable, nil
 }
 
 func deploymentBuildInFlight(deployment *model.Deployment, now time.Time) bool {

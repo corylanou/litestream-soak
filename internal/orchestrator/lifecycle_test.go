@@ -2,11 +2,15 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/reporting"
 )
@@ -94,9 +98,13 @@ func TestEvaluateDormantFleetAlertsPersistsDeduplicatesAndResolvesWithoutWebhook
 	t.Parallel()
 
 	db := openTestDB(t)
-	for _, workerID := range []string{"worker-main-a", "worker-main-b"} {
+	volumes := make([]flyapi.Volume, 0, 2)
+	for i, workerID := range []string{"worker-main-a", "worker-main-b"} {
+		volumeID := fmt.Sprintf("volume-main-%d", i)
+		volumes = append(volumes, flyapi.Volume{ID: volumeID, State: "created"})
 		createTestWorker(t, db, model.Worker{
 			ID:            workerID,
+			AppName:       "litestream-soak",
 			Name:          workerID,
 			Status:        model.WorkerRunning,
 			Source:        "main",
@@ -104,6 +112,7 @@ func TestEvaluateDormantFleetAlertsPersistsDeduplicatesAndResolvesWithoutWebhook
 			LitestreamSHA: "litestream-sha",
 			ProfileName:   "low-volume",
 			ProfileConfig: "{}",
+			FlyVolumeID:   volumeID,
 		})
 		if err := db.MarkWorkerDormant(workerID, "known bad", "integrity_check_mismatch", "known_bad_source"); err != nil {
 			t.Fatalf("MarkWorkerDormant(%s) error = %v", workerID, err)
@@ -111,7 +120,8 @@ func TestEvaluateDormantFleetAlertsPersistsDeduplicatesAndResolvesWithoutWebhook
 	}
 
 	dispatcher := NewAlertDispatcher(db, "https://control.example", "", "")
-	manager := NewManager(nil, db, nil, dispatcher, "litestream-soak", ReplicaConfig{}, "", "")
+	fly := newDormantFleetFlyServer(t, volumes, http.StatusOK)
+	manager := NewManager(fly.client, db, nil, dispatcher, "litestream-soak", ReplicaConfig{}, "", "")
 	policy := DormantFleetAlertPolicy{Threshold: time.Nanosecond}
 
 	manager.evaluateDormantFleetAlerts(context.Background(), policy)
@@ -157,12 +167,119 @@ func TestEvaluateDormantFleetAlertsPersistsDeduplicatesAndResolvesWithoutWebhook
 	}
 }
 
+func TestEvaluateDormantFleetAlertsRequiresLiveVolume(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                  string
+		liveVolumes           []flyapi.Volume
+		volumeLookupStatus    int
+		withoutFlyClient      bool
+		createActiveCondition bool
+		wantAlertCount        int
+		wantConditionStatus   string
+	}{
+		{
+			name:           "retired fleet does not alert",
+			wantAlertCount: 0,
+		},
+		{
+			name: "parked fleet with volume alerts",
+			liveVolumes: []flyapi.Volume{
+				{ID: "volume-pr-159", State: "created"},
+			},
+			wantAlertCount:      1,
+			wantConditionStatus: "active",
+		},
+		{
+			name:                "volume lookup failure uses database fallback",
+			volumeLookupStatus:  http.StatusTooManyRequests,
+			wantAlertCount:      1,
+			wantConditionStatus: "active",
+		},
+		{
+			name:                "missing fly client uses database fallback",
+			withoutFlyClient:    true,
+			wantAlertCount:      1,
+			wantConditionStatus: "active",
+		},
+		{
+			name:                  "retired fleet resolves active condition",
+			createActiveCondition: true,
+			wantAlertCount:        1,
+			wantConditionStatus:   "resolved",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := openTestDB(t)
+			createTestWorker(t, db, model.Worker{
+				ID:            "worker-pr-159",
+				AppName:       "litestream-soak",
+				Name:          "worker-pr-159",
+				Status:        model.WorkerRunning,
+				Source:        "pr-159",
+				GitSHA:        "soak-sha",
+				LitestreamSHA: "litestream-sha",
+				ProfileName:   "low-volume",
+				ProfileConfig: "{}",
+				FlyVolumeID:   "volume-pr-159",
+			})
+			if err := db.MarkWorkerDormant("worker-pr-159", "known bad", "integrity_check_mismatch", "known_bad_source"); err != nil {
+				t.Fatalf("MarkWorkerDormant() error = %v", err)
+			}
+
+			worker, err := db.GetWorker("worker-pr-159")
+			if err != nil {
+				t.Fatalf("GetWorker() error = %v", err)
+			}
+			if tt.createActiveCondition {
+				if _, created, err := db.CreateAlert(&model.AlertDelivery{
+					Source:             "pr-159",
+					AlertType:          fleetFullyDormantAlertType,
+					Fingerprint:        fleetFullyDormantAlertType + ":pr-159:" + worker.DormantAt.Format(time.RFC3339Nano),
+					Status:             "not_configured",
+					ConditionStatus:    "active",
+					ConditionStartedAt: worker.DormantAt,
+				}); err != nil {
+					t.Fatalf("CreateAlert() error = %v", err)
+				} else if !created {
+					t.Fatal("CreateAlert() created = false, want true")
+				}
+			}
+
+			var flyClient *flyapi.Client
+			if !tt.withoutFlyClient {
+				fly := newDormantFleetFlyServer(t, tt.liveVolumes, tt.volumeLookupStatus)
+				flyClient = fly.client
+			}
+			manager := NewManager(flyClient, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+			manager.evaluateDormantFleetAlerts(context.Background(), DormantFleetAlertPolicy{Threshold: time.Nanosecond})
+
+			alerts, err := db.ListAlerts(10)
+			if err != nil {
+				t.Fatalf("ListAlerts() error = %v", err)
+			}
+			if len(alerts) != tt.wantAlertCount {
+				t.Fatalf("len(alerts) = %d, want %d", len(alerts), tt.wantAlertCount)
+			}
+			if tt.wantConditionStatus != "" && alerts[0].ConditionStatus != tt.wantConditionStatus {
+				t.Fatalf("ConditionStatus = %q, want %q", alerts[0].ConditionStatus, tt.wantConditionStatus)
+			}
+		})
+	}
+}
+
 func TestEvaluateDormantFleetAlertsWaitsForThresholdAndActiveDeployment(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
 	createTestWorker(t, db, model.Worker{
 		ID:            "worker-main-alert-gate",
+		AppName:       "litestream-soak",
 		Name:          "worker-main-alert-gate",
 		Status:        model.WorkerRunning,
 		Source:        "main",
@@ -170,6 +287,7 @@ func TestEvaluateDormantFleetAlertsWaitsForThresholdAndActiveDeployment(t *testi
 		LitestreamSHA: "litestream-sha",
 		ProfileName:   "low-volume",
 		ProfileConfig: "{}",
+		FlyVolumeID:   "volume-main-alert-gate",
 	})
 	if err := db.MarkWorkerDormant("worker-main-alert-gate", "known bad", "integrity_check_mismatch", "known_bad_source"); err != nil {
 		t.Fatalf("MarkWorkerDormant() error = %v", err)
@@ -184,7 +302,10 @@ func TestEvaluateDormantFleetAlertsWaitsForThresholdAndActiveDeployment(t *testi
 		t.Fatalf("CreateDeployment() error = %v", err)
 	}
 
-	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	fly := newDormantFleetFlyServer(t, []flyapi.Volume{
+		{ID: "volume-main-alert-gate", State: "created"},
+	}, http.StatusOK)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
 	manager.evaluateDormantFleetAlerts(context.Background(), DormantFleetAlertPolicy{Threshold: time.Hour})
 
 	alerts, err := db.ListAlerts(10)
@@ -209,7 +330,7 @@ func TestEvaluateDormantFleetAlertsWaitsForThresholdAndActiveDeployment(t *testi
 		t.Fatalf("GetLatestDeployment() error = %v", err)
 	}
 	staleAt := deployment.StartedAt.UTC().Add(deploymentBuildTimeout + time.Second)
-	if err := manager.evaluateDormantFleetAlertLocked("main", DormantFleetAlertPolicy{Threshold: time.Nanosecond}, staleAt); err != nil {
+	if err := manager.evaluateDormantFleetAlertLocked(context.Background(), "main", DormantFleetAlertPolicy{Threshold: time.Nanosecond}, staleAt); err != nil {
 		t.Fatalf("evaluateDormantFleetAlertLocked() error = %v", err)
 	}
 
@@ -220,6 +341,42 @@ func TestEvaluateDormantFleetAlertsWaitsForThresholdAndActiveDeployment(t *testi
 	if len(alerts) != 1 {
 		t.Fatalf("len(alerts) after stale deployment = %d, want 1", len(alerts))
 	}
+}
+
+type dormantFleetFlyServer struct {
+	client  *flyapi.Client
+	server  *httptest.Server
+	volumes []flyapi.Volume
+	status  int
+}
+
+func newDormantFleetFlyServer(t *testing.T, volumes []flyapi.Volume, status int) *dormantFleetFlyServer {
+	t.Helper()
+
+	fake := &dormantFleetFlyServer{
+		volumes: append([]flyapi.Volume(nil), volumes...),
+		status:  status,
+	}
+	fake.server = httptest.NewServer(http.HandlerFunc(fake.handle))
+	t.Cleanup(fake.server.Close)
+	fake.client = flyapi.NewClientWithBaseURL("litestream-soak", "test-token", fake.server.URL)
+	return fake
+}
+
+func (f *dormantFleetFlyServer) handle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet || r.URL.Path != "/apps/litestream-soak/volumes" {
+		http.NotFound(w, r)
+		return
+	}
+	if f.status != 0 && f.status != http.StatusOK {
+		http.Error(w, "rate limit exceeded", f.status)
+		return
+	}
+
+	volumes := append([]flyapi.Volume(nil), f.volumes...)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(volumes)
 }
 
 func TestResumeDormantWorkerImmediatelyResolvesFleetCondition(t *testing.T) {
