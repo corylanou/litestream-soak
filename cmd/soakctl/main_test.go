@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -167,6 +168,77 @@ func TestRequestTimeoutHandlerRejectsTeardownWhenWriteDeadlineFails(t *testing.T
 	case <-downstreamCalled:
 		t.Fatal("downstream handler called after write deadline failure")
 	default:
+	}
+}
+
+func TestRequestTimeoutHandlerReturnsStructuredTeardownTimeout(t *testing.T) {
+	defaultTimeout := 10 * time.Millisecond
+	teardownTimeout := 30 * time.Millisecond
+	responseGrace := 200 * time.Millisecond
+	handlerStarted := make(chan struct{})
+	handlerCanceled := make(chan error, 1)
+	releaseHandler := make(chan struct{})
+	handler := newRequestTimeoutHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(handlerStarted)
+		<-r.Context().Done()
+		handlerCanceled <- r.Context().Err()
+		<-releaseHandler
+		w.WriteHeader(http.StatusNoContent)
+	}), defaultTimeout, teardownTimeout, responseGrace)
+	server := httptest.NewUnstartedServer(handler)
+	server.Config.WriteTimeout = defaultTimeout
+	server.Start()
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { close(releaseHandler) })
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+sourceTeardownRequestPath+"?source=pr-168", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	client := server.Client()
+	client.Timeout = teardownTimeout + responseGrace + 100*time.Millisecond
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("Do() error = %v, want structured timeout response", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+	}
+	if contentType := response.Header.Get("Content-Type"); contentType != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", contentType)
+	}
+	var body struct {
+		Error      string `json:"error"`
+		Retryable  bool   `json:"retryable"`
+		NextAction string `json:"next_action"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Error == "" {
+		t.Fatal("error is empty")
+	}
+	if !body.Retryable {
+		t.Fatal("retryable = false, want true")
+	}
+	if body.NextAction == "" {
+		t.Fatal("next_action is empty")
+	}
+
+	select {
+	case <-handlerStarted:
+	default:
+		t.Fatal("teardown handler was not called")
+	}
+	select {
+	case err := <-handlerCanceled:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("handler context error = %v, want %v", err, context.DeadlineExceeded)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("teardown handler context was not canceled")
 	}
 }
 

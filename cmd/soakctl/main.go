@@ -21,12 +21,18 @@ import (
 )
 
 const (
-	shutdownTimeout             = 30 * time.Second
-	defaultRequestTimeout       = 2 * time.Minute
-	sourceTeardownTimeout       = 30 * time.Minute
-	sourceTeardownResponseGrace = time.Minute
-	sourceTeardownRequestPath   = "/api/admin/teardown-source"
-	requestTimeoutResponse      = "request timed out\n"
+	shutdownTimeout               = 30 * time.Second
+	defaultRequestTimeout         = 2 * time.Minute
+	sourceTeardownTimeout         = 30 * time.Minute
+	sourceTeardownResponseGrace   = time.Minute
+	sourceTeardownRequestPath     = "/api/admin/teardown-source"
+	requestTimeoutResponse        = "request timed out\n"
+	sourceTeardownTimeoutResponse = `{
+  "error": "source teardown exceeded its operation budget",
+  "retryable": true,
+  "next_action": "Query worker status and events to identify reclaimed workers, then retry the same request; already stopped workers will be skipped."
+}
+`
 )
 
 type shutdowner interface {
@@ -283,6 +289,7 @@ func main() {
 
 func newRequestTimeoutHandler(next http.Handler, defaultTimeout, teardownTimeout, responseGrace time.Duration) http.Handler {
 	defaultHandler := http.TimeoutHandler(next, defaultTimeout, requestTimeoutResponse)
+	teardownHandler := http.TimeoutHandler(next, teardownTimeout, sourceTeardownTimeoutResponse)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != sourceTeardownRequestPath {
@@ -299,7 +306,8 @@ func newRequestTimeoutHandler(next http.Handler, defaultTimeout, teardownTimeout
 			return
 		}
 
-		next.ServeHTTP(w, r.WithContext(teardownCtx))
+		w.Header().Set("Content-Type", "application/json")
+		teardownHandler.ServeHTTP(w, r.WithContext(teardownCtx))
 	})
 }
 
