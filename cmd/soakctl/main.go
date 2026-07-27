@@ -20,7 +20,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-const shutdownTimeout = 30 * time.Second
+const (
+	shutdownTimeout             = 30 * time.Second
+	defaultRequestTimeout       = 2 * time.Minute
+	sourceTeardownTimeout       = 30 * time.Minute
+	sourceTeardownResponseGrace = time.Minute
+	sourceTeardownRequestPath   = "/api/admin/teardown-source"
+	requestTimeoutResponse      = "request timed out\n"
+)
 
 type shutdowner interface {
 	Shutdown(context.Context) error
@@ -250,10 +257,10 @@ func main() {
 
 	server := &http.Server{
 		Addr:              listenAddr,
-		Handler:           http.TimeoutHandler(handler, 2*time.Minute, "request timed out\n"),
+		Handler:           newRequestTimeoutHandler(handler, defaultRequestTimeout, sourceTeardownTimeout, sourceTeardownResponseGrace),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      2 * time.Minute,
+		WriteTimeout:      defaultRequestTimeout,
 		IdleTimeout:       30 * time.Second,
 	}
 	shutdownErrCh := make(chan error, 1)
@@ -272,6 +279,28 @@ func main() {
 		}
 	}
 	webhookHandler.WaitForRetirements()
+}
+
+func newRequestTimeoutHandler(next http.Handler, defaultTimeout, teardownTimeout, responseGrace time.Duration) http.Handler {
+	defaultHandler := http.TimeoutHandler(next, defaultTimeout, requestTimeoutResponse)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != sourceTeardownRequestPath {
+			defaultHandler.ServeHTTP(w, r)
+			return
+		}
+
+		teardownCtx, cancel := context.WithTimeout(r.Context(), teardownTimeout)
+		defer cancel()
+		teardownDeadline, _ := teardownCtx.Deadline()
+		if err := http.NewResponseController(w).SetWriteDeadline(teardownDeadline.Add(responseGrace)); err != nil {
+			slog.Error("Failed to extend source teardown response deadline", "error", err)
+			http.Error(w, "failed to extend response deadline", http.StatusInternalServerError)
+			return
+		}
+
+		next.ServeHTTP(w, r.WithContext(teardownCtx))
+	})
 }
 
 func shutdownOnCancel(ctx context.Context, server shutdowner, timeout time.Duration) error {

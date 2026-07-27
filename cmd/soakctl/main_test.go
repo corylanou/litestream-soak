@@ -13,10 +13,161 @@ type blockingShutdowner struct {
 	ctxCh chan context.Context
 }
 
+type deadlineResponseWriter struct {
+	*httptest.ResponseRecorder
+	deadline    time.Time
+	deadlineErr error
+}
+
+func (w *deadlineResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadline = deadline
+	return w.deadlineErr
+}
+
 func (s *blockingShutdowner) Shutdown(ctx context.Context) error {
 	s.ctxCh <- ctx
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+func TestRequestTimeoutHandlerAllowsSynchronousTeardownPastDefaultTimeout(t *testing.T) {
+	defaultTimeout := 20 * time.Millisecond
+	teardownTimeout := time.Second
+	responseGrace := 100 * time.Millisecond
+	teardownStarted := make(chan struct{})
+	normalStarted := make(chan struct{})
+	releaseTeardown := make(chan struct{})
+	handler := newRequestTimeoutHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/admin/teardown-source":
+			close(teardownStarted)
+			<-releaseTeardown
+			w.WriteHeader(http.StatusOK)
+		default:
+			close(normalStarted)
+			<-r.Context().Done()
+		}
+	}), defaultTimeout, teardownTimeout, responseGrace)
+
+	teardownResponse := &deadlineResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+	teardownRequest := httptest.NewRequest(http.MethodPost, "/api/admin/teardown-source?source=pr-168", nil)
+	teardownDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(teardownResponse, teardownRequest)
+		close(teardownDone)
+	}()
+
+	select {
+	case <-teardownStarted:
+	case <-time.After(time.Second):
+		close(releaseTeardown)
+		t.Fatal("timed out waiting for teardown handler")
+	}
+
+	normalResponse := httptest.NewRecorder()
+	normalRequest := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	normalDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(normalResponse, normalRequest)
+		close(normalDone)
+	}()
+
+	select {
+	case <-normalStarted:
+	case <-time.After(time.Second):
+		close(releaseTeardown)
+		t.Fatal("timed out waiting for normal handler")
+	}
+	select {
+	case <-normalDone:
+	case <-time.After(time.Second):
+		close(releaseTeardown)
+		t.Fatal("normal request did not receive the default timeout")
+	}
+
+	if normalResponse.Code != http.StatusServiceUnavailable {
+		close(releaseTeardown)
+		t.Fatalf("normal status = %d, want %d", normalResponse.Code, http.StatusServiceUnavailable)
+	}
+	if normalResponse.Body.String() != "request timed out\n" {
+		close(releaseTeardown)
+		t.Fatalf("normal body = %q, want timeout response", normalResponse.Body.String())
+	}
+	select {
+	case <-teardownDone:
+		t.Fatal("teardown returned before downstream completion")
+	default:
+	}
+
+	close(releaseTeardown)
+	select {
+	case <-teardownDone:
+	case <-time.After(time.Second):
+		t.Fatal("teardown did not return after downstream completion")
+	}
+	if teardownResponse.Code != http.StatusOK {
+		t.Fatalf("teardown status = %d, want %d", teardownResponse.Code, http.StatusOK)
+	}
+}
+
+func TestRequestTimeoutHandlerExtendsTeardownDeadlines(t *testing.T) {
+	defaultTimeout := 20 * time.Millisecond
+	teardownTimeout := 500 * time.Millisecond
+	responseGrace := 100 * time.Millisecond
+	var requestDeadline time.Time
+	handler := newRequestTimeoutHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ok bool
+		requestDeadline, ok = r.Context().Deadline()
+		if !ok {
+			t.Fatal("teardown context has no deadline")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}), defaultTimeout, teardownTimeout, responseGrace)
+	response := &deadlineResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/teardown-source", nil)
+	startedAt := time.Now()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	if requestDeadline.Before(startedAt.Add(teardownTimeout)) {
+		t.Fatalf("request deadline = %s, want at least %s", requestDeadline, startedAt.Add(teardownTimeout))
+	}
+	if requestDeadline.After(time.Now().Add(teardownTimeout)) {
+		t.Fatalf("request deadline = %s, exceeds teardown timeout", requestDeadline)
+	}
+	if response.deadline.IsZero() {
+		t.Fatal("write deadline was not set")
+	}
+	if got := response.deadline.Sub(requestDeadline); got != responseGrace {
+		t.Fatalf("write deadline grace = %s, want %s", got, responseGrace)
+	}
+}
+
+func TestRequestTimeoutHandlerRejectsTeardownWhenWriteDeadlineFails(t *testing.T) {
+	deadlineErr := errors.New("write deadlines unavailable")
+	downstreamCalled := make(chan struct{})
+	handler := newRequestTimeoutHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(downstreamCalled)
+	}), 20*time.Millisecond, time.Second, 100*time.Millisecond)
+	response := &deadlineResponseWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		deadlineErr:      deadlineErr,
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/teardown-source", nil)
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
+	select {
+	case <-downstreamCalled:
+		t.Fatal("downstream handler called after write deadline failure")
+	default:
+	}
 }
 
 func TestShutdownOnCancelUsesBoundedContext(t *testing.T) {
