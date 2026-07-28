@@ -3,6 +3,7 @@ module github.com/corylanou/litestream-soak
 go 1.25.12
 
 require (
+	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/google/uuid v1.6.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
@@ -11,6 +12,7 @@ require (
 )
 
 require (
+	github.com/aws/smithy-go v1.24.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect

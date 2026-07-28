@@ -76,6 +76,8 @@ type Config struct {
 	S3Endpoint                                string
 	S3AccessKey                               string
 	S3SecretKey                               string
+	S3SessionToken                            string
+	S3Region                                  string
 	S3Path                                    string
 	S3PartSize                                string
 	S3Concurrency                             int
@@ -578,6 +580,12 @@ func ConfigFromEnv() (Config, error) {
 	if v := os.Getenv("AWS_SECRET_ACCESS_KEY"); v != "" {
 		c.S3SecretKey = v
 	}
+	if v := os.Getenv("AWS_SESSION_TOKEN"); v != "" {
+		c.S3SessionToken = v
+	}
+	if v := firstNonEmpty(os.Getenv("AWS_REGION"), os.Getenv("AWS_DEFAULT_REGION")); v != "" {
+		c.S3Region = v
+	}
 	if v := os.Getenv("S3_PATH"); v != "" {
 		c.S3Path = v
 	}
@@ -1078,6 +1086,8 @@ func (c Config) s3CommandEnv(proxyEndpoint string) []string {
 	env := os.Environ()
 	env = setCommandEnv(env, "AWS_ACCESS_KEY_ID", c.S3AccessKey)
 	env = setCommandEnv(env, "AWS_SECRET_ACCESS_KEY", c.S3SecretKey)
+	env = setCommandEnv(env, "AWS_SESSION_TOKEN", c.S3SessionToken)
+	env = setCommandEnv(env, "AWS_REGION", c.S3Region)
 	if c.S3FaultProxyEnabled && c.ReplicaType == "s3" && strings.TrimSpace(proxyEndpoint) != "" {
 		env = setCommandEnv(env, "HTTP_PROXY", proxyEndpoint)
 		env = setCommandEnv(env, "HTTPS_PROXY", proxyEndpoint)
