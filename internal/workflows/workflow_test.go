@@ -141,6 +141,7 @@ func TestSoakPRDoesNotInterpolateDispatchInputsIntoShell(t *testing.T) {
 	for _, required := range []string{
 		`PR_NUMBER: ${{ github.event.client_payload.pr_number || github.event.inputs.pr_number }}`,
 		`REPO_FULL_NAME: ${{ github.event.client_payload.repo_full_name || github.event.inputs.repo_full_name || 'benbjohnson/litestream' }}`,
+		`REPO_FULL_NAME: ${{ needs.resolve-request.outputs.repo_full_name }}`,
 		`PR_SHA: ${{ github.event.client_payload.pr_sha || github.event.inputs.pr_sha || '' }}`,
 		`if [[ ! "${pr_number}" =~ ^[0-9]+$ ]]; then`,
 		`if [[ ! "${pr_sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then`,
@@ -191,6 +192,56 @@ func TestNotifyDeploymentReadyRequiresImageAndLitestreamSHA(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNotifyDeploymentReadyRequiresRepositoryForPRSource(t *testing.T) {
+	t.Parallel()
+
+	script := filepath.Join("..", "..", "scripts", "notify-deployment-ready.sh")
+	output, err := exec.Command(
+		script,
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"pr-177",
+		"manual",
+		"registry.fly.io/example:image",
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	).CombinedOutput()
+	if err == nil {
+		t.Fatal("notify-deployment-ready.sh succeeded without PR repository")
+	}
+	if !strings.Contains(string(output), "repository in owner/name format is required for PR sources") {
+		t.Fatalf("output %q does not contain repository requirement", output)
+	}
+}
+
+func TestSoakPRPlumbsRepositoryToDeploymentNotification(t *testing.T) {
+	t.Parallel()
+
+	workflow := readWorkflow(t, "soak-pr.yml")
+	for _, required := range []string{
+		`REPO_FULL_NAME: ${{ needs.resolve-request.outputs.repo_full_name }}`,
+		`"${PR_SHA}" \`,
+		`"${REPO_FULL_NAME}"`,
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Fatalf("soak-pr.yml is missing repository notification plumbing %q", required)
+		}
+	}
+
+	scriptPath := filepath.Join("..", "..", "scripts", "notify-deployment-ready.sh")
+	script, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile(%s) error = %v", scriptPath, err)
+	}
+	for _, required := range []string{
+		`repository="${6:-}"`,
+		`--arg repository "$repository"`,
+		`repository: $repository`,
+	} {
+		if !strings.Contains(string(script), required) {
+			t.Fatalf("notify-deployment-ready.sh is missing repository plumbing %q", required)
+		}
 	}
 }
 

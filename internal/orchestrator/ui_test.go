@@ -54,6 +54,20 @@ func TestEventClassMarksVolumeGCProblems(t *testing.T) {
 	}
 }
 
+func TestEventClassMarksPRPollRateLimits(t *testing.T) {
+	t.Parallel()
+
+	for _, eventType := range []string{
+		upstreamPRPollRateLimitedEvent,
+		upstreamPRPollRateLimitSustainedEvent,
+		upstreamPRPollRateLimitRecoveredEvent,
+	} {
+		if got := eventClass(eventType); got != "status-warn" {
+			t.Fatalf("eventClass(%q) = %q, want status-warn", eventType, got)
+		}
+	}
+}
+
 func TestDeploymentSourceSummaryAndCopyText(t *testing.T) {
 	t.Parallel()
 

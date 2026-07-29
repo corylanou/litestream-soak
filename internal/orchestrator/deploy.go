@@ -54,7 +54,7 @@ func (d *Deployer) DeployNewSHA(sha string) error {
 	existing, err := d.db.GetDeploymentByVersion("main", sha, litestreamSHA)
 	if err == nil && existing.Status == "ready" {
 		slog.Info("Deployment already exists for SHA, triggering rolling update", "sha", sha, "image", existing.ImageRef)
-		_, err := d.NotifyDeploymentReady(context.Background(), "main", sha, litestreamSHA, existing.ImageRef, "github_webhook_ready")
+		_, err := d.NotifyDeploymentReady(context.Background(), "main", sha, litestreamSHA, existing.ImageRef, "github_webhook_ready", "")
 		return err
 	}
 
@@ -91,14 +91,18 @@ func (d *Deployer) DeployNewSHA(sha string) error {
 	if err := d.db.UpdateDeployment(depID, "ready", imageRef, ""); err != nil {
 		return fmt.Errorf("mark deployment ready: %w", err)
 	}
-	_, err = d.NotifyDeploymentReady(context.Background(), "main", sha, litestreamSHA, imageRef, "github_webhook_build")
+	_, err = d.NotifyDeploymentReady(context.Background(), "main", sha, litestreamSHA, imageRef, "github_webhook_build", "")
 	return err
 }
 
-func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, litestreamSHA, imageRef, trigger string) (string, error) {
+func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, litestreamSHA, imageRef, trigger, repository string) (string, error) {
 	source = strings.TrimSpace(source)
 	if source == "" {
 		source = "main"
+	}
+	repository = strings.TrimSpace(repository)
+	if err := validateDeploymentRepository(source, repository); err != nil {
+		return "", err
 	}
 	sha = strings.TrimSpace(sha)
 	if !validSHARe.MatchString(sha) {
@@ -121,6 +125,7 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 		LitestreamSHA: litestreamSHA,
 		ImageRef:      imageRef,
 		Source:        source,
+		Repository:    repository,
 		PRNumber:      sourcePRNumber(source),
 		Status:        "ready",
 	}
@@ -181,6 +186,23 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 	}
 
 	return imageRef, nil
+}
+
+func validateDeploymentRepository(source, repository string) error {
+	_, isPullRequest := pullRequestNumberFromSource(source)
+	if !isPullRequest {
+		if strings.TrimSpace(repository) != "" {
+			return fmt.Errorf("repository is only valid for pull request deployment sources")
+		}
+		return nil
+	}
+	if strings.TrimSpace(repository) == "" {
+		return fmt.Errorf("repository is required for pull request deployment source %s", source)
+	}
+	if _, _, ok := splitGitHubRepository(repository); !ok {
+		return fmt.Errorf("invalid deployment repository %q", repository)
+	}
+	return nil
 }
 
 func (d *Deployer) buildImage(sha string) (string, error) {

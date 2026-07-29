@@ -62,7 +62,7 @@ func TestNotifyDeploymentReadyRejectsInvalidSHA(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			deployer := &Deployer{db: openTestDB(t)}
-			_, err := deployer.NotifyDeploymentReady(context.Background(), "main", tc.sha, "", "registry.fly.io/app:latest", "test")
+			_, err := deployer.NotifyDeploymentReady(context.Background(), "main", tc.sha, "", "registry.fly.io/app:latest", "test", "")
 			if err == nil {
 				t.Fatalf("NotifyDeploymentReady(%q) succeeded, want error", tc.sha)
 			}
@@ -81,9 +81,36 @@ func TestNotifyDeploymentReadyRequiresSourceBoundImage(t *testing.T) {
 		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		"",
 		"test",
+		"",
 	)
 	if err == nil || !strings.Contains(err.Error(), "image ref is required") {
 		t.Fatalf("NotifyDeploymentReady() error = %v, want required image error", err)
+	}
+}
+
+func TestNotifyDeploymentReadyRequiresRepositoryForPullRequestSource(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	deployer := &Deployer{db: db}
+	_, err := deployer.NotifyDeploymentReady(
+		context.Background(),
+		"pr-177",
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"registry.fly.io/litestream-soak:sha-aaaaaaaaaaaa-pr-177-ls-bbbbbbbbbbbb",
+		"test",
+		"",
+	)
+	if err == nil || !strings.Contains(err.Error(), "repository is required") {
+		t.Fatalf("NotifyDeploymentReady() error = %v, want required repository error", err)
+	}
+	deployment, getErr := db.GetLatestDeployment("pr-177")
+	if getErr != nil {
+		t.Fatalf("GetLatestDeployment() error = %v", getErr)
+	}
+	if deployment != nil {
+		t.Fatalf("GetLatestDeployment() = %+v, want nil", deployment)
 	}
 }
 
@@ -123,6 +150,7 @@ func TestNotifyDeploymentReadyRejectsImageVersionMismatch(t *testing.T) {
 				"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 				test.imageRef,
 				"test",
+				"",
 			)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("NotifyDeploymentReady() error = %v, want %q", err, test.want)
@@ -296,7 +324,7 @@ func TestNotifyDeploymentReadyRecordsReadyDeploymentBeforeRolloutAndIsIdempotent
 		false,
 	)
 
-	gotImageRef, err := deployer.NotifyDeploymentReady(context.Background(), source, sha, litestreamSHA, imageRef, "github_actions_pr_soak")
+	gotImageRef, err := deployer.NotifyDeploymentReady(context.Background(), source, sha, litestreamSHA, imageRef, "github_actions_pr_soak", "benbjohnson/litestream")
 	if err != nil {
 		t.Fatalf("NotifyDeploymentReady() error = %v", err)
 	}
@@ -313,6 +341,9 @@ func TestNotifyDeploymentReadyRecordsReadyDeploymentBeforeRolloutAndIsIdempotent
 	}
 	if deployment.ImageRef != imageRef {
 		t.Fatalf("deployment.ImageRef=%q want %q", deployment.ImageRef, imageRef)
+	}
+	if deployment.Repository != "benbjohnson/litestream" {
+		t.Fatalf("deployment.Repository=%q want benbjohnson/litestream", deployment.Repository)
 	}
 
 	rollout, err := buildDeploymentRollout(db, *deployment)
@@ -350,7 +381,7 @@ func TestNotifyDeploymentReadyRecordsReadyDeploymentBeforeRolloutAndIsIdempotent
 	machineCreates := fly.machineCreates()
 	volumeCreates := fly.volumeCreates()
 
-	gotImageRef, err = deployer.NotifyDeploymentReady(context.Background(), source, sha, litestreamSHA, imageRef, "github_actions_pr_soak")
+	gotImageRef, err = deployer.NotifyDeploymentReady(context.Background(), source, sha, litestreamSHA, imageRef, "github_actions_pr_soak", "benbjohnson/litestream")
 	if err != nil {
 		t.Fatalf("duplicate NotifyDeploymentReady() error = %v", err)
 	}
@@ -391,7 +422,7 @@ func TestNotifyDeploymentReadyBootstrapsFreshSource(t *testing.T) {
 		false,
 	)
 
-	if _, err := deployer.NotifyDeploymentReady(context.Background(), source, sha, litestreamSHA, imageRef, "test_bootstrap"); err != nil {
+	if _, err := deployer.NotifyDeploymentReady(context.Background(), source, sha, litestreamSHA, imageRef, "test_bootstrap", "benbjohnson/litestream"); err != nil {
 		t.Fatalf("NotifyDeploymentReady() error = %v", err)
 	}
 
@@ -427,6 +458,7 @@ func TestNotifyDeploymentReadySkipsSupersededDeployment(t *testing.T) {
 		LitestreamSHA: oldLitestreamSHA,
 		ImageRef:      "",
 		Source:        source,
+		Repository:    "benbjohnson/litestream",
 		PRNumber:      1228,
 		Status:        "building",
 	}); err != nil {
@@ -437,6 +469,7 @@ func TestNotifyDeploymentReadySkipsSupersededDeployment(t *testing.T) {
 		LitestreamSHA: latestLitestreamSHA,
 		ImageRef:      "",
 		Source:        source,
+		Repository:    "benbjohnson/litestream",
 		PRNumber:      1228,
 		Status:        "building",
 	})
@@ -471,7 +504,7 @@ func TestNotifyDeploymentReadySkipsSupersededDeployment(t *testing.T) {
 		false,
 	)
 
-	gotImageRef, err := deployer.NotifyDeploymentReady(context.Background(), source, oldSHA, oldLitestreamSHA, oldImageRef, "github_actions_pr_soak")
+	gotImageRef, err := deployer.NotifyDeploymentReady(context.Background(), source, oldSHA, oldLitestreamSHA, oldImageRef, "github_actions_pr_soak", "benbjohnson/litestream")
 	if err != nil {
 		t.Fatalf("NotifyDeploymentReady() error = %v", err)
 	}
@@ -532,6 +565,7 @@ func TestNotifyDeploymentReadyRejectsMalformedImageRef(t *testing.T) {
 		"3333333333333333333333333333333333333333",
 		"registry.fly.io/litestream-soak:bad image",
 		"test",
+		"",
 	)
 	if err == nil {
 		t.Fatal("NotifyDeploymentReady() error = nil, want malformed image ref error")
@@ -573,6 +607,7 @@ func TestNotifyDeploymentReadyCanceledWhileSourceLockedDoesNotRecordDeployment(t
 			"3333333333333333333333333333333333333333",
 			"registry.fly.io/litestream-soak:sha-222222222222",
 			"test",
+			"",
 		)
 		result <- err
 	}()

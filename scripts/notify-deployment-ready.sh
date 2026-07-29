@@ -6,11 +6,22 @@ source_name="${2:-main}"
 trigger="${3:-deploy_ready}"
 image_ref="${4:-}"
 litestream_sha="${5:-}"
+repository="${6:-}"
 base_url="${CONTROL_BASE_URL:-https://litestream-soak-ctl.fly.dev}"
 
 if [ "$#" -lt 5 ] || [ -z "$sha" ] || [ -z "$image_ref" ] || [ -z "$litestream_sha" ]; then
   echo "sha, image-ref, and litestream-sha are required" >&2
-  echo "usage: $0 <sha> <source> <trigger> <image-ref> <litestream-sha>" >&2
+  echo "usage: $0 <sha> <source> <trigger> <image-ref> <litestream-sha> [repository]" >&2
+  exit 1
+fi
+
+if [[ "${source_name}" =~ ^pr-[1-9][0-9]*$ ]]; then
+  if [[ ! "${repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "repository in owner/name format is required for PR sources" >&2
+    exit 1
+  fi
+elif [ -n "${repository}" ]; then
+  echo "repository is only valid for PR sources" >&2
   exit 1
 fi
 
@@ -29,12 +40,14 @@ payload="$(jq -n \
   --arg trigger "$trigger" \
   --arg image_ref "$image_ref" \
   --arg litestream_sha "$litestream_sha" \
+  --arg repository "$repository" \
   '{
     sha: $sha,
     source: $source,
     trigger: $trigger,
     image_ref: $image_ref,
-    litestream_sha: $litestream_sha
+    litestream_sha: $litestream_sha,
+    repository: $repository
   }')"
 
 curl -sS --fail-with-body --max-time 180 -X POST \

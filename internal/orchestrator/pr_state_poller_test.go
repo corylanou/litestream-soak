@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -74,6 +76,9 @@ func TestPRStatePollerRetiresDefinitiveTerminalPullRequests(t *testing.T) {
 				if r.Header.Get("User-Agent") != "litestream-soak/pr-state-poller" {
 					t.Errorf("User-Agent = %q, want poller user agent", r.Header.Get("User-Agent"))
 				}
+				if r.Header.Get("Cache-Control") != "no-cache" {
+					t.Errorf("Cache-Control = %q, want no-cache", r.Header.Get("Cache-Control"))
+				}
 				_, _ = w.Write([]byte(responseBody))
 			}))
 			t.Cleanup(api.Close)
@@ -135,6 +140,8 @@ func TestPRStatePollerFailClosedLeavesFleetUntouched(t *testing.T) {
 		body           string
 		timeout        bool
 		requestTimeout time.Duration
+		responseDate   time.Time
+		responseAge    string
 	}{
 		{name: "open PR", status: http.StatusOK, body: validOpen},
 		{name: "HTTP error", status: http.StatusInternalServerError, body: `{"message":"internal error"}`},
@@ -143,6 +150,8 @@ func TestPRStatePollerFailClosedLeavesFleetUntouched(t *testing.T) {
 		{name: "timeout", timeout: true, requestTimeout: 10 * time.Millisecond},
 		{name: "unparseable body", status: http.StatusOK, body: `{"number":`},
 		{name: "malformed valid JSON shape", status: http.StatusOK, body: `{"number":301,"state":"closed","merged":false}`},
+		{name: "duplicate state", status: http.StatusOK, body: `{"number":301,"state":"open","state":"closed","merged":false,"labels":[],"base":{"repo":{"full_name":"benbjohnson/litestream"}}}`},
+		{name: "duplicate labels defeat keep-alive", status: http.StatusOK, body: `{"number":301,"state":"closed","merged":false,"labels":[{"name":"soak:keep-alive"}],"labels":[],"base":{"repo":{"full_name":"benbjohnson/litestream"}}}`},
 		{name: "missing merged field", status: http.StatusOK, body: `{"number":301,"state":"closed","labels":[],"base":{"repo":{"full_name":"benbjohnson/litestream"}}}`},
 		{name: "missing labels field", status: http.StatusOK, body: `{"number":301,"state":"closed","merged":false,"base":{"repo":{"full_name":"benbjohnson/litestream"}}}`},
 		{name: "unexpected repository identity", status: http.StatusOK, body: pullRequestStateBody(t, 301, "closed", false, "other/litestream", nil)},
@@ -151,6 +160,8 @@ func TestPRStatePollerFailClosedLeavesFleetUntouched(t *testing.T) {
 		{name: "trailing JSON", status: http.StatusOK, body: validClosed + `{}`},
 		{name: "unexpected state", status: http.StatusOK, body: pullRequestStateBody(t, 301, "unknown", false, "benbjohnson/litestream", nil)},
 		{name: "inconsistent merged state", status: http.StatusOK, body: pullRequestStateBody(t, 301, "open", true, "benbjohnson/litestream", nil)},
+		{name: "stale Date", status: http.StatusOK, body: validClosed, responseDate: time.Now().UTC().Add(-time.Hour)},
+		{name: "stale Age", status: http.StatusOK, body: validClosed, responseAge: "3600"},
 		{name: "keep-alive label", status: http.StatusOK, body: keepAlive},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -189,6 +200,12 @@ func TestPRStatePollerFailClosedLeavesFleetUntouched(t *testing.T) {
 					<-r.Context().Done()
 					return
 				}
+				if !test.responseDate.IsZero() {
+					w.Header().Set("Date", test.responseDate.Format(http.TimeFormat))
+				}
+				if test.responseAge != "" {
+					w.Header().Set("Age", test.responseAge)
+				}
 				w.WriteHeader(test.status)
 				_, _ = w.Write([]byte(test.body))
 			}))
@@ -205,6 +222,91 @@ func TestPRStatePollerFailClosedLeavesFleetUntouched(t *testing.T) {
 				t.Fatalf("requests = %d, want 1", requests.Load())
 			}
 			assertPRSourceUntouched(t, db, fly, source, workerID, machineID, volumeID)
+		})
+	}
+}
+
+func TestPRStatePollerDoesNotFollowRedirects(t *testing.T) {
+	fleet := newPollingTestFleet(t, "pr-701", "benbjohnson/litestream")
+	responseBody := pullRequestStateBody(t, 701, "closed", false, "benbjohnson/litestream", nil)
+	var destinationRequests atomic.Int32
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		destinationRequests.Add(1)
+		_, _ = w.Write([]byte(responseBody))
+	}))
+	t.Cleanup(destination.Close)
+
+	var originRequests atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originRequests.Add(1)
+		http.Redirect(w, r, destination.URL+r.URL.Path, http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+
+	newTestPRStatePoller(origin, fleet.manager, nil).pollOnce(context.Background())
+
+	if originRequests.Load() != 1 {
+		t.Fatalf("origin requests = %d, want 1", originRequests.Load())
+	}
+	if destinationRequests.Load() != 0 {
+		t.Fatalf("redirect destination requests = %d, want 0", destinationRequests.Load())
+	}
+	assertPRSourceUntouched(t, fleet.db, fleet.fly, fleet.source, fleet.workerID, fleet.machineID, fleet.volumeID)
+}
+
+func TestPRStatePollerRejectsMismatchedResponseURL(t *testing.T) {
+	fleet := newPollingTestFleet(t, "pr-702", "benbjohnson/litestream")
+	responseBody := pullRequestStateBody(t, 702, "closed", false, "benbjohnson/litestream", nil)
+	var requests atomic.Int32
+	client := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		responseRequest := req.Clone(req.Context())
+		responseRequest.URL, _ = url.Parse("https://other.example/repos/benbjohnson/litestream/pulls/702")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Date": []string{time.Now().UTC().Format(http.TimeFormat)}},
+			Body:       io.NopCloser(strings.NewReader(responseBody)),
+			Request:    responseRequest,
+		}, nil
+	})}
+	poller := NewPRStatePoller(PRStatePollerConfig{
+		APIBaseURL:          "https://api.github.example",
+		Client:              client,
+		RepositoryAllowlist: []string{"benbjohnson/litestream"},
+		RequestTimeout:      time.Second,
+	}, fleet.manager)
+
+	poller.pollOnce(context.Background())
+
+	if requests.Load() != 1 {
+		t.Fatalf("requests = %d, want 1", requests.Load())
+	}
+	assertPRSourceUntouched(t, fleet.db, fleet.fly, fleet.source, fleet.workerID, fleet.machineID, fleet.volumeID)
+}
+
+func TestPRStatePollerSkipsUnboundOrMismatchedRepositories(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		repository string
+	}{
+		{name: "missing repository"},
+		{name: "different repository", repository: "other/litestream"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fleet := newPollingTestFleet(t, "pr-703", test.repository)
+			var requests atomic.Int32
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				_, _ = w.Write([]byte(pullRequestStateBody(t, 703, "closed", false, "benbjohnson/litestream", nil)))
+			}))
+			t.Cleanup(api.Close)
+
+			newTestPRStatePoller(api, fleet.manager, nil).pollOnce(context.Background())
+
+			if requests.Load() != 0 {
+				t.Fatalf("requests = %d, want 0", requests.Load())
+			}
+			assertPRSourceUntouched(t, fleet.db, fleet.fly, fleet.source, fleet.workerID, fleet.machineID, fleet.volumeID)
 		})
 	}
 }
@@ -272,6 +374,7 @@ func TestPRStatePollerRateLimitStopsCycleAndSurfacesSustainedCondition(t *testin
 	db := openTestDB(t)
 	for _, prNumber := range []int{601, 602} {
 		source := fmt.Sprintf("pr-%d", prNumber)
+		createTeardownTestDeployment(t, db, source)
 		createTestWorker(t, db, model.Worker{
 			ID:            "worker-" + source,
 			Name:          "worker-" + source,
@@ -285,6 +388,9 @@ func TestPRStatePollerRateLimitStopsCycleAndSurfacesSustainedCondition(t *testin
 	var requests atomic.Int32
 	var status atomic.Int32
 	status.Store(http.StatusForbidden)
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	var clock atomic.Value
+	clock.Store(now)
 	openResponses := map[string]string{
 		"/repos/benbjohnson/litestream/pulls/601": pullRequestStateBody(t, 601, "open", false, "benbjohnson/litestream", nil),
 		"/repos/benbjohnson/litestream/pulls/602": pullRequestStateBody(t, 602, "open", false, "benbjohnson/litestream", nil),
@@ -293,6 +399,7 @@ func TestPRStatePollerRateLimitStopsCycleAndSurfacesSustainedCondition(t *testin
 		requests.Add(1)
 		currentStatus := int(status.Load())
 		if currentStatus == http.StatusOK {
+			w.Header().Set("Date", clock.Load().(time.Time).Format(http.TimeFormat))
 			_, _ = w.Write([]byte(openResponses[r.URL.Path]))
 			return
 		}
@@ -300,9 +407,8 @@ func TestPRStatePollerRateLimitStopsCycleAndSurfacesSustainedCondition(t *testin
 	}))
 	t.Cleanup(api.Close)
 
-	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	poller := newTestPRStatePoller(api, manager, func(config *PRStatePollerConfig) {
-		config.Now = func() time.Time { return now }
+		config.Now = func() time.Time { return clock.Load().(time.Time) }
 		config.RateLimitVisibilityThreshold = time.Hour
 	})
 
@@ -314,25 +420,95 @@ func TestPRStatePollerRateLimitStopsCycleAndSurfacesSustainedCondition(t *testin
 	requireControlEventCount(t, db, upstreamPRPollRateLimitSustainedEvent, 0)
 
 	now = now.Add(30 * time.Minute)
+	clock.Store(now)
 	poller.pollOnce(context.Background())
 	requireControlEventCount(t, db, upstreamPRPollRateLimitSustainedEvent, 0)
 
 	now = now.Add(30 * time.Minute)
+	clock.Store(now)
 	poller.pollOnce(context.Background())
 	requireControlEventCount(t, db, upstreamPRPollRateLimitSustainedEvent, 1)
 
 	now = now.Add(30 * time.Minute)
+	clock.Store(now)
 	poller.pollOnce(context.Background())
 	requireControlEventCount(t, db, upstreamPRPollRateLimitSustainedEvent, 1)
 
 	status.Store(http.StatusOK)
 	now = now.Add(15 * time.Minute)
+	clock.Store(now)
 	poller.pollOnce(context.Background())
 	requireControlEventCount(t, db, upstreamPRPollRateLimitRecoveredEvent, 1)
 
 	if requests.Load() != 6 {
 		t.Fatalf("requests = %d, want 6", requests.Load())
 	}
+}
+
+type pollingTestFleet struct {
+	db        *model.DB
+	fly       *teardownTestServer
+	manager   *Manager
+	source    string
+	workerID  string
+	machineID string
+	volumeID  string
+}
+
+func newPollingTestFleet(t *testing.T, source, repository string) pollingTestFleet {
+	t.Helper()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "soak-sha",
+		LitestreamSHA: "litestream-sha",
+		ImageRef:      "registry.fly.io/litestream-soak:soak-sha",
+		Source:        source,
+		Repository:    repository,
+		PRNumber:      sourcePRNumber(source),
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+	workerID := "worker-" + source
+	machineID := "machine-" + source
+	volumeID := "volume-" + source
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		AppName:       "litestream-soak",
+		Name:          workerID,
+		Status:        model.WorkerRunning,
+		Source:        source,
+		GitSHA:        "soak-sha",
+		LitestreamSHA: "litestream-sha",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+		FlyMachineID:  machineID,
+		FlyVolumeID:   volumeID,
+	})
+	fly := newTeardownTestServer(t, nil)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{
+		Bucket:    "bucket",
+		Endpoint:  fly.server.URL,
+		AccessKey: "access",
+		SecretKey: "secret",
+		Region:    "auto",
+	}, "", "")
+	return pollingTestFleet{
+		db:        db,
+		fly:       fly,
+		manager:   manager,
+		source:    source,
+		workerID:  workerID,
+		machineID: machineID,
+		volumeID:  volumeID,
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
 
 func newTestPRStatePoller(api *httptest.Server, manager *Manager, configure func(*PRStatePollerConfig)) *PRStatePoller {

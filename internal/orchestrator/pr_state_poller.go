@@ -22,6 +22,7 @@ const (
 	defaultPRStatePollInterval            = 15 * time.Minute
 	defaultPRStateRequestTimeout          = 10 * time.Second
 	defaultPRRateLimitVisibilityThreshold = time.Hour
+	defaultPRStateMaxResponseAge          = 5 * time.Minute
 	maxPRStateResponseBytes               = 1 << 20
 	defaultGitHubAPIBaseURL               = "https://api.github.com"
 	upstreamPRPollRateLimitedEvent        = "upstream_pr_poll_rate_limited"
@@ -102,6 +103,11 @@ func NewPRStatePoller(config PRStatePollerConfig, manager *Manager) *PRStatePoll
 	if client == nil {
 		client = &http.Client{Timeout: requestTimeout}
 	}
+	clientCopy := *client
+	clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	client = &clientCopy
 	keepAliveLabel := strings.TrimSpace(config.KeepAliveLabel)
 	if keepAliveLabel == "" {
 		keepAliveLabel = defaultPRKeepAliveLabel
@@ -155,11 +161,25 @@ func (p *PRStatePoller) pollOnce(ctx context.Context) {
 		return
 	}
 
-	repository := p.repositories[0]
+	configuredRepository := p.repositories[0]
 	polled := false
 	for _, source := range sources {
 		prNumber, ok := pullRequestNumberFromSource(source)
 		if !ok {
+			continue
+		}
+
+		repository, err := p.manager.db.GetDeploymentSourceRepository(source)
+		if err != nil {
+			slog.Warn("Upstream PR source repository remains unknown; leaving source unchanged", "source", source, "error", err)
+			continue
+		}
+		if repository == "" {
+			slog.Warn("Upstream PR source has no recorded repository; leaving source unchanged", "source", source)
+			continue
+		}
+		if !strings.EqualFold(repository, configuredRepository) {
+			slog.Warn("Upstream PR source repository does not match polling configuration; leaving source unchanged", "source", source, "recorded_repo", repository, "configured_repo", configuredRepository)
 			continue
 		}
 		polled = true
@@ -219,6 +239,7 @@ func (p *PRStatePoller) fetchPullRequestState(ctx context.Context, repository st
 		return githubPullRequestState{}, fmt.Errorf("create github pull request lookup: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("User-Agent", "litestream-soak/pr-state-poller")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
@@ -232,11 +253,17 @@ func (p *PRStatePoller) fetchPullRequestState(ctx context.Context, repository st
 		}
 	}()
 
+	if resp.Request == nil || resp.Request.URL == nil || resp.Request.URL.String() != req.URL.String() {
+		return githubPullRequestState{}, errors.New("github pull request response URL does not match request URL")
+	}
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
 		return githubPullRequestState{}, fmt.Errorf("%w: status %d", errGitHubRateLimited, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return githubPullRequestState{}, fmt.Errorf("github API returned status %d", resp.StatusCode)
+	}
+	if err := p.validateResponseFreshness(resp); err != nil {
+		return githubPullRequestState{}, err
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPRStateResponseBytes+1))
@@ -245,6 +272,10 @@ func (p *PRStatePoller) fetchPullRequestState(ctx context.Context, repository st
 	}
 	if len(body) > maxPRStateResponseBytes {
 		return githubPullRequestState{}, errors.New("github pull request response exceeds size limit")
+	}
+
+	if err := rejectDuplicateJSONMembers(body); err != nil {
+		return githubPullRequestState{}, fmt.Errorf("validate github pull request response JSON: %w", err)
 	}
 
 	var state githubPullRequestState
@@ -263,6 +294,105 @@ func (p *PRStatePoller) fetchPullRequestState(ctx context.Context, repository st
 		return githubPullRequestState{}, err
 	}
 	return state, nil
+}
+
+func (p *PRStatePoller) validateResponseFreshness(resp *http.Response) error {
+	dateHeader := strings.TrimSpace(resp.Header.Get("Date"))
+	responseDate, err := http.ParseTime(dateHeader)
+	if err != nil {
+		return errors.New("github pull request response has an invalid or missing Date header")
+	}
+
+	now := p.now().UTC()
+	if responseDate.Before(now.Add(-defaultPRStateMaxResponseAge)) {
+		return fmt.Errorf("github pull request response is stale: Date %s", responseDate.UTC().Format(time.RFC3339))
+	}
+	if responseDate.After(now.Add(defaultPRStateMaxResponseAge)) {
+		return fmt.Errorf("github pull request response Date is too far in the future: %s", responseDate.UTC().Format(time.RFC3339))
+	}
+
+	ageHeader := strings.TrimSpace(resp.Header.Get("Age"))
+	if ageHeader == "" {
+		return nil
+	}
+	ageSeconds, err := strconv.ParseInt(ageHeader, 10, 64)
+	if err != nil || ageSeconds < 0 {
+		return fmt.Errorf("github pull request response has invalid Age header %q", ageHeader)
+	}
+	if time.Duration(ageSeconds)*time.Second > defaultPRStateMaxResponseAge {
+		return fmt.Errorf("github pull request response is stale: Age %s", time.Duration(ageSeconds)*time.Second)
+	}
+	return nil
+}
+
+func rejectDuplicateJSONMembers(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if err := scanJSONValue(decoder); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return errors.New("response contains trailing JSON")
+		}
+		return err
+	}
+	return nil
+}
+
+func scanJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+
+	switch delimiter {
+	case '{':
+		members := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("object member name is not a string")
+			}
+			if _, exists := members[key]; exists {
+				return fmt.Errorf("response contains duplicate JSON member %q", key)
+			}
+			members[key] = struct{}{}
+			if err := scanJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim('}') {
+			return errors.New("object is not terminated")
+		}
+	case '[':
+		for decoder.More() {
+			if err := scanJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim(']') {
+			return errors.New("array is not terminated")
+		}
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
+	}
+	return nil
 }
 
 func validateGitHubPullRequestState(state githubPullRequestState, repository string, prNumber int) error {

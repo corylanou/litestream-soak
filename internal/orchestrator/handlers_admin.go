@@ -19,6 +19,7 @@ type deploymentReadyRequest struct {
 	SHA           string `json:"sha"`
 	LitestreamSHA string `json:"litestream_sha"`
 	Source        string `json:"source"`
+	Repository    string `json:"repository"`
 	ImageRef      string `json:"image_ref"`
 	Trigger       string `json:"trigger"`
 }
@@ -54,11 +55,17 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 	request.SHA = strings.TrimSpace(request.SHA)
 	request.LitestreamSHA = strings.TrimSpace(request.LitestreamSHA)
 	request.ImageRef = strings.TrimSpace(request.ImageRef)
+	request.Repository = strings.TrimSpace(request.Repository)
+	if err := validateDeploymentRepository(source, request.Repository); err != nil {
+		respondError(w, r, http.StatusBadRequest, err, "invalid deployment repository")
+		return
+	}
 	if err := validateReadyDeploymentTarget(model.Deployment{
 		GitSHA:        request.SHA,
 		LitestreamSHA: request.LitestreamSHA,
 		ImageRef:      request.ImageRef,
 		Source:        source,
+		Repository:    request.Repository,
 		Status:        "ready",
 	}); err != nil {
 		respondError(w, r, http.StatusBadRequest, err, "invalid deployment target")
@@ -73,7 +80,7 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 	go func(request deploymentReadyRequest, source, trigger string) {
 		defer cancel()
 
-		imageRef, err := a.deployer.NotifyDeploymentReady(rolloutCtx, source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger)
+		imageRef, err := a.deployer.NotifyDeploymentReady(rolloutCtx, source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger, request.Repository)
 		if err != nil {
 			slog.Error("Deployment ready rollout failed", "source", source, "sha", request.SHA, "litestream_sha", request.LitestreamSHA, "error", err)
 			_ = a.db.RecordEvent("", "deploy_ready_failed", fmt.Sprintf("Rollout failed for %s / litestream %s: %v", shortVersionValue(request.SHA), shortVersionValue(request.LitestreamSHA), err), imageRef)
@@ -88,6 +95,7 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 		"sha":            request.SHA,
 		"litestream_sha": request.LitestreamSHA,
 		"source":         source,
+		"repository":     request.Repository,
 		"image_ref":      request.ImageRef,
 		"trigger":        trigger,
 		"accepted":       true,
@@ -336,6 +344,9 @@ func readDeploymentReadyRequest(r *http.Request) (deploymentReadyRequest, error)
 	}
 	if strings.TrimSpace(request.Trigger) == "" {
 		request.Trigger = strings.TrimSpace(r.URL.Query().Get("trigger"))
+	}
+	if strings.TrimSpace(request.Repository) == "" {
+		request.Repository = strings.TrimSpace(r.URL.Query().Get("repository"))
 	}
 
 	return request, nil

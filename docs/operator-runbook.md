@@ -497,8 +497,10 @@ Inputs:
 
 This resolves the PR head SHA, builds a worker image against that Litestream
 commit, then calls `/api/admin/deployments/ready` with `source=pr-<number>`.
-The control plane creates or updates a PR-specific worker fleet under that
-source automatically.
+The notification records `repo_full_name` with the deployment. The control
+plane creates or updates a PR-specific worker fleet under that source
+automatically and refuses poll-based retirement when the recorded repository
+is missing or differs from the polling configuration.
 
 ### Local CLI Trigger
 
@@ -520,7 +522,7 @@ That script:
 
 - resolves the PR head SHA from GitHub unless you provide one
 - builds a worker image with `LITESTREAM_SHA=<pr-head-sha>`
-- notifies the control plane with `source=pr-1221`
+- notifies the control plane with `source=pr-1221` and its repository identity
 
 ### GitHub Label Or Cross-Repo Automation
 
