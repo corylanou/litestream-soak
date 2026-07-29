@@ -2,6 +2,7 @@ package reporting
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -153,5 +154,83 @@ func TestSnapshotStatus(t *testing.T) {
 				t.Fatalf("SnapshotStatus()=%q want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLitestreamMetricsStatusDistinguishesScrapeAndMetricStates(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload *RuntimePayload
+		want    string
+	}{
+		{name: "unknown", want: LitestreamMetricsStatusUnknown},
+		{
+			name: "successful scrape with genuine zero",
+			payload: &RuntimePayload{
+				LitestreamMetricsScrapeStatus:    LitestreamMetricsScrapeStatusHealthy,
+				LitestreamDiskFullMetricPresent:  true,
+				LitestreamDiskFull:               false,
+				LitestreamMemStatsMetricsPresent: true,
+			},
+			want: LitestreamMetricsStatusHealthy,
+		},
+		{
+			name: "successful scrape missing disk full",
+			payload: &RuntimePayload{
+				LitestreamMetricsScrapeStatus:    LitestreamMetricsScrapeStatusHealthy,
+				LitestreamMemStatsMetricsPresent: true,
+			},
+			want: LitestreamMetricsStatusMetricMissing,
+		},
+		{
+			name: "successful scrape missing memstats",
+			payload: &RuntimePayload{
+				LitestreamMetricsScrapeStatus:   LitestreamMetricsScrapeStatusHealthy,
+				LitestreamDiskFullMetricPresent: true,
+			},
+			want: LitestreamMetricsStatusMetricMissing,
+		},
+		{
+			name: "failed scrape has no metric verdict",
+			payload: &RuntimePayload{
+				LitestreamMetricsScrapeStatus:   LitestreamMetricsScrapeStatusFailed,
+				LitestreamDiskFullMetricPresent: true,
+				LitestreamDiskFull:              true,
+			},
+			want: LitestreamMetricsStatusScrapeFailed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := LitestreamMetricsStatus(tt.payload); got != tt.want {
+				t.Fatalf("LitestreamMetricsStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRuntimePayloadJSONPreservesFalseMetricsVerdict(t *testing.T) {
+	payload := RuntimePayload{
+		LitestreamMetricsScrapeStatus:    LitestreamMetricsScrapeStatusHealthy,
+		LitestreamDiskFullMetricPresent:  true,
+		LitestreamDiskFull:               false,
+		LitestreamMemStatsMetricsPresent: true,
+	}
+
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	body := string(encoded)
+	for _, want := range []string{
+		`"litestream_metrics_scrape_status":"healthy"`,
+		`"litestream_disk_full_metric_present":true`,
+		`"litestream_disk_full":false`,
+		`"litestream_memstats_metrics_present":true`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("encoded payload missing %s: %s", want, body)
+		}
 	}
 }

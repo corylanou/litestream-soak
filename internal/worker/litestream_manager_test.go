@@ -28,10 +28,30 @@ func TestWriteLitestreamConfigOmitsCompactionKnobsByDefault(t *testing.T) {
 		t.Fatalf("read config: %v", err)
 	}
 	config := string(body)
+	if !strings.Contains(config, "addr: 127.0.0.1:9092") {
+		t.Fatalf("config missing loopback metrics listener:\n%s", config)
+	}
 	for _, unwanted := range []string{"levels:", "l0-retention:", "l0-retention-check-interval:"} {
 		if strings.Contains(config, unwanted) {
 			t.Fatalf("config contains %q when knobs unset:\n%s", unwanted, config)
 		}
+	}
+}
+
+func TestWriteLitestreamConfigRejectsNonLoopbackMetricsListener(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.LitestreamMetricsAddr = "0.0.0.0:9092"
+
+	err := NewRunner(cfg).writeLitestreamConfig()
+	if err == nil || !strings.Contains(err.Error(), "must use a loopback IP") {
+		t.Fatalf("writeLitestreamConfig() error = %v, want loopback validation error", err)
+	}
+	if _, statErr := os.Stat(cfg.ConfigPath); !os.IsNotExist(statErr) {
+		t.Fatalf("config file exists after listener validation failure: %v", statErr)
 	}
 }
 

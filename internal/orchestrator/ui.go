@@ -59,6 +59,7 @@ type homeWorker struct {
 	ActiveVerification       *reporting.ActiveVerification
 	Workload                 workload.Config
 	RuntimeSnapshotStatus    string
+	LitestreamMetricsStatus  string
 	CurrentFailureStage      string
 	CurrentFailureSignature  string
 	CurrentFailureCategory   string
@@ -219,6 +220,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 			ActiveVerification:       workerSummary.ActiveVerification,
 			Workload:                 workerSummary.Workload,
 			RuntimeSnapshotStatus:    workerSummary.RuntimeSnapshotStatus,
+			LitestreamMetricsStatus:  workerSummary.LitestreamMetricsStatus,
 			CurrentFailureStage:      workerSummary.CurrentFailureStage,
 			CurrentFailureSignature:  workerSummary.CurrentFailureSignature,
 			CurrentProbableSubsystem: workerSummary.CurrentProbableSubsystem,
@@ -405,7 +407,11 @@ func allWorkersStopped(workers []model.Worker) bool {
 }
 
 func homeWorkerNeedsAttention(worker homeWorker) bool {
-	return activeWorkerNeedsAttention(worker.Worker.Status, worker.RuntimeSnapshotStatus)
+	if worker.Worker.Status == model.WorkerStopped {
+		return false
+	}
+	return activeWorkerNeedsAttention(worker.Worker.Status, worker.RuntimeSnapshotStatus) ||
+		litestreamMetricsClass(worker.LitestreamMetricsStatus) == "status-warn"
 }
 
 // activeWorkerNeedsAttention mirrors workerNeedsAttention except that stopped

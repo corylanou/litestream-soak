@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,7 +71,7 @@ func TestDeriveAllocRate(t *testing.T) {
 	})
 }
 
-func startStatsPollerIPCServer(t *testing.T, cfg *Config, metricsBody string) {
+func startStatsPollerIPCServer(t *testing.T, cfg *Config) {
 	t.Helper()
 
 	mux := http.NewServeMux()
@@ -82,13 +84,26 @@ func startStatsPollerIPCServer(t *testing.T, cfg *Config, metricsBody string) {
 	mux.HandleFunc("/list", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"databases":[{"path":"` + cfg.DBPath + `","status":"replicating","txid":10,"replicated_txid":10}]}`))
 	})
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(metricsBody))
-	})
 	mux.HandleFunc("/debug/pprof/goroutine", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("goroutine profile: total 12\n"))
 	})
 	startTestUnixServer(t, cfg.SocketPath, mux)
+}
+
+func startStatsPollerMetricsServer(t *testing.T, cfg *Config, handler http.Handler) {
+	t.Helper()
+
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	cfg.LitestreamMetricsAddr = strings.TrimPrefix(server.URL, "http://")
+}
+
+func startStatsPollerMetricsBody(t *testing.T, cfg *Config, body string) {
+	t.Helper()
+
+	startStatsPollerMetricsServer(t, cfg, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
 }
 
 func newStatsPollerTestConfig(t *testing.T) Config {
@@ -118,7 +133,8 @@ go_memstats_alloc_bytes_total 987654321
 
 func TestCollectLitestreamRuntimeIncludesS3ListRequestsAndMemStats(t *testing.T) {
 	cfg := newStatsPollerTestConfig(t)
-	startStatsPollerIPCServer(t, &cfg, statsPollerTestMetricsBody(cfg))
+	startStatsPollerIPCServer(t, &cfg)
+	startStatsPollerMetricsBody(t, &cfg, statsPollerTestMetricsBody(cfg))
 
 	poller := newStatsPoller(&cfg)
 	poller.s3ListRequests = func() int64 { return 77 }
@@ -146,6 +162,18 @@ func TestCollectLitestreamRuntimeIncludesS3ListRequestsAndMemStats(t *testing.T)
 	if snapshot.LitestreamAllocRateBytesPerSec != 0 {
 		t.Fatalf("LitestreamAllocRateBytesPerSec = %f, want 0 on first sample", snapshot.LitestreamAllocRateBytesPerSec)
 	}
+	if snapshot.LitestreamMetricsScrapeStatus != reporting.LitestreamMetricsScrapeStatusHealthy {
+		t.Fatalf("LitestreamMetricsScrapeStatus = %q, want healthy", snapshot.LitestreamMetricsScrapeStatus)
+	}
+	if snapshot.LitestreamMetricsScrapeLastSuccessAt.IsZero() {
+		t.Fatal("LitestreamMetricsScrapeLastSuccessAt is zero after successful scrape")
+	}
+	if !snapshot.LitestreamDiskFullMetricPresent || snapshot.LitestreamDiskFull {
+		t.Fatalf("disk-full verdict = present:%t value:%t, want present:true value:false", snapshot.LitestreamDiskFullMetricPresent, snapshot.LitestreamDiskFull)
+	}
+	if !snapshot.LitestreamMemStatsMetricsPresent {
+		t.Fatal("LitestreamMemStatsMetricsPresent = false, want true")
+	}
 }
 
 func TestCollectLitestreamRuntimeNilOrNegativeS3ListRequests(t *testing.T) {
@@ -160,7 +188,8 @@ func TestCollectLitestreamRuntimeNilOrNegativeS3ListRequests(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := newStatsPollerTestConfig(t)
-			startStatsPollerIPCServer(t, &cfg, statsPollerTestMetricsBody(cfg))
+			startStatsPollerIPCServer(t, &cfg)
+			startStatsPollerMetricsBody(t, &cfg, statsPollerTestMetricsBody(cfg))
 
 			poller := newStatsPoller(&cfg)
 			poller.s3ListRequests = test.fn
@@ -197,7 +226,8 @@ func TestNewRunnerWiresS3ListRequestsToFaultProxy(t *testing.T) {
 
 func TestCollectLitestreamRuntimeOmitsMemStatsWhenFamiliesAbsent(t *testing.T) {
 	cfg := newStatsPollerTestConfig(t)
-	startStatsPollerIPCServer(t, &cfg, `# HELP litestream_disk_full Whether replication is paused because the local disk is full
+	startStatsPollerIPCServer(t, &cfg)
+	startStatsPollerMetricsBody(t, &cfg, `# HELP litestream_disk_full Whether replication is paused because the local disk is full
 # TYPE litestream_disk_full gauge
 litestream_disk_full{db="`+cfg.DBPath+`"} 0
 `)
@@ -217,6 +247,64 @@ litestream_disk_full{db="`+cfg.DBPath+`"} 0
 	}
 	if snapshot.LitestreamAllocBytesTotal != 0 || snapshot.LitestreamAllocRateBytesPerSec != 0 {
 		t.Fatalf("alloc metrics = %f/%f, want zero", snapshot.LitestreamAllocBytesTotal, snapshot.LitestreamAllocRateBytesPerSec)
+	}
+	if snapshot.LitestreamMetricsScrapeStatus != reporting.LitestreamMetricsScrapeStatusHealthy {
+		t.Fatalf("LitestreamMetricsScrapeStatus = %q, want healthy", snapshot.LitestreamMetricsScrapeStatus)
+	}
+	if snapshot.LitestreamMemStatsMetricsPresent {
+		t.Fatal("LitestreamMemStatsMetricsPresent = true, want false")
+	}
+	if got := reporting.LitestreamMetricsStatus(&snapshot); got != reporting.LitestreamMetricsStatusMetricMissing {
+		t.Fatalf("LitestreamMetricsStatus() = %q, want metric_missing", got)
+	}
+}
+
+func TestCollectLitestreamRuntimeReportsNeverSuccessfulMetricsScrape(t *testing.T) {
+	cfg := newStatsPollerTestConfig(t)
+	startStatsPollerIPCServer(t, &cfg)
+	startStatsPollerMetricsServer(t, &cfg, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+
+	poller := newStatsPoller(&cfg)
+	poller.setLitestreamSnapshot(reporting.RuntimePayload{
+		LitestreamDiskFullMetricPresent:  true,
+		LitestreamDiskFull:               true,
+		LitestreamMemStatsMetricsPresent: true,
+	})
+	snapshot, err := poller.collectLitestreamRuntime(poller.ipcClient(), time.Now().UTC())
+	if err != nil {
+		t.Fatalf("collectLitestreamRuntime() error = %v", err)
+	}
+
+	if !snapshot.LitestreamSnapshotHealthy {
+		t.Fatal("LitestreamSnapshotHealthy = false, want core control snapshot healthy")
+	}
+	if snapshot.LitestreamMetricsScrapeStatus != reporting.LitestreamMetricsScrapeStatusFailed {
+		t.Fatalf("LitestreamMetricsScrapeStatus = %q, want failed", snapshot.LitestreamMetricsScrapeStatus)
+	}
+	if !strings.Contains(snapshot.LitestreamMetricsScrapeError, "404") {
+		t.Fatalf("LitestreamMetricsScrapeError = %q, want 404", snapshot.LitestreamMetricsScrapeError)
+	}
+	if snapshot.LitestreamMetricsScrapeAttemptedAt.IsZero() {
+		t.Fatal("LitestreamMetricsScrapeAttemptedAt is zero")
+	}
+	if !snapshot.LitestreamMetricsScrapeLastSuccessAt.IsZero() {
+		t.Fatalf("LitestreamMetricsScrapeLastSuccessAt = %s, want zero", snapshot.LitestreamMetricsScrapeLastSuccessAt)
+	}
+	if snapshot.LitestreamMetricsScrapeConsecutiveFailures != 1 {
+		t.Fatalf("LitestreamMetricsScrapeConsecutiveFailures = %d, want 1", snapshot.LitestreamMetricsScrapeConsecutiveFailures)
+	}
+	if snapshot.LitestreamDiskFullMetricPresent || snapshot.LitestreamDiskFull || snapshot.LitestreamMemStatsMetricsPresent {
+		t.Fatalf(
+			"failed scrape leaked a metric verdict: disk_present=%t disk_full=%t memstats_present=%t",
+			snapshot.LitestreamDiskFullMetricPresent,
+			snapshot.LitestreamDiskFull,
+			snapshot.LitestreamMemStatsMetricsPresent,
+		)
+	}
+	if got := reporting.LitestreamMetricsStatus(&snapshot); got != reporting.LitestreamMetricsStatusScrapeFailed {
+		t.Fatalf("LitestreamMetricsStatus() = %q, want scrape_failed", got)
 	}
 }
 
@@ -257,7 +345,8 @@ func TestSetLitestreamSnapshotFailurePreservesMonotonicTotals(t *testing.T) {
 
 func TestCollectLitestreamRuntimeCarriesForwardMemStatsWhenFamiliesAbsent(t *testing.T) {
 	cfg := newStatsPollerTestConfig(t)
-	startStatsPollerIPCServer(t, &cfg, `# HELP litestream_db_disk_full Whether replication is paused because the local disk is full
+	startStatsPollerIPCServer(t, &cfg)
+	startStatsPollerMetricsBody(t, &cfg, `# HELP litestream_db_disk_full Whether replication is paused because the local disk is full
 # TYPE litestream_db_disk_full gauge
 litestream_db_disk_full{db="`+cfg.DBPath+`"} 0
 `)

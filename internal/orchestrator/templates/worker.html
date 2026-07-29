@@ -112,6 +112,7 @@
           {{if .Incident.FailureSignature}}<span class="badge badge-bad">{{shorten .Incident.FailureSignature 96}}</span>{{end}}
           {{if .Incident.ActiveVerification}}<span class="badge badge-info">verification running</span>{{end}}
           <span class="badge badge-{{if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-good"}}good{{else if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-warn"}}warn{{else if eq (runtimeClass .Incident.RuntimeSnapshotStatus) "status-bad"}}bad{{else}}neutral{{end}}">{{runtimeLabel .Incident.RuntimeSnapshotStatus}}</span>
+          <span class="badge badge-{{if eq (litestreamMetricsClass .Incident.LitestreamMetricsStatus) "status-good"}}good{{else if eq (litestreamMetricsClass .Incident.LitestreamMetricsStatus) "status-warn"}}warn{{else}}neutral{{end}}">{{litestreamMetricsLabel .Incident.LitestreamMetricsStatus}}</span>
         </div>
         {{if .Incident.Guide.WhyLikely}}
         <ul>

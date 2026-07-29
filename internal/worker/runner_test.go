@@ -47,15 +47,20 @@ func TestPollDBStatsMarksSnapshotHealthy(t *testing.T) {
 		case "/list":
 			lastSyncAt := time.Now().Add(-3 * time.Second).UTC().Format(time.RFC3339Nano)
 			_, _ = w.Write([]byte(`{"databases":[{"status":"replicating","txid":42,"replicated_txid":40,"last_sync_at":"` + lastSyncAt + `"}]}`))
-		case "/metrics":
-			_, _ = w.Write([]byte(`# HELP litestream_disk_full Whether replication is paused because the local disk is full
-# TYPE litestream_disk_full gauge
-litestream_disk_full{db="` + cfg.DBPath + `"} 1
-`))
 		default:
 			http.NotFound(w, r)
 		}
 	}))
+	startStatsPollerMetricsBody(t, &cfg, `# HELP litestream_disk_full Whether replication is paused because the local disk is full
+# TYPE litestream_disk_full gauge
+litestream_disk_full{db="`+cfg.DBPath+`"} 1
+# TYPE go_memstats_heap_inuse_bytes gauge
+go_memstats_heap_inuse_bytes 4194304
+# TYPE go_memstats_stack_inuse_bytes gauge
+go_memstats_stack_inuse_bytes 1048576
+# TYPE go_memstats_alloc_bytes_total counter
+go_memstats_alloc_bytes_total 987654321
+`)
 
 	runner := NewRunner(cfg)
 	runner.pollDBStats()
@@ -78,6 +83,9 @@ litestream_disk_full{db="` + cfg.DBPath + `"} 1
 	}
 	if !snapshot.LitestreamDiskFull {
 		t.Fatal("LitestreamDiskFull = false, want true")
+	}
+	if got := reporting.LitestreamMetricsStatus(&snapshot.RuntimePayload); got != reporting.LitestreamMetricsStatusHealthy {
+		t.Fatalf("LitestreamMetricsStatus() = %q, want healthy", got)
 	}
 	if snapshot.DBStatus != "replicating" {
 		t.Fatalf("db status=%q want %q", snapshot.DBStatus, "replicating")
@@ -108,6 +116,56 @@ litestream_disk_full{db="` + cfg.DBPath + `"} 1
 	}
 	if snapshot.LitestreamSnapshotError != "" {
 		t.Fatalf("unexpected snapshot error %q", snapshot.LitestreamSnapshotError)
+	}
+}
+
+func TestObserveLitestreamMetricsConditionTransitions(t *testing.T) {
+	runner := NewRunner(DefaultConfig())
+
+	failed := runner.observeLitestreamMetricsCondition(reporting.RuntimePayload{
+		LitestreamSnapshotHealthy:     true,
+		LitestreamMetricsScrapeStatus: reporting.LitestreamMetricsScrapeStatusFailed,
+		LitestreamMetricsScrapeError:  "scrape Litestream metrics: 404 Not Found",
+	})
+	if !failed.ShouldReport || failed.EventType != reporting.WorkerEventLitestreamMetricsScrapeFailed {
+		t.Fatalf("failed observation = %+v, want scrape-failed report", failed)
+	}
+
+	repeated := runner.observeLitestreamMetricsCondition(reporting.RuntimePayload{
+		LitestreamSnapshotHealthy:     true,
+		LitestreamMetricsScrapeStatus: reporting.LitestreamMetricsScrapeStatusFailed,
+	})
+	if repeated.ShouldReport {
+		t.Fatalf("repeated failed observation = %+v, want no report", repeated)
+	}
+
+	missing := runner.observeLitestreamMetricsCondition(reporting.RuntimePayload{
+		LitestreamSnapshotHealthy:       true,
+		LitestreamMetricsScrapeStatus:   reporting.LitestreamMetricsScrapeStatusHealthy,
+		LitestreamDiskFullMetricPresent: true,
+	})
+	if !missing.ShouldReport || missing.EventType != reporting.WorkerEventLitestreamMetricsMissing {
+		t.Fatalf("missing observation = %+v, want missing-metrics report", missing)
+	}
+
+	recovered := runner.observeLitestreamMetricsCondition(reporting.RuntimePayload{
+		LitestreamSnapshotHealthy:        true,
+		LitestreamMetricsScrapeStatus:    reporting.LitestreamMetricsScrapeStatusHealthy,
+		LitestreamDiskFullMetricPresent:  true,
+		LitestreamMemStatsMetricsPresent: true,
+	})
+	if !recovered.ShouldReport || recovered.EventType != reporting.WorkerEventLitestreamMetricsRecovered {
+		t.Fatalf("recovered observation = %+v, want recovered report", recovered)
+	}
+
+	healthyAgain := runner.observeLitestreamMetricsCondition(reporting.RuntimePayload{
+		LitestreamSnapshotHealthy:        true,
+		LitestreamMetricsScrapeStatus:    reporting.LitestreamMetricsScrapeStatusHealthy,
+		LitestreamDiskFullMetricPresent:  true,
+		LitestreamMemStatsMetricsPresent: true,
+	})
+	if healthyAgain.ShouldReport {
+		t.Fatalf("repeated healthy observation = %+v, want no report", healthyAgain)
 	}
 }
 

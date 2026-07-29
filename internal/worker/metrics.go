@@ -240,6 +240,21 @@ var (
 		Help: "Whether the worker could refresh Litestream runtime stats on the last poll (1=yes, 0=no).",
 	}, []string{"worker_id", "profile", "source", "region"})
 
+	litestreamMetricsScrapeHealthy = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_metrics_scrape_healthy",
+		Help: "Whether the last Litestream Prometheus metrics scrape succeeded (1=yes, 0=no).",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	litestreamDiskFullMetricPresent = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_disk_full_metric_present",
+		Help: "Whether the last successful Litestream metrics scrape contained litestream_disk_full.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
+	litestreamMemStatsMetricsPresent = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_litestream_memstats_metrics_present",
+		Help: "Whether the last successful Litestream metrics scrape contained all required Go memory series.",
+	}, []string{"worker_id", "profile", "source", "region"})
+
 	dbStatus = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_db_status",
 		Help: "Database status (1=active, 0=inactive).",
@@ -388,6 +403,21 @@ func SetLitestreamSnapshotHealthy(healthy bool) {
 		value = 1
 	}
 	litestreamSnapshotHealthy.WithLabelValues(currentMetricLabels()...).Set(value)
+}
+
+func SetLitestreamMetricsState(status string, diskFullPresent, memStatsPresent bool) {
+	labels := currentMetricLabels()
+	scrapeHealthy := strings.TrimSpace(status) == reporting.LitestreamMetricsScrapeStatusHealthy
+	litestreamMetricsScrapeHealthy.WithLabelValues(labels...).Set(boolFloat(scrapeHealthy))
+	litestreamDiskFullMetricPresent.WithLabelValues(labels...).Set(boolFloat(scrapeHealthy && diskFullPresent))
+	litestreamMemStatsMetricsPresent.WithLabelValues(labels...).Set(boolFloat(scrapeHealthy && memStatsPresent))
+}
+
+func boolFloat(value bool) float64 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func SetDBStatus(status string) {

@@ -30,10 +30,11 @@ type Config struct {
 	Region        string
 
 	// Paths
-	DataDir    string
-	DBPath     string
-	ConfigPath string
-	SocketPath string
+	DataDir               string
+	DBPath                string
+	ConfigPath            string
+	SocketPath            string
+	LitestreamMetricsAddr string
 
 	// Profile
 	ProfileName string
@@ -130,10 +131,11 @@ func DefaultConfig() Config {
 		WorkerName: "worker-1",
 		Source:     "main",
 
-		DataDir:    "/data",
-		DBPath:     "/data/test.db",
-		ConfigPath: "/data/litestream.yml",
-		SocketPath: "/data/litestream.sock",
+		DataDir:               "/data",
+		DBPath:                "/data/test.db",
+		ConfigPath:            "/data/litestream.yml",
+		SocketPath:            "/data/litestream.sock",
+		LitestreamMetricsAddr: "127.0.0.1:9092",
 
 		ProfileName: "low-volume",
 		WriteRate:   10,

@@ -341,8 +341,36 @@ func runtimeSnapshotLabel(value string) string {
 	}
 }
 
+func litestreamMetricsClass(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case reporting.LitestreamMetricsStatusHealthy:
+		return "status-good"
+	case reporting.LitestreamMetricsStatusScrapeFailed, reporting.LitestreamMetricsStatusMetricMissing:
+		return "status-warn"
+	default:
+		return "status-neutral"
+	}
+}
+
+func litestreamMetricsLabel(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case reporting.LitestreamMetricsStatusHealthy:
+		return "metrics ok"
+	case reporting.LitestreamMetricsStatusScrapeFailed:
+		return "metrics scrape failed"
+	case reporting.LitestreamMetricsStatusMetricMissing:
+		return "required metrics missing"
+	default:
+		return "metrics unknown"
+	}
+}
+
 func eventClass(value string) string {
 	switch {
+	case strings.HasPrefix(strings.TrimSpace(value), reporting.WorkerEventLitestreamMetricsRecovered):
+		return "status-good"
+	case strings.HasPrefix(strings.TrimSpace(value), reporting.WorkerEventLitestreamMetricsScrapeFailed), strings.HasPrefix(strings.TrimSpace(value), reporting.WorkerEventLitestreamMetricsMissing):
+		return "status-warn"
 	case strings.HasPrefix(strings.TrimSpace(value), "platform_disk_full_recovered"):
 		return "status-good"
 	case strings.HasPrefix(strings.TrimSpace(value), "platform_oom"), strings.HasPrefix(strings.TrimSpace(value), "platform_disk_full"), strings.HasPrefix(strings.TrimSpace(value), "platform_killed"):
@@ -458,7 +486,8 @@ func workerRank(status model.WorkerStatus) int {
 }
 
 func homeWorkerRank(worker homeWorker) int {
-	if worker.Worker.Status == model.WorkerRunning && runtimeSnapshotNeedsAttention(worker.RuntimeSnapshotStatus) {
+	if worker.Worker.Status == model.WorkerRunning &&
+		(runtimeSnapshotNeedsAttention(worker.RuntimeSnapshotStatus) || litestreamMetricsClass(worker.LitestreamMetricsStatus) == "status-warn") {
 		return workerRank(model.WorkerDegraded)
 	}
 	return workerRank(worker.Worker.Status)
@@ -480,6 +509,7 @@ func fleetRowStatus(worker homeWorker) string {
 	}
 	workerClass := statusClass(worker.Worker.Status)
 	runtimeClass := runtimeSnapshotClass(worker.RuntimeSnapshotStatus)
+	metricsClass := litestreamMetricsClass(worker.LitestreamMetricsStatus)
 	if workerClass == "status-bad" || runtimeClass == "status-bad" {
 		return "failing"
 	}
@@ -487,7 +517,7 @@ func fleetRowStatus(worker homeWorker) string {
 	case model.WorkerProbing, model.WorkerStarting, model.WorkerBuilding, model.WorkerPending:
 		return "probing"
 	}
-	if workerClass == "status-warn" || runtimeClass == "status-warn" {
+	if workerClass == "status-warn" || runtimeClass == "status-warn" || metricsClass == "status-warn" {
 		return "degraded"
 	}
 	if workerClass == "status-good" {

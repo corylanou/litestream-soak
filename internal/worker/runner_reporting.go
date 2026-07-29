@@ -16,6 +16,72 @@ type failureDebugState struct {
 	at  time.Time
 }
 
+type litestreamMetricsObservation struct {
+	ShouldReport bool
+	EventType    string
+	Message      string
+	Runtime      reporting.RuntimePayload
+}
+
+func (r *Runner) observeLitestreamMetricsCondition(runtime reporting.RuntimePayload) litestreamMetricsObservation {
+	if !runtime.LitestreamSnapshotHealthy {
+		return litestreamMetricsObservation{}
+	}
+
+	status := reporting.LitestreamMetricsStatus(&runtime)
+	if status == reporting.LitestreamMetricsStatusUnknown {
+		return litestreamMetricsObservation{}
+	}
+	previous := r.litestreamMetricsStatus
+	r.litestreamMetricsStatus = status
+	if status == previous {
+		return litestreamMetricsObservation{}
+	}
+
+	observation := litestreamMetricsObservation{Runtime: runtime}
+	switch status {
+	case reporting.LitestreamMetricsStatusScrapeFailed:
+		observation.ShouldReport = true
+		observation.EventType = reporting.WorkerEventLitestreamMetricsScrapeFailed
+		observation.Message = firstNonEmpty(runtime.LitestreamMetricsScrapeError, "Litestream metrics scrape failed")
+	case reporting.LitestreamMetricsStatusMetricMissing:
+		missing := make([]string, 0, 2)
+		if !runtime.LitestreamDiskFullMetricPresent {
+			missing = append(missing, "litestream_disk_full")
+		}
+		if !runtime.LitestreamMemStatsMetricsPresent {
+			missing = append(missing, "required Go memory series")
+		}
+		observation.ShouldReport = true
+		observation.EventType = reporting.WorkerEventLitestreamMetricsMissing
+		observation.Message = "Litestream metrics scrape succeeded but required metrics are absent: " + strings.Join(missing, ", ")
+	case reporting.LitestreamMetricsStatusHealthy:
+		if previous == reporting.LitestreamMetricsStatusScrapeFailed || previous == reporting.LitestreamMetricsStatusMetricMissing {
+			observation.ShouldReport = true
+			observation.EventType = reporting.WorkerEventLitestreamMetricsRecovered
+			observation.Message = "Litestream metrics scrape recovered with all required metrics present"
+		}
+	}
+	return observation
+}
+
+func (r *Runner) sendLitestreamMetricsEvent(ctx context.Context, observation litestreamMetricsObservation) {
+	if r.reporter == nil || !r.reporter.Enabled() || observation.EventType == "" {
+		return
+	}
+
+	reportCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := r.reporter.SendEvent(reportCtx, reporting.WorkerEventPayload{
+		EventType:      observation.EventType,
+		Message:        observation.Message,
+		SentAt:         time.Now().UTC(),
+		RuntimePayload: observation.Runtime,
+	}); err != nil {
+		slog.Warn("Failed to send Litestream metrics condition", "event_type", observation.EventType, "error", err)
+	}
+}
+
 func (r *Runner) sendHeartbeat(ctx context.Context) {
 	if r.reporter == nil || !r.reporter.Enabled() {
 		return

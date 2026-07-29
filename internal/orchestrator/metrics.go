@@ -15,26 +15,27 @@ import (
 )
 
 type controlMetrics struct {
-	mu                      sync.Mutex
-	statusByWorker          map[string]string
-	infoByWorker            map[string]workerInfoMetricState
-	workloadByWorker        map[string]labelMetricState
-	runtimeByWorker         map[string]labelMetricState
-	platformByWorker        map[string]labelMetricState
-	failureByWorker         map[string]failureMetricState
-	lastFailureByWorker     map[string]failureMetricState
-	latestDeployment        labelMetricState
-	latestDeploymentVersion labelMetricState
-	rolloutByState          map[string]labelMetricState
-	comparisonInfo          labelMetricState
-	comparisonWorkers       map[string]labelMetricState
-	comparisonDeltas        map[string]labelMetricState
-	comparisonFailures      map[string]labelMetricState
-	sourceComparisonInfo    map[string]labelMetricState
-	sourceComparisonWorkers map[string]labelMetricState
-	sourceComparisonDeltas  map[string]labelMetricState
-	sourceComparisonFailure map[string]labelMetricState
-	volumeInventory         map[string]volumeMetricState
+	mu                        sync.Mutex
+	statusByWorker            map[string]string
+	infoByWorker              map[string]workerInfoMetricState
+	workloadByWorker          map[string]labelMetricState
+	runtimeByWorker           map[string]labelMetricState
+	litestreamMetricsByWorker map[string]labelMetricState
+	platformByWorker          map[string]labelMetricState
+	failureByWorker           map[string]failureMetricState
+	lastFailureByWorker       map[string]failureMetricState
+	latestDeployment          labelMetricState
+	latestDeploymentVersion   labelMetricState
+	rolloutByState            map[string]labelMetricState
+	comparisonInfo            labelMetricState
+	comparisonWorkers         map[string]labelMetricState
+	comparisonDeltas          map[string]labelMetricState
+	comparisonFailures        map[string]labelMetricState
+	sourceComparisonInfo      map[string]labelMetricState
+	sourceComparisonWorkers   map[string]labelMetricState
+	sourceComparisonDeltas    map[string]labelMetricState
+	sourceComparisonFailure   map[string]labelMetricState
+	volumeInventory           map[string]volumeMetricState
 }
 
 type labelMetricState struct {
@@ -101,6 +102,11 @@ var (
 		Name: "soak_control_worker_runtime_snapshot_status",
 		Help: "Current runtime snapshot health classification tracked by the control plane.",
 	}, []string{"worker_id", "profile", "source", "app_name", "region", "runtime_status"})
+
+	controlWorkerLitestreamMetricsStatus = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_control_worker_litestream_metrics_status",
+		Help: "Current Litestream Prometheus metrics scrape and required-series classification tracked by the control plane.",
+	}, []string{"worker_id", "profile", "source", "app_name", "region", "metrics_status"})
 
 	controlWorkerDataDiskTotalSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_control_worker_data_disk_total_bytes",
@@ -355,22 +361,23 @@ var (
 
 func NewControlMetrics(db *model.DB) *controlMetrics {
 	m := &controlMetrics{
-		statusByWorker:          make(map[string]string),
-		infoByWorker:            make(map[string]workerInfoMetricState),
-		workloadByWorker:        make(map[string]labelMetricState),
-		runtimeByWorker:         make(map[string]labelMetricState),
-		platformByWorker:        make(map[string]labelMetricState),
-		failureByWorker:         make(map[string]failureMetricState),
-		lastFailureByWorker:     make(map[string]failureMetricState),
-		rolloutByState:          make(map[string]labelMetricState),
-		comparisonWorkers:       make(map[string]labelMetricState),
-		comparisonDeltas:        make(map[string]labelMetricState),
-		comparisonFailures:      make(map[string]labelMetricState),
-		sourceComparisonInfo:    make(map[string]labelMetricState),
-		sourceComparisonWorkers: make(map[string]labelMetricState),
-		sourceComparisonDeltas:  make(map[string]labelMetricState),
-		sourceComparisonFailure: make(map[string]labelMetricState),
-		volumeInventory:         make(map[string]volumeMetricState),
+		statusByWorker:            make(map[string]string),
+		infoByWorker:              make(map[string]workerInfoMetricState),
+		workloadByWorker:          make(map[string]labelMetricState),
+		runtimeByWorker:           make(map[string]labelMetricState),
+		litestreamMetricsByWorker: make(map[string]labelMetricState),
+		platformByWorker:          make(map[string]labelMetricState),
+		failureByWorker:           make(map[string]failureMetricState),
+		lastFailureByWorker:       make(map[string]failureMetricState),
+		rolloutByState:            make(map[string]labelMetricState),
+		comparisonWorkers:         make(map[string]labelMetricState),
+		comparisonDeltas:          make(map[string]labelMetricState),
+		comparisonFailures:        make(map[string]labelMetricState),
+		sourceComparisonInfo:      make(map[string]labelMetricState),
+		sourceComparisonWorkers:   make(map[string]labelMetricState),
+		sourceComparisonDeltas:    make(map[string]labelMetricState),
+		sourceComparisonFailure:   make(map[string]labelMetricState),
+		volumeInventory:           make(map[string]volumeMetricState),
 	}
 	m.syncFromDB(db)
 	return m
@@ -432,7 +439,9 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 		workerRegion(worker),
 	}
 	workloadCfg := resolveWorkerWorkload(worker)
-	runtimeStatus := reporting.SnapshotStatus(extractReportedRuntime(worker, nil))
+	reportedRuntime := extractReportedRuntime(worker, nil)
+	runtimeStatus := reporting.SnapshotStatus(reportedRuntime)
+	litestreamMetricsStatus := reporting.LitestreamMetricsStatus(reportedRuntime)
 	workloadLabels := []string{
 		worker.ID,
 		worker.ProfileName,
@@ -450,6 +459,7 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 		metricIntLabel(workloadCfg.CPUs),
 	}
 	runtimeLabels := append(labels, metricValueOrUnknown(runtimeStatus))
+	litestreamMetricsLabels := append(labels, metricValueOrUnknown(litestreamMetricsStatus))
 
 	m.mu.Lock()
 	previousStatus := m.statusByWorker[worker.ID]
@@ -460,6 +470,8 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 	m.workloadByWorker[worker.ID] = labelMetricState{labels: workloadLabels}
 	previousRuntime := m.runtimeByWorker[worker.ID]
 	m.runtimeByWorker[worker.ID] = labelMetricState{labels: runtimeLabels}
+	previousLitestreamMetrics := m.litestreamMetricsByWorker[worker.ID]
+	m.litestreamMetricsByWorker[worker.ID] = labelMetricState{labels: litestreamMetricsLabels}
 	m.mu.Unlock()
 
 	if len(previousInfo.infoLabels) > 0 && !sameMetricLabels(previousInfo.infoLabels, infoLabels) {
@@ -480,7 +492,11 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 		controlWorkerRuntimeSnapshotStatus.WithLabelValues(previousRuntime.labels...).Set(0)
 	}
 	controlWorkerRuntimeSnapshotStatus.WithLabelValues(runtimeLabels...).Set(1)
-	if runtime := extractReportedRuntime(worker, nil); runtime != nil {
+	if len(previousLitestreamMetrics.labels) > 0 && !sameMetricLabels(previousLitestreamMetrics.labels, litestreamMetricsLabels) {
+		controlWorkerLitestreamMetricsStatus.WithLabelValues(previousLitestreamMetrics.labels...).Set(0)
+	}
+	controlWorkerLitestreamMetricsStatus.WithLabelValues(litestreamMetricsLabels...).Set(1)
+	if runtime := reportedRuntime; runtime != nil {
 		controlWorkerDataDiskTotalSize.WithLabelValues(labels...).Set(float64(runtime.DataDiskTotalBytes))
 		controlWorkerDataDiskUsedSize.WithLabelValues(labels...).Set(float64(runtime.DataDiskUsedBytes))
 		controlWorkerDataDiskFreeSize.WithLabelValues(labels...).Set(float64(runtime.DataDiskFreeBytes))

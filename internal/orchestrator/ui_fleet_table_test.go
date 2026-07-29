@@ -81,6 +81,24 @@ func TestFleetRowStatus(t *testing.T) {
 			want: "degraded",
 		},
 		{
+			name: "running worker with failed Litestream metrics scrape",
+			worker: homeWorker{
+				Worker:                  model.Worker{Status: model.WorkerRunning},
+				RuntimeSnapshotStatus:   reporting.RuntimeSnapshotStatusHealthy,
+				LitestreamMetricsStatus: reporting.LitestreamMetricsStatusScrapeFailed,
+			},
+			want: "degraded",
+		},
+		{
+			name: "running worker with missing Litestream metrics",
+			worker: homeWorker{
+				Worker:                  model.Worker{Status: model.WorkerRunning},
+				RuntimeSnapshotStatus:   reporting.RuntimeSnapshotStatusHealthy,
+				LitestreamMetricsStatus: reporting.LitestreamMetricsStatusMetricMissing,
+			},
+			want: "degraded",
+		},
+		{
 			name: "healthy running worker",
 			worker: homeWorker{
 				Worker:                model.Worker{Status: model.WorkerRunning},

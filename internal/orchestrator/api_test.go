@@ -2417,6 +2417,97 @@ func TestHandleWorkerEventDiskFullRecoveryFailedDegradesWorker(t *testing.T) {
 	}
 }
 
+func TestHandleWorkerEventPersistsLitestreamMetricsWarning(t *testing.T) {
+	db := openTestDB(t)
+	workerID := "worker-litestream-metrics-warning"
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		Name:          workerID,
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "abc123",
+		LitestreamSHA: "ls123",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+
+	sentAt := time.Date(2026, 7, 29, 10, 0, 0, 0, time.UTC)
+	payload := reporting.WorkerEventPayload{
+		WorkerIdentity: reporting.WorkerIdentity{
+			WorkerID:      workerID,
+			Name:          workerID,
+			Source:        "main",
+			GitSHA:        "abc123",
+			LitestreamSHA: "ls123",
+			ProfileName:   "low-volume",
+			ProfileConfig: "{}",
+		},
+		EventType: reporting.WorkerEventLitestreamMetricsScrapeFailed,
+		Message:   "scrape Litestream metrics: 404 Not Found",
+		SentAt:    sentAt,
+		RuntimePayload: reporting.RuntimePayload{
+			LitestreamMetricsScrapeStatus:              reporting.LitestreamMetricsScrapeStatusFailed,
+			LitestreamMetricsScrapeError:               "scrape Litestream metrics: 404 Not Found",
+			LitestreamMetricsScrapeAttemptedAt:         sentAt,
+			LitestreamMetricsScrapeConsecutiveFailures: 1,
+			SnapshotCollectedAt:                        sentAt,
+			LitestreamSnapshotHealthy:                  true,
+		},
+	}
+
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	for i := 0; i < 2; i++ {
+		payload.SentAt = sentAt.Add(time.Duration(i) * time.Minute)
+		payload.LitestreamMetricsScrapeAttemptedAt = payload.SentAt
+		payload.LitestreamMetricsScrapeConsecutiveFailures = i + 1
+		body, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/api/workers/"+workerID+"/events", bytes.NewReader(body))
+		request.SetPathValue("id", workerID)
+		recorder := httptest.NewRecorder()
+		api.handleWorkerEvent(recorder, request)
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+		}
+	}
+
+	worker, err := db.GetWorker(workerID)
+	if err != nil {
+		t.Fatalf("GetWorker() error = %v", err)
+	}
+	for _, want := range []string{
+		`"litestream_metrics_scrape_status":"failed"`,
+		`"litestream_disk_full_metric_present":false`,
+		`"litestream_disk_full":false`,
+		`"litestream_memstats_metrics_present":false`,
+	} {
+		if !strings.Contains(worker.LastRuntimeJSON, want) {
+			t.Fatalf("LastRuntimeJSON missing %s: %s", want, worker.LastRuntimeJSON)
+		}
+	}
+
+	detail, status, err := api.workerDetail(workerID)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("workerDetail() status=%d error=%v", status, err)
+	}
+	if detail.LitestreamMetricsStatus != reporting.LitestreamMetricsStatusScrapeFailed {
+		t.Fatalf("detail LitestreamMetricsStatus = %q, want scrape_failed", detail.LitestreamMetricsStatus)
+	}
+
+	events, err := db.ListWorkerEvents(workerID, 10)
+	if err != nil {
+		t.Fatalf("ListWorkerEvents() error = %v", err)
+	}
+	if len(events) != 1 || events[0].EventType != reporting.WorkerEventLitestreamMetricsScrapeFailed {
+		t.Fatalf("events = %+v, want one windowed metrics warning", events)
+	}
+	if got := eventClass(events[0].EventType); got != "status-warn" {
+		t.Fatalf("eventClass() = %q, want status-warn", got)
+	}
+}
+
 func TestBuildHomePageDataStalestRuntimeAt(t *testing.T) {
 	t.Parallel()
 
