@@ -248,7 +248,7 @@ func TestShutdownOnCancelUsesBoundedContext(t *testing.T) {
 	errCh := make(chan error, 1)
 
 	go func() {
-		errCh <- shutdownOnCancel(ctx, server, 20*time.Millisecond)
+		errCh <- shutdownOnCancel(ctx, server, 20*time.Millisecond, nil)
 	}()
 
 	cancel()
@@ -272,6 +272,44 @@ func TestShutdownOnCancelUsesBoundedContext(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("expected shutdown to return after timeout")
 	}
+}
+
+func TestShutdownOnCancelBoundsBackgroundWait(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	server := shutdownerFunc(func(context.Context) error {
+		return nil
+	})
+	waitStarted := make(chan struct{})
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- shutdownOnCancel(ctx, server, 20*time.Millisecond, func(shutdownCtx context.Context) error {
+			close(waitStarted)
+			<-shutdownCtx.Done()
+			return shutdownCtx.Err()
+		})
+	}()
+
+	cancel()
+	select {
+	case <-waitStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background wait did not start")
+	}
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("shutdown returned %v, want %v", err, context.DeadlineExceeded)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("background wait exceeded shutdown timeout")
+	}
+}
+
+type shutdownerFunc func(context.Context) error
+
+func (f shutdownerFunc) Shutdown(ctx context.Context) error {
+	return f(ctx)
 }
 
 func TestDormantFleetAlertPolicyFromEnv(t *testing.T) {
