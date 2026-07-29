@@ -55,6 +55,10 @@ func TestConfigFromEnvReadsS3FaultProxyConfig(t *testing.T) {
 	t.Setenv("REPLICA_TYPE", "s3")
 	t.Setenv("S3_BUCKET", "bucket")
 	t.Setenv("S3_ENDPOINT", "https://fly.storage.tigris.dev")
+	t.Setenv("AWS_ACCESS_KEY_ID", "access")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("AWS_SESSION_TOKEN", "session")
+	t.Setenv("AWS_REGION", "auto")
 	t.Setenv("S3_FAULT_PROXY_ENABLED", "true")
 	t.Setenv("S3_FAULT_PROXY_TARGET_ENDPOINT", "https://target.example.com")
 	t.Setenv("S3_FAULT_PROXY_MODE", "source-get-reset")
@@ -75,6 +79,18 @@ func TestConfigFromEnvReadsS3FaultProxyConfig(t *testing.T) {
 
 	if !cfg.S3FaultProxyEnabled {
 		t.Fatal("S3FaultProxyEnabled = false, want true")
+	}
+	if cfg.S3AccessKey != "access" {
+		t.Fatalf("S3AccessKey = %q, want access", cfg.S3AccessKey)
+	}
+	if cfg.S3SecretKey != "secret" {
+		t.Fatalf("S3SecretKey = %q, want secret", cfg.S3SecretKey)
+	}
+	if cfg.S3SessionToken != "session" {
+		t.Fatalf("S3SessionToken = %q, want session", cfg.S3SessionToken)
+	}
+	if cfg.S3Region != "auto" {
+		t.Fatalf("S3Region = %q, want auto", cfg.S3Region)
 	}
 	if cfg.S3FaultProxyTargetEndpoint != "https://target.example.com" {
 		t.Fatalf("S3FaultProxyTargetEndpoint = %q, want target endpoint", cfg.S3FaultProxyTargetEndpoint)

@@ -671,6 +671,8 @@ func TestVerifierValidateUsesS3ProxyEnv(t *testing.T) {
 	writeFakeLitestreamTest(t, dir, `
 	printf 'AWS_ACCESS_KEY_ID=%s\n' "$AWS_ACCESS_KEY_ID" > "$LITESTREAM_TEST_ENV"
 	printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$AWS_SECRET_ACCESS_KEY" >> "$LITESTREAM_TEST_ENV"
+	printf 'AWS_SESSION_TOKEN=%s\n' "$AWS_SESSION_TOKEN" >> "$LITESTREAM_TEST_ENV"
+	printf 'AWS_REGION=%s\n' "$AWS_REGION" >> "$LITESTREAM_TEST_ENV"
 	printf 'HTTP_PROXY=%s\n' "$HTTP_PROXY" >> "$LITESTREAM_TEST_ENV"
 	printf 'HTTPS_PROXY=%s\n' "$HTTPS_PROXY" >> "$LITESTREAM_TEST_ENV"
 	printf 'NO_PROXY=%s\n' "$NO_PROXY" >> "$LITESTREAM_TEST_ENV"
@@ -686,6 +688,8 @@ func TestVerifierValidateUsesS3ProxyEnv(t *testing.T) {
 	cfg.ReplicaType = "s3"
 	cfg.S3AccessKey = "access"
 	cfg.S3SecretKey = "secret"
+	cfg.S3SessionToken = "session"
+	cfg.S3Region = "auto"
 	cfg.S3FaultProxyEnabled = true
 	cfg.S3FaultProxyEndpoint = "http://127.0.0.1:19000"
 	if err := os.WriteFile(cfg.DBPath, []byte("db"), 0o644); err != nil {
@@ -709,6 +713,12 @@ func TestVerifierValidateUsesS3ProxyEnv(t *testing.T) {
 	}
 	if env["AWS_SECRET_ACCESS_KEY"] != "secret" {
 		t.Fatalf("AWS_SECRET_ACCESS_KEY = %q, want secret", env["AWS_SECRET_ACCESS_KEY"])
+	}
+	if env["AWS_SESSION_TOKEN"] != "session" {
+		t.Fatalf("AWS_SESSION_TOKEN = %q, want session", env["AWS_SESSION_TOKEN"])
+	}
+	if env["AWS_REGION"] != "auto" {
+		t.Fatalf("AWS_REGION = %q, want auto", env["AWS_REGION"])
 	}
 	if env["HTTP_PROXY"] != cfg.S3FaultProxyEndpoint {
 		t.Fatalf("HTTP_PROXY = %q, want %q", env["HTTP_PROXY"], cfg.S3FaultProxyEndpoint)

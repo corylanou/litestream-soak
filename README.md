@@ -81,11 +81,14 @@ with an in-process writer, rotate active membership on a deterministic
 interval, report aggregate runtime/process metrics only, and verify changed
 databases per cycle. They are excluded from release-quality scoring.
 
-All many-DB profiles run the S3 proxy in passive `observe` mode: it injects no
-faults and counts Litestream-originated S3 LIST requests so LIST volume can be
-compared across tiers. Litestream heap-in-use, stack-in-use, and allocation
-rate are captured from its `/metrics` endpoint and reported alongside the
-existing process stats.
+Many-DB baseline profiles connect Litestream directly to Tigris. The S3 proxy
+is disabled for them and is supported only for deliberate fault-injection
+profiles because it rewrites and re-signs traffic. `observe` mode remains
+disabled and unfixed; the soaked Litestream version has no native
+`ListObjectsV2` counter, so passive LIST counting would require an upstream
+Litestream change. Litestream heap-in-use, stack-in-use, and allocation rate
+are captured from its `/metrics` endpoint and reported alongside the existing
+process stats.
 
 `many-dbs-500-dir-lowfreq` is the reduced-frequency control pair for
 `many-dbs-500-dir`: identical workload, but with longer retention and

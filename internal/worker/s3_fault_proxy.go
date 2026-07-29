@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +14,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 )
 
 const (
@@ -28,6 +33,14 @@ const (
 	requestTimeoutResponseBody              = `<Error><Code>RequestTimeout</Code><Message>Request timeout.</Message><RequestId>fault-proxy</RequestId></Error>`
 )
 
+var (
+	errS3FaultProxySigningCredentialsRequired = errors.New("s3 fault proxy signing credentials are required")
+	errS3FaultProxySigningRegionRequired      = errors.New("s3 fault proxy signing region is required")
+	errS3FaultProxyPayloadHashRequired        = errors.New("s3 fault proxy x-amz-content-sha256 header is required")
+	errS3FaultProxySigningFailed              = errors.New("s3 fault proxy request signing failed")
+	errS3FaultProxyUpstreamRequestFailed      = errors.New("s3 fault proxy upstream request failed")
+)
+
 type s3FaultProxyConfig struct {
 	TargetEndpoint    string
 	ListenAddr        string
@@ -37,6 +50,10 @@ type s3FaultProxyConfig struct {
 	FailFirstAttempts int
 	MaxFailures       int
 	SourceLevel       string
+	AccessKeyID       string
+	SecretAccessKey   string
+	SessionToken      string
+	Region            string
 }
 
 type s3FaultProxy struct {
@@ -77,6 +94,16 @@ func newS3FaultProxy(cfg s3FaultProxyConfig) *s3FaultProxy {
 }
 
 func (p *s3FaultProxy) Start(ctx context.Context) error {
+	signingEnabled, err := s3FaultProxyModeRequiresSigning(p.cfg.Mode)
+	if err != nil {
+		return err
+	}
+	if signingEnabled {
+		if err := validateS3FaultProxySigningConfig(p.cfg); err != nil {
+			return err
+		}
+	}
+
 	target, err := parseProxyTargetEndpoint(p.cfg.TargetEndpoint)
 	if err != nil {
 		return err
@@ -90,10 +117,25 @@ func (p *s3FaultProxy) Start(ctx context.Context) error {
 	p.endpoint = "http://" + listener.Addr().String()
 	p.target = target
 	p.proxy = httputil.NewSingleHostReverseProxy(target)
-	p.proxy.Transport = directHTTPTransport()
+	transport := directHTTPTransport()
+	if signingEnabled {
+		p.proxy.Transport = &s3FaultSigningTransport{
+			transport: transport,
+			signer:    v4.NewSigner(),
+			credentials: aws.Credentials{
+				AccessKeyID:     p.cfg.AccessKeyID,
+				SecretAccessKey: p.cfg.SecretAccessKey,
+				SessionToken:    p.cfg.SessionToken,
+			},
+			region: p.cfg.Region,
+		}
+	} else {
+		p.proxy.Transport = transport
+	}
 	p.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		slog.Warn("S3 fault proxy upstream request failed", "method", r.Method, "path", r.URL.String(), "error", err)
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		safeErr := safeS3FaultProxyError(err)
+		slog.Warn("S3 fault proxy upstream request failed", "method", r.Method, "path", r.URL.Path, "error", safeErr)
+		http.Error(w, safeErr.Error(), http.StatusBadGateway)
 	}
 	p.server = &http.Server{Handler: p}
 
@@ -111,7 +153,7 @@ func (p *s3FaultProxy) Start(ctx context.Context) error {
 	default:
 	}
 
-	slog.Info("Started S3 fault proxy", "listen", p.endpoint, "target", target.String())
+	slog.Info("Started S3 fault proxy", "listen", p.endpoint, "target", target.Scheme+"://"+target.Host)
 	return nil
 }
 
@@ -151,7 +193,7 @@ func (p *s3FaultProxy) Close(ctx context.Context) error {
 		return nil
 	}
 	if p.proxy != nil {
-		if transport, ok := p.proxy.Transport.(*http.Transport); ok {
+		if transport, ok := p.proxy.Transport.(interface{ CloseIdleConnections() }); ok {
 			transport.CloseIdleConnections()
 		}
 	}
@@ -221,8 +263,9 @@ func (p *s3FaultProxy) proxyConnect(w http.ResponseWriter, r *http.Request) {
 func (p *s3FaultProxy) proxyHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := p.roundTrip(r)
 	if err != nil {
-		slog.Warn("S3 fault proxy HTTP request failed", "method", r.Method, "url", r.URL.String(), "error", err)
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		safeErr := safeS3FaultProxyError(err)
+		slog.Warn("S3 fault proxy HTTP request failed", "method", r.Method, "path", r.URL.Path, "error", safeErr)
+		http.Error(w, safeErr.Error(), http.StatusBadGateway)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -265,14 +308,14 @@ func (p *s3FaultProxy) shouldInjectProviderHTTP408(r *http.Request) bool {
 	if p.cfg.Mode != s3FaultProxyModeProviderHTTP408 || r.Method != http.MethodGet {
 		return false
 	}
-	return p.recordFault("provider-http-408\x00" + r.URL.Path + "\x00" + r.URL.RawQuery)
+	return p.recordFault("provider-http-408\x00" + s3FaultRequestKey(r))
 }
 
 func (p *s3FaultProxy) shouldInjectProviderRequestCanceled(r *http.Request) bool {
 	if p.cfg.Mode != s3FaultProxyModeProviderRequestCanceled || r.Method != http.MethodGet {
 		return false
 	}
-	return p.recordFault("provider-request-canceled\x00" + r.URL.Path + "\x00" + r.URL.RawQuery)
+	return p.recordFault("provider-request-canceled\x00" + s3FaultRequestKey(r))
 }
 
 func (p *s3FaultProxy) matchesSourceLevel(path string) bool {
@@ -284,7 +327,7 @@ func (p *s3FaultProxy) matchesSourceLevel(path string) bool {
 }
 
 func (p *s3FaultProxy) injectProviderHTTP408(w http.ResponseWriter, r *http.Request) {
-	slog.Warn("S3 fault proxy injected provider HTTP 408", "path", r.URL.Path, "query", r.URL.RawQuery)
+	slog.Warn("S3 fault proxy injected provider HTTP 408", "path", r.URL.Path)
 	w.Header().Set("Content-Type", "application/xml")
 	w.Header().Set("X-Amz-Request-Id", "fault-proxy")
 	w.WriteHeader(http.StatusRequestTimeout)
@@ -292,7 +335,7 @@ func (p *s3FaultProxy) injectProviderHTTP408(w http.ResponseWriter, r *http.Requ
 }
 
 func (p *s3FaultProxy) injectProviderRequestCanceled(w http.ResponseWriter, r *http.Request) {
-	slog.Warn("S3 fault proxy injected provider RequestCanceled", "path", r.URL.Path, "query", r.URL.RawQuery)
+	slog.Warn("S3 fault proxy injected provider RequestCanceled", "path", r.URL.Path)
 	w.Header().Set("Content-Type", "application/xml")
 	w.Header().Set("X-Amz-Request-Id", "fault-proxy")
 	w.WriteHeader(http.StatusBadRequest)
@@ -302,8 +345,9 @@ func (p *s3FaultProxy) injectProviderRequestCanceled(w http.ResponseWriter, r *h
 func (p *s3FaultProxy) dropSourceGETResponse(w http.ResponseWriter, r *http.Request) {
 	resp, err := p.roundTrip(r)
 	if err != nil {
-		slog.Warn("S3 fault proxy source GET upstream request failed", "method", r.Method, "url", r.URL.String(), "error", err)
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		safeErr := safeS3FaultProxyError(err)
+		slog.Warn("S3 fault proxy source GET upstream request failed", "method", r.Method, "path", r.URL.Path, "error", safeErr)
+		http.Error(w, safeErr.Error(), http.StatusBadGateway)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -448,6 +492,11 @@ func isNonzeroRangeHeader(value string) bool {
 	return value != "" && value != "0"
 }
 
+func s3FaultRequestKey(r *http.Request) string {
+	queryHash := sha256.Sum256([]byte(r.URL.RawQuery))
+	return fmt.Sprintf("%s\x00%x", r.URL.Path, queryHash)
+}
+
 func (p *s3FaultProxy) roundTrip(r *http.Request) (*http.Response, error) {
 	out := r.Clone(r.Context())
 	out.RequestURI = ""
@@ -496,6 +545,96 @@ func normalizeS3FaultProxyMode(mode string) string {
 	}
 }
 
+func s3FaultProxyModeRequiresSigning(mode string) (bool, error) {
+	switch normalizeS3FaultProxyMode(mode) {
+	case s3FaultProxyModeObserve:
+		return false, nil
+	case s3FaultProxyModeUploadPartReset,
+		s3FaultProxyModeSourceGETReset,
+		s3FaultProxyModeProviderHTTP408,
+		s3FaultProxyModeProviderRequestCanceled,
+		s3FaultProxyModeConnectReset:
+		return true, nil
+	default:
+		return false, fmt.Errorf("invalid s3 fault proxy mode %q", mode)
+	}
+}
+
+func validateS3FaultProxySigningConfig(cfg s3FaultProxyConfig) error {
+	if strings.TrimSpace(cfg.AccessKeyID) == "" || cfg.SecretAccessKey == "" {
+		return errS3FaultProxySigningCredentialsRequired
+	}
+	if strings.TrimSpace(cfg.Region) == "" {
+		return errS3FaultProxySigningRegionRequired
+	}
+	return nil
+}
+
+func safeS3FaultProxyError(err error) error {
+	switch {
+	case errors.Is(err, errS3FaultProxyPayloadHashRequired):
+		return errS3FaultProxyPayloadHashRequired
+	case errors.Is(err, errS3FaultProxySigningFailed):
+		return errS3FaultProxySigningFailed
+	default:
+		return errS3FaultProxyUpstreamRequestFailed
+	}
+}
+
+type s3FaultSigningTransport struct {
+	transport   http.RoundTripper
+	signer      *v4.Signer
+	credentials aws.Credentials
+	region      string
+	now         func() time.Time
+}
+
+func (t *s3FaultSigningTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	out := r.Clone(r.Context())
+	out.Header = r.Header.Clone()
+	out.URL = cloneURL(r.URL)
+	out.Host = out.URL.Host
+
+	payloadHash := strings.TrimSpace(out.Header.Get("X-Amz-Content-Sha256"))
+	if payloadHash == "" {
+		return nil, errS3FaultProxyPayloadHashRequired
+	}
+	out.Header.Set("X-Amz-Content-Sha256", payloadHash)
+	out.Header.Del("Authorization")
+	out.Header.Del("X-Amz-Date")
+	out.Header.Del("X-Amz-Security-Token")
+	out.Header.Del("X-Amz-Region-Set")
+
+	signingTime := time.Now().UTC()
+	if t.now != nil {
+		signingTime = t.now().UTC()
+	}
+	if err := t.signer.SignHTTP(
+		out.Context(),
+		t.credentials,
+		out,
+		payloadHash,
+		"s3",
+		t.region,
+		signingTime,
+		func(options *v4.SignerOptions) {
+			options.DisableURIPathEscaping = true
+		},
+	); err != nil {
+		out.Header.Del("Authorization")
+		out.Header.Del("X-Amz-Date")
+		out.Header.Del("X-Amz-Security-Token")
+		return nil, errS3FaultProxySigningFailed
+	}
+	return t.transport.RoundTrip(out)
+}
+
+func (t *s3FaultSigningTransport) CloseIdleConnections() {
+	if transport, ok := t.transport.(interface{ CloseIdleConnections() }); ok {
+		transport.CloseIdleConnections()
+	}
+}
+
 func (r *Runner) startS3FaultProxy(ctx context.Context) error {
 	if !r.cfg.S3FaultProxyEnabled || r.cfg.ReplicaType != "s3" {
 		return nil
@@ -510,6 +649,10 @@ func (r *Runner) startS3FaultProxy(ctx context.Context) error {
 		FailFirstAttempts: r.cfg.S3FaultProxyFailFirstAttempts,
 		MaxFailures:       r.cfg.S3FaultProxyMaxFailures,
 		SourceLevel:       r.cfg.S3FaultProxySourceLevel,
+		AccessKeyID:       r.cfg.S3AccessKey,
+		SecretAccessKey:   r.cfg.S3SecretKey,
+		SessionToken:      r.cfg.S3SessionToken,
+		Region:            r.cfg.S3Region,
 	})
 	if err := proxy.Start(ctx); err != nil {
 		return err

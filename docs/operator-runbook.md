@@ -912,12 +912,30 @@ The many-DB tier ladder is flag-gated in `internal/orchestrator/fleet.go`:
 5m/30m/6h, L0 retention 1h checked every 2m. The default profiles omit those
 keys so upstream Litestream defaults apply.
 
-All many-DB profiles route Litestream's S3 traffic through the in-worker proxy
-in passive `observe` mode (no fault injection) to count LIST requests. New
-per-worker series on the control plane:
+Many-DB baseline profiles connect Litestream directly to Tigris. Keep
+`SOAK_ENABLE_S3_OBSERVE_PROXY` unset: `observe` mode remains disabled and
+unfixed because the proxy forwards Litestream's local proxy `Host`, which
+Tigris interprets as the bucket name.
+
+The S3 proxy is supported only for profiles that deliberately inject faults.
+In those modes it replaces stale SigV4 signing headers, rewrites the request
+for the target host, and signs it again with the worker's configured S3
+credentials and region. This makes the proxy a traffic-mutating transformer,
+not a passive observer. Never use it for baseline soak measurement: those
+results would measure Litestream talking to the transformer instead of
+Litestream talking directly to Tigris.
+
+The soaked Litestream version does not count `ListObjectsV2` operations on its
+metrics endpoint. A passive LIST counter therefore requires an upstream
+Litestream change, which is outside the scope of the fault proxy. Consequently,
+baseline many-DB profiles do not populate
+`soak_control_worker_s3_list_requests_total`.
+
+Related per-worker series on the control plane:
 
 - `soak_control_worker_s3_list_requests_total` — monotonic LIST count; a
-  gauge, so it resets to 0 on worker restart. Use
+  gauge populated only while an explicit fault-injection profile uses the
+  proxy, so it resets to 0 on worker restart. Use
   `delta(soak_control_worker_s3_list_requests_total[1h])` for LIST/hour and
   treat negative deltas as restarts.
 - `soak_control_worker_litestream_heap_inuse_bytes`,
