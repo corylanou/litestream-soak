@@ -226,7 +226,11 @@ func (p *PRStatePoller) fetchPullRequestState(ctx context.Context, repository st
 	if err != nil {
 		return githubPullRequestState{}, fmt.Errorf("request github pull request state: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Debug("Failed to close GitHub pull request response body", "error", err)
+		}
+	}()
 
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
 		return githubPullRequestState{}, fmt.Errorf("%w: status %d", errGitHubRateLimited, resp.StatusCode)
