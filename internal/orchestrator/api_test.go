@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -2686,6 +2687,9 @@ func TestHandleDeploymentReady(t *testing.T) {
 		db := openTestDB(t)
 		deployer := &Deployer{db: db}
 		api := NewAPI(db, nil, nil, nil, nil, deployer)
+		t.Cleanup(func() {
+			waitForAPIRollouts(t, api)
+		})
 		request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?sha=not-hex-sha&litestream_sha=ls-abc123&image=registry.fly.io%2Fapp%3Anot-hex-sha", nil)
 		recorder := httptest.NewRecorder()
 
@@ -2895,6 +2899,9 @@ func TestHandleRollWorker(t *testing.T) {
 		fly.currentImageRef = unrelatedImageRef
 		manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
 		api := NewAPI(db, fly.client, nil, nil, manager, nil)
+		t.Cleanup(func() {
+			waitForAPIRollouts(t, api)
+		})
 
 		request := httptest.NewRequest(
 			http.MethodPost,
@@ -2917,23 +2924,13 @@ func TestHandleRollWorker(t *testing.T) {
 			t.Fatalf("image_ref = %v, want source deployment image %s", resp["image_ref"], imageRef)
 		}
 
-		deadline := time.NewTimer(time.Second)
-		defer deadline.Stop()
-		ticker := time.NewTicker(5 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			worker, err := db.GetWorker(workerID)
-			if err != nil {
-				t.Fatalf("GetWorker() error = %v", err)
-			}
-			if worker.FlyMachineID != "old-machine" {
-				break
-			}
-			select {
-			case <-deadline.C:
-				t.Fatal("targeted rollout did not replace worker")
-			case <-ticker.C:
-			}
+		waitForAPIRollouts(t, api)
+		worker, err := db.GetWorker(workerID)
+		if err != nil {
+			t.Fatalf("GetWorker() error = %v", err)
+		}
+		if worker.FlyMachineID == "old-machine" {
+			t.Fatal("targeted rollout did not replace worker")
 		}
 		fly.assertCreateCounts(t, 1, 1)
 		fly.assertNoErrors(t)
@@ -2975,6 +2972,9 @@ func TestHandleRollWorker(t *testing.T) {
 		fly := newDeployTestFlyServer(t, db, "main", sha, litestreamSHA, imageRef)
 		manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
 		api := NewAPI(db, fly.client, nil, nil, manager, nil)
+		t.Cleanup(func() {
+			waitForAPIRollouts(t, api)
+		})
 
 		request := httptest.NewRequest(http.MethodPost, "/api/admin/workers/"+workerID+"/roll?sha="+sha+"&litestream_sha="+litestreamSHA+"&image="+imageRef, nil)
 		request.SetPathValue("id", workerID)
@@ -3012,26 +3012,86 @@ func TestHandleRollWorker(t *testing.T) {
 			t.Fatalf("targeted_rollout_requested event not recorded; got: %+v", events)
 		}
 
-		deadline := time.NewTimer(time.Second)
-		defer deadline.Stop()
-		ticker := time.NewTicker(5 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			worker, err := db.GetWorker(workerID)
-			if err != nil {
-				t.Fatalf("GetWorker() error = %v", err)
-			}
-			if worker.FlyMachineID != "old-machine" {
-				break
-			}
-			select {
-			case <-deadline.C:
-				t.Fatal("targeted rollout did not replace worker")
-			case <-ticker.C:
-			}
+		waitForAPIRollouts(t, api)
+		worker, err := db.GetWorker(workerID)
+		if err != nil {
+			t.Fatalf("GetWorker() error = %v", err)
+		}
+		if worker.FlyMachineID == "old-machine" {
+			t.Fatal("targeted rollout did not replace worker")
 		}
 		fly.assertCreateCounts(t, 1, 1)
 		fly.assertNoErrors(t)
+	})
+}
+
+func waitForAPIRollouts(t *testing.T, api *API) {
+	t.Helper()
+
+	if err := api.WaitForRollouts(context.Background()); err != nil {
+		t.Fatalf("WaitForRollouts() error = %v", err)
+	}
+}
+
+func TestAPIWaitForRollouts(t *testing.T) {
+	t.Parallel()
+
+	t.Run("waits for active rollout", func(t *testing.T) {
+		backgroundContext, cancel := context.WithCancel(context.Background())
+		api := &API{backgroundContext: backgroundContext}
+		started := make(chan struct{})
+		stopped := make(chan struct{})
+		api.runRollout(func(ctx context.Context) {
+			close(started)
+			<-ctx.Done()
+			close(stopped)
+		})
+		<-started
+
+		waiting := make(chan error, 1)
+		go func() {
+			waiting <- api.WaitForRollouts(context.Background())
+		}()
+		select {
+		case err := <-waiting:
+			t.Fatalf("WaitForRollouts() returned %v while rollout was running", err)
+		default:
+		}
+
+		cancel()
+		select {
+		case err := <-waiting:
+			if err != nil {
+				t.Fatalf("WaitForRollouts() error = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("WaitForRollouts() did not return after background context cancellation")
+		}
+		select {
+		case <-stopped:
+		default:
+			t.Fatal("rollout did not observe background context cancellation")
+		}
+	})
+
+	t.Run("bounded wait returns for wedged rollout", func(t *testing.T) {
+		api := &API{backgroundContext: context.Background()}
+		started := make(chan struct{})
+		release := make(chan struct{})
+		api.runRollout(func(context.Context) {
+			close(started)
+			<-release
+		})
+		<-started
+
+		waitContext, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := api.WaitForRollouts(waitContext); !errors.Is(err, context.Canceled) {
+			t.Fatalf("WaitForRollouts() error = %v, want %v", err, context.Canceled)
+		}
+
+		close(release)
+		waitForAPIRollouts(t, api)
 	})
 }
 

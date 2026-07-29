@@ -1,7 +1,9 @@
 package orchestrator
 
 import (
+	"context"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/flyapi"
@@ -11,12 +13,16 @@ import (
 )
 
 type API struct {
-	db       *model.DB
-	fly      *flyapi.Client
-	metrics  *controlMetrics
-	alerts   *AlertDispatcher
-	manager  *Manager
-	deployer *Deployer
+	backgroundContext context.Context
+	rolloutMu         sync.Mutex
+	rolloutTasks      int
+	rolloutsDone      chan struct{}
+	db                *model.DB
+	fly               *flyapi.Client
+	metrics           *controlMetrics
+	alerts            *AlertDispatcher
+	manager           *Manager
+	deployer          *Deployer
 }
 
 type WorkerDetailResponse struct {
@@ -222,16 +228,65 @@ type IncidentBundle struct {
 }
 
 func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *AlertDispatcher, manager *Manager, deployer *Deployer) *API {
+	return NewAPIWithContext(context.Background(), db, fly, metrics, alerts, manager, deployer)
+}
+
+func NewAPIWithContext(backgroundContext context.Context, db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *AlertDispatcher, manager *Manager, deployer *Deployer) *API {
 	if metrics == nil {
 		metrics = NewControlMetrics(db)
 	}
+	if backgroundContext == nil {
+		backgroundContext = context.Background()
+	}
 	return &API{
-		db:       db,
-		fly:      fly,
-		metrics:  metrics,
-		alerts:   alerts,
-		manager:  manager,
-		deployer: deployer,
+		backgroundContext: backgroundContext,
+		db:                db,
+		fly:               fly,
+		metrics:           metrics,
+		alerts:            alerts,
+		manager:           manager,
+		deployer:          deployer,
+	}
+}
+
+func (a *API) runRollout(run func(context.Context)) {
+	a.rolloutMu.Lock()
+	if a.rolloutTasks == 0 {
+		a.rolloutsDone = make(chan struct{})
+	}
+	a.rolloutTasks++
+	a.rolloutMu.Unlock()
+
+	go func() {
+		defer func() {
+			a.rolloutMu.Lock()
+			a.rolloutTasks--
+			if a.rolloutTasks == 0 {
+				close(a.rolloutsDone)
+			}
+			a.rolloutMu.Unlock()
+		}()
+
+		ctx, cancel := context.WithTimeout(a.backgroundContext, deploymentReadyRolloutTimeout)
+		defer cancel()
+		run(ctx)
+	}()
+}
+
+func (a *API) WaitForRollouts(ctx context.Context) error {
+	a.rolloutMu.Lock()
+	if a.rolloutTasks == 0 {
+		a.rolloutMu.Unlock()
+		return nil
+	}
+	done := a.rolloutsDone
+	a.rolloutMu.Unlock()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -148,7 +149,7 @@ func main() {
 		PollInterval:                 prStatePollInterval,
 		RateLimitVisibilityThreshold: prStateRateLimitVisibilityThreshold,
 	}, mgr)
-	api := orchestrator.NewAPI(db, fly, metrics, alerts, mgr, deployer)
+	api := orchestrator.NewAPIWithContext(ctx, db, fly, metrics, alerts, mgr, deployer)
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /webhooks/github", webhookHandler)
@@ -286,7 +287,7 @@ func main() {
 	}
 	shutdownErrCh := make(chan error, 1)
 	go func() {
-		shutdownErrCh <- shutdownOnCancel(ctx, server, shutdownTimeout)
+		shutdownErrCh <- shutdownOnCancel(ctx, server, shutdownTimeout, api.WaitForRollouts)
 	}()
 
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {
@@ -295,7 +296,7 @@ func main() {
 	}
 	if ctx.Err() != nil {
 		if err := <-shutdownErrCh; err != nil {
-			slog.Error("Server shutdown failed", "error", err)
+			slog.Error("Shutdown failed", "error", err)
 			os.Exit(1)
 		}
 	}
@@ -326,11 +327,16 @@ func newRequestTimeoutHandler(next http.Handler, defaultTimeout, teardownTimeout
 	})
 }
 
-func shutdownOnCancel(ctx context.Context, server shutdowner, timeout time.Duration) error {
+func shutdownOnCancel(ctx context.Context, server shutdowner, timeout time.Duration, waitForBackground func(context.Context) error) error {
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return server.Shutdown(shutdownCtx)
+
+	shutdownErr := server.Shutdown(shutdownCtx)
+	if waitForBackground == nil {
+		return shutdownErr
+	}
+	return errors.Join(shutdownErr, waitForBackground(shutdownCtx))
 }
 
 func envOrDefault(key, def string) string {

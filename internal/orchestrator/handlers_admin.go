@@ -76,10 +76,7 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 		trigger = "deploy_ready"
 	}
 
-	rolloutCtx, cancel := context.WithTimeout(context.Background(), deploymentReadyRolloutTimeout)
-	go func(request deploymentReadyRequest, source, trigger string) {
-		defer cancel()
-
+	a.runRollout(func(rolloutCtx context.Context) {
 		imageRef, err := a.deployer.NotifyDeploymentReady(rolloutCtx, source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger, request.Repository)
 		if err != nil {
 			slog.Error("Deployment ready rollout failed", "source", source, "sha", request.SHA, "litestream_sha", request.LitestreamSHA, "error", err)
@@ -88,7 +85,7 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 		}
 		a.observeLatestDeploymentState(source)
 		slog.Info("Deployment ready rollout complete", "source", source, "sha", request.SHA, "litestream_sha", request.LitestreamSHA, "image", imageRef, "trigger", trigger)
-	}(request, source, trigger)
+	})
 
 	w.WriteHeader(http.StatusAccepted)
 	writeAPIJSON(w, map[string]any{
@@ -167,9 +164,7 @@ func (a *API) handleRollWorker(w http.ResponseWriter, r *http.Request) {
 	message := fmt.Sprintf("Targeted rollout for %s to soak %s / litestream %s via %s", workerID, shortVersionValue(request.SHA), shortVersionValue(request.LitestreamSHA), trigger)
 	_ = a.db.RecordEvent(workerID, "targeted_rollout_requested", message, imageRef)
 
-	rolloutCtx, cancel := context.WithTimeout(context.Background(), deploymentReadyRolloutTimeout)
-	go func(request deploymentReadyRequest, imageRef, source, workerID string) {
-		defer cancel()
+	a.runRollout(func(rolloutCtx context.Context) {
 		if _, err := a.manager.RollWorker(rolloutCtx, workerID, imageRef, request.SHA, request.LitestreamSHA); err != nil {
 			slog.Error("Targeted worker rollout failed", "worker_id", workerID, "sha", request.SHA, "litestream_sha", request.LitestreamSHA, "error", err)
 			_ = a.db.RecordEvent(workerID, "targeted_rollout_failed", fmt.Sprintf("Targeted rollout failed for %s / litestream %s: %v", shortVersionValue(request.SHA), shortVersionValue(request.LitestreamSHA), err), imageRef)
@@ -177,7 +172,7 @@ func (a *API) handleRollWorker(w http.ResponseWriter, r *http.Request) {
 		}
 		a.observeLatestDeploymentState(source)
 		slog.Info("Targeted worker rollout complete", "worker_id", workerID, "source", source, "sha", request.SHA, "litestream_sha", request.LitestreamSHA, "image", imageRef)
-	}(request, imageRef, source, workerID)
+	})
 
 	w.WriteHeader(http.StatusAccepted)
 	writeAPIJSON(w, map[string]any{
