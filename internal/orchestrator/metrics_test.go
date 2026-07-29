@@ -291,6 +291,7 @@ func TestControlMetricsObserveWorkerZeroesStaleStatusAndRuntimeSeries(t *testing
 
 	assertGaugeVecValue(t, controlWorkerStatus, metricLabelsWith(labels, string(model.WorkerRunning)), 1)
 	assertGaugeVecValue(t, controlWorkerRuntimeSnapshotStatus, metricLabelsWith(labels, reporting.RuntimeSnapshotStatusMissing), 1)
+	assertGaugeVecValue(t, controlWorkerLitestreamMetricsStatus, metricLabelsWith(labels, reporting.LitestreamMetricsStatusUnknown), 1)
 
 	worker.Status = model.WorkerDegraded
 	worker.LastRuntimeJSON = mustJSON(reporting.RuntimePayload{
@@ -307,6 +308,8 @@ func TestControlMetricsObserveWorkerZeroesStaleStatusAndRuntimeSeries(t *testing
 		LitestreamStackInuseBytes:      1048576,
 		LitestreamAllocBytesTotal:      987654321,
 		LitestreamAllocRateBytesPerSec: 2048.5,
+		LitestreamMetricsScrapeStatus:  reporting.LitestreamMetricsScrapeStatusFailed,
+		LitestreamMetricsScrapeError:   "scrape Litestream metrics: 404 Not Found",
 		LitestreamSnapshotHealthy:      true,
 	})
 	metrics.observeWorker(worker)
@@ -315,6 +318,8 @@ func TestControlMetricsObserveWorkerZeroesStaleStatusAndRuntimeSeries(t *testing
 	assertGaugeVecValue(t, controlWorkerStatus, metricLabelsWith(labels, string(model.WorkerDegraded)), 1)
 	assertGaugeVecValue(t, controlWorkerRuntimeSnapshotStatus, metricLabelsWith(labels, reporting.RuntimeSnapshotStatusMissing), 0)
 	assertGaugeVecValue(t, controlWorkerRuntimeSnapshotStatus, metricLabelsWith(labels, reporting.RuntimeSnapshotStatusHealthy), 1)
+	assertGaugeVecValue(t, controlWorkerLitestreamMetricsStatus, metricLabelsWith(labels, reporting.LitestreamMetricsStatusUnknown), 0)
+	assertGaugeVecValue(t, controlWorkerLitestreamMetricsStatus, metricLabelsWith(labels, reporting.LitestreamMetricsStatusScrapeFailed), 1)
 	assertGaugeVecValue(t, controlWorkerDataDiskTotalSize, labels, 8192)
 	assertGaugeVecValue(t, controlWorkerDataDiskUsedSize, labels, 4096)
 	assertGaugeVecValue(t, controlWorkerDataDiskFreeSize, labels, 4096)

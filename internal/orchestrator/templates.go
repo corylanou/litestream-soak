@@ -56,6 +56,8 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"timeAgo":                 formatTimeAgoPtr,
 	"timeAgoValue":            formatTimeAgo,
 	"litestreamCommitURL":     litestreamCommitURL,
+	"litestreamMetricsClass":  litestreamMetricsClass,
+	"litestreamMetricsLabel":  litestreamMetricsLabel,
 	"trimSHA":                 trimSHA,
 	"verificationClass":       verificationClass,
 	"verificationLabel":       verificationLabel,

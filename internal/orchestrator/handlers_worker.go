@@ -11,6 +11,8 @@ import (
 	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
+const litestreamMetricsEventWindow = 24 * time.Hour
+
 func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	workerID := r.PathValue("id")
 	var payload reporting.HeartbeatPayload
@@ -239,8 +241,15 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(message) == "" {
 		message = payload.EventType
 	}
-	if err := a.db.RecordEvent(workerID, payload.EventType, message, string(details)); err != nil {
-		respondError(w, r, http.StatusInternalServerError, err, "failed to record event")
+	var recordErr error
+	switch strings.TrimSpace(payload.EventType) {
+	case reporting.WorkerEventLitestreamMetricsScrapeFailed, reporting.WorkerEventLitestreamMetricsMissing:
+		_, recordErr = a.db.RecordWindowedEventAt(workerID, payload.EventType, message, string(details), observedAt, litestreamMetricsEventWindow)
+	default:
+		recordErr = a.db.RecordEvent(workerID, payload.EventType, message, string(details))
+	}
+	if recordErr != nil {
+		respondError(w, r, http.StatusInternalServerError, recordErr, "failed to record event")
 		return
 	}
 	switch strings.TrimSpace(payload.EventType) {

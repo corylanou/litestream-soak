@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,6 +43,8 @@ func newLitestreamManager(cfg *Config) litestreamManager {
 var litestreamConfigTmpl = template.Must(template.New("config").Parse(`socket:
   enabled: true
   path: {{.SocketPath}}
+
+addr: {{.MetricsAddr}}
 
 {{- if .Levels}}
 
@@ -93,6 +96,9 @@ dbs:
 `))
 
 func (m *litestreamManager) writeLitestreamConfig() error {
+	if err := validateLitestreamMetricsAddr(m.cfg.LitestreamMetricsAddr); err != nil {
+		return err
+	}
 	if err := m.cleanupStaleLitestreamState(); err != nil {
 		return err
 	}
@@ -120,6 +126,7 @@ func (m *litestreamManager) writeLitestreamConfig() error {
 
 type litestreamConfigData struct {
 	SocketPath               string
+	MetricsAddr              string
 	Levels                   []string
 	L0Retention              string
 	L0RetentionCheckInterval string
@@ -148,7 +155,10 @@ type litestreamConfigReplica struct {
 }
 
 func (m *litestreamManager) litestreamConfigData() litestreamConfigData {
-	data := litestreamConfigData{SocketPath: m.cfg.SocketPath}
+	data := litestreamConfigData{
+		SocketPath:  m.cfg.SocketPath,
+		MetricsAddr: m.cfg.LitestreamMetricsAddr,
+	}
 	if m.cfg.L1CompactionInterval > 0 && m.cfg.L2CompactionInterval > 0 && m.cfg.L3CompactionInterval > 0 {
 		data.Levels = []string{
 			m.cfg.L1CompactionInterval.String(),
@@ -202,6 +212,22 @@ func (m *litestreamManager) litestreamConfigData() litestreamConfigData {
 	}
 	data.Databases = dbs
 	return data
+}
+
+func validateLitestreamMetricsAddr(addr string) error {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return fmt.Errorf("invalid Litestream metrics address %q: %w", addr, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("litestream metrics address %q must use a loopback IP", addr)
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return fmt.Errorf("litestream metrics address %q has an invalid port", addr)
+	}
+	return nil
 }
 
 func (m *litestreamManager) litestreamConfigReplica(dbPath string) litestreamConfigReplica {

@@ -18,11 +18,12 @@ type Runner struct {
 	statsPoller
 	loadReplayManager
 
-	failureDebug failureDebugState
-	noProgress   diskPressureNoProgressState
-	verifier     *Verifier
-	reporter     *Reporter
-	s3FaultProxy *s3FaultProxy
+	failureDebug            failureDebugState
+	noProgress              diskPressureNoProgressState
+	litestreamMetricsStatus string
+	verifier                *Verifier
+	reporter                *Reporter
+	s3FaultProxy            *s3FaultProxy
 }
 
 func NewRunner(cfg Config) *Runner {
@@ -68,7 +69,12 @@ func (r *Runner) Run(ctx context.Context) error {
 				SetUptime(uptime)
 				r.setUptime(uptime)
 				r.pollDBStats()
-				pressure := r.observeDiskPressureNoProgress(time.Now().UTC(), r.currentSnapshot())
+				snapshot := r.currentSnapshot()
+				metricsCondition := r.observeLitestreamMetricsCondition(snapshot.RuntimePayload)
+				if metricsCondition.ShouldReport {
+					r.sendLitestreamMetricsEvent(runCtx, metricsCondition)
+				}
+				pressure := r.observeDiskPressureNoProgress(time.Now().UTC(), snapshot)
 				if pressure.ShouldReport {
 					r.sendDiskFullEvent(runCtx, pressure)
 				}

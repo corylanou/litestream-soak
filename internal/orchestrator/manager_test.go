@@ -244,6 +244,19 @@ func TestCreateWorkerForksPRWorkerFromEligibleMainVolume(t *testing.T) {
 	if got, want := machines[0].Config.Env["S3_PATH"], "soak/worker-pr-62-low-vol/"+worker.FlyVolumeID; got != want {
 		t.Fatalf("S3_PATH=%q want %q", got, want)
 	}
+	if len(machines[0].Config.Services) != 0 {
+		t.Fatalf("machine services = %+v, want empty", machines[0].Config.Services)
+	}
+	if machines[0].Config.Metrics == nil || machines[0].Config.Metrics.Port != 9091 {
+		t.Fatalf("machine metrics = %+v, want worker metrics on 9091", machines[0].Config.Metrics)
+	}
+	configJSON, err := json.Marshal(machines[0].Config)
+	if err != nil {
+		t.Fatalf("marshal machine config: %v", err)
+	}
+	if strings.Contains(string(configJSON), "9092") {
+		t.Fatalf("machine config exposes Litestream loopback metrics port 9092: %s", configJSON)
+	}
 
 	event := requireWorkerEvent(t, db, worker.ID, "worker_volume_forked")
 	if !strings.Contains(event.Details, "vol-main-001") || !strings.Contains(event.Details, "worker-main-low-vol") {

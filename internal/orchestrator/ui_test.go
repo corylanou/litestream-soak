@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 func TestDeploymentSourceLabelAndURL(t *testing.T) {
@@ -51,6 +52,22 @@ func TestEventClassMarksVolumeGCProblems(t *testing.T) {
 	}
 	if got := eventClass(volumeGCEventConfirmFailed); got != "status-bad" {
 		t.Fatalf("eventClass(%q) = %q, want status-bad", volumeGCEventConfirmFailed, got)
+	}
+}
+
+func TestEventClassMarksLitestreamMetricsConditions(t *testing.T) {
+	t.Parallel()
+
+	for _, eventType := range []string{
+		reporting.WorkerEventLitestreamMetricsScrapeFailed,
+		reporting.WorkerEventLitestreamMetricsMissing,
+	} {
+		if got := eventClass(eventType); got != "status-warn" {
+			t.Fatalf("eventClass(%q) = %q, want status-warn", eventType, got)
+		}
+	}
+	if got := eventClass(reporting.WorkerEventLitestreamMetricsRecovered); got != "status-good" {
+		t.Fatalf("eventClass(%q) = %q, want status-good", reporting.WorkerEventLitestreamMetricsRecovered, got)
 	}
 }
 
@@ -236,6 +253,30 @@ func TestActiveWorkerNeedsAttentionTreatsStoppedAsNeutral(t *testing.T) {
 	}
 	if activeWorkerNeedsAttention(model.WorkerRunning, "") {
 		t.Fatal("healthy running worker should not need attention")
+	}
+}
+
+func TestHomeWorkerNeedsAttentionIncludesLitestreamMetricsWarnings(t *testing.T) {
+	t.Parallel()
+
+	running := homeWorker{
+		Worker:                  model.Worker{Status: model.WorkerRunning},
+		RuntimeSnapshotStatus:   reporting.RuntimeSnapshotStatusHealthy,
+		LitestreamMetricsStatus: reporting.LitestreamMetricsStatusMetricMissing,
+	}
+	if !homeWorkerNeedsAttention(running) {
+		t.Fatal("running worker with missing Litestream metrics should need attention")
+	}
+
+	running.LitestreamMetricsStatus = reporting.LitestreamMetricsStatusHealthy
+	if homeWorkerNeedsAttention(running) {
+		t.Fatal("running worker with healthy snapshots and metrics should not need attention")
+	}
+
+	running.Worker.Status = model.WorkerStopped
+	running.LitestreamMetricsStatus = reporting.LitestreamMetricsStatusScrapeFailed
+	if homeWorkerNeedsAttention(running) {
+		t.Fatal("stopped worker should remain neutral when its last metrics scrape failed")
 	}
 }
 

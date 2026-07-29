@@ -31,11 +31,13 @@ func (a *API) listWorkerSummaries(status, source string) ([]WorkerSummaryRespons
 }
 
 func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, error) {
+	reportedRuntime := extractReportedRuntime(worker, nil)
 	summary := WorkerSummaryResponse{
-		Worker:                worker,
-		Workload:              resolveWorkerWorkload(worker),
-		RuntimeSnapshotStatus: reporting.SnapshotStatus(extractReportedRuntime(worker, nil)),
-		TriageCommands:        buildTriageCommands(worker, worker.FlyMachineID != ""),
+		Worker:                  worker,
+		Workload:                resolveWorkerWorkload(worker),
+		RuntimeSnapshotStatus:   reporting.SnapshotStatus(reportedRuntime),
+		LitestreamMetricsStatus: reporting.LitestreamMetricsStatus(reportedRuntime),
+		TriageCommands:          buildTriageCommands(worker, worker.FlyMachineID != ""),
 	}
 
 	verifications, err := a.db.ListVerifications(worker.ID, 20)
@@ -110,6 +112,7 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 		TriageCommands:      buildTriageCommands(*worker, false),
 	}
 	response.RuntimeSnapshotStatus = reporting.SnapshotStatus(response.ReportedRuntime)
+	response.LitestreamMetricsStatus = reporting.LitestreamMetricsStatus(response.ReportedRuntime)
 
 	for _, verification := range verifications {
 		if !activeFailure(&verification) {
@@ -174,27 +177,28 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 	failureDebug := latestFailureDebugSnapshot(detail.RecentEvents)
 
 	bundle := &IncidentBundle{
-		GeneratedAt:           time.Now().UTC(),
-		Worker:                detail.Worker,
-		Workload:              detail.Workload,
-		LatestFailure:         latestFailure,
-		LatestPlatformEvent:   detail.LatestPlatformEvent,
-		ActiveVerification:    detail.ActiveVerification,
-		ActiveFailure:         activeFailureDetected,
-		FailureStage:          failure.Stage,
-		FailureSignature:      failure.Signature,
-		FailureClassification: failure.Classification,
-		ProbableSubsystem:     probableSubsystem,
-		RuntimeSnapshotStatus: reporting.SnapshotStatus(reportedRuntime),
-		ReportedRuntime:       reportedRuntime,
-		FailureDebug:          failureDebug,
-		Diagnosis:             diagnosis,
-		RelatedClusters:       relatedDiagnosisClusters(diagnosis, detail.Worker.ID, failure.Signature, probableSubsystem),
-		RecentVerifications:   detail.RecentVerifications,
-		RecentEvents:          detail.RecentEvents,
-		Machine:               detail.Machine,
-		MachineError:          detail.MachineError,
-		TriageCommands:        buildTriageCommands(detail.Worker, detail.Machine != nil),
+		GeneratedAt:             time.Now().UTC(),
+		Worker:                  detail.Worker,
+		Workload:                detail.Workload,
+		LatestFailure:           latestFailure,
+		LatestPlatformEvent:     detail.LatestPlatformEvent,
+		ActiveVerification:      detail.ActiveVerification,
+		ActiveFailure:           activeFailureDetected,
+		FailureStage:            failure.Stage,
+		FailureSignature:        failure.Signature,
+		FailureClassification:   failure.Classification,
+		ProbableSubsystem:       probableSubsystem,
+		RuntimeSnapshotStatus:   reporting.SnapshotStatus(reportedRuntime),
+		LitestreamMetricsStatus: reporting.LitestreamMetricsStatus(reportedRuntime),
+		ReportedRuntime:         reportedRuntime,
+		FailureDebug:            failureDebug,
+		Diagnosis:               diagnosis,
+		RelatedClusters:         relatedDiagnosisClusters(diagnosis, detail.Worker.ID, failure.Signature, probableSubsystem),
+		RecentVerifications:     detail.RecentVerifications,
+		RecentEvents:            detail.RecentEvents,
+		Machine:                 detail.Machine,
+		MachineError:            detail.MachineError,
+		TriageCommands:          buildTriageCommands(detail.Worker, detail.Machine != nil),
 	}
 	bundle.Guide = buildIncidentGuide(bundle)
 	bundle.PromptModes = buildPromptModes(bundle.Guide.RecommendedPromptMode)

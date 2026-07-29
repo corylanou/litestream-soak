@@ -628,6 +628,7 @@ func buildPrompt(bundle *IncidentBundle, mode promptMode) string {
 		fmt.Sprintf("failure_stage: %s", valueOrUnknown(bundle.FailureStage)),
 		fmt.Sprintf("failure_signature: %s", valueOrUnknown(bundle.FailureSignature)),
 		fmt.Sprintf("current_runtime_snapshot_status: %s", valueOrUnknown(bundle.RuntimeSnapshotStatus)),
+		fmt.Sprintf("current_litestream_metrics_status: %s", valueOrUnknown(bundle.LitestreamMetricsStatus)),
 		"</summary>",
 	)
 

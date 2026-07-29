@@ -27,13 +27,15 @@ type runtimeSnapshot struct {
 type statsPoller struct {
 	cfg *Config
 
-	snapshotMu     sync.Mutex
-	snapshot       runtimeSnapshot
-	lastLocalPoll  time.Time
-	litestreamPID  func() int
-	s3ListRequests func() int64
-	prevAllocBytes float64
-	prevAllocAt    time.Time
+	snapshotMu                           sync.Mutex
+	snapshot                             runtimeSnapshot
+	lastLocalPoll                        time.Time
+	litestreamPID                        func() int
+	s3ListRequests                       func() int64
+	prevAllocBytes                       float64
+	prevAllocAt                          time.Time
+	litestreamMetricsLastSuccessAt       time.Time
+	litestreamMetricsConsecutiveFailures int
 }
 
 func newStatsPoller(cfg *Config) statsPoller {
@@ -109,7 +111,8 @@ func newIPCClient(socketPath string, timeout time.Duration) *http.Client {
 }
 
 func (p *statsPoller) collectLitestreamRuntime(client *http.Client, collectedAt time.Time) (reporting.RuntimePayload, error) {
-	litestreamMetrics := p.pollLitestreamMetrics(client)
+	litestreamMetrics, litestreamMetricsErr := p.pollLitestreamMetrics()
+	litestreamMetricsRuntime := p.recordLitestreamMetricsScrape(collectedAt, litestreamMetrics, litestreamMetricsErr)
 	listRequests := p.currentS3ListRequests()
 	SetS3ListRequests(listRequests)
 	heapInuse, stackInuse, allocTotal := p.lastLitestreamMemStats()
@@ -135,6 +138,7 @@ func (p *statsPoller) collectLitestreamRuntime(client *http.Client, collectedAt 
 		process.LitestreamGoroutines = p.pollLitestreamGoroutineCount(client)
 		snapshot.LitestreamDiskFullMetricPresent = litestreamMetrics.DiskFullPresent
 		snapshot.LitestreamDiskFull = litestreamMetrics.DiskFull
+		applyLitestreamMetricsRuntime(&snapshot, litestreamMetricsRuntime)
 		snapshot.LitestreamRSSBytes = process.LitestreamRSSBytes
 		snapshot.LitestreamCPUSecondsTotal = process.LitestreamCPUSecondsTotal
 		snapshot.LitestreamGoroutines = process.LitestreamGoroutines
@@ -193,6 +197,7 @@ func (p *statsPoller) collectLitestreamRuntime(client *http.Client, collectedAt 
 	snapshot.LitestreamStackInuseBytes = stackInuse
 	snapshot.LitestreamAllocBytesTotal = allocTotal
 	snapshot.LitestreamAllocRateBytesPerSec = allocRate
+	applyLitestreamMetricsRuntime(&snapshot, litestreamMetricsRuntime)
 	return snapshot, nil
 }
 
@@ -286,15 +291,24 @@ func (p *statsPoller) pollList(client *http.Client, localTXID uint64) (string, u
 	return db.Status, replicatedTXID, lag, age, nil
 }
 
-func (p *statsPoller) pollLitestreamMetrics(client *http.Client) litestreamMetricsSnapshot {
-	resp, err := client.Get("http://localhost/metrics")
+func (p *statsPoller) pollLitestreamMetrics() (litestreamMetricsSnapshot, error) {
+	if err := validateLitestreamMetricsAddr(p.cfg.LitestreamMetricsAddr); err != nil {
+		return litestreamMetricsSnapshot{}, err
+	}
+	client := &http.Client{
+		Transport: &http.Transport{DisableKeepAlives: true},
+		Timeout:   5 * time.Second,
+	}
+	defer client.CloseIdleConnections()
+
+	resp, err := client.Get("http://" + p.cfg.LitestreamMetricsAddr + "/metrics")
 	if err != nil {
-		return litestreamMetricsSnapshot{}
+		return litestreamMetricsSnapshot{}, fmt.Errorf("scrape Litestream metrics: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return litestreamMetricsSnapshot{}
+		return litestreamMetricsSnapshot{}, fmt.Errorf("scrape Litestream metrics: %s", resp.Status)
 	}
 	dbPath := p.cfg.DBPath
 	if p.cfg.ManyDBEnabled() {
@@ -302,9 +316,43 @@ func (p *statsPoller) pollLitestreamMetrics(client *http.Client) litestreamMetri
 	}
 	snapshot, err := parseLitestreamMetrics(resp.Body, dbPath)
 	if err != nil {
-		return litestreamMetricsSnapshot{}
+		return litestreamMetricsSnapshot{}, fmt.Errorf("parse Litestream metrics: %w", err)
 	}
-	return snapshot
+	return snapshot, nil
+}
+
+func (p *statsPoller) recordLitestreamMetricsScrape(collectedAt time.Time, snapshot litestreamMetricsSnapshot, err error) reporting.RuntimePayload {
+	runtime := reporting.RuntimePayload{
+		LitestreamMetricsScrapeAttemptedAt: collectedAt,
+	}
+	if err != nil {
+		p.litestreamMetricsConsecutiveFailures++
+		runtime.LitestreamMetricsScrapeStatus = reporting.LitestreamMetricsScrapeStatusFailed
+		runtime.LitestreamMetricsScrapeError = err.Error()
+		runtime.LitestreamMetricsScrapeLastSuccessAt = p.litestreamMetricsLastSuccessAt
+		runtime.LitestreamMetricsScrapeConsecutiveFailures = p.litestreamMetricsConsecutiveFailures
+		return runtime
+	}
+
+	p.litestreamMetricsLastSuccessAt = collectedAt
+	p.litestreamMetricsConsecutiveFailures = 0
+	runtime.LitestreamMetricsScrapeStatus = reporting.LitestreamMetricsScrapeStatusHealthy
+	runtime.LitestreamMetricsScrapeLastSuccessAt = collectedAt
+	runtime.LitestreamDiskFullMetricPresent = snapshot.DiskFullPresent
+	runtime.LitestreamDiskFull = snapshot.DiskFull
+	runtime.LitestreamMemStatsMetricsPresent = snapshot.MemStatsPresent
+	return runtime
+}
+
+func applyLitestreamMetricsRuntime(snapshot *reporting.RuntimePayload, metrics reporting.RuntimePayload) {
+	snapshot.LitestreamMetricsScrapeStatus = metrics.LitestreamMetricsScrapeStatus
+	snapshot.LitestreamMetricsScrapeError = metrics.LitestreamMetricsScrapeError
+	snapshot.LitestreamMetricsScrapeAttemptedAt = metrics.LitestreamMetricsScrapeAttemptedAt
+	snapshot.LitestreamMetricsScrapeLastSuccessAt = metrics.LitestreamMetricsScrapeLastSuccessAt
+	snapshot.LitestreamMetricsScrapeConsecutiveFailures = metrics.LitestreamMetricsScrapeConsecutiveFailures
+	snapshot.LitestreamDiskFullMetricPresent = metrics.LitestreamDiskFullMetricPresent
+	snapshot.LitestreamDiskFull = metrics.LitestreamDiskFull
+	snapshot.LitestreamMemStatsMetricsPresent = metrics.LitestreamMemStatsMetricsPresent
 }
 
 func (p *statsPoller) currentS3ListRequests() uint64 {
@@ -538,8 +586,14 @@ func (p *statsPoller) setLitestreamSnapshot(snapshot reporting.RuntimePayload) {
 	p.snapshot.ReplicationLagP95 = snapshot.ReplicationLagP95
 	p.snapshot.ReplicationLagMax = snapshot.ReplicationLagMax
 	p.snapshot.ReplicationLagOverThreshold = snapshot.ReplicationLagOverThreshold
+	p.snapshot.LitestreamMetricsScrapeStatus = snapshot.LitestreamMetricsScrapeStatus
+	p.snapshot.LitestreamMetricsScrapeError = snapshot.LitestreamMetricsScrapeError
+	p.snapshot.LitestreamMetricsScrapeAttemptedAt = snapshot.LitestreamMetricsScrapeAttemptedAt
+	p.snapshot.LitestreamMetricsScrapeLastSuccessAt = snapshot.LitestreamMetricsScrapeLastSuccessAt
+	p.snapshot.LitestreamMetricsScrapeConsecutiveFailures = snapshot.LitestreamMetricsScrapeConsecutiveFailures
 	p.snapshot.LitestreamDiskFullMetricPresent = snapshot.LitestreamDiskFullMetricPresent
 	p.snapshot.LitestreamDiskFull = snapshot.LitestreamDiskFull
+	p.snapshot.LitestreamMemStatsMetricsPresent = snapshot.LitestreamMemStatsMetricsPresent
 	p.snapshot.LitestreamRSSBytes = snapshot.LitestreamRSSBytes
 	p.snapshot.LitestreamCPUSecondsTotal = snapshot.LitestreamCPUSecondsTotal
 	p.snapshot.LitestreamGoroutines = snapshot.LitestreamGoroutines
@@ -571,6 +625,11 @@ func (p *statsPoller) setLitestreamSnapshot(snapshot reporting.RuntimePayload) {
 	SetReplicationLagAggregates(snapshot.ReplicationLagP95, snapshot.ReplicationLagMax, snapshot.ReplicationLagOverThreshold)
 	SetLitestreamUptime(snapshot.LitestreamUptimeSeconds)
 	SetLitestreamSnapshotHealthy(snapshot.LitestreamSnapshotHealthy)
+	SetLitestreamMetricsState(
+		snapshot.LitestreamMetricsScrapeStatus,
+		snapshot.LitestreamDiskFullMetricPresent,
+		snapshot.LitestreamMemStatsMetricsPresent,
+	)
 }
 
 func (p *statsPoller) setLitestreamSnapshotFailure(collectedAt time.Time, err error) {
