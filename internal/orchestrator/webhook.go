@@ -130,11 +130,13 @@ type pullRequestPayload struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 	PullRequest struct {
-		Merged bool `json:"merged"`
-		Labels []struct {
-			Name string `json:"name"`
-		} `json:"labels"`
+		Merged bool               `json:"merged"`
+		Labels []pullRequestLabel `json:"labels"`
 	} `json:"pull_request"`
+}
+
+type pullRequestLabel struct {
+	Name string `json:"name"`
 }
 
 func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, body []byte) {
@@ -162,7 +164,7 @@ func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	if pullRequestHasLabel(payload, h.prKeepAliveLabel) {
+	if pullRequestHasLabel(payload.PullRequest.Labels, h.prKeepAliveLabel) {
 		message := fmt.Sprintf("Kept %s#%d active after the upstream PR closed because it has label %s", repository, payload.Number, h.prKeepAliveLabel)
 		slog.Info(message)
 		h.recordWebhookEvent("upstream_pr_retirement_skipped", message, "keep_alive_label")
@@ -253,8 +255,8 @@ func (h *WebhookHandler) recordWebhookEvent(eventType, message, details string) 
 	}
 }
 
-func pullRequestHasLabel(payload pullRequestPayload, label string) bool {
-	for _, candidate := range payload.PullRequest.Labels {
+func pullRequestHasLabel(labels []pullRequestLabel, label string) bool {
+	for _, candidate := range labels {
 		if strings.EqualFold(strings.TrimSpace(candidate.Name), label) {
 			return true
 		}

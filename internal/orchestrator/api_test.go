@@ -2548,6 +2548,29 @@ func TestHandleDeploymentReady(t *testing.T) {
 		}
 	})
 
+	t.Run("PR source without repository returns 400", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTestDB(t)
+		deployer := &Deployer{db: db}
+		api := NewAPI(db, nil, nil, nil, nil, deployer)
+		request := httptest.NewRequest(
+			http.MethodPost,
+			"/api/admin/deployments/ready?source=pr-177&sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&litestream_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&image=registry.fly.io%2Flitestream-soak%3Asha-aaaaaaaaaaaa-pr-177-ls-bbbbbbbbbbbb",
+			nil,
+		)
+		recorder := httptest.NewRecorder()
+
+		api.handleDeploymentReady(recorder, request)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status code = %d, want %d; body: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+		}
+		if !strings.Contains(recorder.Body.String(), "repository") {
+			t.Fatalf("body = %q, want repository error", recorder.Body.String())
+		}
+	})
+
 	t.Run("malformed JSON body returns 400", func(t *testing.T) {
 		t.Parallel()
 
@@ -3855,11 +3878,16 @@ func TestHandleTeardownSourceReportsFailuresAndSupportsRetry(t *testing.T) {
 func createTeardownTestDeployment(t *testing.T, db *model.DB, source string) *model.Deployment {
 	t.Helper()
 
+	repository := ""
+	if _, ok := pullRequestNumberFromSource(source); ok {
+		repository = "benbjohnson/litestream"
+	}
 	if err := db.UpsertReadyDeployment(&model.Deployment{
 		GitSHA:        "soak-sha",
 		LitestreamSHA: "litestream-sha",
 		ImageRef:      "registry.fly.io/litestream-soak:soak-sha",
 		Source:        source,
+		Repository:    repository,
 		PRNumber:      sourcePRNumber(source),
 		Status:        "ready",
 	}); err != nil {

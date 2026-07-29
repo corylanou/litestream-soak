@@ -53,4 +53,5 @@ scripts/notify-deployment-ready.sh \
   "${source_name}" \
   manual_pr_soak \
   "${image_ref}" \
-  "${pr_sha}"
+  "${pr_sha}" \
+  "${repo_full_name}"

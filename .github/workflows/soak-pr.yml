@@ -199,6 +199,7 @@ jobs:
           TRIGGER: ${{ needs.resolve-request.outputs.trigger }}
           IMAGE_REF: ${{ needs.build-worker-image.outputs.image_ref }}
           PR_SHA: ${{ needs.resolve-request.outputs.pr_sha }}
+          REPO_FULL_NAME: ${{ needs.resolve-request.outputs.repo_full_name }}
         run: |
           set -euo pipefail
 
@@ -212,4 +213,5 @@ jobs:
             "${SOURCE_NAME}" \
             "${TRIGGER}" \
             "${IMAGE_REF}" \
-            "${PR_SHA}"
+            "${PR_SHA}" \
+            "${REPO_FULL_NAME}"

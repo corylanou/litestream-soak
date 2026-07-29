@@ -105,6 +105,9 @@ func main() {
 	webhookDeployEnabled := envOrDefault("GITHUB_WEBHOOK_DEPLOY_ENABLED", "false") == "true"
 	prRepositoryAllowlist := listEnvOrDefault("SOAK_PR_REPO_ALLOWLIST", []string{"benbjohnson/litestream"})
 	prKeepAliveLabel := envOrDefault("SOAK_PR_KEEP_ALIVE_LABEL", "soak:keep-alive")
+	prStatePollEnabled := envOrDefault("SOAK_PR_STATE_POLL_ENABLED", "false") == "true"
+	prStatePollInterval := durationEnvOrDefault("SOAK_PR_STATE_POLL_INTERVAL", 15*time.Minute)
+	prStateRateLimitVisibilityThreshold := durationEnvOrDefault("SOAK_PR_STATE_RATE_LIMIT_VISIBILITY_THRESHOLD", time.Hour)
 	if len(prRepositoryAllowlist) > 1 {
 		slog.Warn("Multiple upstream PR repositories can collide on pr-N source names; keep SOAK_PR_REPO_ALLOWLIST single-repository until source names include the repository", "repositories", strings.Join(prRepositoryAllowlist, ","))
 	}
@@ -139,6 +142,12 @@ func main() {
 		PRRepositoryAllowlist: prRepositoryAllowlist,
 		PRKeepAliveLabel:      prKeepAliveLabel,
 	}, deployer, mgr)
+	prStatePoller := orchestrator.NewPRStatePoller(orchestrator.PRStatePollerConfig{
+		RepositoryAllowlist:          prRepositoryAllowlist,
+		KeepAliveLabel:               prKeepAliveLabel,
+		PollInterval:                 prStatePollInterval,
+		RateLimitVisibilityThreshold: prStateRateLimitVisibilityThreshold,
+	}, mgr)
 	api := orchestrator.NewAPI(db, fly, metrics, alerts, mgr, deployer)
 
 	mux := http.NewServeMux()
@@ -216,6 +225,9 @@ func main() {
 			SourceAllowlist: failedSourcePauseSources,
 		})
 	}
+	if prStatePollEnabled {
+		go prStatePoller.Run(ctx)
+	}
 	if platformLogMonitorEnabled {
 		go mgr.RunPlatformLogMonitor(ctx, platformLogPollInterval)
 	}
@@ -259,6 +271,9 @@ func main() {
 		"webhook_deploy_enabled", webhookDeployEnabled,
 		"pr_repository_allowlist", strings.Join(prRepositoryAllowlist, ","),
 		"pr_keep_alive_label", prKeepAliveLabel,
+		"pr_state_poll_enabled", prStatePollEnabled,
+		"pr_state_poll_interval", prStatePollInterval,
+		"pr_state_rate_limit_visibility_threshold", prStateRateLimitVisibilityThreshold,
 	)
 
 	server := &http.Server{

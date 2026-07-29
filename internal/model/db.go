@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS deployments (
     litestream_sha TEXT NOT NULL DEFAULT '',
     image_ref TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'main',
+    repository TEXT NOT NULL DEFAULT '',
     pr_number INTEGER,
     status TEXT NOT NULL DEFAULT 'building',
     started_at DATETIME NOT NULL DEFAULT (datetime('now')),
@@ -331,6 +332,7 @@ func ensureVerificationColumns(db *sql.DB) error {
 func ensureDeploymentColumns(db *sql.DB) error {
 	statements := []string{
 		`ALTER TABLE deployments ADD COLUMN litestream_sha TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE deployments ADD COLUMN repository TEXT NOT NULL DEFAULT ''`,
 	}
 
 	for _, statement := range statements {

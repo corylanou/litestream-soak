@@ -82,6 +82,7 @@ type Deployment struct {
 	LitestreamSHA string     `json:"litestream_sha,omitempty"`
 	ImageRef      string     `json:"image_ref"`
 	Source        string     `json:"source"`
+	Repository    string     `json:"repository,omitempty"`
 	PRNumber      int        `json:"pr_number,omitempty"`
 	Status        string     `json:"status"`
 	StartedAt     time.Time  `json:"started_at"`

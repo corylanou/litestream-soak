@@ -226,24 +226,45 @@ curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
 
 ## Upstream PR Retirement
 
-The signed GitHub webhook at `/webhooks/github` retires a `pr-N` soak fleet
-when upstream PR `N` is merged or closed. It archives the latest deployment and
-worker evidence before destroying Machines, volumes, and S3 replica prefixes.
-Failures in the soak fleet do not block this terminal cleanup.
+The control plane polls GitHub for every `pr-N` source with a live worker and
+retires the fleet when upstream PR `N` is definitively merged or closed. The
+signed GitHub webhook at `/webhooks/github` remains available for faster
+retirement when the upstream repository sends it. Both paths archive the latest
+deployment and worker evidence before destroying Machines, volumes, and S3
+replica prefixes. Failures in the soak fleet do not block terminal cleanup.
 
-Configure the upstream repository webhook to send `pull_request` events and use
-the same `GITHUB_WEBHOOK_SECRET` configured on `soakctl`. Only repositories in
-the allowlist can trigger retirement:
+Polling fails closed. HTTP errors, rate limits, timeouts, empty or malformed
+responses, unexpected response shapes, identity mismatches, and unknown PRs
+leave the fleet unchanged. The default 15-minute interval makes four requests
+per live PR source per hour: five live sources use 20 of GitHub's 60
+unauthenticated requests per hour, ten use 40, and fifteen reach the ceiling.
+More than fifteen live sources exceed the ceiling, and headroom for other
+unauthenticated requests shrinks as the source count approaches fifteen; extend
+the interval or explicitly add authenticated API access before operating at
+that scale. Polling stops the current cycle on a rate-limit response and does
+not retry until the next interval. A rate limit is recorded in the control-plane
+event feed immediately and escalated as a sustained event after one hour.
+
+Polling is disabled unless exactly one repository is configured because `pr-N`
+source names do not identify their repository. Only repositories in the
+allowlist can trigger retirement:
 
 ```bash
 SOAK_PR_REPO_ALLOWLIST=benbjohnson/litestream
 SOAK_PR_KEEP_ALIVE_LABEL=soak:keep-alive
+SOAK_PR_STATE_POLL_ENABLED=true
+SOAK_PR_STATE_POLL_INTERVAL=15m
+SOAK_PR_STATE_RATE_LIMIT_VISIBILITY_THRESHOLD=1h
 ```
 
 Apply the keep-alive label before closing a long-lived fixture PR when its soak
 fleet must remain active. Label comparison is case-insensitive. Removing the
-label does not retire an already-closed fixture automatically; reopen and close
-the PR again or use the operator teardown endpoint when it is ready to retire.
+label from an already-closed PR makes the fleet eligible for retirement on the
+next successful poll.
+
+To use webhook acceleration, configure the upstream repository to send
+`pull_request` events and use the same `GITHUB_WEBHOOK_SECRET` configured on
+`soakctl`.
 
 Terminal PR archives use type `teardown` with reason
 `upstream_pr_merged` or `upstream_pr_closed`.
@@ -476,8 +497,10 @@ Inputs:
 
 This resolves the PR head SHA, builds a worker image against that Litestream
 commit, then calls `/api/admin/deployments/ready` with `source=pr-<number>`.
-The control plane creates or updates a PR-specific worker fleet under that
-source automatically.
+The notification records `repo_full_name` with the deployment. The control
+plane creates or updates a PR-specific worker fleet under that source
+automatically and refuses poll-based retirement when the recorded repository
+is missing or differs from the polling configuration.
 
 ### Local CLI Trigger
 
@@ -499,7 +522,7 @@ That script:
 
 - resolves the PR head SHA from GitHub unless you provide one
 - builds a worker image with `LITESTREAM_SHA=<pr-head-sha>`
-- notifies the control plane with `source=pr-1221`
+- notifies the control plane with `source=pr-1221` and its repository identity
 
 ### GitHub Label Or Cross-Repo Automation
 
