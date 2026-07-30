@@ -716,6 +716,554 @@ func TestFailedSourcePauseCandidatePausesKnownBadMain(t *testing.T) {
 	}
 }
 
+func TestFailedSourcePauseCandidateDoesNotParkCleanScoringFleetForRegionalFailures(t *testing.T) {
+	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{
+		Bucket:                   "litestream-soak-replicas-shared",
+		EscalateAfterConsecutive: 2,
+	})
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "soak-sha",
+		LitestreamSHA: "litestream-sha",
+		ImageRef:      "registry.fly.io/litestream-soak:soak-sha",
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+	deployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment() error = %v", err)
+	}
+
+	scoringProfiles := []string{
+		"low-volume",
+		"high-volume",
+		"burst-volume",
+		"read-heavy",
+		"gharchive-replay",
+		"gharchive-mixed",
+		"taxi-mixed",
+		"taxi-replay",
+		"orders-replay",
+		"overload-truncate0",
+		"pinned-reader",
+	}
+	for _, profile := range scoringProfiles {
+		workerID := "worker-main-" + profile
+		createTestWorker(t, db, model.Worker{
+			ID:            workerID,
+			Name:          workerID,
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        deployment.GitSHA,
+			LitestreamSHA: deployment.LitestreamSHA,
+			ProfileName:   profile,
+			ProfileConfig: "{}",
+			Region:        "ord",
+		})
+	}
+	for _, worker := range []model.Worker{
+		{
+			ID:            "worker-main-low-vol-syd",
+			Name:          "worker-main-low-vol-syd",
+			Status:        model.WorkerDegraded,
+			Source:        "main",
+			GitSHA:        deployment.GitSHA,
+			LitestreamSHA: deployment.LitestreamSHA,
+			ProfileName:   "low-vol-syd",
+			ProfileConfig: "{}",
+			Region:        "syd",
+		},
+		{
+			ID:            "worker-main-high-vol-ams",
+			Name:          "worker-main-high-vol-ams",
+			Status:        model.WorkerDegraded,
+			Source:        "main",
+			GitSHA:        deployment.GitSHA,
+			LitestreamSHA: deployment.LitestreamSHA,
+			ProfileName:   "high-vol-ams",
+			ProfileConfig: "{}",
+			Region:        "ams",
+		},
+		{
+			ID:            "worker-main-many-dbs-100-list",
+			Name:          "worker-main-many-dbs-100-list",
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        deployment.GitSHA,
+			LitestreamSHA: deployment.LitestreamSHA,
+			ProfileName:   "many-dbs-100-list",
+			ProfileConfig: "{}",
+			Region:        "ord",
+		},
+		{
+			ID:            "worker-main-many-dbs-100-dir",
+			Name:          "worker-main-many-dbs-100-dir",
+			Status:        model.WorkerRunning,
+			Source:        "main",
+			GitSHA:        deployment.GitSHA,
+			LitestreamSHA: deployment.LitestreamSHA,
+			ProfileName:   "many-dbs-100-dir",
+			ProfileConfig: "{}",
+			Region:        "ord",
+		},
+	} {
+		createTestWorker(t, db, worker)
+	}
+
+	verifiedAt := deployment.StartedAt.Add(10 * time.Minute)
+	for _, profile := range append(scoringProfiles, "many-dbs-100-list", "many-dbs-100-dir") {
+		workerID := "worker-main-" + profile
+		mustRecordVerification(t, db, &model.Verification{
+			WorkerID:    workerID,
+			StartedAt:   verifiedAt.Add(-time.Minute),
+			CompletedAt: &verifiedAt,
+			Status:      "passed",
+			CheckType:   "integrity",
+			Passed:      true,
+		})
+	}
+	amsCompletedAt := verifiedAt.Add(time.Minute)
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:     "worker-main-high-vol-ams",
+		StartedAt:    amsCompletedAt.Add(-time.Minute),
+		CompletedAt:  &amsCompletedAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		ErrorMessage: "restore failed: decode header: EOF",
+	})
+	for i := 1; i <= 3; i++ {
+		completedAt := verifiedAt.Add(time.Duration(i+1) * time.Minute)
+		mustRecordVerification(t, db, &model.Verification{
+			WorkerID:     "worker-main-low-vol-syd",
+			StartedAt:    completedAt.Add(-time.Minute),
+			CompletedAt:  &completedAt,
+			Status:       "failed",
+			CheckType:    "integrity",
+			ErrorMessage: tigrisListRequestCanceled,
+		})
+	}
+
+	scorecard, err := buildDeploymentScorecard(db, *deployment, nil)
+	if err != nil {
+		t.Fatalf("buildDeploymentScorecard() error = %v", err)
+	}
+	if scorecard.TotalWorkers != 11 || scorecard.PassedWorkers != 11 || scorecard.FailedWorkers != 0 {
+		t.Fatalf("scorecard = %d/%d passed, %d failed; want 11/11 passed, 0 failed", scorecard.PassedWorkers, scorecard.TotalWorkers, scorecard.FailedWorkers)
+	}
+
+	_, ok, err := failedSourcePauseCandidate(db, *deployment, FailedSourcePausePolicy{})
+	if err != nil {
+		t.Fatalf("failedSourcePauseCandidate() error = %v", err)
+	}
+	if ok {
+		t.Fatal("unrelated failures from two non-scoring regional workers must not park a clean release-quality fleet")
+	}
+}
+
+func TestEvaluateFailedSourcePauseRejectsFleetWithoutReleaseQualityWorkers(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	deployment := createFailedSourceReevaluationDeployment(t, db)
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-many-dbs-100-list",
+		Name:          "worker-main-many-dbs-100-list",
+		Status:        model.WorkerDegraded,
+		Source:        "main",
+		GitSHA:        deployment.GitSHA,
+		LitestreamSHA: deployment.LitestreamSHA,
+		ProfileName:   "many-dbs-100-list",
+		ProfileConfig: "{}",
+		Region:        "ord",
+	})
+	completedAt := deployment.StartedAt.Add(2 * time.Minute)
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:     "worker-main-many-dbs-100-list",
+		StartedAt:    completedAt.Add(-time.Minute),
+		CompletedAt:  &completedAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		ErrorMessage: "validation failed (exit 1): integrity check mismatch",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-many-dbs-100-dir",
+		Name:          "worker-main-many-dbs-100-dir",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        deployment.GitSHA,
+		LitestreamSHA: deployment.LitestreamSHA,
+		ProfileName:   "many-dbs-100-dir",
+		ProfileConfig: "{}",
+		Region:        "ord",
+		FlyVolumeID:   "volume-many-dbs-100-dir",
+	})
+	if err := db.MarkWorkerDormant(
+		"worker-main-many-dbs-100-dir",
+		"known bad",
+		"known_bad_rollout",
+		"known_bad_source",
+	); err != nil {
+		t.Fatalf("MarkWorkerDormant() error = %v", err)
+	}
+
+	_, verdict, err := failedSourcePolicyEvaluation(db, deployment, FailedSourcePausePolicy{})
+	if verdict != failedSourcePolicyInconclusive {
+		t.Errorf("verdict = %v, want inconclusive", verdict)
+	}
+	if err == nil || !strings.Contains(err.Error(), "no release-quality workers") {
+		t.Errorf("failedSourcePolicyEvaluation() error = %v, want no release-quality workers configuration error", err)
+	}
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := &Manager{fly: fly.client, db: db, appName: "litestream-soak"}
+	err = manager.evaluateFailedSourcePauseLocked(context.Background(), "main", FailedSourcePausePolicy{})
+	if err == nil || !strings.Contains(err.Error(), "no release-quality workers") {
+		t.Errorf("evaluateFailedSourcePauseLocked() error = %v, want no release-quality workers configuration error", err)
+	}
+
+	worker, err := db.GetWorker("worker-main-many-dbs-100-dir")
+	if err != nil {
+		t.Fatalf("GetWorker() error = %v", err)
+	}
+	if worker.Status != model.WorkerDormant {
+		t.Fatalf("known-bad worker status = %s, want dormant", worker.Status)
+	}
+	if requests := fly.machineRequests(); len(requests) != 0 {
+		t.Fatalf("len(machine requests) = %d, want 0", len(requests))
+	}
+}
+
+func TestClassifyReleaseFailureDomainPrefersStructuredObjectStoreEvidence(t *testing.T) {
+	t.Parallel()
+
+	restoreFailure := classifyFailureMessage("integrity", "restore failed: decode header: EOF")
+	if got := classifyReleaseFailureDomain(restoreFailure); got != releaseFailureDomainRestore {
+		t.Fatalf("restore failure domain = %q, want %q", got, releaseFailureDomainRestore)
+	}
+
+	objectStoreFailure := classifyFailureMessage("integrity", tigrisListRequestCanceled)
+	if got := classifyReleaseFailureDomain(objectStoreFailure); got != releaseFailureDomainObjectStore {
+		t.Fatalf("object-store failure domain = %q, want %q", got, releaseFailureDomainObjectStore)
+	}
+}
+
+func TestFailedSourcePauseCandidateCorroboratesMatchingDomains(t *testing.T) {
+	t.Parallel()
+
+	evaluation, ok := failedSourceCandidateForFailures(t, []failedSourceTestFailure{
+		{
+			workerID:     "worker-main-low-vol",
+			profileName:  "low-volume",
+			errorMessage: "restore failed: decode header: EOF",
+		},
+		{
+			workerID:     "worker-main-high-vol",
+			profileName:  "high-volume",
+			errorMessage: "restore failed: calc restore plan: missing generation",
+		},
+	})
+	if !ok {
+		t.Fatal("two scoring workers failing in the restore domain must pause the source")
+	}
+	if evaluation.Signature != "known_bad_rollout" {
+		t.Fatalf("Signature = %q, want known_bad_rollout for tied exact signatures", evaluation.Signature)
+	}
+}
+
+func TestFailedSourcePauseCandidateRejectsTwoDifferentDomains(t *testing.T) {
+	t.Parallel()
+
+	_, ok := failedSourceCandidateForFailures(t, []failedSourceTestFailure{
+		{
+			workerID:     "worker-main-low-vol",
+			profileName:  "low-volume",
+			errorMessage: "restore failed: decode header: EOF",
+		},
+		{
+			workerID:     "worker-main-high-vol",
+			profileName:  "high-volume",
+			errorMessage: "restore failed: operation error S3: GetObject, https response error StatusCode: 403, api error AccessDenied: denied",
+		},
+	})
+	if ok {
+		t.Fatal("two scoring workers failing in unrelated domains must not pause the source without temporal corroboration")
+	}
+}
+
+func TestFailedSourcePauseCandidateRejectsTwoOtherDomainFailures(t *testing.T) {
+	t.Parallel()
+
+	_, ok := failedSourceCandidateForFailures(t, []failedSourceTestFailure{
+		{
+			workerID:      "worker-main-low-vol",
+			profileName:   "low-volume",
+			omitCheckType: true,
+			errorMessage:  "scheduler returned an impossible state",
+		},
+		{
+			workerID:      "worker-main-high-vol",
+			profileName:   "high-volume",
+			omitCheckType: true,
+			errorMessage:  "metadata parser rejected the generated manifest",
+		},
+	})
+	if ok {
+		t.Fatal("two unrelated failures without a known domain must not pause the source")
+	}
+}
+
+func TestFailedSourcePauseCandidateRejectsTwoVerificationDomainFailures(t *testing.T) {
+	t.Parallel()
+
+	_, ok := failedSourceCandidateForFailures(t, []failedSourceTestFailure{
+		{
+			workerID:     "worker-main-low-vol",
+			profileName:  "low-volume",
+			errorMessage: "checksum process exited with status 1",
+		},
+		{
+			workerID:     "worker-main-high-vol",
+			profileName:  "high-volume",
+			errorMessage: "query returned an unexpected row count",
+		},
+	})
+	if ok {
+		t.Fatal("two unrelated failures inheriting the verification check type must not pause the source")
+	}
+}
+
+func TestFailedSourcePauseCandidateRejectsFlappingSingleWorker(t *testing.T) {
+	t.Parallel()
+
+	_, ok := failedSourceCandidateForFailures(t, []failedSourceTestFailure{
+		{
+			workerID:       "worker-main-low-vol",
+			profileName:    "low-volume",
+			errorMessage:   "restore failed: decode header: EOF",
+			statusSequence: []string{"failed", "passed", "failed"},
+		},
+	})
+	if ok {
+		t.Fatal("fail-pass-fail evidence must not satisfy the consecutive single-worker fallback")
+	}
+}
+
+func TestFailedSourcePauseCandidateRejectsNonCoincidentWorkerFailures(t *testing.T) {
+	t.Parallel()
+
+	_, ok := failedSourceCandidateForFailures(t, []failedSourceTestFailure{
+		{
+			workerID:       "worker-main-low-vol",
+			profileName:    "low-volume",
+			errorMessage:   "restore failed: decode header: EOF",
+			startMinute:    2,
+			statusSequence: []string{"failed", "passed"},
+		},
+		{
+			workerID:     "worker-main-high-vol",
+			profileName:  "high-volume",
+			errorMessage: "restore failed: calc restore plan: missing generation",
+			startMinute:  4,
+		},
+	})
+	if ok {
+		t.Fatal("a recovered worker's earlier failure must not corroborate another worker's current failure")
+	}
+}
+
+func TestFailedSourcePauseCandidateRejectsRegionalTemporalCorroboration(t *testing.T) {
+	t.Parallel()
+
+	_, ok := failedSourceCandidateForFailures(t, []failedSourceTestFailure{
+		{
+			workerID:       "worker-main-low-vol",
+			profileName:    "low-volume",
+			statusSequence: []string{"passed"},
+		},
+		{
+			workerID:     "worker-main-high-vol-ams",
+			profileName:  "high-vol-ams",
+			region:       "ams",
+			errorMessage: "restore failed: decode header: EOF",
+			repetitions:  2,
+		},
+	})
+	if ok {
+		t.Fatal("repeated failures from a non-scoring regional worker must not park the source")
+	}
+}
+
+func TestFailedSourcePauseCandidateCorroboratesThreeDifferentDomains(t *testing.T) {
+	t.Parallel()
+
+	evaluation, ok := failedSourceCandidateForFailures(t, []failedSourceTestFailure{
+		{
+			workerID:     "worker-main-low-vol",
+			profileName:  "low-volume",
+			errorMessage: "restore failed: decode header: EOF",
+		},
+		{
+			workerID:     "worker-main-high-vol",
+			profileName:  "high-volume",
+			errorMessage: `wait for sync: sync request: Post "http://localhost/sync": context deadline exceeded`,
+		},
+		{
+			workerID:     "worker-main-read-heavy",
+			profileName:  "read-heavy",
+			errorMessage: "validation failed (exit 1): integrity check mismatch",
+		},
+	})
+	if !ok {
+		t.Fatal("three scoring workers with actionable failures must pause across different domains")
+	}
+	if evaluation.Signature != "known_bad_rollout" {
+		t.Fatalf("Signature = %q, want known_bad_rollout for three tied signatures", evaluation.Signature)
+	}
+}
+
+func TestDominantRolloutFailureSignatureDoesNotBreakTiesLexically(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		signatures []string
+		want       string
+	}{
+		{
+			name:       "no failures",
+			signatures: nil,
+			want:       "known_bad_rollout",
+		},
+		{
+			name:       "one dominant signature",
+			signatures: []string{"restore_decode_error", "restore_decode_error", "restore_s3_list_request_canceled"},
+			want:       "restore_decode_error",
+		},
+		{
+			name:       "one-to-one tie",
+			signatures: []string{"restore_decode_error", "restore_s3_list_request_canceled"},
+			want:       "known_bad_rollout",
+		},
+		{
+			name:       "two-to-two tie",
+			signatures: []string{"restore_decode_error", "restore_decode_error", "validation_failed", "validation_failed"},
+			want:       "known_bad_rollout",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			rollout := DeploymentRolloutResponse{
+				Workers: make([]DeploymentWorkerProgress, 0, len(test.signatures)),
+			}
+			for i, signature := range test.signatures {
+				rollout.Workers = append(rollout.Workers, DeploymentWorkerProgress{
+					WorkerID:                fmt.Sprintf("worker-%d", i),
+					CurrentFailureSignature: signature,
+				})
+			}
+
+			if got := dominantRolloutFailureSignature(rollout); got != test.want {
+				t.Fatalf("dominantRolloutFailureSignature() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+type failedSourceTestFailure struct {
+	workerID       string
+	profileName    string
+	region         string
+	omitCheckType  bool
+	errorMessage   string
+	repetitions    int
+	startMinute    int
+	statusSequence []string
+}
+
+func failedSourceCandidateForFailures(t *testing.T, failures []failedSourceTestFailure) (failedSourcePauseEvaluation, bool) {
+	t.Helper()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA:        "soak-sha",
+		LitestreamSHA: "litestream-sha",
+		ImageRef:      "registry.fly.io/litestream-soak:soak-sha",
+		Source:        "main",
+		Status:        "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+	deployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment() error = %v", err)
+	}
+
+	for i, failure := range failures {
+		region := failure.region
+		if region == "" {
+			region = "ord"
+		}
+		createTestWorker(t, db, model.Worker{
+			ID:            failure.workerID,
+			Name:          failure.workerID,
+			Status:        model.WorkerDegraded,
+			Source:        "main",
+			GitSHA:        deployment.GitSHA,
+			LitestreamSHA: deployment.LitestreamSHA,
+			ProfileName:   failure.profileName,
+			ProfileConfig: "{}",
+			Region:        region,
+		})
+		statuses := failure.statusSequence
+		if len(statuses) == 0 {
+			repetitions := failure.repetitions
+			if repetitions == 0 {
+				repetitions = 1
+			}
+			statuses = make([]string, repetitions)
+			for repetition := range statuses {
+				statuses[repetition] = "failed"
+			}
+		}
+		startMinute := failure.startMinute
+		if startMinute == 0 {
+			startMinute = i + 2
+		}
+		checkType := "integrity"
+		if failure.omitCheckType {
+			checkType = ""
+		}
+		for observation, status := range statuses {
+			completedAt := deployment.StartedAt.Add(time.Duration(startMinute+observation) * time.Minute)
+			errorMessage := failure.errorMessage
+			if status == "passed" {
+				errorMessage = ""
+			}
+			mustRecordVerification(t, db, &model.Verification{
+				WorkerID:     failure.workerID,
+				StartedAt:    completedAt.Add(-time.Minute),
+				CompletedAt:  &completedAt,
+				Status:       status,
+				CheckType:    checkType,
+				Passed:       status == "passed",
+				ErrorMessage: errorMessage,
+			})
+		}
+	}
+
+	evaluation, ok, err := failedSourcePauseCandidate(db, *deployment, FailedSourcePausePolicy{})
+	if err != nil {
+		t.Fatalf("failedSourcePauseCandidate() error = %v", err)
+	}
+	return evaluation, ok
+}
+
 func TestPauseSourceWorkersMarksActiveWorkersDormant(t *testing.T) {
 	t.Parallel()
 

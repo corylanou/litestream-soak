@@ -55,14 +55,10 @@ type PRMaxAgePolicy struct {
 }
 
 type FailedSourcePausePolicy struct {
-	CheckInterval   time.Duration
-	SourceAllowlist []string
-	// MinAttentionWorkers pauses immediately when this many workers need
-	// attention at once. A single struggling worker instead requires
-	// SingleWorkerMinConsecutiveFailures actionable (non-environmental)
-	// failed verifications since the deployment started — one provider blip
-	// must not park a whole fleet (2026-07-18 false alarm).
+	CheckInterval                      time.Duration
+	SourceAllowlist                    []string
 	MinAttentionWorkers                int
+	MinFleetAttentionWorkers           int
 	SingleWorkerMinConsecutiveFailures int
 }
 
@@ -101,6 +97,24 @@ const (
 	failedSourcePolicyCleared
 	failedSourcePolicyKnownBad
 )
+
+type releaseFailureDomain string
+
+const (
+	releaseFailureDomainObjectStore  releaseFailureDomain = "object_store"
+	releaseFailureDomainSync         releaseFailureDomain = "sync"
+	releaseFailureDomainRestore      releaseFailureDomain = "restore"
+	releaseFailureDomainVerification releaseFailureDomain = "verification"
+	releaseFailureDomainResource     releaseFailureDomain = "resource"
+	releaseFailureDomainHarness      releaseFailureDomain = "harness"
+	releaseFailureDomainOther        releaseFailureDomain = "other"
+)
+
+type actionableAttentionFailure struct {
+	WorkerID  string
+	Domain    releaseFailureDomain
+	Signature string
+}
 
 type runArchivePayload struct {
 	GeneratedAt time.Time                     `json:"generated_at"`
@@ -404,6 +418,9 @@ func normalizeFailedSourcePausePolicy(policy FailedSourcePausePolicy) FailedSour
 	}
 	if policy.MinAttentionWorkers <= 0 {
 		policy.MinAttentionWorkers = 2
+	}
+	if policy.MinFleetAttentionWorkers <= 0 {
+		policy.MinFleetAttentionWorkers = 3
 	}
 	if policy.SingleWorkerMinConsecutiveFailures <= 0 {
 		policy.SingleWorkerMinConsecutiveFailures = 2
@@ -752,8 +769,27 @@ func failedSourcePolicyEvaluation(db *model.DB, deployment model.Deployment, pol
 	if err != nil {
 		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, err
 	}
-	if rollout.TotalWorkers == 0 ||
-		rollout.Status != "needs_attention" ||
+	if rollout.TotalWorkers == 0 {
+		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, nil
+	}
+
+	releaseQualityWorkers, err := deploymentScorecardWorkers(db, deployment)
+	if err != nil {
+		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, fmt.Errorf("list release-quality workers: %w", err)
+	}
+	if len(releaseQualityWorkers) == 0 {
+		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, fmt.Errorf(
+			"failed-source pause policy has no release-quality workers for source %q deployment %d",
+			source,
+			deployment.ID,
+		)
+	}
+	releaseQualityWorkerIDs := make(map[string]struct{}, len(releaseQualityWorkers))
+	for _, worker := range releaseQualityWorkers {
+		releaseQualityWorkerIDs[worker.ID] = struct{}{}
+	}
+
+	if rollout.Status != "needs_attention" ||
 		rollout.OutdatedWorkers > 0 ||
 		rollout.ProbingWorkers > 0 ||
 		rollout.AwaitingVerification > 0 ||
@@ -762,12 +798,27 @@ func failedSourcePolicyEvaluation(db *model.DB, deployment model.Deployment, pol
 		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, nil
 	}
 
-	actionableAttention, err := countActionableAttentionWorkers(db, rollout, deployment)
+	actionableAttention, err := releaseQualityActionableAttentionFailures(
+		db,
+		rollout,
+		deployment,
+		releaseQualityWorkerIDs,
+	)
 	if err != nil {
 		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, err
 	}
-	if actionableAttention < policy.MinAttentionWorkers {
-		corroborated, err := singleWorkerFailureCorroborated(db, rollout, deployment, policy.SingleWorkerMinConsecutiveFailures)
+	corroborated := multiWorkerFailuresCorroborated(
+		actionableAttention,
+		policy.MinAttentionWorkers,
+		policy.MinFleetAttentionWorkers,
+	)
+	if !corroborated {
+		corroborated, err = singleWorkerFailureCorroborated(
+			db,
+			actionableAttention,
+			deployment,
+			policy.SingleWorkerMinConsecutiveFailures,
+		)
 		if err != nil {
 			return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, err
 		}
@@ -776,7 +827,7 @@ func failedSourcePolicyEvaluation(db *model.DB, deployment model.Deployment, pol
 		}
 	}
 
-	signature := dominantRolloutFailureSignature(rollout)
+	signature := dominantActionableFailureSignature(actionableAttention)
 	summary := fmt.Sprintf("%s is known-bad for soak %s / litestream %s; pausing active worker compute until the next deployment.", sourceHumanLabel(source), shortVersionValue(deployment.GitSHA), shortVersionValue(deployment.LitestreamSHA))
 	return failedSourcePauseEvaluation{
 		Deployment: deployment,
@@ -1162,14 +1213,36 @@ func dominantRolloutFailureSignature(rollout DeploymentRolloutResponse) string {
 		}
 		counts[worker.CurrentFailureSignature]++
 	}
+	return dominantFailureSignature(counts)
+}
 
+func dominantActionableFailureSignature(failures []actionableAttentionFailure) string {
+	counts := make(map[string]int)
+	for _, failure := range failures {
+		if strings.TrimSpace(failure.Signature) == "" {
+			continue
+		}
+		counts[failure.Signature]++
+	}
+	return dominantFailureSignature(counts)
+}
+
+func dominantFailureSignature(counts map[string]int) string {
 	signature := ""
 	count := 0
+	tied := false
 	for candidate, candidateCount := range counts {
-		if candidateCount > count || (candidateCount == count && (signature == "" || candidate < signature)) {
+		switch {
+		case candidateCount > count:
 			signature = candidate
 			count = candidateCount
+			tied = false
+		case candidateCount == count:
+			tied = true
 		}
+	}
+	if tied {
+		return "known_bad_rollout"
 	}
 	return firstNonEmpty(signature, "known_bad_rollout")
 }
@@ -1212,20 +1285,24 @@ func pauseEvidenceHistory(db *model.DB, workerID string, deployment model.Deploy
 	}
 }
 
-// countActionableAttentionWorkers counts attention workers whose most recent
-// non-aborted verification since the deployment started is an actionable
-// (non-environmental) failure. Dormant or runtime-stale workers without such
-// evidence do not corroborate a known-bad release (Codex review finding).
-func countActionableAttentionWorkers(db *model.DB, rollout DeploymentRolloutResponse, deployment model.Deployment) (int, error) {
+func releaseQualityActionableAttentionFailures(
+	db *model.DB,
+	rollout DeploymentRolloutResponse,
+	deployment model.Deployment,
+	releaseQualityWorkerIDs map[string]struct{},
+) ([]actionableAttentionFailure, error) {
 	policy := currentEnvironmentalFailurePolicy()
-	count := 0
+	failures := make([]actionableAttentionFailure, 0, rollout.AttentionWorkers)
 	for _, progress := range rollout.Workers {
 		if !workerNeedsAttention(progress.Status, progress.RuntimeSnapshotStatus) {
 			continue
 		}
+		if _, ok := releaseQualityWorkerIDs[progress.WorkerID]; !ok {
+			continue
+		}
 		verifications, err := pauseEvidenceHistory(db, progress.WorkerID, deployment, 20)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		environmental := environmentalVerificationIDs(verifications, policy)
 		for _, verification := range verifications {
@@ -1236,30 +1313,79 @@ func countActionableAttentionWorkers(db *model.DB, rollout DeploymentRolloutResp
 				continue
 			}
 			if verification.Failed() && !environmental[verification.ID] {
-				count++
+				failure := classifyVerification(&verification)
+				failures = append(failures, actionableAttentionFailure{
+					WorkerID:  progress.WorkerID,
+					Domain:    classifyReleaseFailureDomain(failure),
+					Signature: failure.Signature,
+				})
 			}
 			break
 		}
 	}
-	return count, nil
+	return failures, nil
 }
 
-// singleWorkerFailureCorroborated decides whether a lone attention worker
-// justifies pausing the whole source: it must have accumulated the required
-// number of consecutive actionable failed verifications since the deployment
-// started. Aborted checks are neutral (skipped); an environmental failure
-// resets the count — provider weather interleaving a streak makes the
-// attribution ambiguous, and the escalation guard already converts
-// persistent weather into actionable failures on its own.
-func singleWorkerFailureCorroborated(db *model.DB, rollout DeploymentRolloutResponse, deployment model.Deployment, minConsecutive int) (bool, error) {
-	policy := currentEnvironmentalFailurePolicy()
-	for _, progress := range rollout.Workers {
-		if !workerNeedsAttention(progress.Status, progress.RuntimeSnapshotStatus) {
+func classifyReleaseFailureDomain(failure verificationFailure) releaseFailureDomain {
+	if failure.Classification != nil && failure.Classification.ObjectStore != nil {
+		return releaseFailureDomainObjectStore
+	}
+
+	signature := strings.ToLower(strings.TrimSpace(failure.Signature))
+	if signature == "s3_transport" || strings.Contains(signature, "_s3_") {
+		return releaseFailureDomainObjectStore
+	}
+	if strings.Contains(signature, "checkpoint") || strings.Contains(signature, "pause_load") {
+		return releaseFailureDomainHarness
+	}
+
+	switch strings.ToLower(strings.TrimSpace(failure.Stage)) {
+	case "disk_capacity":
+		return releaseFailureDomainResource
+	case "sync":
+		return releaseFailureDomainSync
+	case "restore":
+		return releaseFailureDomainRestore
+	case "integrity", "integrity_check", "validation":
+		return releaseFailureDomainVerification
+	default:
+		return releaseFailureDomainOther
+	}
+}
+
+func multiWorkerFailuresCorroborated(failures []actionableAttentionFailure, minMatchingDomain, minFleet int) bool {
+	if len(failures) >= minFleet {
+		return true
+	}
+
+	counts := make(map[releaseFailureDomain]int)
+	for _, failure := range failures {
+		if !releaseFailureDomainSupportsPairCorroboration(failure.Domain) {
 			continue
 		}
+		counts[failure.Domain]++
+		if counts[failure.Domain] >= minMatchingDomain {
+			return true
+		}
+	}
+	return false
+}
+
+func releaseFailureDomainSupportsPairCorroboration(domain releaseFailureDomain) bool {
+	switch domain {
+	case releaseFailureDomainOther, releaseFailureDomainVerification:
+		return false
+	default:
+		return true
+	}
+}
+
+func singleWorkerFailureCorroborated(db *model.DB, failures []actionableAttentionFailure, deployment model.Deployment, minConsecutive int) (bool, error) {
+	policy := currentEnvironmentalFailurePolicy()
+	for _, failure := range failures {
 		limit := minConsecutive*5 + 10
 		for {
-			verifications, err := db.ListVerifications(progress.WorkerID, limit)
+			verifications, err := db.ListVerifications(failure.WorkerID, limit)
 			if err != nil {
 				return false, err
 			}
