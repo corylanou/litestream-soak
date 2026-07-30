@@ -434,7 +434,7 @@ func deploymentFailureCategory(worker model.Worker, verification model.Verificat
 		return failureCategorySoakFixture
 	}
 	if isTransientObjectStoreFailure(failure.Classification, policy) &&
-		!environmentalStreakEscalated(verificationsBefore(verifications, verification), verification.StartedAt, policy) {
+		!environmentalStreakEscalated(verificationsBefore(verifications, verification), policy) {
 		return failureCategoryEnvironmental
 	}
 	if isDeploymentRampUpFailure(worker, verification, verifications) {

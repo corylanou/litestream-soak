@@ -87,7 +87,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 			Signature:      payload.FailureClassification.Signature,
 			Classification: payload.FailureClassification,
 		}
-		environmental = a.environmentalWithoutEscalation(workerID, vf, payload.StartedAt)
+		environmental = a.environmentalWithoutEscalation(workerID, vf)
 	}
 	if payload.FailureDebug != nil && payload.FailureDebug.FailureClassification == nil && payload.FailureClassification != nil {
 		classification := *payload.FailureClassification

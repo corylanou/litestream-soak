@@ -12,7 +12,10 @@ import (
 	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
-const tigrisListNoSuchBucket = `wait for sync: sync returned 500: {"error":"sync database: db sync: replica sync: list objects: operation error S3: ListObjectsV2, https response error StatusCode: 404, RequestID: 01H8, api error NoSuchBucket: The specified bucket does not exist"}`
+const (
+	tigrisListNoSuchBucket    = `wait for sync: sync returned 500: {"error":"sync database: db sync: replica sync: list objects: operation error S3: ListObjectsV2, https response error StatusCode: 404, RequestID: 01H8, api error NoSuchBucket: The specified bucket does not exist"}`
+	tigrisListRequestCanceled = `restore failed: operation error S3: ListObjectsV2, https response error StatusCode: 408, RequestID: 1783, api error RequestCanceled: Request was canceled`
+)
 
 func configureEnvPolicyForTest(t *testing.T, policy EnvironmentalFailurePolicy) {
 	t.Helper()
@@ -53,30 +56,102 @@ func TestIsTransientObjectStoreFailure(t *testing.T) {
 }
 
 func TestEnvironmentalStreakEscalation(t *testing.T) {
-	policy := EnvironmentalFailurePolicy{Bucket: "b", EscalateAfterConsecutive: 3, EscalateAfterDuration: 30 * time.Minute}
+	policy := EnvironmentalFailurePolicy{Bucket: "b", EscalateAfterConsecutive: 3}
 
 	now := time.Now().UTC()
 	envFailure := func(age time.Duration) model.Verification {
 		return model.Verification{Status: "failed", CheckType: "integrity", StartedAt: now.Add(-age), ErrorMessage: tigrisListNoSuchBucket}
 	}
 
-	if environmentalStreakEscalated([]model.Verification{envFailure(2 * time.Minute), envFailure(4 * time.Minute)}, now, policy) {
-		t.Fatal("3 consecutive (2 prior + current) within window should NOT escalate at threshold 3")
+	if environmentalStreakEscalated([]model.Verification{envFailure(2 * time.Minute), envFailure(4 * time.Minute)}, policy) {
+		t.Fatal("3 consecutive (2 prior + current) should NOT escalate at threshold 3")
 	}
-	if !environmentalStreakEscalated([]model.Verification{envFailure(2 * time.Minute), envFailure(4 * time.Minute), envFailure(6 * time.Minute)}, now, policy) {
+	if !environmentalStreakEscalated([]model.Verification{envFailure(2 * time.Minute), envFailure(4 * time.Minute), envFailure(6 * time.Minute)}, policy) {
 		t.Fatal("4 consecutive should escalate past threshold 3")
 	}
-	if !environmentalStreakEscalated([]model.Verification{envFailure(45 * time.Minute)}, now, policy) {
-		t.Fatal("a streak spanning more than the duration window should escalate")
-	}
 	passed := model.Verification{Status: "passed", Passed: true, StartedAt: now.Add(-3 * time.Minute)}
-	if environmentalStreakEscalated([]model.Verification{passed, envFailure(5 * time.Minute), envFailure(7 * time.Minute), envFailure(9 * time.Minute)}, now, policy) {
+	if environmentalStreakEscalated([]model.Verification{passed, envFailure(5 * time.Minute), envFailure(7 * time.Minute), envFailure(9 * time.Minute)}, policy) {
 		t.Fatal("a pass resets the streak")
 	}
 }
 
+func TestEnvironmentalStreakEscalationIgnoresVerificationCadenceJitter(t *testing.T) {
+	const (
+		verifyInterval = 30 * time.Minute
+		jitter         = 38 * time.Millisecond
+	)
+	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{
+		Bucket:                   "b",
+		EscalateAfterConsecutive: 2,
+	})
+	now := time.Now().UTC()
+	worker := model.Worker{CreatedAt: now.Add(-24 * time.Hour)}
+	current := model.Verification{
+		Status:       "failed",
+		CheckType:    "integrity",
+		StartedAt:    now,
+		ErrorMessage: tigrisListRequestCanceled,
+	}
+
+	for _, test := range []struct {
+		name       string
+		separation time.Duration
+	}{
+		{name: "below cadence", separation: verifyInterval - jitter},
+		{name: "at cadence", separation: verifyInterval},
+		{name: "above cadence", separation: verifyInterval + jitter},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			history := []model.Verification{{
+				Status:       "failed",
+				CheckType:    "integrity",
+				StartedAt:    now.Add(-test.separation),
+				ErrorMessage: tigrisListRequestCanceled,
+			}}
+
+			if got := deploymentFailureCategory(worker, current, history); got != failureCategoryEnvironmental {
+				t.Fatalf("two environmental failures %s apart classified as %q, want %q", test.separation, got, failureCategoryEnvironmental)
+			}
+		})
+	}
+}
+
+func TestEnvironmentalStreakEscalationEscalatesSustainedProviderFailure(t *testing.T) {
+	const verifyInterval = 30 * time.Minute
+	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{
+		Bucket:                   "b",
+		EscalateAfterConsecutive: 2,
+	})
+	now := time.Now().UTC()
+	worker := model.Worker{CreatedAt: now.Add(-24 * time.Hour)}
+	current := model.Verification{
+		Status:       "failed",
+		CheckType:    "integrity",
+		StartedAt:    now,
+		ErrorMessage: tigrisListRequestCanceled,
+	}
+	history := []model.Verification{
+		{
+			Status:       "failed",
+			CheckType:    "integrity",
+			StartedAt:    now.Add(-verifyInterval),
+			ErrorMessage: tigrisListRequestCanceled,
+		},
+		{
+			Status:       "failed",
+			CheckType:    "integrity",
+			StartedAt:    now.Add(-2 * verifyInterval),
+			ErrorMessage: tigrisListRequestCanceled,
+		},
+	}
+
+	if got := deploymentFailureCategory(worker, current, history); got != failureCategoryActionable {
+		t.Fatalf("third consecutive environmental verification classified as %q, want %q", got, failureCategoryActionable)
+	}
+}
+
 func TestBuildFailureClassificationContextEnvironmentalAndEscalation(t *testing.T) {
-	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 2, EscalateAfterDuration: time.Hour})
+	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 2})
 
 	now := time.Now().UTC()
 	stats := []model.VerificationStat{
@@ -106,7 +181,7 @@ func TestBuildFailureClassificationContextEnvironmentalAndEscalation(t *testing.
 }
 
 func TestDeploymentFailureCategoryEnvironmental(t *testing.T) {
-	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 2, EscalateAfterDuration: time.Hour})
+	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 2})
 
 	now := time.Now().UTC()
 	worker := model.Worker{ID: "w1", CreatedAt: now.Add(-24 * time.Hour)}
@@ -163,7 +238,7 @@ func postVerificationForTest(t *testing.T, api *API, workerID string, startedAt 
 }
 
 func TestHandleVerificationEnvironmentalKeepsWorkerRunningUntilEscalation(t *testing.T) {
-	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 2, EscalateAfterDuration: time.Hour})
+	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 2})
 
 	db := openTestDB(t)
 	workerID := "worker-env-guard"
@@ -216,7 +291,7 @@ func TestHandleVerificationEnvironmentalKeepsWorkerRunningUntilEscalation(t *tes
 }
 
 func TestEnvironmentalStreakTreatsAbortedAsNeutral(t *testing.T) {
-	policy := EnvironmentalFailurePolicy{Bucket: "b", EscalateAfterConsecutive: 2, EscalateAfterDuration: time.Hour}
+	policy := EnvironmentalFailurePolicy{Bucket: "b", EscalateAfterConsecutive: 2}
 
 	now := time.Now().UTC()
 	envFailure := func(age time.Duration) model.Verification {
@@ -227,7 +302,7 @@ func TestEnvironmentalStreakTreatsAbortedAsNeutral(t *testing.T) {
 	}
 
 	interleaved := []model.Verification{abortedAt(5 * time.Minute), envFailure(10 * time.Minute), abortedAt(15 * time.Minute), envFailure(20 * time.Minute)}
-	if !environmentalStreakEscalated(interleaved, now, policy) {
+	if !environmentalStreakEscalated(interleaved, policy) {
 		t.Fatal("aborted checks between environmental failures must not reset the streak (deleted-bucket bypass)")
 	}
 
@@ -244,7 +319,7 @@ func TestEnvironmentalStreakTreatsAbortedAsNeutral(t *testing.T) {
 }
 
 func TestEnvironmentalVerificationIDsForLifecycle(t *testing.T) {
-	policy := EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 2, EscalateAfterDuration: time.Hour}
+	policy := EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 2}
 
 	now := time.Now().UTC()
 	verifications := []model.Verification{
@@ -263,7 +338,7 @@ func TestEnvironmentalVerificationIDsForLifecycle(t *testing.T) {
 }
 
 func TestHandleVerificationEscalatesAcrossAbortStarvedHistory(t *testing.T) {
-	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 2, EscalateAfterDuration: 12 * time.Hour})
+	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 2})
 
 	db := openTestDB(t)
 	workerID := "worker-env-abort-starve"
@@ -301,7 +376,7 @@ func TestHandleVerificationEscalatesAcrossAbortStarvedHistory(t *testing.T) {
 }
 
 func TestRecentEnvironmentalSignaturesAgeOut(t *testing.T) {
-	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 5, EscalateAfterDuration: 12 * time.Hour})
+	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 5})
 
 	now := time.Now().UTC()
 	stats := []model.VerificationStat{
@@ -327,31 +402,22 @@ func TestRecentEnvironmentalSignaturesAgeOut(t *testing.T) {
 func TestIsTransientObjectStoreFailure408RequestCanceled(t *testing.T) {
 	policy := EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared"}.normalized()
 
-	list408 := `restore failed: operation error S3: ListObjectsV2, https response error StatusCode: 408, RequestID: 1783, api error RequestCanceled: Request was canceled`
-	if !isTransientObjectStoreFailure(classifyForTest(list408), policy) {
+	if !isTransientObjectStoreFailure(classifyForTest(tigrisListRequestCanceled), policy) {
 		t.Fatal("408/RequestCanceled on ListObjectsV2 should be transient-environmental")
 	}
 	put408 := `wait for sync: sync returned 500: {"error":"sync database: replica sync: write ltx file: operation error S3: PutObject, https response error StatusCode: 408, api error RequestCanceled: Request was canceled"}`
 	if !isTransientObjectStoreFailure(classifyForTest(put408), policy) {
 		t.Fatal("sync-side PutObject 408 should be transient-environmental too")
 	}
-	mismatch := list408 + ` s3://some-other-bucket/prefix/x.ltx`
+	mismatch := tigrisListRequestCanceled + ` s3://some-other-bucket/prefix/x.ltx`
 	if isTransientObjectStoreFailure(classifyForTest(mismatch), policy) {
 		t.Fatal("bucket mismatch stays fail-closed for 408s")
 	}
 
-	streakPolicy := EnvironmentalFailurePolicy{Bucket: "b", EscalateAfterConsecutive: 2, EscalateAfterDuration: time.Hour}
-	now := time.Now().UTC()
-	failure := func(age time.Duration) model.Verification {
-		return model.Verification{Status: "failed", CheckType: "integrity", StartedAt: now.Add(-age), ErrorMessage: list408}
-	}
-	if !environmentalStreakEscalated([]model.Verification{failure(5 * time.Minute), failure(10 * time.Minute)}, now, streakPolicy) {
-		t.Fatal("a persistent 408 streak must still escalate to actionable")
-	}
 }
 
 func TestSingleWorkerCorroborationEnvironmentalResetsStreak(t *testing.T) {
-	policy := EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 10, EscalateAfterDuration: 12 * time.Hour}
+	policy := EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 10}
 
 	now := time.Now().UTC()
 	hard := func(age time.Duration) model.Verification {
