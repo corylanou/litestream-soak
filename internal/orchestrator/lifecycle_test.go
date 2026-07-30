@@ -944,7 +944,7 @@ func createCleanSuccessCandidate(t *testing.T, db *model.DB, source string, prNu
 }
 
 func TestFailedSourcePauseCandidateIgnoresSingleEnvironmentalBlip(t *testing.T) {
-	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 4, EscalateAfterDuration: 30 * time.Minute})
+	configureEnvPolicyForTest(t, EnvironmentalFailurePolicy{Bucket: "litestream-soak-replicas-shared", EscalateAfterConsecutive: 4})
 
 	db := openTestDB(t)
 	if err := db.UpsertReadyDeployment(&model.Deployment{

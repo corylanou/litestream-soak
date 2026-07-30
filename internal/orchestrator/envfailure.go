@@ -3,16 +3,12 @@ package orchestrator
 import (
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
-const (
-	defaultEnvEscalateConsecutive = 4
-	defaultEnvEscalateDuration    = 30 * time.Minute
-)
+const defaultEnvEscalateConsecutive = 2
 
 // EnvironmentalFailurePolicy decides when a transient provider-side object
 // store error counts as environment weather instead of a worker failure.
@@ -21,15 +17,11 @@ const (
 type EnvironmentalFailurePolicy struct {
 	Bucket                   string
 	EscalateAfterConsecutive int
-	EscalateAfterDuration    time.Duration
 }
 
 func (p EnvironmentalFailurePolicy) normalized() EnvironmentalFailurePolicy {
 	if p.EscalateAfterConsecutive <= 0 {
 		p.EscalateAfterConsecutive = defaultEnvEscalateConsecutive
-	}
-	if p.EscalateAfterDuration <= 0 {
-		p.EscalateAfterDuration = defaultEnvEscalateDuration
 	}
 	return p
 }
@@ -83,37 +75,28 @@ func isTransientObjectStoreFailure(classification *reporting.FailureClassificati
 }
 
 // environmentalStreak marks one verification inside a worker's history as
-// escalated when the transient-error streak it belongs to has run too long:
-// more than EscalateAfterConsecutive consecutive environmental failures, or
-// spanning more than EscalateAfterDuration. Streaks reset on any pass or any
+// escalated when the transient-error streak exceeds the allowed number of
+// consecutive environmental failures. Streaks reset on any pass or any
 // non-environmental failure.
 type environmentalStreak struct {
 	count int
-	start time.Time
 }
 
-func (s *environmentalStreak) observe(startedAt time.Time) {
-	if s.count == 0 {
-		s.start = startedAt
-	}
+func (s *environmentalStreak) observe() {
 	s.count++
 }
 
 func (s *environmentalStreak) reset() {
 	s.count = 0
-	s.start = time.Time{}
 }
 
-func (s environmentalStreak) escalated(at time.Time, policy EnvironmentalFailurePolicy) bool {
-	if s.count > policy.EscalateAfterConsecutive {
-		return true
-	}
-	return s.count > 0 && at.Sub(s.start) > policy.EscalateAfterDuration
+func (s environmentalStreak) escalated(policy EnvironmentalFailurePolicy) bool {
+	return s.count > policy.EscalateAfterConsecutive
 }
 
 // escalatedEnvironmentalStatIDs walks each worker's verification history in
 // order and returns the IDs of environmental failures whose streak breached
-// the escalation thresholds — those must be treated as real failures again.
+// the escalation threshold — those must be treated as real failures again.
 func escalatedEnvironmentalStatIDs(stats []model.VerificationStat, policy EnvironmentalFailurePolicy) map[int]bool {
 	byWorker := make(map[string][]model.VerificationStat)
 	for _, stat := range stats {
@@ -143,8 +126,8 @@ func escalatedEnvironmentalStatIDs(stats []model.VerificationStat, policy Enviro
 				streak.reset()
 				continue
 			}
-			streak.observe(stat.StartedAt)
-			if streak.escalated(stat.StartedAt, policy) {
+			streak.observe()
+			if streak.escalated(policy) {
 				escalated[stat.ID] = true
 			}
 		}
@@ -154,9 +137,9 @@ func escalatedEnvironmentalStatIDs(stats []model.VerificationStat, policy Enviro
 
 // environmentalStreakEscalated answers the same question for a single worker
 // at ingest time: given the latest verifications (newest first) and one more
-// environmental failure arriving now, has the streak breached the thresholds?
-func environmentalStreakEscalated(previous []model.Verification, now time.Time, policy EnvironmentalFailurePolicy) bool {
-	streak := environmentalStreak{count: 1, start: now}
+// environmental failure arriving now, has the streak breached the threshold?
+func environmentalStreakEscalated(previous []model.Verification, policy EnvironmentalFailurePolicy) bool {
+	streak := environmentalStreak{count: 1}
 	for _, verification := range previous {
 		if verificationStatusAborted(verification.Status) {
 			continue
@@ -169,15 +152,14 @@ func environmentalStreakEscalated(previous []model.Verification, now time.Time, 
 			break
 		}
 		streak.count++
-		streak.start = verification.StartedAt
 	}
-	return streak.escalated(now, policy)
+	return streak.escalated(policy)
 }
 
 // environmentalWithoutEscalation is the ingest-time guard: a transient
 // provider blip on the configured bucket keeps the worker out of degraded —
-// unless the streak has run long enough that it must page again.
-func (a *API) environmentalWithoutEscalation(workerID string, failure verificationFailure, startedAt time.Time) bool {
+// unless the streak has accumulated enough consecutive failures to page again.
+func (a *API) environmentalWithoutEscalation(workerID string, failure verificationFailure) bool {
 	policy := currentEnvironmentalFailurePolicy()
 	if !isTransientObjectStoreFailure(failure.Classification, policy) {
 		return false
@@ -194,10 +176,7 @@ func (a *API) environmentalWithoutEscalation(workerID string, failure verificati
 	if err != nil {
 		return false
 	}
-	if startedAt.IsZero() {
-		startedAt = time.Now().UTC()
-	}
-	return !environmentalStreakEscalated(previous, startedAt, policy)
+	return !environmentalStreakEscalated(previous, policy)
 }
 
 // environmentalVerificationIDs walks a worker's verifications oldest-first
@@ -226,8 +205,8 @@ func environmentalVerificationIDs(verifications []model.Verification, policy Env
 			streak.reset()
 			continue
 		}
-		streak.observe(verification.StartedAt)
-		if !streak.escalated(verification.StartedAt, policy) {
+		streak.observe()
+		if !streak.escalated(policy) {
 			environmental[verification.ID] = true
 		}
 	}

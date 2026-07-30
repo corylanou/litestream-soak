@@ -186,8 +186,7 @@ func main() {
 
 	orchestrator.ConfigureEnvironmentalFailurePolicy(orchestrator.EnvironmentalFailurePolicy{
 		Bucket:                   s3Bucket,
-		EscalateAfterConsecutive: intEnvOrDefault("SOAK_ENV_ESCALATION_FAILURES", 4),
-		EscalateAfterDuration:    durationEnvOrDefault("SOAK_ENV_ESCALATION_WINDOW", 30*time.Minute),
+		EscalateAfterConsecutive: intEnvOrDefault("SOAK_ENV_ESCALATION_FAILURES", 2),
 	})
 
 	go mgr.RunExpiryLoop(ctx)

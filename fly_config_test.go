@@ -96,6 +96,29 @@ func TestControlFlyConfigDeclaresDormantFleetAlertPolicy(t *testing.T) {
 	}
 }
 
+func TestControlFlyConfigDeclaresEnvironmentalFailurePolicy(t *testing.T) {
+	t.Parallel()
+
+	contents, err := os.ReadFile("fly.control.toml")
+	if err != nil {
+		t.Fatalf("read fly.control.toml: %v", err)
+	}
+	env, ok := tomlTable(string(contents), "[env]")
+	if !ok {
+		t.Fatal("fly.control.toml is missing [env]")
+	}
+	got, ok := tomlValue(env, "SOAK_ENV_ESCALATION_FAILURES")
+	if !ok {
+		t.Fatal("fly.control.toml [env] is missing SOAK_ENV_ESCALATION_FAILURES")
+	}
+	if got != "2" {
+		t.Fatalf("fly.control.toml [env] SOAK_ENV_ESCALATION_FAILURES = %q, want %q", got, "2")
+	}
+	if _, ok := tomlValue(env, "SOAK_ENV_ESCALATION_WINDOW"); ok {
+		t.Fatal("fly.control.toml [env] must not declare SOAK_ENV_ESCALATION_WINDOW")
+	}
+}
+
 func tomlTable(contents, header string) (string, bool) {
 	lines := strings.Split(contents, "\n")
 	for i, line := range lines {
