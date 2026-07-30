@@ -769,8 +769,27 @@ func failedSourcePolicyEvaluation(db *model.DB, deployment model.Deployment, pol
 	if err != nil {
 		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, err
 	}
-	if rollout.TotalWorkers == 0 ||
-		rollout.Status != "needs_attention" ||
+	if rollout.TotalWorkers == 0 {
+		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, nil
+	}
+
+	releaseQualityWorkers, err := deploymentScorecardWorkers(db, deployment)
+	if err != nil {
+		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, fmt.Errorf("list release-quality workers: %w", err)
+	}
+	if len(releaseQualityWorkers) == 0 {
+		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, fmt.Errorf(
+			"failed-source pause policy has no release-quality workers for source %q deployment %d",
+			source,
+			deployment.ID,
+		)
+	}
+	releaseQualityWorkerIDs := make(map[string]struct{}, len(releaseQualityWorkers))
+	for _, worker := range releaseQualityWorkers {
+		releaseQualityWorkerIDs[worker.ID] = struct{}{}
+	}
+
+	if rollout.Status != "needs_attention" ||
 		rollout.OutdatedWorkers > 0 ||
 		rollout.ProbingWorkers > 0 ||
 		rollout.AwaitingVerification > 0 ||
@@ -779,7 +798,12 @@ func failedSourcePolicyEvaluation(db *model.DB, deployment model.Deployment, pol
 		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, nil
 	}
 
-	actionableAttention, err := releaseQualityActionableAttentionFailures(db, rollout, deployment)
+	actionableAttention, err := releaseQualityActionableAttentionFailures(
+		db,
+		rollout,
+		deployment,
+		releaseQualityWorkerIDs,
+	)
 	if err != nil {
 		return failedSourcePauseEvaluation{}, failedSourcePolicyInconclusive, err
 	}
@@ -1261,25 +1285,19 @@ func pauseEvidenceHistory(db *model.DB, workerID string, deployment model.Deploy
 	}
 }
 
-func releaseQualityActionableAttentionFailures(db *model.DB, rollout DeploymentRolloutResponse, deployment model.Deployment) ([]actionableAttentionFailure, error) {
-	source := firstNonEmpty(strings.TrimSpace(deployment.Source), "main")
-	workers, err := db.ListWorkersForSource(source)
-	if err != nil {
-		return nil, err
-	}
-	workersByID := make(map[string]model.Worker, len(workers))
-	for _, worker := range workers {
-		workersByID[worker.ID] = worker
-	}
-
+func releaseQualityActionableAttentionFailures(
+	db *model.DB,
+	rollout DeploymentRolloutResponse,
+	deployment model.Deployment,
+	releaseQualityWorkerIDs map[string]struct{},
+) ([]actionableAttentionFailure, error) {
 	policy := currentEnvironmentalFailurePolicy()
 	failures := make([]actionableAttentionFailure, 0, rollout.AttentionWorkers)
 	for _, progress := range rollout.Workers {
 		if !workerNeedsAttention(progress.Status, progress.RuntimeSnapshotStatus) {
 			continue
 		}
-		worker, ok := workersByID[progress.WorkerID]
-		if !ok || !workerIncludedInReleaseQuality(worker) {
+		if _, ok := releaseQualityWorkerIDs[progress.WorkerID]; !ok {
 			continue
 		}
 		verifications, err := pauseEvidenceHistory(db, progress.WorkerID, deployment, 20)
@@ -1335,19 +1353,31 @@ func classifyReleaseFailureDomain(failure verificationFailure) releaseFailureDom
 	}
 }
 
-func multiWorkerFailuresCorroborated(failures []actionableAttentionFailure, minMatchingDomain, minDiverse int) bool {
-	if len(failures) >= minDiverse {
+func multiWorkerFailuresCorroborated(failures []actionableAttentionFailure, minMatchingDomain, minFleet int) bool {
+	if len(failures) >= minFleet {
 		return true
 	}
 
 	counts := make(map[releaseFailureDomain]int)
 	for _, failure := range failures {
+		if !releaseFailureDomainSupportsPairCorroboration(failure.Domain) {
+			continue
+		}
 		counts[failure.Domain]++
 		if counts[failure.Domain] >= minMatchingDomain {
 			return true
 		}
 	}
 	return false
+}
+
+func releaseFailureDomainSupportsPairCorroboration(domain releaseFailureDomain) bool {
+	switch domain {
+	case releaseFailureDomainOther, releaseFailureDomainVerification:
+		return false
+	default:
+		return true
+	}
 }
 
 func singleWorkerFailureCorroborated(db *model.DB, failures []actionableAttentionFailure, deployment model.Deployment, minConsecutive int) (bool, error) {

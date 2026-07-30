@@ -863,6 +863,79 @@ func TestFailedSourcePauseCandidateDoesNotParkCleanScoringFleetForRegionalFailur
 	}
 }
 
+func TestEvaluateFailedSourcePauseRejectsFleetWithoutReleaseQualityWorkers(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	deployment := createFailedSourceReevaluationDeployment(t, db)
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-many-dbs-100-list",
+		Name:          "worker-main-many-dbs-100-list",
+		Status:        model.WorkerDegraded,
+		Source:        "main",
+		GitSHA:        deployment.GitSHA,
+		LitestreamSHA: deployment.LitestreamSHA,
+		ProfileName:   "many-dbs-100-list",
+		ProfileConfig: "{}",
+		Region:        "ord",
+	})
+	completedAt := deployment.StartedAt.Add(2 * time.Minute)
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:     "worker-main-many-dbs-100-list",
+		StartedAt:    completedAt.Add(-time.Minute),
+		CompletedAt:  &completedAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		ErrorMessage: "validation failed (exit 1): integrity check mismatch",
+	})
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-many-dbs-100-dir",
+		Name:          "worker-main-many-dbs-100-dir",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        deployment.GitSHA,
+		LitestreamSHA: deployment.LitestreamSHA,
+		ProfileName:   "many-dbs-100-dir",
+		ProfileConfig: "{}",
+		Region:        "ord",
+		FlyVolumeID:   "volume-many-dbs-100-dir",
+	})
+	if err := db.MarkWorkerDormant(
+		"worker-main-many-dbs-100-dir",
+		"known bad",
+		"known_bad_rollout",
+		"known_bad_source",
+	); err != nil {
+		t.Fatalf("MarkWorkerDormant() error = %v", err)
+	}
+
+	_, verdict, err := failedSourcePolicyEvaluation(db, deployment, FailedSourcePausePolicy{})
+	if verdict != failedSourcePolicyInconclusive {
+		t.Errorf("verdict = %v, want inconclusive", verdict)
+	}
+	if err == nil || !strings.Contains(err.Error(), "no release-quality workers") {
+		t.Errorf("failedSourcePolicyEvaluation() error = %v, want no release-quality workers configuration error", err)
+	}
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := &Manager{fly: fly.client, db: db, appName: "litestream-soak"}
+	err = manager.evaluateFailedSourcePauseLocked(context.Background(), "main", FailedSourcePausePolicy{})
+	if err == nil || !strings.Contains(err.Error(), "no release-quality workers") {
+		t.Errorf("evaluateFailedSourcePauseLocked() error = %v, want no release-quality workers configuration error", err)
+	}
+
+	worker, err := db.GetWorker("worker-main-many-dbs-100-dir")
+	if err != nil {
+		t.Fatalf("GetWorker() error = %v", err)
+	}
+	if worker.Status != model.WorkerDormant {
+		t.Fatalf("known-bad worker status = %s, want dormant", worker.Status)
+	}
+	if requests := fly.machineRequests(); len(requests) != 0 {
+		t.Fatalf("len(machine requests) = %d, want 0", len(requests))
+	}
+}
+
 func TestClassifyReleaseFailureDomainPrefersStructuredObjectStoreEvidence(t *testing.T) {
 	t.Parallel()
 
@@ -920,10 +993,96 @@ func TestFailedSourcePauseCandidateRejectsTwoDifferentDomains(t *testing.T) {
 	}
 }
 
+func TestFailedSourcePauseCandidateRejectsTwoOtherDomainFailures(t *testing.T) {
+	t.Parallel()
+
+	_, ok := failedSourceCandidateForFailures(t, []failedSourceTestFailure{
+		{
+			workerID:      "worker-main-low-vol",
+			profileName:   "low-volume",
+			omitCheckType: true,
+			errorMessage:  "scheduler returned an impossible state",
+		},
+		{
+			workerID:      "worker-main-high-vol",
+			profileName:   "high-volume",
+			omitCheckType: true,
+			errorMessage:  "metadata parser rejected the generated manifest",
+		},
+	})
+	if ok {
+		t.Fatal("two unrelated failures without a known domain must not pause the source")
+	}
+}
+
+func TestFailedSourcePauseCandidateRejectsTwoVerificationDomainFailures(t *testing.T) {
+	t.Parallel()
+
+	_, ok := failedSourceCandidateForFailures(t, []failedSourceTestFailure{
+		{
+			workerID:     "worker-main-low-vol",
+			profileName:  "low-volume",
+			errorMessage: "checksum process exited with status 1",
+		},
+		{
+			workerID:     "worker-main-high-vol",
+			profileName:  "high-volume",
+			errorMessage: "query returned an unexpected row count",
+		},
+	})
+	if ok {
+		t.Fatal("two unrelated failures inheriting the verification check type must not pause the source")
+	}
+}
+
+func TestFailedSourcePauseCandidateRejectsFlappingSingleWorker(t *testing.T) {
+	t.Parallel()
+
+	_, ok := failedSourceCandidateForFailures(t, []failedSourceTestFailure{
+		{
+			workerID:       "worker-main-low-vol",
+			profileName:    "low-volume",
+			errorMessage:   "restore failed: decode header: EOF",
+			statusSequence: []string{"failed", "passed", "failed"},
+		},
+	})
+	if ok {
+		t.Fatal("fail-pass-fail evidence must not satisfy the consecutive single-worker fallback")
+	}
+}
+
+func TestFailedSourcePauseCandidateRejectsNonCoincidentWorkerFailures(t *testing.T) {
+	t.Parallel()
+
+	_, ok := failedSourceCandidateForFailures(t, []failedSourceTestFailure{
+		{
+			workerID:       "worker-main-low-vol",
+			profileName:    "low-volume",
+			errorMessage:   "restore failed: decode header: EOF",
+			startMinute:    2,
+			statusSequence: []string{"failed", "passed"},
+		},
+		{
+			workerID:     "worker-main-high-vol",
+			profileName:  "high-volume",
+			errorMessage: "restore failed: calc restore plan: missing generation",
+			startMinute:  4,
+		},
+	})
+	if ok {
+		t.Fatal("a recovered worker's earlier failure must not corroborate another worker's current failure")
+	}
+}
+
 func TestFailedSourcePauseCandidateRejectsRegionalTemporalCorroboration(t *testing.T) {
 	t.Parallel()
 
 	_, ok := failedSourceCandidateForFailures(t, []failedSourceTestFailure{
+		{
+			workerID:       "worker-main-low-vol",
+			profileName:    "low-volume",
+			statusSequence: []string{"passed"},
+		},
 		{
 			workerID:     "worker-main-high-vol-ams",
 			profileName:  "high-vol-ams",
@@ -1017,11 +1176,14 @@ func TestDominantRolloutFailureSignatureDoesNotBreakTiesLexically(t *testing.T) 
 }
 
 type failedSourceTestFailure struct {
-	workerID     string
-	profileName  string
-	region       string
-	errorMessage string
-	repetitions  int
+	workerID       string
+	profileName    string
+	region         string
+	omitCheckType  bool
+	errorMessage   string
+	repetitions    int
+	startMinute    int
+	statusSequence []string
 }
 
 func failedSourceCandidateForFailures(t *testing.T, failures []failedSourceTestFailure) (failedSourcePauseEvaluation, bool) {
@@ -1058,19 +1220,39 @@ func failedSourceCandidateForFailures(t *testing.T, failures []failedSourceTestF
 			ProfileConfig: "{}",
 			Region:        region,
 		})
-		repetitions := failure.repetitions
-		if repetitions == 0 {
-			repetitions = 1
+		statuses := failure.statusSequence
+		if len(statuses) == 0 {
+			repetitions := failure.repetitions
+			if repetitions == 0 {
+				repetitions = 1
+			}
+			statuses = make([]string, repetitions)
+			for repetition := range statuses {
+				statuses[repetition] = "failed"
+			}
 		}
-		for repetition := 0; repetition < repetitions; repetition++ {
-			completedAt := deployment.StartedAt.Add(time.Duration(i+repetition+2) * time.Minute)
+		startMinute := failure.startMinute
+		if startMinute == 0 {
+			startMinute = i + 2
+		}
+		checkType := "integrity"
+		if failure.omitCheckType {
+			checkType = ""
+		}
+		for observation, status := range statuses {
+			completedAt := deployment.StartedAt.Add(time.Duration(startMinute+observation) * time.Minute)
+			errorMessage := failure.errorMessage
+			if status == "passed" {
+				errorMessage = ""
+			}
 			mustRecordVerification(t, db, &model.Verification{
 				WorkerID:     failure.workerID,
 				StartedAt:    completedAt.Add(-time.Minute),
 				CompletedAt:  &completedAt,
-				Status:       "failed",
-				CheckType:    "integrity",
-				ErrorMessage: failure.errorMessage,
+				Status:       status,
+				CheckType:    checkType,
+				Passed:       status == "passed",
+				ErrorMessage: errorMessage,
 			})
 		}
 	}
