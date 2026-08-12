@@ -117,7 +117,13 @@ jobs:
             resolution="ambiguous"
             echo "control plane reports a main deployment with no live status line" >&2
           else
-            resolution="none"
+            # No main series at all is either a genuine cold start or a control
+            # plane whose metric registration silently failed, and the two are
+            # indistinguishable from here. Cold start happens once, with a human
+            # present, so require an explicit force dispatch rather than letting
+            # a metrics outage roll the fleet.
+            resolution="ambiguous"
+            echo "control plane reports no main deployment series; run with force to seed a cold start" >&2
           fi
 
           force_rebuild="false"
