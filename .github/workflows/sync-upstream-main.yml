@@ -35,7 +35,7 @@ jobs:
           set -euo pipefail
 
           base_url="${CONTROL_BASE_URL:-https://litestream-soak-ctl.fly.dev}"
-          litestream_sha="$(git ls-remote https://github.com/benbjohnson/litestream.git refs/heads/main | awk 'NR==1{print $1}')"
+          litestream_sha="$(git ls-remote https://github.com/benbjohnson/litestream.git refs/heads/main | awk 'NR==1{print tolower($1)}')"
           if [ -z "${litestream_sha}" ]; then
             echo "failed to resolve upstream Litestream main" >&2
             exit 1
@@ -70,8 +70,25 @@ jobs:
             }
           ' "${metrics_file}" | sort -u)"
 
-          live_sha_count="$(printf '%s' "${live_shas}" | grep -c . || true)"
-          main_deployment_lines="$(grep -c '^soak_control_latest_deployment_version_info{.*source="main"' "${metrics_file}" || true)"
+          # grep -c exits 1 on "no matches" but 2+ on a real error, so treat
+          # only exit 1 as an empty count and fail on anything worse rather
+          # than letting an unreadable file look like a cold start.
+          count_matches() {
+            local pattern="$1" file="$2" out rc
+            set +e
+            out="$(grep -c -- "${pattern}" "${file}")"
+            rc=$?
+            set -e
+            if [ "${rc}" -gt 1 ]; then
+              echo "failed to scan control-plane metrics (grep exit ${rc})" >&2
+              return 1
+            fi
+            printf '%s' "${out:-0}"
+          }
+
+          printf '%s' "${live_shas}" > "${metrics_file}.shas"
+          live_sha_count="$(count_matches . "${metrics_file}.shas")"
+          main_deployment_lines="$(count_matches '^soak_control_latest_deployment_version_info{.*source="main"' "${metrics_file}")"
 
           # resolved: exactly one well-formed live SHA. none: no main deployment
           # at all, a genuine cold start. ambiguous: anything else, which must
@@ -79,8 +96,11 @@ jobs:
           # skipped one just waits for the next run.
           current_litestream_sha=""
           if [ "${live_sha_count}" -eq 1 ]; then
-            candidate="${live_shas}"
-            if printf '%s' "${candidate}" | grep -Eq '^[0-9a-fA-F]{40}$'; then
+            # Normalise case before comparing: deploy-main preserves a
+            # configured SHA verbatim, so an uppercase value would otherwise
+            # read as a mismatch against lowercase git ls-remote output.
+            candidate="$(printf '%s' "${live_shas}" | tr '[:upper:]' '[:lower:]')"
+            if printf '%s' "${candidate}" | grep -Eq '^[0-9a-f]{40}$'; then
               resolution="resolved"
               current_litestream_sha="${candidate}"
             else
