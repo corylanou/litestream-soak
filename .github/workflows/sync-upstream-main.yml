@@ -41,18 +41,31 @@ jobs:
             exit 1
           fi
 
-          current_litestream_sha="$(curl -fsSL "${base_url}/metrics" | awk '
-            /^soak_control_latest_deployment_version_info\{/ {
-              if ($0 ~ /source="main"/) {
-                split($0, parts, "litestream_sha=\"")
-                if (length(parts) > 1) {
-                  split(parts[2], tail, "\"")
-                  print tail[1]
-                  exit
-                }
+          metrics_file="$(mktemp)"
+          if ! curl -fsSL --retry 3 --retry-delay 5 -o "${metrics_file}" "${base_url}/metrics"; then
+            echo "failed to fetch control-plane metrics from ${base_url}/metrics" >&2
+            exit 1
+          fi
+
+          # The gauge keeps one line per status the deployment has moved through,
+          # plus a zeroed line for the superseded deployment, so line order does
+          # not identify the live deployment. Only the current status carries a
+          # non-zero value. Read from a file and latch on the first match instead
+          # of calling awk's exit, which would close the pipe under pipefail.
+          current_litestream_sha="$(awk '
+            found { next }
+            /^soak_control_latest_deployment_version_info\{/ && /source="main"/ {
+              if (($NF + 0) == 0) { next }
+              split($0, parts, "litestream_sha=\"")
+              if (length(parts) > 1) {
+                split(parts[2], tail, "\"")
+                print tail[1]
+                found = 1
               }
             }
-          ')"
+          ' "${metrics_file}")"
+
+          main_deployment_lines="$(grep -c '^soak_control_latest_deployment_version_info{.*source="main"' "${metrics_file}" || true)"
 
           force_rebuild="false"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.force || '' }}" = "true" ]; then
@@ -60,8 +73,19 @@ jobs:
           fi
 
           should_build="true"
-          if [ "${force_rebuild}" != "true" ] && [ -n "${current_litestream_sha}" ] && [ "${current_litestream_sha}" = "${litestream_sha}" ]; then
-            should_build="false"
+          if [ "${force_rebuild}" != "true" ]; then
+            if [ -n "${current_litestream_sha}" ]; then
+              if [ "${current_litestream_sha}" = "${litestream_sha}" ]; then
+                should_build="false"
+                echo "already soaking upstream main ${litestream_sha}; nothing to build"
+              fi
+            elif [ "${main_deployment_lines}" -gt 0 ]; then
+              # A main deployment exists but no status line is live, which happens
+              # mid-rollout. Building here would roll a fleet that is already
+              # moving, so skip and pick it up on the next run.
+              should_build="false"
+              echo "control plane reports a main deployment with no live status line; skipping this cycle" >&2
+            fi
           fi
 
           trigger="upstream_main_schedule"
