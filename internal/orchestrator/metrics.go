@@ -736,14 +736,12 @@ func (m *controlMetrics) publishDeploymentSnapshot(db *model.DB, deployment mode
 		m.rolloutByState[state] = labelMetricState{labels: append(append([]string{}, deploymentLabels...), state)}
 	}
 
-	if len(previousDeployment.labels) > 0 && !sameMetricLabels(previousDeployment.labels, deploymentLabels) {
-		controlLatestDeploymentInfo.WithLabelValues(previousDeployment.labels...).Set(0)
-		controlLatestDeploymentAge.WithLabelValues(previousDeployment.labels...).Set(0)
-		controlLatestDeploymentGraceExceeded.WithLabelValues(previousDeployment.labels...).Set(0)
-	}
-	if len(previousDeploymentVersion.labels) > 0 && !sameMetricLabels(previousDeploymentVersion.labels, deploymentVersionLabels) {
-		controlLatestDeploymentVersionInfo.WithLabelValues(previousDeploymentVersion.labels...).Set(0)
-	}
+	// Publish the current series before zeroing the superseded one. The mutex
+	// orders publishers but is invisible to Prometheus collection, so a scrape
+	// can land between the two writes. Zeroing first would expose a window
+	// holding only the stale series, which reads as authoritative; setting first
+	// means the worst a scrape sees is both series non-zero, which is
+	// self-evidently ambiguous and safe to reject.
 	controlLatestDeploymentInfo.WithLabelValues(deploymentLabels...).Set(deploymentMetricValue(rollout.Status))
 	controlLatestDeploymentVersionInfo.WithLabelValues(deploymentVersionLabels...).Set(deploymentMetricValue(rollout.Status))
 	if !rollout.Deployment.StartedAt.IsZero() {
@@ -753,6 +751,15 @@ func (m *controlMetrics) publishDeploymentSnapshot(db *model.DB, deployment mode
 		controlLatestDeploymentGraceExceeded.WithLabelValues(deploymentLabels...).Set(1)
 	} else {
 		controlLatestDeploymentGraceExceeded.WithLabelValues(deploymentLabels...).Set(0)
+	}
+
+	if len(previousDeployment.labels) > 0 && !sameMetricLabels(previousDeployment.labels, deploymentLabels) {
+		controlLatestDeploymentInfo.WithLabelValues(previousDeployment.labels...).Set(0)
+		controlLatestDeploymentAge.WithLabelValues(previousDeployment.labels...).Set(0)
+		controlLatestDeploymentGraceExceeded.WithLabelValues(previousDeployment.labels...).Set(0)
+	}
+	if len(previousDeploymentVersion.labels) > 0 && !sameMetricLabels(previousDeploymentVersion.labels, deploymentVersionLabels) {
+		controlLatestDeploymentVersionInfo.WithLabelValues(previousDeploymentVersion.labels...).Set(0)
 	}
 
 	for state, previous := range previousRolloutStates {
