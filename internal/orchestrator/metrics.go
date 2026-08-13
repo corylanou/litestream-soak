@@ -26,6 +26,7 @@ type controlMetrics struct {
 	lastFailureByWorker       map[string]failureMetricState
 	latestDeployment          labelMetricState
 	latestDeploymentVersion   labelMetricState
+	latestDeploymentPublished deploymentVersionKey
 	rolloutByState            map[string]labelMetricState
 	comparisonInfo            labelMetricState
 	comparisonWorkers         map[string]labelMetricState
@@ -40,6 +41,25 @@ type controlMetrics struct {
 
 type labelMetricState struct {
 	labels []string
+}
+
+// deploymentVersionKey orders deployment snapshots the same way
+// GetLatestDeployment does, so a stalled observation can recognise that what it
+// read has already been superseded.
+type deploymentVersionKey struct {
+	startedAt time.Time
+	id        int
+	set       bool
+}
+
+func (k deploymentVersionKey) olderThan(other deploymentVersionKey) bool {
+	if !k.set || !other.set {
+		return false
+	}
+	if !k.startedAt.Equal(other.startedAt) {
+		return k.startedAt.Before(other.startedAt)
+	}
+	return k.id < other.id
 }
 
 type workerInfoMetricState struct {
@@ -648,7 +668,14 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 		return
 	}
 
-	rollout, err := buildDeploymentRollout(db, *deployment)
+	m.publishDeploymentSnapshot(db, *deployment)
+}
+
+// publishDeploymentSnapshot builds and publishes the gauges for one deployment
+// snapshot. The snapshot is read before the lock, so it may already be
+// superseded by the time it reaches the critical section.
+func (m *controlMetrics) publishDeploymentSnapshot(db *model.DB, deployment model.Deployment) {
+	rollout, err := buildDeploymentRollout(db, deployment)
 	if err != nil {
 		return
 	}
@@ -678,7 +705,24 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 		"awaiting_verification": float64(rollout.AwaitingVerification),
 	}
 
+	// The label swap and the gauge writes have to be one critical section.
+	// Releasing between them lets a slower observation write its series after a
+	// newer one already zeroed it, leaving a superseded deployment non-zero with
+	// nothing left holding its labels to clear it later. Readers that identify
+	// the live deployment by its non-zero series then see a stale SHA.
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// The deployment was read before the lock, so this snapshot may already be
+	// superseded by one another observation published while this one waited.
+	// Publishing it anyway would zero the newer series and leave a single live
+	// series holding a stale SHA, which reads as authoritative.
+	incoming := deploymentVersionKey{startedAt: rollout.Deployment.StartedAt, id: rollout.Deployment.ID, set: true}
+	if incoming.olderThan(m.latestDeploymentPublished) {
+		return
+	}
+	m.latestDeploymentPublished = incoming
+
 	previousDeployment := m.latestDeployment
 	previousDeploymentVersion := m.latestDeploymentVersion
 	m.latestDeployment = labelMetricState{labels: deploymentLabels}
@@ -691,16 +735,13 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 	for state := range rolloutStates {
 		m.rolloutByState[state] = labelMetricState{labels: append(append([]string{}, deploymentLabels...), state)}
 	}
-	m.mu.Unlock()
 
-	if len(previousDeployment.labels) > 0 && !sameMetricLabels(previousDeployment.labels, deploymentLabels) {
-		controlLatestDeploymentInfo.WithLabelValues(previousDeployment.labels...).Set(0)
-		controlLatestDeploymentAge.WithLabelValues(previousDeployment.labels...).Set(0)
-		controlLatestDeploymentGraceExceeded.WithLabelValues(previousDeployment.labels...).Set(0)
-	}
-	if len(previousDeploymentVersion.labels) > 0 && !sameMetricLabels(previousDeploymentVersion.labels, deploymentVersionLabels) {
-		controlLatestDeploymentVersionInfo.WithLabelValues(previousDeploymentVersion.labels...).Set(0)
-	}
+	// Publish the current series before zeroing the superseded one. The mutex
+	// orders publishers but is invisible to Prometheus collection, so a scrape
+	// can land between the two writes. Zeroing first would expose a window
+	// holding only the stale series, which reads as authoritative; setting first
+	// means the worst a scrape sees is both series non-zero, which is
+	// self-evidently ambiguous and safe to reject.
 	controlLatestDeploymentInfo.WithLabelValues(deploymentLabels...).Set(deploymentMetricValue(rollout.Status))
 	controlLatestDeploymentVersionInfo.WithLabelValues(deploymentVersionLabels...).Set(deploymentMetricValue(rollout.Status))
 	if !rollout.Deployment.StartedAt.IsZero() {
@@ -710,6 +751,15 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 		controlLatestDeploymentGraceExceeded.WithLabelValues(deploymentLabels...).Set(1)
 	} else {
 		controlLatestDeploymentGraceExceeded.WithLabelValues(deploymentLabels...).Set(0)
+	}
+
+	if len(previousDeployment.labels) > 0 && !sameMetricLabels(previousDeployment.labels, deploymentLabels) {
+		controlLatestDeploymentInfo.WithLabelValues(previousDeployment.labels...).Set(0)
+		controlLatestDeploymentAge.WithLabelValues(previousDeployment.labels...).Set(0)
+		controlLatestDeploymentGraceExceeded.WithLabelValues(previousDeployment.labels...).Set(0)
+	}
+	if len(previousDeploymentVersion.labels) > 0 && !sameMetricLabels(previousDeploymentVersion.labels, deploymentVersionLabels) {
+		controlLatestDeploymentVersionInfo.WithLabelValues(previousDeploymentVersion.labels...).Set(0)
 	}
 
 	for state, previous := range previousRolloutStates {
