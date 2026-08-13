@@ -43,38 +43,48 @@ jobs:
             exit 1
           fi
 
-          # Read the soaked SHA from the authoritative deployment endpoint
-          # rather than inferring it from the Prometheus gauge. The gauge keeps
-          # a series per status plus a zeroed one for the superseded deployment,
-          # and Prometheus collection is not transactional across series, so a
-          # scrape landing mid-publication can expose a lone stale SHA. This
-          # endpoint returns one value with no inference.
-          deployment_file="$(mktemp)"
-          if ! curl -sS --fail-with-body --retry 3 --retry-delay 5 --max-time 60 \
-            --user "${SOAK_BASIC_AUTH_USERNAME}:${SOAK_BASIC_AUTH_PASSWORD}" \
-            -o "${deployment_file}" "${base_url}/api/deployments/latest"; then
-            echo "failed to fetch ${base_url}/api/deployments/latest" >&2
-            exit 1
-          fi
-
-          current_litestream_sha="$(jq -r '.deployment.litestream_sha // empty' "${deployment_file}" | tr '[:upper:]' '[:lower:]')"
-
           force_rebuild="false"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.force || '' }}" = "true" ]; then
             force_rebuild="true"
           fi
 
+          # Resolve the soaked SHA from the authoritative deployment endpoint
+          # rather than inferring it from the Prometheus gauge. The gauge keeps a
+          # series per status plus a zeroed one for the superseded deployment,
+          # and Prometheus collection is not transactional across series, so a
+          # scrape landing mid-publication can expose a lone stale SHA.
+          #
+          # source=main is required: unscoped, the endpoint returns the newest
+          # deployment across every source, so an active PR fleet would hand
+          # back its own SHA and trigger a main-fleet build.
+          #
+          # Skipped entirely under force, so a cold-start control plane with no
+          # deployment yet (which 404s here) can still be seeded by hand.
           should_build="true"
           if [ "${force_rebuild}" != "true" ]; then
+            deployment_file="$(mktemp)"
+            if ! curl -sS --fail-with-body --retry 3 --retry-delay 5 --max-time 60 \
+              --user "${SOAK_BASIC_AUTH_USERNAME}:${SOAK_BASIC_AUTH_PASSWORD}" \
+              -o "${deployment_file}" "${base_url}/api/deployments/latest?source=main"; then
+              echo "failed to fetch ${base_url}/api/deployments/latest?source=main" >&2
+              echo "run with force to build without confirming the soaked SHA" >&2
+              exit 1
+            fi
+
+            deployment_source="$(jq -r '.deployment.source // empty' "${deployment_file}")"
+            if [ "${deployment_source}" != "main" ]; then
+              echo "expected a main deployment, got '${deployment_source}'" >&2
+              exit 1
+            fi
+
+            current_litestream_sha="$(jq -r '.deployment.litestream_sha // empty' "${deployment_file}" | tr '[:upper:]' '[:lower:]')"
             if printf '%s' "${current_litestream_sha}" | grep -Eq '^[0-9a-f]{40}$'; then
               if [ "${current_litestream_sha}" = "${litestream_sha}" ]; then
                 should_build="false"
                 echo "already soaking upstream main ${litestream_sha}; nothing to build"
               fi
             else
-              # No deployment yet, or a value that is not a commit SHA. Building
-              # blind rolls a 15-machine fleet, so require an explicit force
-              # dispatch instead.
+              # Building blind rolls a 15-machine fleet, so require force.
               should_build="false"
               echo "control plane did not report a usable Litestream SHA (got '${current_litestream_sha}'); run with force to override" >&2
             fi
