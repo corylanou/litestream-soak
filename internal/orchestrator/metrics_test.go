@@ -882,7 +882,7 @@ func TestControlMetricsObserveLatestDeploymentIgnoresSupersededSnapshot(t *testi
 	// live series holding a stale SHA reads as authoritative to anything that
 	// identifies the current deployment by its non-zero value.
 	stale := mustDeploymentByGitSHA(t, db, "sha-superseded-old")
-	metrics.publishDeploymentSnapshot(db, stale)
+	metrics.publishDeploymentSnapshot(db, stale, metrics.latestDeploymentSequence.Add(1))
 
 	assertGatheredGaugeValue(t, "soak_control_latest_deployment_version_info", map[string]string{
 		"source":         "main",
@@ -895,6 +895,37 @@ func TestControlMetricsObserveLatestDeploymentIgnoresSupersededSnapshot(t *testi
 		"git_sha":        "sha-superseded-old",
 		"litestream_sha": "litestream-superseded-old",
 		"status":         "stable",
+	}, 0)
+}
+
+func TestControlMetricsObserveLatestDeploymentIgnoresSupersededStatusSnapshot(t *testing.T) {
+	db := openTestDB(t)
+	metrics := NewControlMetrics(db)
+	startedAt := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	deployment := model.Deployment{
+		ID:            188,
+		GitSHA:        "sha-status-snapshot",
+		LitestreamSHA: "litestream-status-snapshot",
+		Source:        "main",
+		StartedAt:     startedAt,
+	}
+	stable := DeploymentRolloutResponse{Deployment: deployment, Status: "stable"}
+	rollingOut := DeploymentRolloutResponse{Deployment: deployment, Status: "rolling_out"}
+
+	metrics.publishDeploymentRollout(stable, 2)
+	metrics.publishDeploymentRollout(rollingOut, 1)
+
+	assertGatheredGaugeValue(t, "soak_control_latest_deployment_version_info", map[string]string{
+		"source":         "main",
+		"git_sha":        "sha-status-snapshot",
+		"litestream_sha": "litestream-status-snapshot",
+		"status":         "stable",
+	}, 4)
+	assertGaugeVecValue(t, controlLatestDeploymentVersionInfo, []string{
+		"main",
+		"sha-status-snapshot",
+		"litestream-status-snapshot",
+		"rolling_out",
 	}, 0)
 }
 
