@@ -60,6 +60,10 @@ jobs:
           #
           # Skipped entirely under force, so a cold-start control plane with no
           # deployment yet (which 404s here) can still be seeded by hand.
+          # Declared up front because the force path skips the lookup entirely
+          # and the outputs block below expands it unconditionally under set -u.
+          current_litestream_sha=""
+
           should_build="true"
           if [ "${force_rebuild}" != "true" ]; then
             deployment_file="$(mktemp)"
