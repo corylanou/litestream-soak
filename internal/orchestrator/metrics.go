@@ -26,6 +26,7 @@ type controlMetrics struct {
 	lastFailureByWorker       map[string]failureMetricState
 	latestDeployment          labelMetricState
 	latestDeploymentVersion   labelMetricState
+	latestDeploymentPublished deploymentVersionKey
 	rolloutByState            map[string]labelMetricState
 	comparisonInfo            labelMetricState
 	comparisonWorkers         map[string]labelMetricState
@@ -40,6 +41,25 @@ type controlMetrics struct {
 
 type labelMetricState struct {
 	labels []string
+}
+
+// deploymentVersionKey orders deployment snapshots the same way
+// GetLatestDeployment does, so a stalled observation can recognise that what it
+// read has already been superseded.
+type deploymentVersionKey struct {
+	startedAt time.Time
+	id        int
+	set       bool
+}
+
+func (k deploymentVersionKey) olderThan(other deploymentVersionKey) bool {
+	if !k.set || !other.set {
+		return false
+	}
+	if !k.startedAt.Equal(other.startedAt) {
+		return k.startedAt.Before(other.startedAt)
+	}
+	return k.id < other.id
 }
 
 type workerInfoMetricState struct {
@@ -648,7 +668,14 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 		return
 	}
 
-	rollout, err := buildDeploymentRollout(db, *deployment)
+	m.publishDeploymentSnapshot(db, *deployment)
+}
+
+// publishDeploymentSnapshot builds and publishes the gauges for one deployment
+// snapshot. The snapshot is read before the lock, so it may already be
+// superseded by the time it reaches the critical section.
+func (m *controlMetrics) publishDeploymentSnapshot(db *model.DB, deployment model.Deployment) {
+	rollout, err := buildDeploymentRollout(db, deployment)
 	if err != nil {
 		return
 	}
@@ -685,6 +712,16 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 	// the live deployment by its non-zero series then see a stale SHA.
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// The deployment was read before the lock, so this snapshot may already be
+	// superseded by one another observation published while this one waited.
+	// Publishing it anyway would zero the newer series and leave a single live
+	// series holding a stale SHA, which reads as authoritative.
+	incoming := deploymentVersionKey{startedAt: rollout.Deployment.StartedAt, id: rollout.Deployment.ID, set: true}
+	if incoming.olderThan(m.latestDeploymentPublished) {
+		return
+	}
+	m.latestDeploymentPublished = incoming
 
 	previousDeployment := m.latestDeployment
 	previousDeploymentVersion := m.latestDeploymentVersion

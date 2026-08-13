@@ -823,3 +823,93 @@ func nonZeroRaceSeries(t *testing.T) []string {
 	}
 	return live
 }
+
+func TestControlMetricsObserveLatestDeploymentIgnoresSupersededSnapshot(t *testing.T) {
+	db := openTestDB(t)
+	metrics := NewControlMetrics(db)
+
+	older := model.Deployment{
+		GitSHA:        "sha-superseded-old",
+		LitestreamSHA: "litestream-superseded-old",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-superseded-old",
+		Source:        "main",
+		Status:        "ready",
+	}
+	mustUpsertReadyDeployment(t, db, older)
+	oldDeployment := mustLatestDeployment(t, db, "main")
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-superseded-metrics",
+		Name:          "worker-superseded-metrics",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        oldDeployment.GitSHA,
+		LitestreamSHA: oldDeployment.LitestreamSHA,
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	})
+	verifiedAt := time.Now().UTC().Add(time.Second)
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID:    "worker-superseded-metrics",
+		StartedAt:   verifiedAt.Add(-time.Second),
+		CompletedAt: &verifiedAt,
+		Status:      "passed",
+		CheckType:   "integrity",
+		Passed:      true,
+		DurationMS:  1000,
+	})
+	metrics.observeLatestDeployment(db)
+
+	newer := model.Deployment{
+		GitSHA:        "sha-superseded-new",
+		LitestreamSHA: "litestream-superseded-new",
+		ImageRef:      "registry.fly.io/litestream-soak:sha-superseded-new",
+		Source:        "main",
+		Status:        "ready",
+	}
+	mustUpsertReadyDeployment(t, db, newer)
+	metrics.observeLatestDeployment(db)
+
+	assertGatheredGaugeValue(t, "soak_control_latest_deployment_version_info", map[string]string{
+		"source":         "main",
+		"git_sha":        "sha-superseded-new",
+		"litestream_sha": "litestream-superseded-new",
+		"status":         "rolling_out",
+	}, 1)
+
+	// Replay the older snapshot the way a stalled observation would: it read the
+	// old deployment before the newer one landed and only now reaches the
+	// publish step. It must not overwrite the newer series, because a single
+	// live series holding a stale SHA reads as authoritative to anything that
+	// identifies the current deployment by its non-zero value.
+	stale := mustDeploymentByGitSHA(t, db, "sha-superseded-old")
+	metrics.publishDeploymentSnapshot(db, stale)
+
+	assertGatheredGaugeValue(t, "soak_control_latest_deployment_version_info", map[string]string{
+		"source":         "main",
+		"git_sha":        "sha-superseded-new",
+		"litestream_sha": "litestream-superseded-new",
+		"status":         "rolling_out",
+	}, 1)
+	assertGatheredGaugeValue(t, "soak_control_latest_deployment_version_info", map[string]string{
+		"source":         "main",
+		"git_sha":        "sha-superseded-old",
+		"litestream_sha": "litestream-superseded-old",
+		"status":         "stable",
+	}, 0)
+}
+
+func mustDeploymentByGitSHA(t *testing.T, db *model.DB, gitSHA string) model.Deployment {
+	t.Helper()
+
+	deployments, err := db.ListDeployments("main", 50)
+	if err != nil {
+		t.Fatalf("ListDeployments() error = %v", err)
+	}
+	for _, deployment := range deployments {
+		if deployment.GitSHA == gitSHA {
+			return deployment
+		}
+	}
+	t.Fatalf("deployment %s not found", gitSHA)
+	return model.Deployment{}
+}
