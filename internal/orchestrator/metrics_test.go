@@ -1,6 +1,9 @@
 package orchestrator
 
 import (
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -734,4 +737,89 @@ func metricLabels(metric *dto.Metric) map[string]string {
 		labels[label.GetName()] = label.GetValue()
 	}
 	return labels
+}
+
+func TestControlMetricsObserveLatestDeploymentKeepsSingleLiveVersionSeries(t *testing.T) {
+	db := openTestDB(t)
+	metrics := NewControlMetrics(db)
+
+	// Each round has to insert a genuinely newer deployment: re-upserting the
+	// same row preserves started_at, so GetLatestDeployment would keep handing
+	// every observer identical state and nothing would race.
+	newDeployment := func(round int) model.Deployment {
+		sha := fmt.Sprintf("sha-race-%03d", round)
+		return model.Deployment{
+			GitSHA:        sha,
+			LitestreamSHA: "litestream-race-" + sha,
+			ImageRef:      "registry.fly.io/litestream-soak:" + sha,
+			Source:        "main",
+			Status:        "ready",
+		}
+	}
+	mustUpsertReadyDeployment(t, db, newDeployment(0))
+
+	// Guards the invariant that at most one version series is ever live, which
+	// is what lets a reader identify the current deployment by its non-zero
+	// value. This exercises concurrent observation while the latest deployment
+	// moves; it is an invariant guard rather than a reproducer, since the window
+	// between the label swap and the gauge writes is far too narrow to hit
+	// reliably from a test, and the failure is a logical race that -race cannot
+	// see. The invariant is held by keeping both under one critical section.
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					metrics.observeLatestDeployment(db)
+				}
+			}
+		}()
+	}
+
+	for round := 1; round <= 150; round++ {
+		mustUpsertReadyDeployment(t, db, newDeployment(round))
+		time.Sleep(time.Millisecond)
+	}
+	close(stop)
+	wg.Wait()
+
+	metrics.observeLatestDeployment(db)
+
+	if live := nonZeroRaceSeries(t); len(live) > 1 {
+		t.Fatalf("%d live version series, want at most 1: %v", len(live), live)
+	}
+}
+
+func nonZeroRaceSeries(t *testing.T) []string {
+	t.Helper()
+
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+
+	live := make([]string, 0)
+	for _, family := range families {
+		if family.GetName() != "soak_control_latest_deployment_version_info" {
+			continue
+		}
+		for _, metric := range family.Metric {
+			if metric.GetGauge().GetValue() == 0 {
+				continue
+			}
+			labels := metricLabels(metric)
+			if !strings.HasPrefix(labels["litestream_sha"], "litestream-race-") {
+				continue
+			}
+			live = append(live, labels["litestream_sha"]+"="+labels["status"])
+		}
+	}
+	return live
 }

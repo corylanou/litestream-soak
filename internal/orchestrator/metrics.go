@@ -678,7 +678,14 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 		"awaiting_verification": float64(rollout.AwaitingVerification),
 	}
 
+	// The label swap and the gauge writes have to be one critical section.
+	// Releasing between them lets a slower observation write its series after a
+	// newer one already zeroed it, leaving a superseded deployment non-zero with
+	// nothing left holding its labels to clear it later. Readers that identify
+	// the live deployment by its non-zero series then see a stale SHA.
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	previousDeployment := m.latestDeployment
 	previousDeploymentVersion := m.latestDeploymentVersion
 	m.latestDeployment = labelMetricState{labels: deploymentLabels}
@@ -691,7 +698,6 @@ func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
 	for state := range rolloutStates {
 		m.rolloutByState[state] = labelMetricState{labels: append(append([]string{}, deploymentLabels...), state)}
 	}
-	m.mu.Unlock()
 
 	if len(previousDeployment.labels) > 0 && !sameMetricLabels(previousDeployment.labels, deploymentLabels) {
 		controlLatestDeploymentInfo.WithLabelValues(previousDeployment.labels...).Set(0)
