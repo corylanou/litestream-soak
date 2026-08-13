@@ -31,6 +31,8 @@ jobs:
         shell: bash
         env:
           CONTROL_BASE_URL: ${{ vars.SOAK_CONTROL_BASE_URL }}
+          SOAK_BASIC_AUTH_USERNAME: ${{ secrets.SOAK_BASIC_AUTH_USERNAME }}
+          SOAK_BASIC_AUTH_PASSWORD: ${{ secrets.SOAK_BASIC_AUTH_PASSWORD }}
         run: |
           set -euo pipefail
 
@@ -41,90 +43,21 @@ jobs:
             exit 1
           fi
 
-          metrics_file="$(mktemp)"
-          if ! curl -fsSL --retry 3 --retry-delay 5 -o "${metrics_file}" "${base_url}/metrics"; then
-            echo "failed to fetch control-plane metrics from ${base_url}/metrics" >&2
+          # Read the soaked SHA from the authoritative deployment endpoint
+          # rather than inferring it from the Prometheus gauge. The gauge keeps
+          # a series per status plus a zeroed one for the superseded deployment,
+          # and Prometheus collection is not transactional across series, so a
+          # scrape landing mid-publication can expose a lone stale SHA. This
+          # endpoint returns one value with no inference.
+          deployment_file="$(mktemp)"
+          if ! curl -sS --fail-with-body --retry 3 --retry-delay 5 --max-time 60 \
+            --user "${SOAK_BASIC_AUTH_USERNAME}:${SOAK_BASIC_AUTH_PASSWORD}" \
+            -o "${deployment_file}" "${base_url}/api/deployments/latest"; then
+            echo "failed to fetch ${base_url}/api/deployments/latest" >&2
             exit 1
           fi
 
-          # The gauge keeps one line per status the deployment has moved through,
-          # plus a zeroed line for the superseded deployment, so line order does
-          # not identify the live deployment. Only a live status carries a
-          # non-zero value. Read from a file so awk never writes to a closed
-          # pipe, which is what the previous awk exit did under pipefail.
-          #
-          # The emitter releases its mutex before writing the gauges
-          # (internal/orchestrator/metrics.go), so a slow concurrent observation
-          # can set a superseded series non-zero again after a newer one zeroed
-          # it, and nothing remembers to clear it afterwards. That makes "the
-          # non-zero series" ambiguous rather than authoritative, so collect
-          # every distinct non-zero SHA and only trust an unambiguous answer.
-          live_shas="$(awk '
-            /^soak_control_latest_deployment_version_info\{/ && /source="main"/ {
-              if (($NF + 0) == 0) { next }
-              split($0, parts, "litestream_sha=\"")
-              if (length(parts) > 1) {
-                split(parts[2], tail, "\"")
-                print tail[1]
-              }
-            }
-          ' "${metrics_file}" | sort -u)"
-
-          # grep -c exits 1 on "no matches" but 2+ on a real error, so treat
-          # only exit 1 as an empty count and fail on anything worse rather
-          # than letting an unreadable file look like a cold start.
-          count_matches() {
-            local pattern="$1" file="$2" out rc
-            set +e
-            out="$(grep -c -- "${pattern}" "${file}")"
-            rc=$?
-            set -e
-            if [ "${rc}" -gt 1 ]; then
-              echo "failed to scan control-plane metrics (grep exit ${rc})" >&2
-              return 1
-            fi
-            printf '%s' "${out:-0}"
-          }
-
-          printf '%s' "${live_shas}" > "${metrics_file}.shas"
-          live_sha_count="$(count_matches . "${metrics_file}.shas")"
-          main_deployment_lines="$(count_matches '^soak_control_latest_deployment_version_info{.*source="main"' "${metrics_file}")"
-
-          # resolved: exactly one well-formed live SHA. none: no main deployment
-          # at all, a genuine cold start. ambiguous: anything else, which must
-          # never build, because a wrong build rolls the whole fleet whereas a
-          # skipped one just waits for the next run.
-          current_litestream_sha=""
-          if [ "${live_sha_count}" -eq 1 ]; then
-            # Normalise case before comparing: deploy-main preserves a
-            # configured SHA verbatim, so an uppercase value would otherwise
-            # read as a mismatch against lowercase git ls-remote output.
-            candidate="$(printf '%s' "${live_shas}" | tr '[:upper:]' '[:lower:]')"
-            if printf '%s' "${candidate}" | grep -Eq '^[0-9a-f]{40}$'; then
-              resolution="resolved"
-              current_litestream_sha="${candidate}"
-            else
-              # Empty deployment values are exported as the literal "unknown"
-              # sentinel, which is non-empty and would otherwise read as a real
-              # mismatch against upstream.
-              resolution="ambiguous"
-              echo "control plane reported a non-SHA litestream value (${candidate})" >&2
-            fi
-          elif [ "${live_sha_count}" -gt 1 ]; then
-            resolution="ambiguous"
-            echo "control plane reported ${live_sha_count} live main SHAs: $(printf '%s' "${live_shas}" | tr '\n' ' ')" >&2
-          elif [ "${main_deployment_lines}" -gt 0 ]; then
-            resolution="ambiguous"
-            echo "control plane reports a main deployment with no live status line" >&2
-          else
-            # No main series at all is either a genuine cold start or a control
-            # plane whose metric registration silently failed, and the two are
-            # indistinguishable from here. Cold start happens once, with a human
-            # present, so require an explicit force dispatch rather than letting
-            # a metrics outage roll the fleet.
-            resolution="ambiguous"
-            echo "control plane reports no main deployment series; run with force to seed a cold start" >&2
-          fi
+          current_litestream_sha="$(jq -r '.deployment.litestream_sha // empty' "${deployment_file}" | tr '[:upper:]' '[:lower:]')"
 
           force_rebuild="false"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.force || '' }}" = "true" ]; then
@@ -133,18 +66,18 @@ jobs:
 
           should_build="true"
           if [ "${force_rebuild}" != "true" ]; then
-            case "${resolution}" in
-              resolved)
-                if [ "${current_litestream_sha}" = "${litestream_sha}" ]; then
-                  should_build="false"
-                  echo "already soaking upstream main ${litestream_sha}; nothing to build"
-                fi
-                ;;
-              ambiguous)
+            if printf '%s' "${current_litestream_sha}" | grep -Eq '^[0-9a-f]{40}$'; then
+              if [ "${current_litestream_sha}" = "${litestream_sha}" ]; then
                 should_build="false"
-                echo "cannot identify the soaked Litestream SHA; skipping this cycle rather than rolling the fleet" >&2
-                ;;
-            esac
+                echo "already soaking upstream main ${litestream_sha}; nothing to build"
+              fi
+            else
+              # No deployment yet, or a value that is not a commit SHA. Building
+              # blind rolls a 15-machine fleet, so require an explicit force
+              # dispatch instead.
+              should_build="false"
+              echo "control plane did not report a usable Litestream SHA (got '${current_litestream_sha}'); run with force to override" >&2
+            fi
           fi
 
           trigger="upstream_main_schedule"
