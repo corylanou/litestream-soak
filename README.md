@@ -119,6 +119,12 @@ fixture did not engage the intended fault. The Litestream fixes for compaction
 resume and disk-full recovery are validated through
 `scripts/local-rig-one-shot.sh` instead.
 
+The `provider-request-canceled` local rig injects the production Tigris failure
+shape, HTTP 408 with API code `RequestCanceled`, into `ListObjectsV2` and
+requires the restore to recover. This verifies the S3 retry policy directly;
+increasing the soak worker's verification timeout does not change whether the
+SDK retries that response.
+
 PR fleets use sources named `pr-NNN`. The PR workflow builds a worker image with
 `LITESTREAM_SHA` set to the upstream PR head SHA, then notifies the control
 plane with `source=pr-NNN`. The control plane rewrites the default fleet names

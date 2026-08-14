@@ -381,7 +381,6 @@ func runProviderRestore(ctx context.Context, cfg config) (result, error) {
 	res.Stats["restored_row_count"] = restoredRowCount(restorePath)
 	if opErr != nil {
 		res.Error = opErr.Error()
-		res.Pass = proxy.TotalFailures() == 1 && providerSignature(cfg.Scenario, opErr)
 		return res, nil
 	}
 	res.Pass = proxy.TotalFailures() == 1 && fileExists(restorePath) && restoredRowCount(restorePath) == 64
@@ -696,17 +695,6 @@ func sourceReadSignature(err error) bool {
 	return strings.Contains(s, "read") || strings.Contains(s, "stream") || strings.Contains(s, "unexpected eof") || strings.Contains(s, "connection")
 }
 
-func providerSignature(scenario string, err error) bool {
-	if err == nil {
-		return false
-	}
-	s := strings.ToLower(err.Error())
-	if scenario == "provider-request-canceled" {
-		return strings.Contains(s, "requestcanceled") || strings.Contains(s, "request canceled") || strings.Contains(s, "canceled")
-	}
-	return strings.Contains(s, "requesttimeout") || strings.Contains(s, "408") || strings.Contains(s, "request timeout")
-}
-
 func withProxyEnv(endpoint string, fn func() error) error {
 	keys := []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"}
 	old := make(map[string]*string, len(keys))
@@ -899,7 +887,7 @@ func (p *faultProxy) shouldInjectProviderRequestCanceled(r *http.Request) bool {
 	if p.cfg.Mode != modeProviderRequestCanceled || r.Method != http.MethodGet {
 		return false
 	}
-	if !isProviderObjectGET(r) {
+	if !isProviderListObjectsV2(r) {
 		return false
 	}
 	key := "provider-request-canceled\x00" + r.URL.Path + "\x00" + r.URL.RawQuery
@@ -920,7 +908,7 @@ func (p *faultProxy) injectProviderHTTP408(w http.ResponseWriter, r *http.Reques
 func (p *faultProxy) injectProviderRequestCanceled(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/xml")
 	w.Header().Set("X-Amz-Request-Id", "fault-proxy")
-	w.WriteHeader(http.StatusBadRequest)
+	w.WriteHeader(http.StatusRequestTimeout)
 	_, _ = w.Write([]byte(requestCanceledResponseBody))
 }
 
@@ -1137,6 +1125,10 @@ func isNonzeroRangeHeader(value string) bool {
 
 func isProviderObjectGET(r *http.Request) bool {
 	return r.URL.Query().Get("list-type") == "" && strings.HasSuffix(r.URL.Path, ".ltx")
+}
+
+func isProviderListObjectsV2(r *http.Request) bool {
+	return r.URL.Query().Get("list-type") == "2"
 }
 
 func cloneURL(input *url.URL) *url.URL {
