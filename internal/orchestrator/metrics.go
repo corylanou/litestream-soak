@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/flyapi"
@@ -26,6 +27,7 @@ type controlMetrics struct {
 	lastFailureByWorker       map[string]failureMetricState
 	latestDeployment          labelMetricState
 	latestDeploymentVersion   labelMetricState
+	latestDeploymentSequence  atomic.Uint64
 	latestDeploymentPublished deploymentVersionKey
 	rolloutByState            map[string]labelMetricState
 	comparisonInfo            labelMetricState
@@ -43,12 +45,11 @@ type labelMetricState struct {
 	labels []string
 }
 
-// deploymentVersionKey orders deployment snapshots the same way
-// GetLatestDeployment does, so a stalled observation can recognise that what it
-// read has already been superseded.
+// deploymentVersionKey orders deployments before their observations.
 type deploymentVersionKey struct {
 	startedAt time.Time
 	id        int
+	sequence  uint64
 	set       bool
 }
 
@@ -59,7 +60,10 @@ func (k deploymentVersionKey) olderThan(other deploymentVersionKey) bool {
 	if !k.startedAt.Equal(other.startedAt) {
 		return k.startedAt.Before(other.startedAt)
 	}
-	return k.id < other.id
+	if k.id != other.id {
+		return k.id < other.id
+	}
+	return k.sequence < other.sequence
 }
 
 type workerInfoMetricState struct {
@@ -663,23 +667,27 @@ func (m *controlMetrics) observeLastFailure(worker model.Worker, verification mo
 }
 
 func (m *controlMetrics) observeLatestDeployment(db *model.DB) {
+	sequence := m.latestDeploymentSequence.Add(1)
 	deployment, err := db.GetLatestDeployment("main")
 	if err != nil || deployment == nil {
 		return
 	}
 
-	m.publishDeploymentSnapshot(db, *deployment)
+	m.publishDeploymentSnapshot(db, *deployment, sequence)
 }
 
 // publishDeploymentSnapshot builds and publishes the gauges for one deployment
 // snapshot. The snapshot is read before the lock, so it may already be
 // superseded by the time it reaches the critical section.
-func (m *controlMetrics) publishDeploymentSnapshot(db *model.DB, deployment model.Deployment) {
+func (m *controlMetrics) publishDeploymentSnapshot(db *model.DB, deployment model.Deployment, sequence uint64) {
 	rollout, err := buildDeploymentRollout(db, deployment)
 	if err != nil {
 		return
 	}
+	m.publishDeploymentRollout(rollout, sequence)
+}
 
+func (m *controlMetrics) publishDeploymentRollout(rollout DeploymentRolloutResponse, sequence uint64) {
 	deploymentLabels := []string{
 		valueOrUnknown(rollout.Deployment.Source),
 		valueOrUnknown(rollout.Deployment.GitSHA),
@@ -717,7 +725,7 @@ func (m *controlMetrics) publishDeploymentSnapshot(db *model.DB, deployment mode
 	// superseded by one another observation published while this one waited.
 	// Publishing it anyway would zero the newer series and leave a single live
 	// series holding a stale SHA, which reads as authoritative.
-	incoming := deploymentVersionKey{startedAt: rollout.Deployment.StartedAt, id: rollout.Deployment.ID, set: true}
+	incoming := deploymentVersionKey{startedAt: rollout.Deployment.StartedAt, id: rollout.Deployment.ID, sequence: sequence, set: true}
 	if incoming.olderThan(m.latestDeploymentPublished) {
 		return
 	}
@@ -921,6 +929,8 @@ func (m *controlMetrics) observeLatestDeploymentComparison(db *model.DB) {
 	}
 
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	previousInfo := m.comparisonInfo
 	previousWorkers := cloneLabelMetricStates(m.comparisonWorkers)
 	previousDeltas := cloneLabelMetricStates(m.comparisonDeltas)
@@ -938,8 +948,6 @@ func (m *controlMetrics) observeLatestDeploymentComparison(db *model.DB) {
 	for key, metric := range failureStates {
 		m.comparisonFailures[key] = labelMetricState{labels: metric.labels}
 	}
-	m.mu.Unlock()
-
 	if len(previousInfo.labels) > 0 && !sameMetricLabels(previousInfo.labels, infoLabels) {
 		controlLatestDeploymentComparisonInfo.WithLabelValues(previousInfo.labels...).Set(0)
 	}
@@ -998,6 +1006,9 @@ func (m *controlMetrics) observeSourceComparisons(db *model.DB) {
 	workerStates := make(map[string]labelMetricState)
 	deltaStates := make(map[string]labelMetricState)
 	failureStates := make(map[string]labelMetricState)
+	workerValues := make(map[string]float64)
+	deltaValues := make(map[string]float64)
+	failureValues := make(map[string]float64)
 
 	for _, headSource := range headSources {
 		comparison, err := buildLatestCrossSourceDeploymentComparison(db, "main", headSource)
@@ -1028,7 +1039,7 @@ func (m *controlMetrics) observeSourceComparisons(db *model.DB) {
 				valueOrUnknown(headDeployment.LitestreamSHA),
 				state,
 			}}
-			controlSourceComparisonWorkers.WithLabelValues(workerStates[key].labels...).Set(value)
+			workerValues[key] = value
 		}
 		for state, value := range deploymentScorecardWorkerStates(*comparison.Base) {
 			key := strings.Join([]string{headSource, "base", state}, ":")
@@ -1040,7 +1051,7 @@ func (m *controlMetrics) observeSourceComparisons(db *model.DB) {
 				valueOrUnknown(baseDeployment.LitestreamSHA),
 				state,
 			}}
-			controlSourceComparisonWorkers.WithLabelValues(workerStates[key].labels...).Set(value)
+			workerValues[key] = value
 		}
 
 		deltaLabels := []string{
@@ -1063,7 +1074,7 @@ func (m *controlMetrics) observeSourceComparisons(db *model.DB) {
 		for deltaType, value := range deltas {
 			key := strings.Join([]string{headSource, deltaType}, ":")
 			deltaStates[key] = labelMetricState{labels: append(append([]string{}, deltaLabels...), deltaType, valueOrUnknown(comparison.Verdict))}
-			controlSourceComparisonDelta.WithLabelValues(deltaStates[key].labels...).Set(value)
+			deltaValues[key] = value
 		}
 
 		for _, failure := range comparison.Head.Failures {
@@ -1077,7 +1088,7 @@ func (m *controlMetrics) observeSourceComparisons(db *model.DB) {
 				metricValueOrUnknown(failure.Stage),
 				metricValueOrUnknown(failure.Signature),
 			}}
-			controlSourceComparisonFailure.WithLabelValues(failureStates[key].labels...).Set(float64(failure.Count))
+			failureValues[key] = float64(failure.Count)
 		}
 		for _, failure := range comparison.Base.Failures {
 			key := strings.Join([]string{headSource, "base", failure.Stage, failure.Signature}, ":")
@@ -1090,7 +1101,7 @@ func (m *controlMetrics) observeSourceComparisons(db *model.DB) {
 				metricValueOrUnknown(failure.Stage),
 				metricValueOrUnknown(failure.Signature),
 			}}
-			controlSourceComparisonFailure.WithLabelValues(failureStates[key].labels...).Set(float64(failure.Count))
+			failureValues[key] = float64(failure.Count)
 		}
 		for _, failure := range comparison.NewFailures {
 			key := strings.Join([]string{headSource, "new", failure.Stage, failure.Signature}, ":")
@@ -1103,7 +1114,7 @@ func (m *controlMetrics) observeSourceComparisons(db *model.DB) {
 				metricValueOrUnknown(failure.Stage),
 				metricValueOrUnknown(failure.Signature),
 			}}
-			controlSourceComparisonFailure.WithLabelValues(failureStates[key].labels...).Set(float64(failure.Count))
+			failureValues[key] = float64(failure.Count)
 		}
 		for _, failure := range comparison.ResolvedFailures {
 			key := strings.Join([]string{headSource, "resolved", failure.Stage, failure.Signature}, ":")
@@ -1116,13 +1127,13 @@ func (m *controlMetrics) observeSourceComparisons(db *model.DB) {
 				metricValueOrUnknown(failure.Stage),
 				metricValueOrUnknown(failure.Signature),
 			}}
-			controlSourceComparisonFailure.WithLabelValues(failureStates[key].labels...).Set(float64(failure.Count))
+			failureValues[key] = float64(failure.Count)
 		}
-
-		controlSourceComparisonInfo.WithLabelValues(infoLabels...).Set(1)
 	}
 
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	previousInfo := cloneLabelMetricStates(m.sourceComparisonInfo)
 	previousWorkers := cloneLabelMetricStates(m.sourceComparisonWorkers)
 	previousDeltas := cloneLabelMetricStates(m.sourceComparisonDeltas)
@@ -1131,7 +1142,19 @@ func (m *controlMetrics) observeSourceComparisons(db *model.DB) {
 	m.sourceComparisonWorkers = workerStates
 	m.sourceComparisonDeltas = deltaStates
 	m.sourceComparisonFailure = failureStates
-	m.mu.Unlock()
+
+	for _, current := range infoStates {
+		controlSourceComparisonInfo.WithLabelValues(current.labels...).Set(1)
+	}
+	for key, current := range workerStates {
+		controlSourceComparisonWorkers.WithLabelValues(current.labels...).Set(workerValues[key])
+	}
+	for key, current := range deltaStates {
+		controlSourceComparisonDelta.WithLabelValues(current.labels...).Set(deltaValues[key])
+	}
+	for key, current := range failureStates {
+		controlSourceComparisonFailure.WithLabelValues(current.labels...).Set(failureValues[key])
+	}
 
 	for key, previous := range previousInfo {
 		current, ok := infoStates[key]
@@ -1249,6 +1272,8 @@ func (m *controlMetrics) observeVolumes(appName string, volumes []flyapi.Volume)
 	}
 
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	previous := make([]volumeMetricState, 0, len(m.volumeInventory))
 	for key, state := range m.volumeInventory {
 		if _, ok := next[key]; !ok {
@@ -1256,7 +1281,6 @@ func (m *controlMetrics) observeVolumes(appName string, volumes []flyapi.Volume)
 		}
 	}
 	m.volumeInventory = next
-	m.mu.Unlock()
 
 	for _, state := range previous {
 		if len(state.labels) > 0 {
