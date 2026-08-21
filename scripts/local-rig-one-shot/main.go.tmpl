@@ -107,6 +107,8 @@ func main() {
 		res, err = runUploadPartRetryQuota(ctx, cfg)
 	case "provider-http-408", "provider-request-canceled":
 		res, err = runProviderRestore(ctx, cfg)
+	case "l0-gap-heal":
+		res, err = runL0GapHeal(ctx, cfg)
 	case "constrained-disk":
 		res, err = runConstrainedDisk(ctx, cfg)
 	default:
@@ -384,6 +386,138 @@ func runProviderRestore(ctx context.Context, cfg config) (result, error) {
 		return res, nil
 	}
 	res.Pass = proxy.TotalFailures() == 1 && fileExists(restorePath) && restoredRowCount(restorePath) == 64
+	return res, nil
+}
+
+func runL0GapHeal(ctx context.Context, cfg config) (result, error) {
+	res := baseResult(cfg, "compact-level-1-heal")
+	client := newS3Client(cfg, cfg.S3Prefix, 0, 0)
+	if err := client.DeleteAll(ctx); err != nil {
+		return res, fmt.Errorf("delete s3 prefix: %w", err)
+	}
+
+	dbPath := filepath.Join(cfg.WorkDir, "gap-source.db")
+	levels := litestream.CompactionLevels{
+		{Level: 0},
+		{Level: 1, Interval: time.Second},
+	}
+	db, store, sqldb, err := openLitestreamDB(ctx, dbPath, client, levels)
+	if err != nil {
+		return res, err
+	}
+	defer func() {
+		_ = sqldb.Close()
+		_ = store.Close(context.Background())
+	}()
+
+	if err := insertRows(ctx, sqldb, 0, 64, 1024); err != nil {
+		return res, err
+	}
+	if err := syncDB(ctx, db); err != nil {
+		return res, err
+	}
+	if _, err := db.Snapshot(ctx); err != nil {
+		return res, fmt.Errorf("seed snapshot: %w", err)
+	}
+	l1Info, err := store.CompactDB(ctx, db, levels[1])
+	if err != nil {
+		return res, fmt.Errorf("seed level 1 compaction: %w", err)
+	}
+
+	totalRows := 64
+	for i := 0; i < 3; i++ {
+		if err := insertRows(ctx, sqldb, totalRows, 16, 1024); err != nil {
+			return res, err
+		}
+		totalRows += 16
+		if err := syncDB(ctx, db); err != nil {
+			return res, err
+		}
+	}
+	expectedTXID := ltx.TXID(currentTXID(db))
+
+	l0Before, err := listLTXFiles(ctx, client, 0)
+	if err != nil {
+		return res, err
+	}
+	var post []*ltx.FileInfo
+	for _, info := range l0Before {
+		if info.MinTXID > l1Info.MaxTXID {
+			post = append(post, info)
+		}
+	}
+	if len(post) < 3 {
+		return res, fmt.Errorf("expected at least 3 post-boundary l0 files, got %d", len(post))
+	}
+	victim := post[1]
+	if err := client.DeleteLTXFiles(ctx, []*ltx.FileInfo{victim}); err != nil {
+		return res, fmt.Errorf("delete interior l0 file: %w", err)
+	}
+	l0Gapped, err := listLTXFiles(ctx, client, 0)
+	if err != nil {
+		return res, err
+	}
+	gapEngaged := !coversTXID(l0Gapped, victim.MinTXID)
+
+	var healErrs []string
+	healed := false
+	iterations := 0
+	var l0After, l1After []*ltx.FileInfo
+	for i := 0; i < 10 && !healed; i++ {
+		iterations = i + 1
+		if _, err := db.Compact(ctx, 1); err != nil {
+			healErrs = append(healErrs, "compact: "+err.Error())
+		}
+		if err := db.Replica.Sync(ctx); err != nil {
+			healErrs = append(healErrs, "replica sync: "+err.Error())
+		}
+		if l0After, err = listLTXFiles(ctx, client, 0); err != nil {
+			return res, err
+		}
+		if l1After, err = listLTXFiles(ctx, client, 1); err != nil {
+			return res, err
+		}
+		healed = coversTXID(l0After, victim.MinTXID) && coversTXID(l1After, expectedTXID)
+		if !healed {
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+	restorePath := filepath.Join(cfg.WorkDir, "gap-restored.db")
+	if err := os.Remove(restorePath); err != nil && !os.IsNotExist(err) {
+		return res, err
+	}
+	restoreDB := litestream.NewDB(filepath.Join(cfg.WorkDir, "gap-restore-handle.db"))
+	restoreDB.Replica = litestream.NewReplica(restoreDB)
+	restoreDB.Replica.Client = newS3Client(cfg, cfg.S3Prefix, 0, 0)
+	restoreErr := restoreDB.Replica.Restore(ctx, litestream.RestoreOptions{OutputPath: restorePath})
+
+	res.Files = map[string][]fileInfo{
+		"l0_gapped": encodeFiles(l0Gapped),
+		"l0_after":  encodeFiles(l0After),
+		"l1_after":  encodeFiles(l1After),
+	}
+	res.Stats = map[string]any{
+		"l1_seed_max_txid":   uint64(l1Info.MaxTXID),
+		"victim_min_txid":    uint64(victim.MinTXID),
+		"victim_max_txid":    uint64(victim.MaxTXID),
+		"expected_txid":      uint64(expectedTXID),
+		"gap_engaged":        gapEngaged,
+		"heal_iterations":    iterations,
+		"healed":             healed,
+		"heal_errors":        len(healErrs),
+		"restore_error":      errorString(restoreErr),
+		"restored_row_count": restoredRowCount(restorePath),
+	}
+	res.Logs = tailStrings(healErrs, 6)
+
+	if len(healErrs) > 0 {
+		res.Error = healErrs[len(healErrs)-1]
+	}
+	if restoreErr != nil {
+		res.Error = restoreErr.Error()
+	}
+	res.Pass = gapEngaged && healed && restoreErr == nil && restoredRowCount(restorePath) == totalRows
 	return res, nil
 }
 

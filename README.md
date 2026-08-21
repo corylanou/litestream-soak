@@ -125,6 +125,14 @@ requires the restore to recover. This verifies the S3 retry policy directly;
 increasing the soak worker's verification timeout does not change whether the
 SDK retries that response.
 
+The `l0-gap-heal` local rig recreates the persistent interior L0 gap from
+litestream #1151 (a permanently failed L0 upload that the replica position
+advanced past) by deleting an interior remote L0 file above the L1 boundary,
+then requires compaction and replication to self-heal: gap detected, position
+invalidated, missing file re-uploaded from local disk, compaction completes,
+and a full restore returns every row. Unpatched Litestream fails forever with
+`non-contiguous transaction ids`; litestream #1155 heals it.
+
 PR fleets use sources named `pr-NNN`. The PR workflow builds a worker image with
 `LITESTREAM_SHA` set to the upstream PR head SHA, then notifies the control
 plane with `source=pr-NNN`. The control plane rewrites the default fleet names
