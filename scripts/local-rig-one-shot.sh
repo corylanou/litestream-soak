@@ -12,7 +12,7 @@ if [ -z "$scenario" ]; then
 fi
 
 case "$scenario" in
-  compaction-source-stream-drop|uploadpart-retry-quota|provider-http-408|provider-request-canceled|constrained-disk) ;;
+  compaction-source-stream-drop|uploadpart-retry-quota|provider-http-408|provider-request-canceled|constrained-disk|l0-gap-heal) ;;
   *)
     printf 'unknown scenario: %s\n' "$scenario" >&2
     exit 2
