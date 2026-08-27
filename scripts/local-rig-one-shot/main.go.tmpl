@@ -794,10 +794,12 @@ func runSnapshotCompactionOverlap(ctx context.Context, cfg config) (result, erro
 	res.Stats["pages"] = pages
 	res.Stats["gc_percent"] = overlapGCPercent
 	res.Stats["phases"] = phases
+	overlapSnapshotCount := countLevel(ctx, overlapClient, litestream.SnapshotLevel)
+	overlapL1Count := countLevel(ctx, overlapClient, 1)
 	res.Stats["sequential_snapshot_count"] = countLevel(ctx, sequentialClient, litestream.SnapshotLevel)
 	res.Stats["sequential_l1_count"] = countLevel(ctx, sequentialClient, 1)
-	res.Stats["overlap_snapshot_count"] = countLevel(ctx, overlapClient, litestream.SnapshotLevel)
-	res.Stats["overlap_l1_count"] = countLevel(ctx, overlapClient, 1)
+	res.Stats["overlap_snapshot_count"] = overlapSnapshotCount
+	res.Stats["overlap_l1_count"] = overlapL1Count
 	passLimit := overlapPassSlack*float64(maxSequential) + overlapUploadBufferBytes
 	res.Stats["max_sequential_growth_bytes"] = maxSequential
 	res.Stats["overlap_growth_bytes"] = overlapGrowth
@@ -823,6 +825,10 @@ func runSnapshotCompactionOverlap(ctx context.Context, cfg config) (result, erro
 	}
 	if gate != nil && !gate.Engaged() {
 		res.Error = "snapshot gate never engaged; the overlap was not exercised"
+		return res, nil
+	}
+	if overlapSnapshotCount != 1 || overlapL1Count != 1 {
+		res.Error = fmt.Sprintf("overlap run produced %d snapshot and %d l1 files, want 1 and 1", overlapSnapshotCount, overlapL1Count)
 		return res, nil
 	}
 	res.Pass = float64(overlapGrowth) <= passLimit
@@ -928,10 +934,15 @@ func runOverlapConcurrent(ctx context.Context, sampler *memSampler, dbPath strin
 			// the compaction while the snapshot is in flight; retry the way
 			// the production level monitor does (matched by message so the
 			// harness builds against versions without the sentinel).
+			busyDeadline := time.Now().Add(2 * gateTimeout)
 			for {
 				_, err := store.CompactDB(ctx, db, levels[1])
 				if err != nil && strings.Contains(err.Error(), "maintenance busy") {
 					busyRetries++
+					if time.Now().After(busyDeadline) {
+						errs[1] = fmt.Errorf("compact l1 still busy after %s (%d retries): %w", 2*gateTimeout, busyRetries, err)
+						return
+					}
 					select {
 					case <-time.After(500 * time.Millisecond):
 						continue
