@@ -758,8 +758,9 @@ func runSnapshotCompactionOverlap(ctx context.Context, cfg config) (result, erro
 		return res, fmt.Errorf("delete overlap s3 prefix: %w", err)
 	}
 	defer func() { _ = overlapClient.DeleteAll(context.Background()) }()
-	overlapPhases, gate, err := runOverlapConcurrent(ctx, sampler, overlapPath, overlapClient, levels, holdAfterBytes, gateTimeout)
+	overlapPhases, gate, busyRetries, err := runOverlapConcurrent(ctx, sampler, overlapPath, overlapClient, levels, holdAfterBytes, gateTimeout)
 	phases = append(phases, overlapPhases...)
+	res.Stats["compaction_busy_retries"] = busyRetries
 	if gate != nil {
 		res.Stats["gate_engaged"] = gate.Engaged()
 		res.Stats["gate_release_reason"] = gate.ReleaseReason()
@@ -877,13 +878,13 @@ func runOverlapSequential(ctx context.Context, sampler *memSampler, dbPath strin
 // after gateTimeout (a serializing Litestream never starts the compaction
 // while the snapshot is active, so the timeout breaks the deadlock and the
 // release reason records the serialization).
-func runOverlapConcurrent(ctx context.Context, sampler *memSampler, dbPath string, client litestream.ReplicaClient, levels litestream.CompactionLevels, holdAfterBytes int64, gateTimeout time.Duration) ([]memPhase, *snapshotGate, error) {
+func runOverlapConcurrent(ctx context.Context, sampler *memSampler, dbPath string, client litestream.ReplicaClient, levels litestream.CompactionLevels, holdAfterBytes int64, gateTimeout time.Duration) ([]memPhase, *snapshotGate, int64, error) {
 	gate := newSnapshotGate(gateTimeout)
 	gate.SetHoldAfterBytes(holdAfterBytes)
 	gatedClient := &gatedSnapshotClient{ReplicaClient: client, gate: gate}
 	db, store, sqldb, err := openLitestreamDB(ctx, dbPath, gatedClient, levels)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	defer func() {
 		_ = sqldb.Close()
@@ -894,8 +895,9 @@ func runOverlapConcurrent(ctx context.Context, sampler *memSampler, dbPath strin
 		sampler.Measure("overlap-initial-l0", func() error { return syncDB(ctx, db) }),
 	}
 	if phases[0].Error != "" {
-		return phases, gate, nil
+		return phases, gate, 0, nil
 	}
+	var busyRetries int64
 	phases = append(phases, sampler.Measure("overlap-snapshot-and-compact-l1", func() error {
 		var wg sync.WaitGroup
 		errs := make([]error, 2)
@@ -909,20 +911,36 @@ func runOverlapConcurrent(ctx context.Context, sampler *memSampler, dbPath strin
 		}()
 		go func() {
 			defer wg.Done()
+			defer gate.Release("compaction-finished")
 			select {
 			case <-gate.Held():
 			case <-gate.Released():
 			case <-ctx.Done():
 			}
-			if _, err := store.CompactDB(ctx, db, levels[1]); err != nil {
-				errs[1] = fmt.Errorf("compact l1: %w", err)
+			// A Litestream that serializes per-database maintenance refuses
+			// the compaction while the snapshot is in flight; retry the way
+			// the production level monitor does (matched by message so the
+			// harness builds against versions without the sentinel).
+			for {
+				_, err := store.CompactDB(ctx, db, levels[1])
+				if err != nil && strings.Contains(err.Error(), "maintenance busy") {
+					busyRetries++
+					select {
+					case <-time.After(500 * time.Millisecond):
+						continue
+					case <-ctx.Done():
+						errs[1] = ctx.Err()
+					}
+				} else if err != nil {
+					errs[1] = fmt.Errorf("compact l1: %w", err)
+				}
+				return
 			}
-			gate.Release("compaction-finished")
 		}()
 		wg.Wait()
 		return errors.Join(errs...)
 	}))
-	return phases, gate, nil
+	return phases, gate, busyRetries, nil
 }
 
 // snapshotGate holds a snapshot-level replica write open once holdAfterBytes
