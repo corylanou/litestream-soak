@@ -685,6 +685,257 @@
       ],
       "title": "Verification Coverage",
       "type": "bargauge"
+    },
+    {
+      "id": 13,
+      "type": "row",
+      "title": "Memory \u2014 main vs $compare_source",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "panels": []
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Litestream RSS",
+      "description": "Resident memory of the litestream process per worker (soak_litestream_rss_bytes).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "soak_litestream_rss_bytes{source=~\"main|$compare_source\"}",
+          "legendFormat": "{{source}} \u00b7 {{profile}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Litestream heap in-use",
+      "description": "Go heap in-use bytes scraped from litestream's metrics endpoint.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "soak_litestream_heap_inuse_bytes{source=~\"main|$compare_source\"}",
+          "legendFormat": "{{source}} \u00b7 {{profile}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Litestream alloc rate",
+      "description": "Heap allocation rate derived from consecutive alloc_bytes_total samples (GC pressure).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "soak_litestream_alloc_rate_bytes_per_second{source=~\"main|$compare_source\"}",
+          "legendFormat": "{{source}} \u00b7 {{profile}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Litestream goroutines",
+      "description": "Goroutine count of the litestream process.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "soak_litestream_goroutines{source=~\"main|$compare_source\"}",
+          "legendFormat": "{{source}} \u00b7 {{profile}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "bargauge",
+      "title": "Peak Litestream RSS over range, by profile",
+      "description": "max_over_time of soak_litestream_rss_bytes across the dashboard time range; one bar per source per profile so main and the compare source line up.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 536870912
+              },
+              {
+                "color": "red",
+                "value": 805306368
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "expr": "max by (profile) (max_over_time(soak_litestream_rss_bytes{source=\"main\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "main \u00b7 {{profile}}",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (profile) (max_over_time(soak_litestream_rss_bytes{source=\"$compare_source\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "${compare_source} \u00b7 {{profile}}",
+          "refId": "B"
+        }
+      ]
     }
   ],
   "refresh": "30s",
@@ -732,6 +983,6 @@
   "timezone": "",
   "title": "Litestream Source Compare",
   "uid": "litestream-source-compare",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
