@@ -736,6 +736,13 @@ func runSnapshotCompactionOverlap(ctx context.Context, cfg config) (result, erro
 		res.Stats["phases"] = phases
 		return res, err
 	}
+	for _, phase := range sequentialPhases {
+		if phase.Error != "" {
+			res.Stats["phases"] = phases
+			res.Error = phase.Name + ": " + phase.Error
+			return res, nil
+		}
+	}
 	gateTimeout := overlapGateTimeout(sequentialPhases)
 
 	// The overlap gate holds the snapshot stream just before completion, so
