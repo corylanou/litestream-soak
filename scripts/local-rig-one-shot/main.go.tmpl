@@ -16,6 +16,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -109,6 +112,8 @@ func main() {
 		res, err = runProviderRestore(ctx, cfg)
 	case "l0-gap-heal":
 		res, err = runL0GapHeal(ctx, cfg)
+	case "snapshot-compaction-overlap":
+		res, err = runSnapshotCompactionOverlap(ctx, cfg)
 	case "constrained-disk":
 		res, err = runConstrainedDisk(ctx, cfg)
 	default:
@@ -127,6 +132,8 @@ func scenarioTimeout(scenario string) time.Duration {
 	switch scenario {
 	case "uploadpart-retry-quota":
 		return 8 * time.Minute
+	case "snapshot-compaction-overlap":
+		return 45 * time.Minute
 	case "constrained-disk":
 		return 5 * time.Minute
 	default:
@@ -643,6 +650,326 @@ func runConstrainedDisk(ctx context.Context, cfg config) (result, error) {
 	_ = sqldb.Close()
 	_ = store.Close(ctx)
 	return res, nil
+}
+
+const (
+	overlapDefaultDBMB       = 1024
+	overlapGCPercent         = 25
+	overlapSampleInterval    = 100 * time.Millisecond
+	overlapProfileMinGrowth  = 1.10
+	overlapProfileMinSpacing = time.Second
+	overlapPassRatio         = 1.25
+	overlapRowBlobSize       = 4000
+	overlapInsertBatchRows   = 4096
+)
+
+type memPhase struct {
+	Name          string  `json:"name"`
+	DurationMS    int64   `json:"duration_ms"`
+	Samples       int     `json:"samples"`
+	BaselineHeap  uint64  `json:"baseline_heap_inuse_bytes"`
+	PeakHeapInuse uint64  `json:"peak_heap_inuse_bytes"`
+	PeakHeapAlloc uint64  `json:"peak_heap_alloc_bytes"`
+	PeakSys       uint64  `json:"peak_sys_bytes"`
+	HeapGrowth    uint64  `json:"heap_growth_bytes"`
+	BytesPerPage  float64 `json:"heap_growth_bytes_per_page"`
+	PeakProfile   string  `json:"peak_profile,omitempty"`
+	Error         string  `json:"error,omitempty"`
+}
+
+type memSampler struct {
+	profileDir string
+	pages      int64
+}
+
+func runSnapshotCompactionOverlap(ctx context.Context, cfg config) (result, error) {
+	res := baseResult(cfg, "snapshot-and-compact-l1")
+	dbMB := intEnv("ONE_SHOT_OVERLAP_DB_MB", overlapDefaultDBMB)
+	profileDir := filepath.Join(cfg.WorkDir, "profiles")
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		return res, err
+	}
+
+	seedPath := filepath.Join(cfg.WorkDir, "seed.db")
+	pages, pageSize, err := buildOverlapSeedDB(ctx, seedPath, dbMB)
+	if err != nil {
+		return res, fmt.Errorf("build seed db: %w", err)
+	}
+	sequentialPath := filepath.Join(cfg.WorkDir, "sequential.db")
+	overlapPath := filepath.Join(cfg.WorkDir, "overlap.db")
+	for _, target := range []string{sequentialPath, overlapPath} {
+		if err := copyFile(seedPath, target); err != nil {
+			return res, err
+		}
+	}
+	_ = os.Remove(seedPath)
+	defer func() {
+		_ = os.Remove(sequentialPath)
+		_ = os.Remove(overlapPath)
+	}()
+
+	previousGCPercent := debug.SetGCPercent(overlapGCPercent)
+	defer debug.SetGCPercent(previousGCPercent)
+
+	sampler := &memSampler{profileDir: profileDir, pages: pages}
+	levels := litestream.CompactionLevels{
+		{Level: 0},
+		{Level: 1, Interval: time.Second},
+	}
+	phases := make([]memPhase, 0, 5)
+
+	sequentialClient := newS3Client(cfg, cfg.S3Prefix+"/sequential", 0, 0)
+	if err := sequentialClient.DeleteAll(ctx); err != nil {
+		return res, fmt.Errorf("delete sequential s3 prefix: %w", err)
+	}
+	sequentialPhases, err := runOverlapSequential(ctx, sampler, sequentialPath, sequentialClient, levels)
+	phases = append(phases, sequentialPhases...)
+	if err != nil {
+		res.Stats["phases"] = phases
+		return res, err
+	}
+
+	overlapClient := newS3Client(cfg, cfg.S3Prefix+"/overlap", 0, 0)
+	if err := overlapClient.DeleteAll(ctx); err != nil {
+		return res, fmt.Errorf("delete overlap s3 prefix: %w", err)
+	}
+	overlapPhases, err := runOverlapConcurrent(ctx, sampler, overlapPath, overlapClient, levels)
+	phases = append(phases, overlapPhases...)
+	if err != nil {
+		res.Stats["phases"] = phases
+		return res, err
+	}
+
+	byName := make(map[string]memPhase, len(phases))
+	for _, phase := range phases {
+		byName[phase.Name] = phase
+	}
+	snapshotGrowth := byName["sequential-snapshot"].HeapGrowth
+	compactGrowth := byName["sequential-compact-l1"].HeapGrowth
+	overlapGrowth := byName["overlap-snapshot-and-compact-l1"].HeapGrowth
+	maxSequential := max(snapshotGrowth, compactGrowth)
+
+	res.Stats["db_mb_requested"] = dbMB
+	res.Stats["page_size"] = pageSize
+	res.Stats["pages"] = pages
+	res.Stats["gc_percent"] = overlapGCPercent
+	res.Stats["phases"] = phases
+	res.Stats["sequential_snapshot_count"] = countLevel(ctx, sequentialClient, litestream.SnapshotLevel)
+	res.Stats["sequential_l1_count"] = countLevel(ctx, sequentialClient, 1)
+	res.Stats["overlap_snapshot_count"] = countLevel(ctx, overlapClient, litestream.SnapshotLevel)
+	res.Stats["overlap_l1_count"] = countLevel(ctx, overlapClient, 1)
+	res.Stats["max_sequential_growth_bytes"] = maxSequential
+	res.Stats["overlap_growth_bytes"] = overlapGrowth
+	res.Stats["pass_ratio_threshold"] = overlapPassRatio
+	if maxSequential > 0 {
+		res.Stats["overlap_to_max_sequential_ratio"] = float64(overlapGrowth) / float64(maxSequential)
+	}
+	if snapshotGrowth+compactGrowth > 0 {
+		res.Stats["overlap_to_sum_sequential_ratio"] = float64(overlapGrowth) / float64(snapshotGrowth+compactGrowth)
+	}
+
+	for _, phase := range phases {
+		if phase.Error != "" {
+			res.Error = phase.Name + ": " + phase.Error
+			return res, nil
+		}
+	}
+	if maxSequential == 0 {
+		res.Error = "sequential phases recorded no heap growth"
+		return res, nil
+	}
+	res.Pass = float64(overlapGrowth) <= overlapPassRatio*float64(maxSequential)
+	return res, nil
+}
+
+func runOverlapSequential(ctx context.Context, sampler *memSampler, dbPath string, client litestream.ReplicaClient, levels litestream.CompactionLevels) ([]memPhase, error) {
+	db, store, sqldb, err := openLitestreamDB(ctx, dbPath, client, levels)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = sqldb.Close()
+		_ = store.Close(context.Background())
+	}()
+
+	phases := []memPhase{
+		sampler.Measure("sequential-initial-l0", func() error { return syncDB(ctx, db) }),
+	}
+	if phases[0].Error != "" {
+		return phases, nil
+	}
+	phases = append(phases, sampler.Measure("sequential-snapshot", func() error {
+		_, err := db.Snapshot(ctx)
+		return err
+	}))
+	phases = append(phases, sampler.Measure("sequential-compact-l1", func() error {
+		_, err := store.CompactDB(ctx, db, levels[1])
+		return err
+	}))
+	return phases, nil
+}
+
+func runOverlapConcurrent(ctx context.Context, sampler *memSampler, dbPath string, client litestream.ReplicaClient, levels litestream.CompactionLevels) ([]memPhase, error) {
+	db, store, sqldb, err := openLitestreamDB(ctx, dbPath, client, levels)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = sqldb.Close()
+		_ = store.Close(context.Background())
+	}()
+
+	phases := []memPhase{
+		sampler.Measure("overlap-initial-l0", func() error { return syncDB(ctx, db) }),
+	}
+	if phases[0].Error != "" {
+		return phases, nil
+	}
+	phases = append(phases, sampler.Measure("overlap-snapshot-and-compact-l1", func() error {
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if _, err := db.Snapshot(ctx); err != nil {
+				errs[0] = fmt.Errorf("snapshot: %w", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if _, err := store.CompactDB(ctx, db, levels[1]); err != nil {
+				errs[1] = fmt.Errorf("compact l1: %w", err)
+			}
+		}()
+		wg.Wait()
+		return errors.Join(errs...)
+	}))
+	return phases, nil
+}
+
+func (s *memSampler) Measure(name string, fn func() error) memPhase {
+	runtime.GC()
+	debug.FreeOSMemory()
+	var base runtime.MemStats
+	runtime.ReadMemStats(&base)
+	phase := memPhase{
+		Name:          name,
+		BaselineHeap:  base.HeapInuse,
+		PeakHeapInuse: base.HeapInuse,
+		PeakHeapAlloc: base.HeapAlloc,
+		PeakSys:       base.Sys,
+	}
+	profilePath := filepath.Join(s.profileDir, name+"-peak.pprof")
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(overlapSampleInterval)
+		defer ticker.Stop()
+		var lastProfiled uint64
+		var lastProfileAt time.Time
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+			}
+			var ms runtime.MemStats
+			runtime.ReadMemStats(&ms)
+			phase.Samples++
+			phase.PeakHeapInuse = max(phase.PeakHeapInuse, ms.HeapInuse)
+			phase.PeakHeapAlloc = max(phase.PeakHeapAlloc, ms.HeapAlloc)
+			phase.PeakSys = max(phase.PeakSys, ms.Sys)
+			grew := float64(ms.HeapInuse) > float64(lastProfiled)*overlapProfileMinGrowth
+			if !grew || time.Since(lastProfileAt) < overlapProfileMinSpacing {
+				continue
+			}
+			if err := writeHeapProfile(profilePath); err != nil {
+				slog.Warn("write heap profile", "phase", name, "error", err)
+				continue
+			}
+			lastProfiled = ms.HeapInuse
+			lastProfileAt = time.Now()
+			phase.PeakProfile = profilePath
+		}
+	}()
+
+	start := time.Now()
+	err := fn()
+	phase.DurationMS = time.Since(start).Milliseconds()
+	close(done)
+	wg.Wait()
+
+	if err != nil {
+		phase.Error = err.Error()
+	}
+	if phase.PeakHeapInuse > phase.BaselineHeap {
+		phase.HeapGrowth = phase.PeakHeapInuse - phase.BaselineHeap
+	}
+	if s.pages > 0 {
+		phase.BytesPerPage = float64(phase.HeapGrowth) / float64(s.pages)
+	}
+	return phase
+}
+
+func writeHeapProfile(path string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if err := pprof.Lookup("heap").WriteTo(f, 0); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func buildOverlapSeedDB(ctx context.Context, path string, sizeMB int) (int64, int64, error) {
+	sqldb, err := openSQLDB(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	var pageSize int64
+	if err := sqldb.QueryRowContext(ctx, `PRAGMA page_size`).Scan(&pageSize); err != nil {
+		_ = sqldb.Close()
+		return 0, 0, err
+	}
+	targetRows := int64(sizeMB) * 1024 * 1024 / pageSize
+	for inserted := int64(0); inserted < targetRows; {
+		batch := min(int64(overlapInsertBatchRows), targetRows-inserted)
+		if err := insertRows(ctx, sqldb, int(inserted), int(batch), overlapRowBlobSize); err != nil {
+			_ = sqldb.Close()
+			return 0, 0, err
+		}
+		inserted += batch
+	}
+	if _, err := sqldb.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		_ = sqldb.Close()
+		return 0, 0, err
+	}
+	if err := sqldb.Close(); err != nil {
+		return 0, 0, err
+	}
+	return fileSize(path) / pageSize, pageSize, nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func baseResult(cfg config, operation string) result {

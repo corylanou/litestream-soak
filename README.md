@@ -133,6 +133,18 @@ invalidated, missing file re-uploaded from local disk, compaction completes,
 and a full restore returns every row. Unpatched Litestream fails forever with
 `non-contiguous transaction ids`; litestream #1155 heals it.
 
+The `snapshot-compaction-overlap` local rig measures the memory cost of the
+per-database maintenance overlap from litestream #1477 (an L9 snapshot and an
+L1 compaction running concurrently on one large database). It builds a
+multi-GiB database (`ONE_SHOT_OVERLAP_DB_MB`, default 1024), runs the initial
+L0 sync, snapshot, and L1 compaction sequentially on one copy and the snapshot
+and L1 compaction concurrently on a second copy, and samples `runtime.MemStats`
+throughout, writing a heap profile at each phase's peak under the run's
+`profiles/` directory. It passes only when the overlap's heap growth stays
+within 1.25x the larger sequential phase, so unpatched Litestream (overlap
+roughly equals the sum) fails, a per-database serialization fix passes, and a
+disk-backed page index passes with lower bytes-per-page in every phase.
+
 PR fleets use sources named `pr-NNN`. The PR workflow builds a worker image with
 `LITESTREAM_SHA` set to the upstream PR head SHA, then notifies the control
 plane with `source=pr-NNN`. The control plane rewrites the default fleet names
