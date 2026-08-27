@@ -137,13 +137,20 @@ The `snapshot-compaction-overlap` local rig measures the memory cost of the
 per-database maintenance overlap from litestream #1477 (an L9 snapshot and an
 L1 compaction running concurrently on one large database). It builds a
 multi-GiB database (`ONE_SHOT_OVERLAP_DB_MB`, default 1024), runs the initial
-L0 sync, snapshot, and L1 compaction sequentially on one copy and the snapshot
-and L1 compaction concurrently on a second copy, and samples `runtime.MemStats`
-throughout, writing a heap profile at each phase's peak under the run's
-`profiles/` directory. It passes only when the overlap's heap growth stays
-within 1.25x the larger sequential phase, so unpatched Litestream (overlap
-roughly equals the sum) fails, a per-database serialization fix passes, and a
-disk-backed page index passes with lower bytes-per-page in every phase.
+L0 sync, snapshot, and L1 compaction sequentially on one copy, then reproduces
+the overlap deterministically on a second copy: the snapshot's replica stream
+is gated at 95% of the snapshot's encoded size (taken from the sequential
+baseline's L9 file), so the ltx encoder blocks mid-stream
+with its full page index resident while the L1 compaction runs, releasing when
+the compaction finishes or on a timeout (which is how a Litestream that
+serializes per-database maintenance shows up, recorded in
+`gate_release_reason`). `runtime.MemStats` is sampled throughout and a heap
+profile is written at each phase's peak under the run's `profiles/` directory.
+Pass requires the overlap's heap growth to stay within 1.10x the larger
+sequential phase plus one multipart upload's fixed buffers, so unpatched
+Litestream (roughly additive) fails, a per-database serialization fix passes
+via the timeout path, and a disk-backed page index passes with lower
+bytes-per-page in every phase.
 
 PR fleets use sources named `pr-NNN`. The PR workflow builds a worker image with
 `LITESTREAM_SHA` set to the upstream PR head SHA, then notifies the control

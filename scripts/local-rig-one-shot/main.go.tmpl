@@ -658,9 +658,16 @@ const (
 	overlapSampleInterval    = 100 * time.Millisecond
 	overlapProfileMinGrowth  = 1.10
 	overlapProfileMinSpacing = time.Second
-	overlapPassRatio         = 1.25
+	overlapPassSlack         = 1.10
 	overlapRowBlobSize       = 4000
 	overlapInsertBatchRows   = 4096
+	overlapS3PartSize        = 8 * 1024 * 1024
+	overlapS3Concurrency     = 3
+	// The aws-sdk-go-v2 s3 manager holds concurrency+1 part-size buffers per
+	// in-flight multipart upload. The overlap adds one whole upload, so that
+	// fixed cost is allowed on top of the per-page pass criterion.
+	overlapUploadBufferBytes = overlapS3PartSize * (overlapS3Concurrency + 1)
+	overlapMinGateTimeout    = 30 * time.Second
 )
 
 type memPhase struct {
@@ -704,8 +711,8 @@ func runSnapshotCompactionOverlap(ctx context.Context, cfg config) (result, erro
 	}
 	_ = os.Remove(seedPath)
 	defer func() {
-		_ = os.Remove(sequentialPath)
-		_ = os.Remove(overlapPath)
+		removeDBArtifacts(sequentialPath)
+		removeDBArtifacts(overlapPath)
 	}()
 
 	previousGCPercent := debug.SetGCPercent(overlapGCPercent)
@@ -718,23 +725,48 @@ func runSnapshotCompactionOverlap(ctx context.Context, cfg config) (result, erro
 	}
 	phases := make([]memPhase, 0, 5)
 
-	sequentialClient := newS3Client(cfg, cfg.S3Prefix+"/sequential", 0, 0)
+	sequentialClient := newS3Client(cfg, cfg.S3Prefix+"/sequential", overlapS3PartSize, overlapS3Concurrency)
 	if err := sequentialClient.DeleteAll(ctx); err != nil {
 		return res, fmt.Errorf("delete sequential s3 prefix: %w", err)
 	}
+	defer func() { _ = sequentialClient.DeleteAll(context.Background()) }()
 	sequentialPhases, err := runOverlapSequential(ctx, sampler, sequentialPath, sequentialClient, levels)
 	phases = append(phases, sequentialPhases...)
 	if err != nil {
 		res.Stats["phases"] = phases
 		return res, err
 	}
+	gateTimeout := overlapGateTimeout(sequentialPhases)
 
-	overlapClient := newS3Client(cfg, cfg.S3Prefix+"/overlap", 0, 0)
+	// The overlap gate holds the snapshot stream just before completion, so
+	// the hold point must track the snapshot's true encoded size (page bodies
+	// are compressed, and L0 can be split across files). The sequential run
+	// just wrote an L9 snapshot of identical content — its size is exact.
+	snapshotInfos, err := listLTXFiles(ctx, sequentialClient, litestream.SnapshotLevel)
+	if err != nil {
+		res.Stats["phases"] = phases
+		return res, fmt.Errorf("list sequential snapshots: %w", err)
+	}
+	if len(snapshotInfos) == 0 || snapshotInfos[0].Size == 0 {
+		res.Stats["phases"] = phases
+		return res, errors.New("sequential snapshot missing or empty; cannot derive gate hold point")
+	}
+	holdAfterBytes := snapshotInfos[0].Size * 95 / 100
+
+	overlapClient := newS3Client(cfg, cfg.S3Prefix+"/overlap", overlapS3PartSize, overlapS3Concurrency)
 	if err := overlapClient.DeleteAll(ctx); err != nil {
 		return res, fmt.Errorf("delete overlap s3 prefix: %w", err)
 	}
-	overlapPhases, err := runOverlapConcurrent(ctx, sampler, overlapPath, overlapClient, levels)
+	defer func() { _ = overlapClient.DeleteAll(context.Background()) }()
+	overlapPhases, gate, err := runOverlapConcurrent(ctx, sampler, overlapPath, overlapClient, levels, holdAfterBytes, gateTimeout)
 	phases = append(phases, overlapPhases...)
+	if gate != nil {
+		res.Stats["gate_engaged"] = gate.Engaged()
+		res.Stats["gate_release_reason"] = gate.ReleaseReason()
+		res.Stats["gate_held_ms"] = gate.HeldDuration().Milliseconds()
+		res.Stats["gate_timeout_ms"] = gateTimeout.Milliseconds()
+		res.Stats["gate_hold_after_bytes"] = gate.HoldAfterBytes()
+	}
 	if err != nil {
 		res.Stats["phases"] = phases
 		return res, err
@@ -758,9 +790,12 @@ func runSnapshotCompactionOverlap(ctx context.Context, cfg config) (result, erro
 	res.Stats["sequential_l1_count"] = countLevel(ctx, sequentialClient, 1)
 	res.Stats["overlap_snapshot_count"] = countLevel(ctx, overlapClient, litestream.SnapshotLevel)
 	res.Stats["overlap_l1_count"] = countLevel(ctx, overlapClient, 1)
+	passLimit := overlapPassSlack*float64(maxSequential) + overlapUploadBufferBytes
 	res.Stats["max_sequential_growth_bytes"] = maxSequential
 	res.Stats["overlap_growth_bytes"] = overlapGrowth
-	res.Stats["pass_ratio_threshold"] = overlapPassRatio
+	res.Stats["pass_slack"] = overlapPassSlack
+	res.Stats["upload_buffer_allowance_bytes"] = overlapUploadBufferBytes
+	res.Stats["pass_limit_bytes"] = uint64(passLimit)
 	if maxSequential > 0 {
 		res.Stats["overlap_to_max_sequential_ratio"] = float64(overlapGrowth) / float64(maxSequential)
 	}
@@ -778,8 +813,31 @@ func runSnapshotCompactionOverlap(ctx context.Context, cfg config) (result, erro
 		res.Error = "sequential phases recorded no heap growth"
 		return res, nil
 	}
-	res.Pass = float64(overlapGrowth) <= overlapPassRatio*float64(maxSequential)
+	if gate != nil && !gate.Engaged() {
+		res.Error = "snapshot gate never engaged; the overlap was not exercised"
+		return res, nil
+	}
+	res.Pass = float64(overlapGrowth) <= passLimit
 	return res, nil
+}
+
+// overlapGateTimeout bounds how long the overlap phase holds the snapshot
+// stream open waiting for the concurrent compaction to finish. A Litestream
+// that serializes per-database maintenance never starts the compaction while
+// the snapshot is held, so the gate must release on its own to avoid deadlock;
+// the release reason then records the serialization.
+func overlapGateTimeout(sequential []memPhase) time.Duration {
+	var compactMS int64
+	for _, phase := range sequential {
+		if phase.Name == "sequential-compact-l1" {
+			compactMS = phase.DurationMS
+		}
+	}
+	timeout := 4 * time.Duration(compactMS) * time.Millisecond
+	if timeout < overlapMinGateTimeout {
+		timeout = overlapMinGateTimeout
+	}
+	return timeout
 }
 
 func runOverlapSequential(ctx context.Context, sampler *memSampler, dbPath string, client litestream.ReplicaClient, levels litestream.CompactionLevels) ([]memPhase, error) {
@@ -799,7 +857,7 @@ func runOverlapSequential(ctx context.Context, sampler *memSampler, dbPath strin
 		return phases, nil
 	}
 	phases = append(phases, sampler.Measure("sequential-snapshot", func() error {
-		_, err := db.Snapshot(ctx)
+		_, err := store.CompactDB(ctx, db, store.SnapshotLevel())
 		return err
 	}))
 	phases = append(phases, sampler.Measure("sequential-compact-l1", func() error {
@@ -809,10 +867,23 @@ func runOverlapSequential(ctx context.Context, sampler *memSampler, dbPath strin
 	return phases, nil
 }
 
-func runOverlapConcurrent(ctx context.Context, sampler *memSampler, dbPath string, client litestream.ReplicaClient, levels litestream.CompactionLevels) ([]memPhase, error) {
-	db, store, sqldb, err := openLitestreamDB(ctx, dbPath, client, levels)
+// runOverlapConcurrent reproduces the litestream #1477 overlap: an L9
+// snapshot and an L1 compaction live at the same time for one database. The
+// snapshot's replica writes go through a gate that pauses the stream once the
+// full page block has been consumed — the ltx encoder goroutine is then
+// blocked mid-Close with its complete page index resident, exactly like a
+// large snapshot whose upload is still in flight — and the L1 compaction runs
+// against that held state. The gate releases when the compaction finishes or
+// after gateTimeout (a serializing Litestream never starts the compaction
+// while the snapshot is active, so the timeout breaks the deadlock and the
+// release reason records the serialization).
+func runOverlapConcurrent(ctx context.Context, sampler *memSampler, dbPath string, client litestream.ReplicaClient, levels litestream.CompactionLevels, holdAfterBytes int64, gateTimeout time.Duration) ([]memPhase, *snapshotGate, error) {
+	gate := newSnapshotGate(gateTimeout)
+	gate.SetHoldAfterBytes(holdAfterBytes)
+	gatedClient := &gatedSnapshotClient{ReplicaClient: client, gate: gate}
+	db, store, sqldb, err := openLitestreamDB(ctx, dbPath, gatedClient, levels)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() {
 		_ = sqldb.Close()
@@ -823,7 +894,7 @@ func runOverlapConcurrent(ctx context.Context, sampler *memSampler, dbPath strin
 		sampler.Measure("overlap-initial-l0", func() error { return syncDB(ctx, db) }),
 	}
 	if phases[0].Error != "" {
-		return phases, nil
+		return phases, gate, nil
 	}
 	phases = append(phases, sampler.Measure("overlap-snapshot-and-compact-l1", func() error {
 		var wg sync.WaitGroup
@@ -831,20 +902,152 @@ func runOverlapConcurrent(ctx context.Context, sampler *memSampler, dbPath strin
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			if _, err := db.Snapshot(ctx); err != nil {
+			if _, err := store.CompactDB(ctx, db, store.SnapshotLevel()); err != nil {
 				errs[0] = fmt.Errorf("snapshot: %w", err)
 			}
+			gate.Release("snapshot-finished")
 		}()
 		go func() {
 			defer wg.Done()
+			select {
+			case <-gate.Held():
+			case <-gate.Released():
+			case <-ctx.Done():
+			}
 			if _, err := store.CompactDB(ctx, db, levels[1]); err != nil {
 				errs[1] = fmt.Errorf("compact l1: %w", err)
 			}
+			gate.Release("compaction-finished")
 		}()
 		wg.Wait()
 		return errors.Join(errs...)
 	}))
-	return phases, nil
+	return phases, gate, nil
+}
+
+// snapshotGate holds a snapshot-level replica write open once holdAfterBytes
+// of the stream have been consumed, keeping the snapshot's encoder state
+// resident until Release or timeout.
+type snapshotGate struct {
+	holdAfterBytes int64
+	timeout        time.Duration
+
+	held     chan struct{}
+	released chan struct{}
+
+	mu            sync.Mutex
+	engaged       bool
+	heldAt        time.Time
+	heldFor       time.Duration
+	releaseReason string
+}
+
+func newSnapshotGate(timeout time.Duration) *snapshotGate {
+	return &snapshotGate{
+		timeout:  timeout,
+		held:     make(chan struct{}),
+		released: make(chan struct{}),
+	}
+}
+
+// SetHoldAfterBytes arms the gate. Must be called before the gated snapshot
+// stream starts; an unarmed gate passes everything through.
+func (g *snapshotGate) SetHoldAfterBytes(n int64) { g.holdAfterBytes = n }
+
+func (g *snapshotGate) HoldAfterBytes() int64 { return g.holdAfterBytes }
+
+func (g *snapshotGate) Held() <-chan struct{}     { return g.held }
+func (g *snapshotGate) Released() <-chan struct{} { return g.released }
+
+func (g *snapshotGate) Release(reason string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.releaseLocked(reason)
+}
+
+func (g *snapshotGate) releaseLocked(reason string) {
+	select {
+	case <-g.released:
+		return
+	default:
+	}
+	g.releaseReason = reason
+	if !g.heldAt.IsZero() {
+		g.heldFor = time.Since(g.heldAt)
+	}
+	close(g.released)
+}
+
+func (g *snapshotGate) Engaged() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.engaged
+}
+
+func (g *snapshotGate) ReleaseReason() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.releaseReason
+}
+
+func (g *snapshotGate) HeldDuration() time.Duration {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.heldFor
+}
+
+// wait blocks the snapshot stream at the hold point until release or timeout.
+func (g *snapshotGate) wait(ctx context.Context) {
+	g.mu.Lock()
+	if g.engaged {
+		g.mu.Unlock()
+		return
+	}
+	g.engaged = true
+	g.heldAt = time.Now()
+	close(g.held)
+	g.mu.Unlock()
+
+	timer := time.NewTimer(g.timeout)
+	defer timer.Stop()
+	select {
+	case <-g.released:
+	case <-timer.C:
+		g.Release("timeout")
+	case <-ctx.Done():
+		g.Release("context-done")
+	}
+}
+
+type gatedSnapshotClient struct {
+	litestream.ReplicaClient
+	gate *snapshotGate
+}
+
+func (c *gatedSnapshotClient) WriteLTXFile(ctx context.Context, level int, minTXID, maxTXID ltx.TXID, r io.Reader) (*ltx.FileInfo, error) {
+	if level != litestream.SnapshotLevel {
+		return c.ReplicaClient.WriteLTXFile(ctx, level, minTXID, maxTXID, r)
+	}
+	return c.ReplicaClient.WriteLTXFile(ctx, level, minTXID, maxTXID, &gatedReader{ctx: ctx, inner: r, gate: c.gate})
+}
+
+// gatedReader passes the snapshot stream through until the gate's hold point,
+// then blocks before delivering further bytes so the producing encoder stays
+// alive with its page index resident.
+type gatedReader struct {
+	ctx   context.Context
+	inner io.Reader
+	gate  *snapshotGate
+	read  int64
+}
+
+func (r *gatedReader) Read(p []byte) (int, error) {
+	if r.gate.holdAfterBytes > 0 && r.read >= r.gate.holdAfterBytes {
+		r.gate.wait(r.ctx)
+	}
+	n, err := r.inner.Read(p)
+	r.read += int64(n)
+	return n, err
 }
 
 func (s *memSampler) Measure(name string, fn func() error) memPhase {
@@ -953,6 +1156,16 @@ func buildOverlapSeedDB(ctx context.Context, path string, sizeMB int) (int64, in
 		return 0, 0, err
 	}
 	return fileSize(path) / pageSize, pageSize, nil
+}
+
+// removeDBArtifacts deletes a scenario database along with its WAL/SHM
+// sidecars and Litestream's local meta directory, which holds a full copy of
+// the L0 files and dwarfs the database itself on multi-GiB runs.
+func removeDBArtifacts(dbPath string) {
+	_ = os.Remove(dbPath)
+	_ = os.Remove(dbPath + "-wal")
+	_ = os.Remove(dbPath + "-shm")
+	_ = os.RemoveAll(filepath.Join(filepath.Dir(dbPath), "."+filepath.Base(dbPath)+"-litestream"))
 }
 
 func copyFile(src, dst string) error {
