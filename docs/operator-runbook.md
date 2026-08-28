@@ -836,8 +836,8 @@ The standard worker image includes `curl`, `jq`, `ripgrep`, `procps`,
 Every worker captures Litestream pprof profiles from its control socket: a
 baseline set at start, then hourly heap, allocs, goroutine, and `memstats`
 captures plus a 90s CPU profile. They are kept under `/data/profiles` on the
-machine (newest 96) and uploaded to the replica bucket under the worker's
-`profiles/` prefix. Set `SOAK_PPROF_CAPTURE=false` on a worker to turn it off.
+machine (the newest 96 periodic captures plus the newest baseline set) and
+uploaded to the replica bucket under the worker's `profiles/` prefix. Set `SOAK_PPROF_CAPTURE=false` on a worker to turn it off.
 
 `scripts/pull-profiles.sh <source> <profile> [count]` downloads the newest
 captures straight off the machine with flyctl (`<profile>` is the worker-name

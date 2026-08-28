@@ -58,7 +58,7 @@ source, profile = sys.argv[1], sys.argv[2]
 d = json.load(sys.stdin)
 rows = d if isinstance(d, list) else (d.get("workers") or d.get("items") or [])
 for w in rows:
-    if w.get("source") == source and w.get("profile_name") == profile and w.get("status") == "running":
+    if w.get("source") == source and w.get("profile_name") == profile and w.get("status") in ("running", "probing", "degraded"):
         print(w["name"]); break
 ' "$source_name" "$profile_name" || true)"
   if [ -n "$resolved" ]; then
