@@ -152,6 +152,20 @@ Litestream (roughly additive) fails, a per-database serialization fix passes
 via the timeout path, and a disk-backed page index passes with lower
 bytes-per-page in every phase.
 
+The `restore-retention-race` local rig reproduces the fleet failure where a
+restore fails mid-plan with `reopen ltx file at offset 0: file does not
+exist`: a restore plan is computed from the replica listing, then while its
+files are read one by one, L1 compaction covers the plan's L0 files and L0
+retention deletes them. Litestream's own store monitors drive compaction and
+retention (L1 every 2s, L0 retention 2s checked every second, overridable via
+`ONE_SHOT_RACE_L0_RETENTION_MS`), a writer streams L0 files for the scenario
+window (`ONE_SHOT_RACE_SECONDS`, default 90), and full restores run back to
+back. It reports restores attempted/failed, race failures, max plan depth and
+L0 backlog, and counts of compactions, retention runs, and maintenance-busy
+refusals from the Litestream log. It passes only with zero race failures, so
+it is a measurement of whether a given Litestream ref narrows or widens the
+race, not a regression gate that unpatched main is expected to clear.
+
 PR fleets use sources named `pr-NNN`. The PR workflow builds a worker image with
 `LITESTREAM_SHA` set to the upstream PR head SHA, then notifies the control
 plane with `source=pr-NNN`. The control plane rewrites the default fleet names
