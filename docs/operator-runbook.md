@@ -840,7 +840,10 @@ machine (newest 96) and uploaded to the replica bucket under the worker's
 `profiles/` prefix. Set `SOAK_PPROF_CAPTURE=false` on a worker to turn it off.
 
 `scripts/pull-profiles.sh <source> <profile> [count]` downloads the newest
-captures straight off the machine with flyctl (it reads the access token from
+captures straight off the machine with flyctl (`<profile>` is the worker-name
+suffix such as `high-vol` or `many-dbs-100-dir`; the profile name such as
+`high-volume` also works when `SOAK_BASIC_AUTH_USERNAME`/`PASSWORD` are set,
+since the script then resolves it through the control plane) (it reads the access token from
 `~/.fly/config.yml` when `FLY_ACCESS_TOKEN` is not exported) into
 `tmp/profiles/<source>/<profile>/` and prints the `go tool pprof` commands,
 including a `-diff_base` comparison against `main` when that profile has been

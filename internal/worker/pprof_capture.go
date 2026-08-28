@@ -16,7 +16,11 @@ import (
 	"time"
 )
 
-const pprofLocalRetentionFiles = 96
+const (
+	pprofLocalRetentionFiles = 96
+	// One baseline set is heap, allocs, goroutine, and memstats.
+	pprofBaselineRetentionFiles = 4
+)
 
 type pprofCapturer struct {
 	cfg *Config
@@ -132,12 +136,12 @@ func (c *pprofCapturer) pruneLocalProfiles(dir string, keep int) {
 		return
 	}
 
-	files := make([]pprofProfileFile, 0, len(entries))
+	// Baseline captures are pruned separately so the newest baseline set
+	// (one file per profile kind) always survives, while restarts cannot
+	// accumulate baselines without bound.
+	var files, baselines []pprofProfileFile
 	for _, entry := range entries {
 		if entry.IsDir() {
-			continue
-		}
-		if strings.Contains(entry.Name(), "_baseline_") {
 			continue
 		}
 		info, err := entry.Info()
@@ -145,19 +149,28 @@ func (c *pprofCapturer) pruneLocalProfiles(dir string, keep int) {
 			slog.Warn("Read pprof file info failed", "file", filepath.Join(dir, entry.Name()), "error", err)
 			continue
 		}
-		files = append(files, pprofProfileFile{name: entry.Name(), modTime: info.ModTime()})
+		file := pprofProfileFile{name: entry.Name(), modTime: info.ModTime()}
+		if strings.Contains(entry.Name(), "_baseline_") {
+			baselines = append(baselines, file)
+		} else {
+			files = append(files, file)
+		}
 	}
+	removeOldest(dir, files, keep)
+	removeOldest(dir, baselines, pprofBaselineRetentionFiles)
+}
+
+// removeOldest deletes all but the newest keep files.
+func removeOldest(dir string, files []pprofProfileFile, keep int) {
 	if len(files) <= keep {
 		return
 	}
-
 	sort.Slice(files, func(i, j int) bool {
 		if files[i].modTime.Equal(files[j].modTime) {
 			return files[i].name < files[j].name
 		}
 		return files[i].modTime.Before(files[j].modTime)
 	})
-
 	for _, file := range files[:len(files)-keep] {
 		target := filepath.Join(dir, file.name)
 		if err := os.Remove(target); err != nil {

@@ -184,3 +184,53 @@ func TestPprofCapturerPrunesOldLocalProfiles(t *testing.T) {
 		t.Fatalf("remaining profiles = %v, want %v", got, want)
 	}
 }
+
+func TestPprofCapturerPrunesOldBaselines(t *testing.T) {
+	cfg := DefaultConfig()
+	capturer := newPprofCapturer(&cfg)
+	dir := t.TempDir()
+	names := []string{
+		"20260101T000000Z_baseline_heap.pprof",
+		"20260101T000001Z_baseline_allocs.pprof",
+		"20260101T000002Z_baseline_goroutine.txt",
+		"20260101T000003Z_baseline_memstats.txt",
+		"20260102T000000Z_baseline_heap.pprof",
+		"20260102T000001Z_baseline_allocs.pprof",
+		"20260102T000002Z_baseline_goroutine.txt",
+		"20260102T000003Z_baseline_memstats.txt",
+		"20260102T010000Z_hourly_heap.pprof",
+	}
+	for i, name := range names {
+		target := filepath.Join(dir, name)
+		if err := os.WriteFile(target, []byte("profile"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		modTime := time.Unix(int64(i), 0)
+		if err := os.Chtimes(target, modTime, modTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	capturer.pruneLocalProfiles(dir, 96)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		got = append(got, entry.Name())
+	}
+	slices.Sort(got)
+
+	want := []string{
+		"20260102T000000Z_baseline_heap.pprof",
+		"20260102T000001Z_baseline_allocs.pprof",
+		"20260102T000002Z_baseline_goroutine.txt",
+		"20260102T000003Z_baseline_memstats.txt",
+		"20260102T010000Z_hourly_heap.pprof",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("remaining profiles = %v, want %v", got, want)
+	}
+}

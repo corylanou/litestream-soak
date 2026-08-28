@@ -34,16 +34,40 @@ if [ -z "${FLY_ACCESS_TOKEN:-}" ]; then
   exit 1
 fi
 
-worker="worker-${source_name}-${profile_name}"
-machine="$(fly machines list -a "$app" --json | python3 -c '
+# <profile> may be the worker-name suffix (low-vol, high-vol, gharchive, ...)
+# or the profile name (low-volume, high-volume, gharchive-replay, ...). Try the
+# suffix first; fall back to resolving the profile name through the control
+# plane when SOAK_BASIC_AUTH_USERNAME/PASSWORD are set (e.g. via .envrc).
+machines_json="$(fly machines list -a "$app" --json)"
+resolve_machine() {
+  printf '%s' "$machines_json" | python3 -c '
 import json, sys
 name = sys.argv[1]
 for m in json.load(sys.stdin):
     if m.get("name") == name and m.get("state") in ("started", "running"):
         print(m["id"]); break
-' "$worker")"
+' "$1"
+}
+worker="worker-${source_name}-${profile_name}"
+machine="$(resolve_machine "$worker")"
+if [ -z "$machine" ] && [ -n "${SOAK_BASIC_AUTH_USERNAME:-}" ] && [ -n "${SOAK_BASIC_AUTH_PASSWORD:-}" ]; then
+  ctl="${SOAK_CONTROL_URL:-https://litestream-soak-ctl.fly.dev}"
+  resolved="$(curl -sf --user "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" "$ctl/api/workers" | python3 -c '
+import json, sys
+source, profile = sys.argv[1], sys.argv[2]
+d = json.load(sys.stdin)
+rows = d if isinstance(d, list) else (d.get("workers") or d.get("items") or [])
+for w in rows:
+    if w.get("source") == source and w.get("profile_name") == profile and w.get("status") == "running":
+        print(w["name"]); break
+' "$source_name" "$profile_name" || true)"
+  if [ -n "$resolved" ]; then
+    worker="$resolved"
+    machine="$(resolve_machine "$worker")"
+  fi
+fi
 if [ -z "$machine" ]; then
-  printf 'no started machine named %s in app %s\n' "$worker" "$app" >&2
+  printf 'no started machine for source %s profile %s in app %s (tried %s)\n' "$source_name" "$profile_name" "$app" "$worker" >&2
   exit 1
 fi
 
@@ -64,6 +88,10 @@ for kind in _heap.pprof _allocs.pprof _cpu_profile.pprof; do
   selected="$(printf '%s\n%s' "$selected" "$picked")"
 done
 selected="$(printf '%s\n' "$selected" | sed '/^$/d')"
+if [ -z "$selected" ]; then
+  printf 'no heap/allocs/cpu captures on %s yet (found: %s)\n' "$worker" "$(printf '%s' "$files" | tr '\n' ' ')" >&2
+  exit 1
+fi
 
 printf 'worker %s machine %s -> %s\n' "$worker" "$machine" "$dest"
 while IFS= read -r file; do
@@ -73,8 +101,18 @@ while IFS= read -r file; do
     continue
   fi
   printf '  get  %s\n' "$file"
-  (cd "$dest" && fly ssh sftp get -a "$app" --machine "$machine" "/data/profiles/$file" >/dev/null 2>&1) \
-    || { printf 'download failed: %s\n' "$file" >&2; exit 1; }
+  # Download into a scratch dir and move into place only when complete, so an
+  # interrupted transfer never masquerades as a finished capture on retry.
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/pull-profiles.XXXXXX")"
+  if (cd "$scratch" && fly ssh sftp get -a "$app" --machine "$machine" "/data/profiles/$file" >/dev/null 2>&1) \
+    && [ -s "$scratch/$file" ]; then
+    mv "$scratch/$file" "$dest/$file"
+    rm -rf "$scratch"
+  else
+    rm -rf "$scratch"
+    printf 'download failed: %s\n' "$file" >&2
+    exit 1
+  fi
 done <<< "$selected"
 
 # newest <dir> <suffix>: lexically last match (names are timestamp-prefixed).
