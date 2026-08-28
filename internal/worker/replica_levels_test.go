@@ -2,8 +2,6 @@ package worker
 
 import (
 	"context"
-	"errors"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -11,80 +9,28 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-func TestParseReplicaLevels(t *testing.T) {
-	for _, tt := range []struct {
-		name    string
-		output  string
-		want    []replicaLevel
-		wantErr bool
-	}{
-		{
-			name:   "sorted by level",
-			output: "0009 80 65536\n0000 1212 4096\n0001 221 8192\n",
-			want: []replicaLevel{
-				{Level: "0000", Objects: 1212, Bytes: 4096},
-				{Level: "0001", Objects: 221, Bytes: 8192},
-				{Level: "0009", Objects: 80, Bytes: 65536},
-			},
-		},
-		{name: "empty prefix", output: "", want: nil},
-		{name: "malformed line", output: "0000 12\n", wantErr: true},
-		{name: "non-numeric", output: "0000 x 1\n", wantErr: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseReplicaLevels(tt.output)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("got %v, want %v", got, tt.want)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Fatalf("level %d = %+v, want %+v", i, got[i], tt.want[i])
-				}
-			}
-		})
-	}
-}
-
-// runAwk feeds input through the given awk program, as the poller's shell
-// pipeline does, so the aggregation is tested against a real awk.
-func runAwk(t *testing.T, program, input string) (string, error) {
-	t.Helper()
-	cmd := exec.Command("awk", program)
-	cmd.Stdin = strings.NewReader(input)
-	out, err := cmd.Output()
-	return string(out), err
-}
-
-func TestReplicaLevelAwkAggregatesByLevelDirectory(t *testing.T) {
+func TestAggregateReplicaListing(t *testing.T) {
 	// One recursive listing must cover both the single-database layout
-	// (prefix/000N/file) and the many-database layout (prefix/<db>/000N/file).
+	// (prefix/000N/file) and the many-database layout (prefix/<db>/000N/file),
+	// tolerate keys with spaces, and ignore non-object rows.
 	listing := "" +
 		"2026-08-28 18:17 62951 s3://b/soak/w/vol/0000/0000000000000001-0000000000000001.ltx\n" +
 		"2026-08-28 18:17 193 s3://b/soak/w/vol/0000/0000000000000002-0000000000000002.ltx\n" +
 		"2026-08-28 18:10 300169 s3://b/soak/w/vol/0001/0000000000000001-0000000000000002.ltx\n" +
-		"2026-08-28 18:00 979843 s3://b/soak/w/vol/db-042/0009/0000000000000001-0000000000000100.ltx\n" +
-		"2026-08-28 18:00 12 s3://b/soak/w/vol/db-042/0000/0000000000000101-0000000000000101.ltx\n" +
-		"2026-08-28 18:00 91 s3://b/soak/w/vol/soak-replica-url\n"
-	out, err := runAwk(t, replicaLevelAwk, listing)
-	if err != nil {
-		t.Fatal(err)
-	}
-	levels, err := parseReplicaLevels(out)
+		"2026-08-28 18:00 979843 s3://b/soak/w/vol/db 042/0009/0000000000000001-0000000000000100.ltx\n" +
+		"2026-08-28 18:00 12 s3://b/soak/w/vol/db 042/0000/0000000000000101-0000000000000101.ltx\n" +
+		"2026-08-28 18:00 3000000000 s3://b/soak/w/vol/0002/0000000000000001-0000000000000200.ltx\n" +
+		"2026-08-28 18:00 91 s3://b/soak/w/vol/soak-replica-url\n" +
+		"                          DIR  s3://b/soak/w/vol/0003/\n" +
+		"\n"
+	levels, err := aggregateReplicaListing(strings.NewReader(listing))
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []replicaLevel{
 		{Level: "0000", Objects: 3, Bytes: 62951 + 193 + 12},
 		{Level: "0001", Objects: 1, Bytes: 300169},
+		{Level: "0002", Objects: 1, Bytes: 3000000000},
 		{Level: "0009", Objects: 1, Bytes: 979843},
 	}
 	if len(levels) != len(want) {
@@ -97,7 +43,27 @@ func TestReplicaLevelAwkAggregatesByLevelDirectory(t *testing.T) {
 	}
 }
 
-func TestSetReplicaLevelStats(t *testing.T) {
+func TestReplicaLevelOfKey(t *testing.T) {
+	for _, tt := range []struct {
+		key   string
+		level string
+		ok    bool
+	}{
+		{"s3://b/p/0000/a.ltx", "0000", true},
+		{"s3://b/p/db/0009/a.ltx", "0009", true},
+		{"s3://b/p/soak-replica-url", "", false},
+		{"s3://b/p/00010/a.ltx", "", false},
+		{"s3://b/p/00a1/a.ltx", "", false},
+		{"a.ltx", "", false},
+	} {
+		level, ok := replicaLevelOfKey(tt.key)
+		if level != tt.level || ok != tt.ok {
+			t.Fatalf("replicaLevelOfKey(%q) = %q,%v want %q,%v", tt.key, level, ok, tt.level, tt.ok)
+		}
+	}
+}
+
+func TestReplicaLevelMetrics(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.WorkerID = "worker-replica-levels"
 	cfg.ProfileName = "high-vol-ams"
@@ -105,31 +71,48 @@ func TestSetReplicaLevelStats(t *testing.T) {
 	cfg.Region = "ams"
 	SetWorkerInfo(cfg)
 	base := []string{cfg.WorkerID, cfg.ProfileName, cfg.Source, cfg.Region}
+	objects := func(level string) float64 {
+		return testutil.ToFloat64(replicaLTXObjects.WithLabelValues(append(base, level)...))
+	}
 
-	SetReplicaLevelStats([]replicaLevel{
-		{Level: "0000", Objects: 1212, Bytes: 4096},
-		{Level: "0001", Objects: 221, Bytes: 8192},
-	})
-	SetReplicaLevelListingOK(true)
-	for level, want := range map[string]float64{"0000": 1212, "0001": 221} {
-		if got := testutil.ToFloat64(replicaLTXObjects.WithLabelValues(append(base, level)...)); got != want {
-			t.Fatalf("soak_replica_ltx_objects{level=%s} = %v, want %v", level, got, want)
-		}
+	p := newReplicaLevelPoller(&cfg)
+	var next []replicaLevel
+	var nextErr error
+	p.list = func(context.Context, Config) ([]replicaLevel, error) { return next, nextErr }
+
+	next = []replicaLevel{{Level: "0000", Objects: 1212, Bytes: 4096}, {Level: "0001", Objects: 221, Bytes: 8192}}
+	p.poll(context.Background())
+	if got := objects("0000"); got != 1212 {
+		t.Fatalf("L0 objects = %v, want 1212", got)
 	}
 	if got := testutil.ToFloat64(replicaLTXBytes.WithLabelValues(append(base, "0001")...)); got != 8192 {
-		t.Fatalf("soak_replica_ltx_bytes{level=0001} = %v, want 8192", got)
+		t.Fatalf("L1 bytes = %v, want 8192", got)
 	}
 	if got := testutil.ToFloat64(replicaLTXListingOK.WithLabelValues(base...)); got != 1 {
-		t.Fatalf("soak_replica_ltx_listing_ok = %v, want 1", got)
+		t.Fatalf("listing_ok = %v, want 1", got)
 	}
 
 	// A failed listing flags staleness but keeps the last good values.
-	SetReplicaLevelListingOK(false)
+	next, nextErr = nil, context.DeadlineExceeded
+	p.poll(context.Background())
 	if got := testutil.ToFloat64(replicaLTXListingOK.WithLabelValues(base...)); got != 0 {
-		t.Fatalf("soak_replica_ltx_listing_ok = %v, want 0", got)
+		t.Fatalf("listing_ok after failure = %v, want 0", got)
 	}
-	if got := testutil.ToFloat64(replicaLTXObjects.WithLabelValues(append(base, "0000")...)); got != 1212 {
-		t.Fatalf("soak_replica_ltx_objects{level=0000} = %v after failure, want 1212", got)
+	if got := objects("0000"); got != 1212 {
+		t.Fatalf("L0 objects after failure = %v, want 1212 (stale but kept)", got)
+	}
+
+	// A level that disappears from a successful listing reads zero.
+	next, nextErr = []replicaLevel{{Level: "0001", Objects: 5, Bytes: 10}}, nil
+	p.poll(context.Background())
+	if got := objects("0000"); got != 0 {
+		t.Fatalf("L0 objects after compaction = %v, want 0", got)
+	}
+	if got := objects("0001"); got != 5 {
+		t.Fatalf("L1 objects = %v, want 5", got)
+	}
+	if got := testutil.ToFloat64(replicaLTXListingOK.WithLabelValues(base...)); got != 1 {
+		t.Fatalf("listing_ok = %v, want 1", got)
 	}
 }
 
@@ -149,10 +132,10 @@ func TestReplicaLevelPollerEnabled(t *testing.T) {
 			cfg.ReplicaLevelPollInterval = time.Hour
 			tt.mutate(&cfg)
 			p := newReplicaLevelPoller(&cfg)
-			calls := make(chan struct{}, 4)
+			polled := false
 			ctx, cancel := context.WithCancel(context.Background())
 			p.list = func(context.Context, Config) ([]replicaLevel, error) {
-				calls <- struct{}{}
+				polled = true
 				cancel() // stop after the initial poll
 				return nil, nil
 			}
@@ -164,8 +147,8 @@ func TestReplicaLevelPollerEnabled(t *testing.T) {
 				t.Fatal("poller did not stop")
 			}
 			cancel()
-			if got := len(calls) > 0; got != tt.wantRuns {
-				t.Fatalf("polled=%v, want %v", got, tt.wantRuns)
+			if polled != tt.wantRuns {
+				t.Fatalf("polled=%v, want %v", polled, tt.wantRuns)
 			}
 		})
 	}
@@ -236,9 +219,6 @@ func TestListReplicaLevelsRejectsMissingHost(t *testing.T) {
 	cfg.S3Endpoint = ""
 	if _, err := listReplicaLevels(context.Background(), cfg); err == nil {
 		t.Fatal("expected error for empty endpoint")
-	}
-	if _, err := listReplicaLevels(context.Background(), cfg); errors.Is(err, context.Canceled) {
-		t.Fatal("unexpected cancellation error")
 	}
 }
 

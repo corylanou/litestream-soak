@@ -1,10 +1,13 @@
 package worker
 
 import (
+	"bufio"
+	"bytes"
 	"context"
-	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -12,8 +15,13 @@ import (
 	"time"
 )
 
-// replicaLevelListTimeout bounds one recursive listing of the replica prefix.
-const replicaLevelListTimeout = 90 * time.Second
+const (
+	// replicaLevelListTimeout bounds one recursive listing of the replica prefix.
+	replicaLevelListTimeout = 90 * time.Second
+	// replicaLevelKillGrace is how long Wait may block after the context kills
+	// s3cmd before its pipes are abandoned.
+	replicaLevelKillGrace = 5 * time.Second
+)
 
 // replicaLevel is the object count and total size of one LTX level on the
 // replica, aggregated across every database under the worker's prefix.
@@ -28,17 +36,18 @@ type replicaLevel struct {
 // growing while restores are in flight) is visible in Grafana rather than only
 // in a failure debug snapshot.
 //
-// A single recursive listing of the worker's prefix is aggregated by level in
-// awk, so the output stays a few lines regardless of backlog size and the
-// same command covers single-database (prefix/000N/) and many-database
+// One recursive listing of the worker's prefix is streamed and aggregated by
+// level in Go, so memory stays flat regardless of backlog size and the same
+// pass covers single-database (prefix/000N/) and many-database
 // (prefix/<db>/000N/) layouts.
 type replicaLevelPoller struct {
-	cfg  *Config
-	list func(context.Context, Config) ([]replicaLevel, error)
+	cfg   *Config
+	list  func(context.Context, Config) ([]replicaLevel, error)
+	known map[string]struct{} // levels published by the previous successful poll
 }
 
 func newReplicaLevelPoller(cfg *Config) *replicaLevelPoller {
-	return &replicaLevelPoller{cfg: cfg, list: listReplicaLevels}
+	return &replicaLevelPoller{cfg: cfg, list: listReplicaLevels, known: make(map[string]struct{})}
 }
 
 func (p *replicaLevelPoller) enabled() bool {
@@ -71,67 +80,127 @@ func (p *replicaLevelPoller) poll(ctx context.Context) {
 		SetReplicaLevelListingOK(false)
 		return
 	}
+	// A level that has been compacted away since the last poll must read
+	// zero, not keep its old count.
+	current := make(map[string]struct{}, len(levels))
+	for _, level := range levels {
+		current[level.Level] = struct{}{}
+	}
+	for level := range p.known {
+		if _, ok := current[level]; !ok {
+			levels = append(levels, replicaLevel{Level: level})
+		}
+	}
+	p.known = current
 	SetReplicaLevelStats(levels)
 	SetReplicaLevelListingOK(true)
 }
 
 // listReplicaLevels runs one recursive s3cmd listing of the worker's replica
-// prefix and aggregates object counts and bytes per four-digit level directory.
+// prefix, streaming the output and aggregating objects and bytes per
+// four-digit level directory. Credentials come from the AWS_* environment that
+// s3cmd reads itself, so they never appear on the command line.
 func listReplicaLevels(ctx context.Context, cfg Config) ([]replicaLevel, error) {
 	host := endpointHost(cfg.S3Endpoint)
 	if host == "" {
 		return nil, fmt.Errorf("replica endpoint %q has no host", cfg.S3Endpoint)
 	}
 	prefixURL := fmt.Sprintf("s3://%s/%s/", cfg.S3Bucket, strings.Trim(strings.TrimPrefix(cfg.S3Path, "/"), "/"))
-	ssl := ""
+	args := []string{"--host=" + host}
 	if strings.HasPrefix(strings.ToLower(cfg.S3Endpoint), "http://") {
-		ssl = " --no-ssl"
+		// Plain-http endpoints are the local fault proxy or MinIO: no TLS
+		// and path-style addressing, since %(bucket)s.127.0.0.1 never
+		// resolves.
+		args = append(args, "--no-ssl", "--host-bucket="+host)
+	} else {
+		args = append(args, "--host-bucket=%(bucket)s."+host)
 	}
-	command := fmt.Sprintf(
-		`s3cmd --access_key="$AWS_ACCESS_KEY_ID" --secret_key="$AWS_SECRET_ACCESS_KEY" --host=%s --host-bucket='%%(bucket)s.%s' --region="$AWS_REGION"%s ls --recursive %s | awk '%s'`,
-		shellQuote(host), host, ssl, shellQuote(prefixURL), replicaLevelAwk,
-	)
+	if region := os.Getenv("AWS_REGION"); region != "" {
+		args = append(args, "--region="+region)
+	}
+	args = append(args, "ls", "--recursive", prefixURL)
 
 	ctx, cancel := context.WithTimeout(ctx, replicaLevelListTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	output, err := cmd.Output()
+	cmd := exec.CommandContext(ctx, "s3cmd", args...)
+	cmd.WaitDelay = replicaLevelKillGrace
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("list replica levels: %w", ctx.Err())
-		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-			return nil, fmt.Errorf("list replica levels: %w: %s", err, tailString(strings.TrimSpace(string(exitErr.Stderr)), 512))
-		}
 		return nil, fmt.Errorf("list replica levels: %w", err)
 	}
-	return parseReplicaLevels(string(output))
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("list replica levels: %w", err)
+	}
+	levels, parseErr := aggregateReplicaListing(stdout)
+	waitErr := cmd.Wait()
+	switch {
+	case ctx.Err() != nil:
+		return nil, fmt.Errorf("list replica levels: %w", ctx.Err())
+	case waitErr != nil:
+		return nil, fmt.Errorf("list replica levels: %w: %s", waitErr, tailString(strings.TrimSpace(stderr.String()), 512))
+	case parseErr != nil:
+		return nil, fmt.Errorf("list replica levels: %w", parseErr)
+	}
+	return levels, nil
 }
 
-// replicaLevelAwk aggregates `s3cmd ls --recursive` lines (DATE TIME SIZE KEY)
-// by the four-digit directory that contains each object, emitting
-// "<level> <objects> <bytes>" per level.
-const replicaLevelAwk = `NF >= 4 { n = split($4, parts, "/"); if (n >= 2 && parts[n-1] ~ /^[0-9][0-9][0-9][0-9]$/) { objects[parts[n-1]]++; bytes[parts[n-1]] += $3 } } END { for (level in objects) printf "%s %d %d\n", level, objects[level], bytes[level] }`
-
-// parseReplicaLevels parses the awk output into levels sorted by level name.
-func parseReplicaLevels(output string) ([]replicaLevel, error) {
-	var levels []replicaLevel
-	for _, line := range nonEmptyLines(output) {
-		fields := strings.Fields(line)
-		if len(fields) != 3 {
-			return nil, fmt.Errorf("unexpected replica level line %q", line)
+// aggregateReplicaListing consumes `s3cmd ls --recursive` output
+// (DATE TIME SIZE KEY, where KEY may contain spaces) and sums objects and bytes
+// per four-digit directory that directly contains each object.
+func aggregateReplicaListing(r io.Reader) ([]replicaLevel, error) {
+	totals := make(map[string]*replicaLevel)
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64<<10), 1<<20)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 4 {
+			continue
 		}
-		objects, err := strconv.Atoi(fields[1])
+		size, err := strconv.ParseInt(fields[2], 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("parse object count in %q: %w", line, err)
+			continue // "DIR" rows and other non-object lines
 		}
-		bytes, err := strconv.ParseInt(fields[2], 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("parse bytes in %q: %w", line, err)
+		key := strings.Join(fields[3:], " ")
+		level, ok := replicaLevelOfKey(key)
+		if !ok {
+			continue
 		}
-		levels = append(levels, replicaLevel{Level: fields[0], Objects: objects, Bytes: bytes})
+		entry := totals[level]
+		if entry == nil {
+			entry = &replicaLevel{Level: level}
+			totals[level] = entry
+		}
+		entry.Objects++
+		entry.Bytes += size
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read listing: %w", err)
+	}
+	levels := make([]replicaLevel, 0, len(totals))
+	for _, entry := range totals {
+		levels = append(levels, *entry)
 	}
 	slices.SortFunc(levels, func(a, b replicaLevel) int { return strings.Compare(a.Level, b.Level) })
 	return levels, nil
+}
+
+// replicaLevelOfKey returns the four-digit level directory that directly
+// contains key (…/0001/<file>), if any.
+func replicaLevelOfKey(key string) (string, bool) {
+	parts := strings.Split(key, "/")
+	if len(parts) < 2 {
+		return "", false
+	}
+	level := parts[len(parts)-2]
+	if len(level) != 4 {
+		return "", false
+	}
+	for _, c := range level {
+		if c < '0' || c > '9' {
+			return "", false
+		}
+	}
+	return level, true
 }
