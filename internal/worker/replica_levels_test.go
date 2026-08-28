@@ -51,6 +51,8 @@ func TestReplicaLevelOfKey(t *testing.T) {
 	}{
 		{"s3://b/p/0000/a.ltx", "0000", true},
 		{"s3://b/p/db/0009/a.ltx", "0009", true},
+		{"s3://b/p/0042/a.ltx", "", false},
+		{"s3://b/p/1000/a.ltx", "", false},
 		{"s3://b/p/soak-replica-url", "", false},
 		{"s3://b/p/00010/a.ltx", "", false},
 		{"s3://b/p/00a1/a.ltx", "", false},

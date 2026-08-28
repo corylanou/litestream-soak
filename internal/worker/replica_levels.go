@@ -187,20 +187,17 @@ func aggregateReplicaListing(r io.Reader) ([]replicaLevel, error) {
 }
 
 // replicaLevelOfKey returns the four-digit level directory that directly
-// contains key (…/0001/<file>), if any.
+// contains key (…/0001/<file>), if any. Only LTX's real levels 0000–0009
+// (compaction levels 0–8 and the snapshot level 9) are accepted, so the
+// level label stays bounded to ten values.
 func replicaLevelOfKey(key string) (string, bool) {
 	parts := strings.Split(key, "/")
 	if len(parts) < 2 {
 		return "", false
 	}
 	level := parts[len(parts)-2]
-	if len(level) != 4 {
+	if len(level) != 4 || level[:3] != "000" || level[3] < '0' || level[3] > '9' {
 		return "", false
-	}
-	for _, c := range level {
-		if c < '0' || c > '9' {
-			return "", false
-		}
 	}
 	return level, true
 }
