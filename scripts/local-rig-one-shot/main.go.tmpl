@@ -114,6 +114,8 @@ func main() {
 		res, err = runL0GapHeal(ctx, cfg)
 	case "snapshot-compaction-overlap":
 		res, err = runSnapshotCompactionOverlap(ctx, cfg)
+	case "restore-retention-race":
+		res, err = runRestoreRetentionRace(ctx, cfg)
 	case "constrained-disk":
 		res, err = runConstrainedDisk(ctx, cfg)
 	default:
@@ -134,6 +136,8 @@ func scenarioTimeout(scenario string) time.Duration {
 		return 8 * time.Minute
 	case "snapshot-compaction-overlap":
 		return 45 * time.Minute
+	case "restore-retention-race":
+		return time.Duration(intEnv("ONE_SHOT_RACE_SECONDS", raceDefaultSeconds))*time.Second + 2*time.Minute
 	case "constrained-disk":
 		return 5 * time.Minute
 	default:
@@ -1219,6 +1223,299 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return out.Close()
+}
+
+const (
+	raceDefaultSeconds       = 90
+	raceDefaultL0RetentionMS = 2000
+	raceL1Interval           = 2 * time.Second
+	raceRetentionCheck       = time.Second
+	raceRowsPerSync          = 8
+	raceRowBlobSize          = 2048
+)
+
+// runRestoreRetentionRace reproduces the restore-vs-L0-retention race seen on
+// the soak fleet: a restore plan is computed from the replica listing, then
+// while the plan's files are read one by one, L1 compaction covers the plan's
+// L0 files and L0 retention deletes them, so a later read fails with
+// "reopen ltx file at offset 0: file does not exist". Litestream's own store
+// monitors drive compaction and retention here (that is where per-database
+// maintenance serialization lives), a writer streams L0 files continuously,
+// and full restores run back to back for the scenario duration.
+func runRestoreRetentionRace(ctx context.Context, cfg config) (result, error) {
+	res := baseResult(cfg, "restore-during-retention")
+	duration := time.Duration(intEnv("ONE_SHOT_RACE_SECONDS", raceDefaultSeconds)) * time.Second
+	l0Retention := time.Duration(intEnv("ONE_SHOT_RACE_L0_RETENTION_MS", raceDefaultL0RetentionMS)) * time.Millisecond
+
+	client := newS3Client(cfg, cfg.S3Prefix, 0, 0)
+	if err := client.DeleteAll(ctx); err != nil {
+		return res, fmt.Errorf("delete s3 prefix: %w", err)
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_ = client.DeleteAll(cleanupCtx)
+	}()
+
+	dbPath := filepath.Join(cfg.WorkDir, "race-source.db")
+	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
+		return res, err
+	}
+	defer removeDBArtifacts(dbPath)
+
+	var logBuf safeBuffer
+	counter := &raceLogCounter{
+		Handler: slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}),
+		counts:  &raceLogCounts{m: make(map[string]int)},
+	}
+	logger := slog.New(counter)
+
+	levels := litestream.CompactionLevels{
+		{Level: 0},
+		{Level: 1, Interval: raceL1Interval},
+	}
+	db := litestream.NewDB(dbPath)
+	db.MonitorInterval = 0
+	db.Logger = logger
+	db.Replica = litestream.NewReplica(db)
+	db.Replica.Client = client
+	db.Replica.MonitorEnabled = false
+	store := litestream.NewStore([]*litestream.DB{db}, levels)
+	store.Logger = logger
+	store.CompactionMonitorEnabled = true
+	store.RetentionEnabled = true
+	store.L0Retention = l0Retention
+	store.L0RetentionCheckInterval = raceRetentionCheck
+	// NewStore copies L0Retention and the logger into each DB at
+	// construction, so settings applied to the store afterwards must be
+	// mirrored onto the DB for retention enforcement and log capture.
+	db.L0Retention = l0Retention
+	db.SetLogger(logger)
+	if err := store.Open(ctx); err != nil {
+		return res, fmt.Errorf("open store: %w", err)
+	}
+	defer func() { _ = store.Close(context.Background()) }()
+	sqldb, err := openSQLDB(dbPath)
+	if err != nil {
+		return res, err
+	}
+	defer func() { _ = sqldb.Close() }()
+
+	// Seed and wait for the store's snapshot monitor to publish the first
+	// snapshot, which every restore plan starts from.
+	if err := insertRows(ctx, sqldb, 0, 64, raceRowBlobSize); err != nil {
+		return res, err
+	}
+	if err := syncDB(ctx, db); err != nil {
+		return res, err
+	}
+	seedDeadline := time.Now().Add(20 * time.Second)
+	for countLevel(ctx, client, litestream.SnapshotLevel) == 0 {
+		if time.Now().After(seedDeadline) {
+			return res, errors.New("timed out waiting for the initial snapshot")
+		}
+		select {
+		case <-ctx.Done():
+			return res, ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+
+	// Writer: stream L0 files for the whole scenario.
+	runCtx, cancelRun := context.WithTimeout(ctx, duration)
+	defer cancelRun()
+	var (
+		writerWG  sync.WaitGroup
+		writerErr error
+		syncsDone int64
+		rowsTotal = int64(64)
+	)
+	writerWG.Add(1)
+	go func() {
+		defer writerWG.Done()
+		for runCtx.Err() == nil {
+			if err := insertRows(runCtx, sqldb, int(rowsTotal), raceRowsPerSync, raceRowBlobSize); err != nil {
+				if runCtx.Err() == nil {
+					writerErr = fmt.Errorf("insert rows: %w", err)
+				}
+				return
+			}
+			rowsTotal += raceRowsPerSync
+			if err := syncDB(runCtx, db); err != nil {
+				if runCtx.Err() == nil {
+					writerErr = fmt.Errorf("sync: %w", err)
+				}
+				return
+			}
+			syncsDone++
+		}
+	}()
+
+	// Restores: back to back until the deadline. Each restore is planned from
+	// the live replica listing exactly as `litestream restore` does.
+	// One restore handle is reused for every attempt: each litestream.NewDB
+	// registers metric label sets for its path, and only the client matters
+	// for Replica.Restore.
+	restoreDB := litestream.NewDB(filepath.Join(cfg.WorkDir, "restore-handle.db"))
+	restoreDB.Logger = logger
+	restoreDB.Replica = litestream.NewReplica(restoreDB)
+	restoreDB.Replica.Client = client
+
+	var (
+		attempts, failures, raceFailures, otherFailures int
+		maxPlanDepth, maxPlanL0, maxL0Backlog           int
+		lastRaceErr, lastOtherErr                       string
+		restoreTotal                                    time.Duration
+	)
+	for i := 0; runCtx.Err() == nil; i++ {
+		plan, planErr := litestream.CalcRestorePlan(runCtx, client, 0, time.Time{}, logger)
+		if planErr != nil {
+			if runCtx.Err() != nil {
+				break
+			}
+			// A listing failure is not a restore attempt; note it and back
+			// off rather than spinning on the replica.
+			otherFailures++
+			lastOtherErr = "plan: " + planErr.Error()
+			select {
+			case <-runCtx.Done():
+			case <-time.After(250 * time.Millisecond):
+			}
+			continue
+		}
+		planL0 := 0
+		for _, info := range plan {
+			if info.Level == 0 {
+				planL0++
+			}
+		}
+		maxPlanDepth = max(maxPlanDepth, len(plan))
+		maxPlanL0 = max(maxPlanL0, planL0)
+		if backlog := countLevel(runCtx, client, 0); backlog > maxL0Backlog {
+			maxL0Backlog = backlog
+		}
+
+		restorePath := filepath.Join(cfg.WorkDir, fmt.Sprintf("restored-%d.db", i))
+		start := time.Now()
+		err := restoreDB.Replica.Restore(runCtx, litestream.RestoreOptions{OutputPath: restorePath})
+		if runCtx.Err() != nil && err != nil {
+			_ = os.Remove(restorePath)
+			break // deadline hit mid-restore; neither a verdict nor a timing sample
+		}
+		restoreTotal += time.Since(start)
+		attempts++
+		if err != nil {
+			failures++
+			// The fleet signature is specifically a plan file vanishing between
+			// listing and reading; anything else is a different failure.
+			if msg := err.Error(); strings.Contains(msg, "reopen ltx file") && strings.Contains(msg, "file does not exist") {
+				raceFailures++
+				lastRaceErr = msg
+			} else {
+				otherFailures++
+				lastOtherErr = msg
+			}
+		} else if restoredRowCount(restorePath) <= 0 {
+			failures++
+			otherFailures++
+			lastOtherErr = "restored database unreadable or empty"
+		}
+		_ = os.Remove(restorePath)
+	}
+	cancelRun()
+	writerWG.Wait()
+
+	lines := logBuf.Lines()
+	retentionRuns := counter.count("l0 retention enforced")
+	busyRefusals := counter.count("maintenance busy, will retry") + counter.count("maintenance busy, skipping")
+	compactions := counter.count("compaction complete")
+
+	res.Stats["duration_seconds"] = int(duration / time.Second)
+	res.Stats["l0_retention_ms"] = l0Retention.Milliseconds()
+	res.Stats["l1_interval_ms"] = raceL1Interval.Milliseconds()
+	res.Stats["writer_syncs"] = syncsDone
+	res.Stats["writer_rows"] = rowsTotal
+	res.Stats["restores_attempted"] = attempts
+	res.Stats["restores_failed"] = failures
+	res.Stats["race_failures"] = raceFailures
+	res.Stats["other_failures"] = otherFailures
+	// Plan stats are sampled from a plan computed just before each restore;
+	// Replica.Restore recomputes its own, so treat these as a proxy for how
+	// deep the plans were, not the exact file lists that failed.
+	res.Stats["max_plan_depth_at_start"] = maxPlanDepth
+	res.Stats["max_plan_l0_files_at_start"] = maxPlanL0
+	res.Stats["max_l0_backlog"] = maxL0Backlog
+	res.Stats["l0_retention_runs"] = retentionRuns
+	res.Stats["compactions_complete"] = compactions
+	res.Stats["maintenance_busy_refusals"] = busyRefusals
+	if attempts > 0 {
+		res.Stats["avg_restore_ms"] = restoreTotal.Milliseconds() / int64(attempts)
+	}
+	if lastRaceErr != "" {
+		res.Stats["last_race_error"] = lastRaceErr[:min(len(lastRaceErr), 400)]
+	}
+	if lastOtherErr != "" {
+		res.Stats["last_other_error"] = lastOtherErr[:min(len(lastOtherErr), 400)]
+	}
+	res.Logs = tailStrings(lines, 20)
+
+	if writerErr != nil {
+		res.Error = writerErr.Error()
+		return res, nil
+	}
+	if attempts == 0 {
+		res.Error = "no restore completed within the scenario window"
+		return res, nil
+	}
+	res.Pass = raceFailures == 0
+	return res, nil
+}
+
+// raceLogCounter counts Litestream log messages at every level (the
+// maintenance-busy refusal is logged at DEBUG) while only INFO and above are
+// retained as text. Derived handlers (WithAttrs/WithGroup) share one
+// mutex-guarded count table, since Litestream derives child loggers per
+// subsystem and logs from several goroutines.
+type raceLogCounter struct {
+	slog.Handler
+	counts *raceLogCounts
+}
+
+type raceLogCounts struct {
+	mu sync.Mutex
+	m  map[string]int
+}
+
+func (h *raceLogCounter) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *raceLogCounter) Handle(ctx context.Context, r slog.Record) error {
+	h.counts.mu.Lock()
+	h.counts.m[r.Message]++
+	h.counts.mu.Unlock()
+	if r.Level < slog.LevelInfo {
+		return nil
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h *raceLogCounter) WithAttrs(attrs []slog.Attr) slog.Handler {
+	if len(attrs) == 0 {
+		return h
+	}
+	return &raceLogCounter{Handler: h.Handler.WithAttrs(attrs), counts: h.counts}
+}
+
+func (h *raceLogCounter) WithGroup(name string) slog.Handler {
+	if name == "" {
+		return h
+	}
+	return &raceLogCounter{Handler: h.Handler.WithGroup(name), counts: h.counts}
+}
+
+func (h *raceLogCounter) count(msg string) int {
+	h.counts.mu.Lock()
+	defer h.counts.mu.Unlock()
+	return h.counts.m[msg]
 }
 
 func baseResult(cfg config, operation string) result {

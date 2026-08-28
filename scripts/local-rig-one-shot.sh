@@ -12,7 +12,7 @@ if [ -z "$scenario" ]; then
 fi
 
 case "$scenario" in
-  compaction-source-stream-drop|uploadpart-retry-quota|provider-http-408|provider-request-canceled|constrained-disk|l0-gap-heal|snapshot-compaction-overlap) ;;
+  compaction-source-stream-drop|uploadpart-retry-quota|provider-http-408|provider-request-canceled|constrained-disk|l0-gap-heal|snapshot-compaction-overlap|restore-retention-race) ;;
   *)
     printf 'unknown scenario: %s\n' "$scenario" >&2
     exit 2
@@ -116,14 +116,19 @@ run_constrained() {
       --file-replica /replica
 }
 
+# A failing run no longer aborts the remaining runs: multi-run invocations are
+# how flaky or statistical scenarios (restore-retention-race) get their
+# counts. The exit status still reports whether every run passed.
+status=0
 for run_id in $(seq 1 "$runs"); do
   if [ "$scenario" = "constrained-disk" ]; then
-    run_constrained "$run_id" | tee -a "$result_file"
+    run_constrained "$run_id" | tee -a "$result_file" || status=1
   else
-    run_host "$run_id" | tee -a "$result_file"
+    run_host "$run_id" | tee -a "$result_file" || status=1
   fi
 done
 
 printf 'result_file=%s\n' "$result_file"
 printf 'litestream_sha=%s\n' "$sha"
 printf 'litestream_bin=%s\n' "$bin_dir/litestream"
+exit "$status"
