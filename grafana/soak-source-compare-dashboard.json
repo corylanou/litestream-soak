@@ -989,7 +989,7 @@
       "targets": [
         {
           "expr": "soak_replica_ltx_objects{source=~\"main|$compare_source\"}",
-          "legendFormat": "{{source}} \u00b7 L{{level}}",
+          "legendFormat": "{{source}} \u00b7 {{profile}} \u00b7 L{{level}}",
           "refId": "A"
         }
       ]
