@@ -61,7 +61,8 @@ type Config struct {
 	// Verification
 	VerifyInterval           time.Duration
 	MonitorInterval          time.Duration
-	VerifyType               string // quick, integrity, checksum, full
+	ReplicaLevelPollInterval time.Duration // how often replica LTX level counts are listed for metrics; 0 disables
+	VerifyType               string        // quick, integrity, checksum, full
 	VerifySyncDegradedAfter  time.Duration
 	VerifySyncTimeout        time.Duration
 	DiskFullNoProgressWindow time.Duration
@@ -167,6 +168,7 @@ func DefaultConfig() Config {
 
 		VerifyInterval:           30 * time.Minute,
 		MonitorInterval:          15 * time.Second,
+		ReplicaLevelPollInterval: 5 * time.Minute,
 		VerifyType:               "integrity",
 		VerifySyncDegradedAfter:  5 * time.Minute,
 		VerifySyncTimeout:        15 * time.Minute,
@@ -527,6 +529,16 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid MONITOR_INTERVAL: must be positive")
 		}
 		c.MonitorInterval = d
+	}
+	if v := os.Getenv("REPLICA_LEVEL_POLL_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid REPLICA_LEVEL_POLL_INTERVAL: %w", err)
+		}
+		if d < 0 {
+			return c, fmt.Errorf("invalid REPLICA_LEVEL_POLL_INTERVAL: must not be negative")
+		}
+		c.ReplicaLevelPollInterval = d
 	}
 	if v := os.Getenv("VERIFY_TYPE"); v != "" {
 		c.VerifyType = v

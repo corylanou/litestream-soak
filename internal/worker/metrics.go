@@ -29,6 +29,16 @@ var (
 		Help: "Time since worker started.",
 	}, []string{"worker_id", "profile", "source", "region"})
 
+	replicaLTXObjects = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_replica_ltx_objects",
+		Help: "Number of LTX objects on the replica per compaction level (level is the four-digit prefix, e.g. 0000 for L0, 0009 for snapshots).",
+	}, []string{"worker_id", "profile", "source", "region", "level"})
+
+	replicaLTXBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "soak_replica_ltx_bytes",
+		Help: "Total bytes of LTX objects on the replica per compaction level.",
+	}, []string{"worker_id", "profile", "source", "region", "level"})
+
 	verificationTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "soak_verification_total",
 		Help: "Total number of verification cycles by result.",
@@ -445,4 +455,18 @@ func metricRegion(region string) string {
 		return "unknown"
 	}
 	return region
+}
+
+// SetReplicaLevelStats publishes the per-level LTX object counts and sizes
+// observed on the replica. Levels that errored or were capped are skipped so a
+// failed listing never zeroes a previously good series.
+func SetReplicaLevelStats(levels []reporting.ObjectStorageLevelSnapshot) {
+	labels := currentMetricLabels()
+	for _, level := range levels {
+		if level.Error != "" || level.ObjectCountCapped {
+			continue
+		}
+		replicaLTXObjects.WithLabelValues(append(labels, level.Level)...).Set(float64(level.ObjectCount))
+		replicaLTXBytes.WithLabelValues(append(labels, level.Level)...).Set(float64(level.TotalBytes))
+	}
 }

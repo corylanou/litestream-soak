@@ -936,6 +936,63 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "id": 19,
+      "type": "row",
+      "title": "Replica levels \u2014 main vs $compare_source",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "panels": []
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Replica LTX objects by level",
+      "description": "soak_replica_ltx_objects: objects per compaction level on the replica (0000=L0 \u2026 0009=snapshots), listed every REPLICA_LEVEL_POLL_INTERVAL (default 5m). A growing L0 or L1 count while restores run means compaction is lagging.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "soak_replica_ltx_objects{source=~\"main|$compare_source\"}",
+          "legendFormat": "{{source}} \u00b7 L{{level}}",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",
@@ -983,6 +1040,6 @@
   "timezone": "",
   "title": "Litestream Source Compare",
   "uid": "litestream-source-compare",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }
