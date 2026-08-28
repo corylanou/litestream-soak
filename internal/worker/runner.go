@@ -107,6 +107,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("wait for first sync: %w", err)
 	}
 	go newPprofCapturer(&r.cfg).Run(runCtx) // returns immediately when capture is disabled
+	go newReplicaLevelPoller(&r.cfg).Run(runCtx)
 
 	if r.cfg.ManyDBEnabled() {
 		if err := r.startManyDBLoad(runCtx); err != nil {
