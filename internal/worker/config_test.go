@@ -127,6 +127,20 @@ func TestConfigFromEnvReadsS3FaultProxyConfig(t *testing.T) {
 	}
 }
 
+func TestConfigPprofCaptureDefaultsOnAndCanBeDisabled(t *testing.T) {
+	if !DefaultConfig().PprofCaptureEnabled {
+		t.Fatal("PprofCaptureEnabled default = false, want true")
+	}
+	t.Setenv("SOAK_PPROF_CAPTURE", "false")
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv: %v", err)
+	}
+	if cfg.PprofCaptureEnabled {
+		t.Fatal("PprofCaptureEnabled = true with SOAK_PPROF_CAPTURE=false, want false")
+	}
+}
+
 func TestWorkloadConfigOmitsDisabledS3FaultProxyDefaults(t *testing.T) {
 	t.Parallel()
 

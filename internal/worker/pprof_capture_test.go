@@ -13,10 +13,11 @@ import (
 	"time"
 )
 
-func TestPprofCapturerSkipsSingleDBProfiles(t *testing.T) {
+func TestPprofCapturerSkipsWhenDisabled(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.DataDir = t.TempDir()
 	cfg.SocketPath = filepath.Join(t.TempDir(), "litestream.sock")
+	cfg.PprofCaptureEnabled = false
 
 	done := make(chan struct{})
 	go func() {
@@ -27,11 +28,60 @@ func TestPprofCapturerSkipsSingleDBProfiles(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("pprof capturer did not return for single-DB config")
+		t.Fatal("pprof capturer did not return when capture is disabled")
 	}
 
 	if _, err := os.Stat(filepath.Join(cfg.DataDir, "profiles")); !os.IsNotExist(err) {
 		t.Fatalf("profiles dir stat error = %v, want not exists", err)
+	}
+}
+
+func TestPprofCapturerRunsForSingleDBWorkers(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join("/tmp", fmt.Sprintf("litestream-soak-singledb-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "profile")
+	})
+	startTestUnixServer(t, socketPath, mux)
+
+	cfg := DefaultConfig() // single database, capture enabled by default
+	cfg.DataDir = dir
+	cfg.SocketPath = socketPath
+	if cfg.ManyDBEnabled() {
+		t.Fatal("default config unexpectedly enables many-DB mode")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		newPprofCapturer(&cfg).Run(ctx)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entries, _ := os.ReadDir(filepath.Join(dir, "profiles"))
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		if slices.ContainsFunc(names, func(n string) bool { return strings.Contains(n, "_baseline_heap.") }) &&
+			slices.ContainsFunc(names, func(n string) bool { return strings.Contains(n, "_baseline_memstats.") }) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("baseline captures not written for single-DB worker, got %v", names)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pprof capturer did not stop after cancel")
 	}
 }
 

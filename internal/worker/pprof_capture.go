@@ -26,8 +26,11 @@ func newPprofCapturer(cfg *Config) *pprofCapturer {
 	return &pprofCapturer{cfg: cfg}
 }
 
+// Run captures Litestream pprof profiles for every worker profile (the
+// Litestream control socket exposes /debug/pprof regardless of database
+// count) unless capture is disabled with SOAK_PPROF_CAPTURE=false.
 func (c *pprofCapturer) Run(ctx context.Context) {
-	if !c.cfg.ManyDBEnabled() {
+	if !c.cfg.PprofCaptureEnabled {
 		return
 	}
 

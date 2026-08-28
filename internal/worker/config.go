@@ -95,6 +95,11 @@ type Config struct {
 	S3FaultProxyRequireObservedSourceGet      bool
 	S3FaultProxyRequireObservedSourceRangeGet bool
 	ReplicaLevelReporting                     bool
+	// PprofCaptureEnabled controls the periodic Litestream pprof capture
+	// (baseline + hourly heap/allocs/goroutine/memstats and a CPU profile,
+	// uploaded to the replica bucket). On for every worker unless
+	// SOAK_PPROF_CAPTURE=false.
+	PprofCaptureEnabled bool
 
 	// Litestream config
 	SnapshotInterval         time.Duration
@@ -136,6 +141,7 @@ func DefaultConfig() Config {
 		ConfigPath:            "/data/litestream.yml",
 		SocketPath:            "/data/litestream.sock",
 		LitestreamMetricsAddr: "127.0.0.1:9092",
+		PprofCaptureEnabled:   true,
 
 		ProfileName: "low-volume",
 		WriteRate:   10,
@@ -677,6 +683,9 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if parseBoolEnv(os.Getenv("REPLICA_LEVEL_REPORTING")) {
 		c.ReplicaLevelReporting = true
+	}
+	if v := os.Getenv("SOAK_PPROF_CAPTURE"); v != "" {
+		c.PprofCaptureEnabled = parseBoolEnv(v)
 	}
 
 	if v := os.Getenv("SNAPSHOT_INTERVAL"); v != "" {
