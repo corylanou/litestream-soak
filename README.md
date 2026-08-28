@@ -279,8 +279,9 @@ Repository layout:
 - `datasets/`: replay sample data included in the worker image.
 - `grafana/`: importable dashboards.
 - `migrations/`: control-plane SQLite schema.
-- `scripts/`: deployment notification, PR soak, upstream SHA resolution, and
-  fleet refresh helpers.
+- `scripts/`: deployment notification, PR soak, upstream SHA resolution, fleet
+  refresh helpers, and `pull-profiles.sh` (download a worker's Litestream
+  pprof captures via flyctl for `go tool pprof`).
 - `docs/`: operator runbook and integration examples.
 
 `Dockerfile.worker` builds Litestream and `litestream-test` from

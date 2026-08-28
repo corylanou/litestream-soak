@@ -831,6 +831,36 @@ The standard worker image includes `curl`, `jq`, `ripgrep`, `procps`,
 
 ## How To Debug Litestream Specifically
 
+### Pulling pprof captures from a worker
+
+Every worker captures Litestream pprof profiles from its control socket: a
+baseline set at start, then hourly heap, allocs, goroutine, and `memstats`
+captures plus a 90s CPU profile. They are kept under `/data/profiles` on the
+machine (the newest 96 periodic captures plus the newest baseline set) and
+uploaded to the replica bucket under the worker's `profiles/` prefix. Set `SOAK_PPROF_CAPTURE=false` on a worker to turn it off.
+
+`scripts/pull-profiles.sh <source> <profile> [count]` downloads the newest
+captures straight off the machine with flyctl (`<profile>` is the worker-name
+suffix such as `high-vol` or `many-dbs-100-dir`; the profile name such as
+`high-volume` also works when `SOAK_BASIC_AUTH_USERNAME`/`PASSWORD` are set,
+since the script then resolves it through the control plane) (it reads the access token from
+`~/.fly/config.yml` when `FLY_ACCESS_TOKEN` is not exported) into
+`tmp/profiles/<source>/<profile>/` and prints the `go tool pprof` commands,
+including a `-diff_base` comparison against `main` when that profile has been
+pulled for both sources:
+
+```bash
+scripts/pull-profiles.sh main many-dbs-100-dir
+scripts/pull-profiles.sh pr-1483 many-dbs-100-dir
+go tool pprof -top -sample_index=inuse_space -diff_base=tmp/profiles/main/many-dbs-100-dir/<heap>.pprof tmp/profiles/pr-1483/many-dbs-100-dir/<heap>.pprof
+```
+
+Fleet databases are small, so page-index terms from very large databases will
+not show up here; use the `snapshot-compaction-overlap` local rig for those.
+This is for spotting new allocation sites, goroutine growth, and CPU hot spots
+between `main` and a PR fleet.
+
+
 The verifier flow is:
 
 1. pause the load generator
