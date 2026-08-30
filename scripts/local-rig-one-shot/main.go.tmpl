@@ -772,7 +772,8 @@ func runSnapshotCompactionOverlap(ctx context.Context, cfg config) (result, erro
 	// object store only ever holds one full copy's worth of LTX files.
 	removeDBArtifacts(sequentialPath)
 	if err := sequentialClient.DeleteAll(ctx); err != nil {
-		slog.Warn("delete sequential s3 prefix before overlap", "error", err)
+		res.Stats["phases"] = phases
+		return res, fmt.Errorf("delete sequential s3 prefix before overlap: %w", err)
 	}
 
 	overlapClient := newS3Client(cfg, cfg.S3Prefix+"/overlap", overlapS3PartSize, overlapS3Concurrency)
@@ -1219,6 +1220,16 @@ func removeDBArtifacts(dbPath string) {
 	_ = os.RemoveAll(filepath.Join(filepath.Dir(dbPath), "."+filepath.Base(dbPath)+"-litestream"))
 }
 
+// allocatedBytes returns the bytes actually allocated to path on disk (as
+// opposed to its logical size), which is near zero for a fresh APFS clone.
+func allocatedBytes(path string) (int64, error) {
+	var st syscall.Stat_t
+	if err := syscall.Stat(path, &st); err != nil {
+		return 0, err
+	}
+	return st.Blocks * 512, nil
+}
+
 func truncateString(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -1232,6 +1243,11 @@ func truncateString(s string, n int) string {
 func copyFile(src, dst string) error {
 	if runtime.GOOS == "darwin" {
 		if out, err := exec.Command("cp", "-c", src, dst).CombinedOutput(); err == nil {
+			// cp -c silently degrades to a full copy when cloning is not
+			// possible; report that so disk-usage assumptions are visible.
+			if allocated, err := allocatedBytes(dst); err == nil && allocated > fileSize(dst)/100 {
+				slog.Warn("fixture copy was not an APFS clone; expect full disk usage", "path", dst, "allocated_bytes", allocated)
+			}
 			return nil
 		} else {
 			slog.Warn("apfs clone failed, falling back to byte copy", "error", err, "output", truncateString(string(out), 256))
