@@ -15,6 +15,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -740,6 +741,8 @@ func runSnapshotCompactionOverlap(ctx context.Context, cfg config) (result, erro
 		res.Stats["phases"] = phases
 		return res, err
 	}
+	sequentialSnapshotCount := countLevel(ctx, sequentialClient, litestream.SnapshotLevel)
+	sequentialL1Count := countLevel(ctx, sequentialClient, 1)
 	for _, phase := range sequentialPhases {
 		if phase.Error != "" {
 			res.Stats["phases"] = phases
@@ -763,6 +766,14 @@ func runSnapshotCompactionOverlap(ctx context.Context, cfg config) (result, erro
 		return res, errors.New("sequential snapshot missing or empty; cannot derive gate hold point")
 	}
 	holdAfterBytes := snapshotInfos[0].Size * 95 / 100
+
+	// The sequential replica has served its purpose (counts and the hold
+	// point are captured above); free it before the overlap run so the
+	// object store only ever holds one full copy's worth of LTX files.
+	removeDBArtifacts(sequentialPath)
+	if err := sequentialClient.DeleteAll(ctx); err != nil {
+		slog.Warn("delete sequential s3 prefix before overlap", "error", err)
+	}
 
 	overlapClient := newS3Client(cfg, cfg.S3Prefix+"/overlap", overlapS3PartSize, overlapS3Concurrency)
 	if err := overlapClient.DeleteAll(ctx); err != nil {
@@ -800,8 +811,8 @@ func runSnapshotCompactionOverlap(ctx context.Context, cfg config) (result, erro
 	res.Stats["phases"] = phases
 	overlapSnapshotCount := countLevel(ctx, overlapClient, litestream.SnapshotLevel)
 	overlapL1Count := countLevel(ctx, overlapClient, 1)
-	res.Stats["sequential_snapshot_count"] = countLevel(ctx, sequentialClient, litestream.SnapshotLevel)
-	res.Stats["sequential_l1_count"] = countLevel(ctx, sequentialClient, 1)
+	res.Stats["sequential_snapshot_count"] = sequentialSnapshotCount
+	res.Stats["sequential_l1_count"] = sequentialL1Count
 	res.Stats["overlap_snapshot_count"] = overlapSnapshotCount
 	res.Stats["overlap_l1_count"] = overlapL1Count
 	passLimit := overlapPassSlack*float64(maxSequential) + overlapUploadBufferBytes
@@ -1208,7 +1219,24 @@ func removeDBArtifacts(dbPath string) {
 	_ = os.RemoveAll(filepath.Join(filepath.Dir(dbPath), "."+filepath.Base(dbPath)+"-litestream"))
 }
 
+func truncateString(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// copyFile duplicates src to dst. On macOS it asks cp for an APFS clone
+// (copy-on-write, near-zero extra space) so multi-GiB fixtures do not need
+// three times their size on disk; elsewhere it falls back to a byte copy.
 func copyFile(src, dst string) error {
+	if runtime.GOOS == "darwin" {
+		if out, err := exec.Command("cp", "-c", src, dst).CombinedOutput(); err == nil {
+			return nil
+		} else {
+			slog.Warn("apfs clone failed, falling back to byte copy", "error", err, "output", truncateString(string(out), 256))
+		}
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
