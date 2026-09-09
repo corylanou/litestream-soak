@@ -141,7 +141,7 @@ jobs:
           TARGET_SHA: ${{ needs.changes.outputs.target_sha }}
         run: |
           set -euo pipefail
-          flyctl deploy --remote-only --config fly.control.toml --app litestream-soak-ctl --image-label "control-${TARGET_SHA}"
+          GITHUB_SHA="${TARGET_SHA}" flyctl deploy --remote-only --config fly.control.toml --app litestream-soak-ctl --image-label "control-${TARGET_SHA}"
           {
             echo "### Control deployment"
             echo "Repository revision: ${TARGET_SHA}"
@@ -219,7 +219,7 @@ jobs:
           build_args+=(--build-arg "LITESTREAM_SHA=${litestream_sha}")
           image_label="sha-${short_sha}-ls-${litestream_sha::12}"
 
-          flyctl deploy \
+          GITHUB_SHA="${TARGET_SHA}" flyctl deploy \
             --remote-only \
             --app litestream-soak \
             --config fly.toml \

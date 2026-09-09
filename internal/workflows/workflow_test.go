@@ -703,3 +703,51 @@ func TestQueuedPushAndUpstreamSyncRetainBothComponents(t *testing.T) {
 		})
 	}
 }
+
+func TestFlyBuildProvenanceUsesSelectedTarget(t *testing.T) {
+	t.Parallel()
+	for _, step := range []string{"      - env:\n          FLY_API_TOKEN:", "      - id: build\n"} {
+		t.Run(step, func(t *testing.T) {
+			t.Parallel()
+			workflow := readWorkflow(t, "deploy-main.yml")
+			_, block, ok := strings.Cut(workflow, step)
+			if !ok {
+				t.Fatal("missing Fly step")
+			}
+			_, block, ok = strings.Cut(block, "        run: |\n")
+			if !ok {
+				t.Fatal("missing Fly script")
+			}
+			var lines []string
+			for _, line := range strings.Split(block, "\n") {
+				if line != "" && !strings.HasPrefix(line, "          ") {
+					break
+				}
+				lines = append(lines, strings.TrimPrefix(line, "          "))
+			}
+			dir := t.TempDir()
+			mock := `#!/bin/bash
+printf '%s\n' "$GITHUB_SHA" > "$PROVENANCE_OUTPUT"
+printf 'image: registry.fly.io/litestream-soak:sha-%s-ls-%s\n' "${TARGET_SHA:0:12}" "${SOAK_LITESTREAM_SHA:0:12}"
+`
+			if err := os.WriteFile(filepath.Join(dir, "flyctl"), []byte(mock), 0700); err != nil {
+				t.Fatal(err)
+			}
+			target := strings.Repeat("b", 40)
+			provenance := filepath.Join(dir, "provenance")
+			cmd := exec.Command("bash", "-c", strings.Join(lines, "\n"))
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "GITHUB_SHA="+strings.Repeat("a", 40), "TARGET_SHA="+target, "SOAK_LITESTREAM_SHA="+strings.Repeat("c", 40), "PROVENANCE_OUTPUT="+provenance, "GITHUB_STEP_SUMMARY="+filepath.Join(dir, "summary"), "GITHUB_OUTPUT="+filepath.Join(dir, "outputs"))
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("Fly script: %v\n%s", err, output)
+			}
+			data, err := os.ReadFile(provenance)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(string(data)) != target {
+				t.Fatalf("Fly GH_SHA provenance = %q, want selected target %q", data, target)
+			}
+		})
+	}
+}
