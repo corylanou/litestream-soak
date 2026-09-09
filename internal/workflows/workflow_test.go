@@ -443,8 +443,8 @@ func TestDeployMainCheckoutIncludesPushBase(t *testing.T) {
 	}
 	for _, binding := range []string{
 		"EVENT_NAME: ${{ github.event_name }}",
-		"BEFORE_SHA: ${{ github.event.before }}",
-		"AFTER_SHA: ${{ github.sha }}",
+		"BEFORE_SHA: ${{ steps.baseline.outputs.sha }}",
+		"AFTER_SHA: ${{ steps.target.outputs.sha }}",
 	} {
 		if !strings.Contains(changes, binding) {
 			t.Fatalf("missing detector input binding %q", binding)
@@ -468,6 +468,286 @@ func TestDeployMainRenamedAndDeletedInputs(t *testing.T) {
 			}
 			deployGit(t, dir, "-c", "user.name=Workflow Test", "-c", "user.email=test@example.com", "commit", "-qm", "Remove input")
 			runDeployDetection(t, dir, "push", before, "HEAD", true, true)
+		})
+	}
+}
+
+func TestDeployMainRetainsSupersededChanges(t *testing.T) {
+	t.Parallel()
+	for _, first := range []string{"cmd/soakctl/main.go", "cmd/soakworker/main.go"} {
+		t.Run(first, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			baseline := initDeployRepository(t, dir)
+			commitDeployFile(t, dir, first)
+			before := deployGit(t, dir, "rev-parse", "HEAD")
+			second := "cmd/soakctl/main.go"
+			if first == second {
+				second = "cmd/soakworker/main.go"
+			}
+			commitDeployFile(t, dir, second)
+			selected := runDeployBaseline(t, dir, baseline, "HEAD")
+			if selected == "" {
+				t.Fatal("missing successful deployment baseline")
+			}
+			if selected == before {
+				t.Fatal("selected cancelled predecessor")
+			}
+			runDeployDetection(t, dir, "push", selected, "HEAD", true, true)
+		})
+	}
+}
+
+func runDeployBaseline(t *testing.T, dir, successful, after string) string {
+	t.Helper()
+	workflow := readWorkflow(t, "deploy-main.yml")
+	_, block, ok := strings.Cut(workflow, "      - id: baseline\n")
+	if !ok {
+		t.Fatal("missing successful deployment baseline lookup")
+	}
+	_, block, ok = strings.Cut(block, "        run: |\n")
+	if !ok {
+		t.Fatal("missing baseline script")
+	}
+	var lines []string
+	for _, line := range strings.Split(block, "\n") {
+		if line != "" && !strings.HasPrefix(line, "          ") {
+			break
+		}
+		lines = append(lines, strings.TrimPrefix(line, "          "))
+	}
+	bin := t.TempDir()
+	mock := `#!/bin/bash
+if [[ "$*" == *'actions/workflows/deploy-main.yml/runs?branch=main&status=success&per_page=100'* ]]; then
+  [[ "$*" == *'select(.event == "push" or .event == "workflow_dispatch")'* ]] || exit 2
+  [[ "$SUCCESSFUL_SHA" != error ]] || exit 1
+  echo 1
+elif [[ "$*" == *'actions/runs/1/artifacts?per_page=100'* ]]; then
+  [[ "$*" == *'select(.expired == false)'* ]] || exit 2
+  [[ "$*" == *'main-deployment-checkpoint-v1-'* ]] || exit 2
+  printf '%s\n' "$SUCCESSFUL_SHA"
+else
+  exit 2
+fi
+`
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(mock), 0700); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(t.TempDir(), "output")
+	cmd := exec.Command("bash", "-c", strings.Join(lines, "\n"))
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "SUCCESSFUL_SHA="+successful, "AFTER_SHA="+after, "GITHUB_REPOSITORY=example/repo", "GITHUB_OUTPUT="+outputPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("baseline: %v\n%s", err, output)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimPrefix(strings.TrimSpace(string(data)), "sha=")
+}
+
+func TestDeployMainBaselineRecovery(t *testing.T) {
+	t.Parallel()
+	for _, scenario := range []string{"partial failure", "cancelled", "queued replacement", "legacy success without evidence", "no history", "history unavailable", "non-ancestor", "missing revision"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			baseline := initDeployRepository(t, dir)
+			commitDeployFile(t, dir, "cmd/soakctl/main.go")
+			commitDeployFile(t, dir, "cmd/soakworker/main.go")
+			commitDeployFile(t, dir, "README.md")
+			successful := baseline
+			switch scenario {
+			case "no history", "legacy success without evidence":
+				successful = ""
+			case "history unavailable":
+				successful = "error"
+			case "non-ancestor":
+				target := deployGit(t, dir, "rev-parse", "HEAD")
+				deployGit(t, dir, "checkout", "--orphan", "unrelated")
+				deployGit(t, dir, "-c", "user.name=Workflow Test", "-c", "user.email=test@example.com", "commit", "-qm", "Unrelated")
+				successful = deployGit(t, dir, "rev-parse", "HEAD")
+				deployGit(t, dir, "checkout", target)
+			case "missing revision":
+				successful = strings.Repeat("a", 40)
+			}
+			selected := runDeployBaseline(t, dir, successful, "HEAD")
+			if scenario == "partial failure" || scenario == "cancelled" || scenario == "queued replacement" {
+				if selected != baseline {
+					t.Fatalf("baseline = %q, want %q", selected, baseline)
+				}
+			} else if selected != "" {
+				t.Fatalf("unusable history selected %q", selected)
+			}
+			runDeployDetection(t, dir, "push", selected, "HEAD", true, true)
+		})
+	}
+}
+
+func TestDeployMainBaselineAdvancesAfterSuccess(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	old := initDeployRepository(t, dir)
+	commitDeployFile(t, dir, "cmd/soakctl/main.go")
+	deployed := deployGit(t, dir, "rev-parse", "HEAD")
+	commitDeployFile(t, dir, "cmd/soakworker/main.go")
+	selected := runDeployBaseline(t, dir, deployed+"\n"+old, "HEAD")
+	if selected != deployed {
+		t.Fatalf("baseline = %q, want latest successful ancestor %q", selected, deployed)
+	}
+	runDeployDetection(t, dir, "push", selected, "HEAD", false, true)
+}
+
+func TestDeployMainPublishesComponentEvidence(t *testing.T) {
+	t.Parallel()
+	workflow := readWorkflow(t, "deploy-main.yml")
+	for _, required := range []string{
+		"actions: read",
+		"--image-label \"control-${TARGET_SHA}\"",
+		"### Worker deployment request accepted",
+		"Image: ${IMAGE_REF}",
+		"Litestream revision: ${LITESTREAM_SHA}",
+		"not evidence of fleet convergence",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Fatalf("missing component evidence %q", required)
+		}
+	}
+}
+
+func TestDeployMainSerializesAllMainWriters(t *testing.T) {
+	t.Parallel()
+	main := readWorkflow(t, "deploy-main.yml")
+	for _, required := range []string{"cancel-in-progress: false", "ref: main", "target_sha: ${{ steps.target.outputs.sha }}", "main-deployment-checkpoint-v1-", "flyctl machine list", "actions/upload-artifact@v4"} {
+		if !strings.Contains(main, required) {
+			t.Fatalf("missing serialized deployment contract %q", required)
+		}
+	}
+	sync := readWorkflow(t, "sync-upstream-main.yml")
+	if strings.Contains(sync, "flyctl deploy") || strings.Contains(sync, "./scripts/notify-deployment-ready.sh") {
+		t.Fatal("upstream sync must not independently publish a main worker image")
+	}
+	if !strings.Contains(sync, "gh workflow run deploy-main.yml --ref main") {
+		t.Fatal("upstream sync must submit through the main deployment queue")
+	}
+}
+
+func TestDeploymentSnapshotUsesActualImagesWithoutSecrets(t *testing.T) {
+	t.Parallel()
+	workflow := readWorkflow(t, "deploy-main.yml")
+	_, block, ok := strings.Cut(workflow, "      - name: Record actual component artifacts and health\n")
+	if !ok {
+		t.Fatal("missing snapshot step")
+	}
+	_, block, ok = strings.Cut(block, "        run: |\n")
+	if !ok {
+		t.Fatal("missing snapshot script")
+	}
+	var lines []string
+	for _, line := range strings.Split(block, "\n") {
+		if line != "" && !strings.HasPrefix(line, "          ") {
+			break
+		}
+		lines = append(lines, strings.TrimPrefix(line, "          "))
+	}
+	dir := t.TempDir()
+	mock := `#!/bin/bash
+printf '%s\n' '[{"id":"machine-example","state":"started","region":"ord","image_ref":{"digest":"sha256:actual-digest"},"config":{"image":"registry.fly.io/example:actual-version","env":{"SECRET":"must-not-publish"}},"checks":[{"name":"health","status":"passing","output":"must-not-publish"}]}]'
+`
+	if err := os.WriteFile(filepath.Join(dir, "flyctl"), []byte(mock), 0700); err != nil {
+		t.Fatal(err)
+	}
+	summary := filepath.Join(dir, "summary")
+	cmd := exec.Command("bash", "-c", strings.Join(lines, "\n"))
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "TARGET_SHA=newest-repository-revision", "WORKER_IMAGE=accepted-worker-image", "LITESTREAM_SHA=pinned-upstream", "GITHUB_STEP_SUMMARY="+summary)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("snapshot: %v\n%s", err, output)
+	}
+	for _, file := range []string{"summary", "evidence/control.json", "evidence/worker.json"} {
+		data, err := os.ReadFile(filepath.Join(dir, file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, actual := range []string{"actual-digest", "actual-version", "passing"} {
+			if !strings.Contains(string(data), actual) {
+				t.Fatalf("%s missing %q: %s", file, actual, data)
+			}
+		}
+		if strings.Contains(string(data), "must-not-publish") {
+			t.Fatalf("%s exposed private fields", file)
+		}
+	}
+}
+
+func TestQueuedPushAndUpstreamSyncRetainBothComponents(t *testing.T) {
+	t.Parallel()
+	for _, lastEvent := range []string{"push", "workflow_dispatch"} {
+		t.Run(lastEvent, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			baseline := initDeployRepository(t, dir)
+			commitDeployFile(t, dir, "cmd/soakctl/main.go")
+			commitDeployFile(t, dir, "cmd/soakworker/main.go")
+			selected := runDeployBaseline(t, dir, baseline, "HEAD")
+			runDeployDetection(t, dir, lastEvent, selected, "HEAD", true, true)
+			workflow := readWorkflow(t, "deploy-main.yml")
+			if strings.Count(workflow, "ref: ${{ needs.changes.outputs.target_sha }}") != 4 {
+				t.Fatal("all verifying, building, and publishing checkouts must use the selected current main revision")
+			}
+			if strings.Contains(workflow, "${GITHUB_SHA}") || strings.Contains(workflow, "${GITHUB_SHA::") {
+				t.Fatal("queued event revision must not label current component artifacts")
+			}
+		})
+	}
+}
+
+func TestFlyBuildProvenanceUsesSelectedTarget(t *testing.T) {
+	t.Parallel()
+	for _, step := range []string{"      - env:\n          FLY_API_TOKEN:", "      - id: build\n"} {
+		t.Run(step, func(t *testing.T) {
+			t.Parallel()
+			workflow := readWorkflow(t, "deploy-main.yml")
+			_, block, ok := strings.Cut(workflow, step)
+			if !ok {
+				t.Fatal("missing Fly step")
+			}
+			_, block, ok = strings.Cut(block, "        run: |\n")
+			if !ok {
+				t.Fatal("missing Fly script")
+			}
+			var lines []string
+			for _, line := range strings.Split(block, "\n") {
+				if line != "" && !strings.HasPrefix(line, "          ") {
+					break
+				}
+				lines = append(lines, strings.TrimPrefix(line, "          "))
+			}
+			dir := t.TempDir()
+			mock := `#!/bin/bash
+printf '%s\n' "$GITHUB_SHA" > "$PROVENANCE_OUTPUT"
+printf 'image: registry.fly.io/litestream-soak:sha-%s-ls-%s\n' "${TARGET_SHA:0:12}" "${SOAK_LITESTREAM_SHA:0:12}"
+`
+			if err := os.WriteFile(filepath.Join(dir, "flyctl"), []byte(mock), 0700); err != nil {
+				t.Fatal(err)
+			}
+			target := strings.Repeat("b", 40)
+			provenance := filepath.Join(dir, "provenance")
+			cmd := exec.Command("bash", "-c", strings.Join(lines, "\n"))
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "GITHUB_SHA="+strings.Repeat("a", 40), "TARGET_SHA="+target, "SOAK_LITESTREAM_SHA="+strings.Repeat("c", 40), "PROVENANCE_OUTPUT="+provenance, "GITHUB_STEP_SUMMARY="+filepath.Join(dir, "summary"), "GITHUB_OUTPUT="+filepath.Join(dir, "outputs"))
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("Fly script: %v\n%s", err, output)
+			}
+			data, err := os.ReadFile(provenance)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(string(data)) != target {
+				t.Fatalf("Fly GH_SHA provenance = %q, want selected target %q", data, target)
+			}
 		})
 	}
 }

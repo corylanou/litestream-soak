@@ -348,3 +348,46 @@ Repository layout:
 `Dockerfile.control` builds `soakctl` and includes `flyctl` for platform-log and
 deployment support. Both runtime images use `docker-entrypoint.sh` to ensure
 `/data` ownership and then drop privileges to the `soak` user with `setpriv`.
+
+## Deployment recovery and evidence
+
+All main component deployments, including upstream worker sync requests, run
+through the `deploy-main` concurrency group. Running deployments are not
+cancelled by new requests, so a remote Fly deployment can finish before another
+starts. GitHub may replace a pending run; the surviving run checks out current
+main after acquiring the group, rather than deploying an older event revision.
+
+Component selection compares that checkout with the latest successful ancestor
+checkpoint from `deploy-main`, not the preceding push. Only runs with a
+`main-deployment-checkpoint-v1-<revision>` artifact qualify. Legacy successful
+runs without this evidence are not trusted: the first deployment bootstraps both
+components. Cancelled, failed, partially successful, or replaced queued runs do
+not advance the baseline. The next run includes all relevant changes since that
+baseline. A component that succeeded in a partial run may be redeployed.
+Recovery occurs on the next triggered run; a failed final run still requires a
+retry or manual dispatch. Operators should avoid cancelling a running Fly
+deployment; if one is manually cancelled, confirm the remote operation has
+finished before retrying.
+
+Manual dispatch selects both components and always deploys current main.
+Missing or expired checkpoints, API lookup failure, or no usable ancestor among
+the latest 100 successful main runs also selects both. Upstream sync retains its
+upstream-change check, then dispatches `deploy-main` with `upstream_sync=true`.
+That queued deployment resolves and pins current upstream main when building the
+worker. The sync workflow's success means only that it queued the request; the
+result and evidence belong to the resulting `deploy-main` run. A pending sync
+request replaced by a push will be retried by a later scheduled sync if upstream
+still differs. Sync-triggered manual dispatch also reconciles both components,
+so replacing a queued push cannot lose its control update.
+
+Control deployment and worker acceptance have separate Actions job summaries.
+The final checkpoint publishes a Fly Machines snapshot with actual image
+references, machine states, and health-check statuses for both apps. It filters
+out machine configuration environment variables and credentials. The checkpoint
+revision is the revision reconciled by component selection, not a claim that
+both components use that revision: skipped components retain their prior images.
+The snapshot includes the accepted worker image and pinned Litestream revision
+when a worker update was requested. Worker acceptance starts an asynchronous
+rollout; neither workflow success nor the checkpoint proves convergence or soak
+verification. Use the actual worker images and subsequent worker reports for
+those outcomes.

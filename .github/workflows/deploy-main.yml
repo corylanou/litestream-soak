@@ -9,38 +9,78 @@ on:
       - "grafana/**"
       - "tmp/**"
   workflow_dispatch:
+    inputs:
+      upstream_sync:
+        description: Resolve current upstream main for the worker build
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: deploy-main
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
+      target_sha: ${{ steps.target.outputs.sha }}
       control_changed: ${{ steps.detect.outputs.control_changed }}
       worker_changed: ${{ steps.detect.outputs.worker_changed }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          ref: main
+
+      - id: target
+        run: echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - id: baseline
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AFTER_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          baseline=""
+          if successful_runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-main.yml/runs?branch=main&status=success&per_page=100" --jq '.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch") | .id')"; then
+            while IFS= read -r run_id; do
+              [[ "${run_id}" =~ ^[0-9]+$ ]] || continue
+              if ! candidates="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" --jq '.artifacts[] | select(.expired == false) | .name | select(startswith("main-deployment-checkpoint-v1-")) | ltrimstr("main-deployment-checkpoint-v1-")')"; then
+                echo "::warning::Unable to read deployment checkpoint; selecting both components."
+                break
+              fi
+              while IFS= read -r candidate; do
+                if [[ "${candidate}" =~ ^[0-9a-f]{40}$ ]] && git merge-base --is-ancestor "${candidate}" "${AFTER_SHA}"; then
+                  baseline="${candidate}"
+                  break
+                fi
+              done <<< "${candidates}"
+              [ -z "${baseline}" ] || break
+            done <<< "${successful_runs}"
+          else
+            echo "::warning::Unable to read successful deployment history; selecting both components."
+          fi
+          echo "sha=${baseline}" >> "${GITHUB_OUTPUT}"
 
       - id: detect
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BEFORE_SHA: ${{ github.event.before }}
-          AFTER_SHA: ${{ github.sha }}
+          BEFORE_SHA: ${{ steps.baseline.outputs.sha }}
+          AFTER_SHA: ${{ steps.target.outputs.sha }}
         run: |
           set -euo pipefail
 
           control_changed=false
           worker_changed=false
 
-          if [ "${EVENT_NAME}" = "workflow_dispatch" ] || [ "${BEFORE_SHA}" = "0000000000000000000000000000000000000000" ]; then
+          if [ -z "${BEFORE_SHA}" ] || [ "${EVENT_NAME}" = "workflow_dispatch" ] || [ "${BEFORE_SHA}" = "0000000000000000000000000000000000000000" ]; then
             control_changed=true
             worker_changed=true
           elif ! changed_files="$(git -c core.quotePath=false diff --no-renames --name-only "${BEFORE_SHA}" "${AFTER_SHA}" --)"; then
@@ -71,6 +111,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.changes.outputs.target_sha }}
 
       - uses: actions/setup-go@v6
         with:
@@ -87,6 +129,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.changes.outputs.target_sha }}
 
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
         with:
@@ -94,7 +138,15 @@ jobs:
 
       - env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: flyctl deploy --remote-only --config fly.control.toml --app litestream-soak-ctl
+          TARGET_SHA: ${{ needs.changes.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          GITHUB_SHA="${TARGET_SHA}" flyctl deploy --remote-only --config fly.control.toml --app litestream-soak-ctl --image-label "control-${TARGET_SHA}"
+          {
+            echo "### Control deployment"
+            echo "Repository revision: ${TARGET_SHA}"
+            echo "Fly deployment completed successfully."
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   build-worker-image:
     needs:
@@ -107,6 +159,8 @@ jobs:
       litestream_sha: ${{ steps.build.outputs.litestream_sha }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.changes.outputs.target_sha }}
 
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
         with:
@@ -116,7 +170,8 @@ jobs:
         shell: bash
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          SOAK_LITESTREAM_SHA: ${{ vars.SOAK_LITESTREAM_SHA }}
+          TARGET_SHA: ${{ needs.changes.outputs.target_sha }}
+          SOAK_LITESTREAM_SHA: ${{ inputs.upstream_sync && 'main' || vars.SOAK_LITESTREAM_SHA }}
         run: |
           set -euo pipefail
 
@@ -143,7 +198,7 @@ jobs:
             printf '%s\n' "${image_ref}"
           }
 
-          short_sha="${GITHUB_SHA::12}"
+          short_sha="${TARGET_SHA::12}"
           log_file="$(mktemp)"
           build_args=()
           litestream_ref="${SOAK_LITESTREAM_SHA:-main}"
@@ -164,7 +219,7 @@ jobs:
           build_args+=(--build-arg "LITESTREAM_SHA=${litestream_sha}")
           image_label="sha-${short_sha}-ls-${litestream_sha::12}"
 
-          flyctl deploy \
+          GITHUB_SHA="${TARGET_SHA}" flyctl deploy \
             --remote-only \
             --app litestream-soak \
             --config fly.toml \
@@ -189,9 +244,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.changes.outputs.target_sha }}
 
       - shell: bash
         env:
+          TARGET_SHA: ${{ needs.changes.outputs.target_sha }}
+          DEPLOY_TRIGGER: ${{ inputs.upstream_sync && 'upstream_main_sync' || 'github_actions_main' }}
           CONTROL_BASE_URL: ${{ vars.SOAK_CONTROL_BASE_URL }}
           SOAK_ADMIN_BEARER_TOKEN: ${{ secrets.SOAK_ADMIN_BEARER_TOKEN }}
         run: |
@@ -202,4 +261,64 @@ jobs:
           fi
 
           chmod +x scripts/notify-deployment-ready.sh
-          ./scripts/notify-deployment-ready.sh "${GITHUB_SHA}" main github_actions_main "${{ needs.build-worker-image.outputs.image_ref }}" "${{ needs.build-worker-image.outputs.litestream_sha }}"
+          ./scripts/notify-deployment-ready.sh "${TARGET_SHA}" main "${DEPLOY_TRIGGER}" "${{ needs.build-worker-image.outputs.image_ref }}" "${{ needs.build-worker-image.outputs.litestream_sha }}"
+
+      - name: Record accepted worker version
+        env:
+          TARGET_SHA: ${{ needs.changes.outputs.target_sha }}
+          IMAGE_REF: ${{ needs.build-worker-image.outputs.image_ref }}
+          LITESTREAM_SHA: ${{ needs.build-worker-image.outputs.litestream_sha }}
+        run: |
+          {
+            echo "### Worker deployment request accepted"
+            echo "Repository revision: ${TARGET_SHA}"
+            echo "Image: ${IMAGE_REF}"
+            echo "Litestream revision: ${LITESTREAM_SHA}"
+            echo "Fleet rollout and verification are asynchronous; this is not evidence of fleet convergence."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  deployment-checkpoint:
+    needs:
+      - changes
+      - verify
+      - deploy-control-plane
+      - build-worker-image
+      - notify-worker-fleet
+    if: ${{ !cancelled() && needs.verify.result == 'success' && (needs.deploy-control-plane.result == 'success' || needs.deploy-control-plane.result == 'skipped') && (needs.notify-worker-fleet.result == 'success' || (needs.changes.outputs.worker_changed == 'false' && needs.notify-worker-fleet.result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+        with:
+          version: 0.4.59
+
+      - name: Record actual component artifacts and health
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          TARGET_SHA: ${{ needs.changes.outputs.target_sha }}
+          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.image_ref }}
+          LITESTREAM_SHA: ${{ needs.build-worker-image.outputs.litestream_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          for component in control worker; do
+            app=litestream-soak
+            if [ "${component}" = control ]; then app=litestream-soak-ctl; fi
+            flyctl machine list --app "${app}" --json |
+              jq '[.[] | {id, state, region, image_ref, image: .config.image, checks: [.checks[]? | {name, status, updated_at}]}]' > "evidence/${component}.json"
+          done
+          jq -n --arg revision "${TARGET_SHA}" --arg image "${WORKER_IMAGE}" --arg litestream "${LITESTREAM_SHA}" \
+            '{reconciled_revision: $revision, accepted_worker_image: $image, accepted_litestream_revision: $litestream}' > evidence/checkpoint.json
+          {
+            echo "### Actual component snapshot"
+            echo "Observed at $(date -u +%FT%TZ). Images and health below are from Fly Machines, not inferred from the repository SHA."
+            echo '```json'
+            jq -s '{control: .[0], worker: .[1], checkpoint: .[2]}' evidence/control.json evidence/worker.json evidence/checkpoint.json
+            echo '```'
+            echo "Worker rollout may still be in progress. Skipped components retain the actual images shown above."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: main-deployment-checkpoint-v1-${{ needs.changes.outputs.target_sha }}
+          path: evidence/
+          if-no-files-found: error
