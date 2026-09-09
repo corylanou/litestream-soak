@@ -1595,3 +1595,32 @@ retain the volume if evidence remains pending. Dashboard JSON in this repository
 does not prove a live Grafana import: verify the intended host/organization,
 datasource, panel queries and displayed identities. Never publish credentials,
 environment dumps or unsanitized artifact bundles as documentation evidence.
+
+## Interrupted worker provisioning
+
+A pending worker's stored target does not prove that its machine exists. Fleet
+reconciliation inventories actual machines and volumes, including resources
+created before a controller lost the response or restarted. New provisioning
+records a durable attempt ID and unique volume name before sending creation
+requests. A matching resource is adopted only after checking its attempt, image,
+workload identity, region, and volume ownership. A machine still being created
+remains pending; a heartbeat arriving first does not prevent later completion of
+the attempt.
+
+An ambiguous creation outcome is never retried as another create request.
+Missing inventory, conflicting ownership, multiple matching resources, and
+retained legacy volumes leave provisioning unresolved for operator accounting.
+A legacy pending worker with no conflicting resources can receive fresh resources
+after machine and volume inventory succeeds and its previous machine is confirmed
+missing or destroyed. Reconciliation does not delete volumes or replica prefixes.
+A deployment replacement refuses teardown while a provisioning attempt remains
+unresolved.
+
+The event journal retains the interruption, safe failure classification (including
+HTTP status, timeout, or cancellation when known), and subsequent recovery as
+separate evidence. Provider response bodies and machine environments are not
+persisted in these diagnostics. Worker activation and completion events commit
+atomically. Recovery never erases the incident or establishes clean soak coverage;
+operators must still verify the current physical identity, fresh heartbeat, and
+restore results after deployment. The exact interruption point of a legacy
+attempt remains unknown unless independent evidence establishes it.

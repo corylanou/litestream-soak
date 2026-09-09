@@ -1,0 +1,447 @@
+package orchestrator
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/corylanou/litestream-soak/internal/flyapi"
+	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
+	"github.com/corylanou/litestream-soak/internal/workload"
+)
+
+func TestPendingMatchingWorkerInspectsActualResources(t *testing.T) {
+	db := openTestDB(t)
+	desired := DesiredWorker{WorkerID: "pending", Name: "pending", Source: "main", GitSHA: "sha", LitestreamSHA: "ls", ProfileName: "low-volume", Region: "ord", Workload: workload.Config{LoadMode: "synthetic"}}
+	request, err := workerRequestForDesired(desired, "image", desired.WorkerID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reads.Add(1)
+		http.Error(w, "temporary provider failure", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	manager := NewManager(flyapi.NewClientWithBaseURL("app", "test", server.URL), db, nil, nil, "app", ReplicaConfig{}, "", "")
+	config, err := marshalWorkloadConfig(normalizeWorkloadConfig(request.Workload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := manager.newWorkerRecord(request, config)
+	worker.FlyMachineID = "destroyed"
+	if err := db.CreateWorker(worker); err != nil {
+		t.Fatal(err)
+	}
+	err = manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, "image")
+	if reads.Load() == 0 || err == nil {
+		t.Fatalf("pending worker silently matched: reads=%d err=%v", reads.Load(), err)
+	}
+	stored := mustWorker(t, db, worker.ID)
+	if stored.Status != model.WorkerPending {
+		t.Fatalf("transient observation changed status: %s", stored.Status)
+	}
+}
+
+type provisioningFly struct {
+	machineState                       string
+	mu                                 sync.Mutex
+	machines                           []flyapi.Machine
+	volumes                            []flyapi.Volume
+	volumePosts, machinePosts, deletes int
+	loseVolume, loseMachine            bool
+	readFailure                        bool
+}
+
+func (f *provisioningFly) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	switch {
+	case r.Method == http.MethodGet:
+		if f.readFailure {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if r.URL.Path == "/apps/app/machines" {
+			_ = json.NewEncoder(w).Encode(f.machines)
+			return
+		}
+		if r.URL.Path == "/apps/app/volumes" {
+			_ = json.NewEncoder(w).Encode(f.volumes)
+			return
+		}
+		http.Error(w, "missing", 404)
+	case r.Method == http.MethodPost && r.URL.Path == "/apps/app/volumes":
+		f.volumePosts++
+		var request flyapi.CreateVolumeRequest
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		volume := flyapi.Volume{ID: fmt.Sprintf("volume-%d", f.volumePosts), Name: request.Name, Region: request.Region, SizeGB: request.SizeGB, State: "created", CreatedAt: time.Now().UTC()}
+		f.volumes = append(f.volumes, volume)
+		if f.loseVolume {
+			http.Error(w, "response lost", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(volume)
+	case r.Method == http.MethodPost && r.URL.Path == "/apps/app/machines":
+		f.machinePosts++
+		var request flyapi.CreateMachineRequest
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		machine := flyapi.Machine{ID: fmt.Sprintf("machine-%d", f.machinePosts), Name: request.Name, Region: request.Region, Config: request.Config, State: "started", CreatedAt: time.Now().UTC()}
+		if f.machineState != "" {
+			machine.State = f.machineState
+		}
+		f.machines = append(f.machines, machine)
+		for i := range f.volumes {
+			if f.volumes[i].ID == request.Config.Mounts[0].Volume {
+				f.volumes[i].AttachedMachineID = machine.ID
+			}
+		}
+		if f.loseMachine {
+			http.Error(w, "response lost", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(machine)
+	default:
+		f.deletes++
+		http.Error(w, "unexpected mutation", 500)
+	}
+}
+
+func provisioningFixture(t *testing.T, f *provisioningFly, paths ...string) (*model.DB, *Manager, DesiredWorker, WorkerRequest) {
+	t.Helper()
+	var db *model.DB
+	if len(paths) == 0 {
+		db = openTestDB(t)
+	} else {
+		var err error
+		db, err = model.Open(paths[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+	}
+	server := httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(server.Close)
+	manager := NewManager(flyapi.NewClientWithBaseURL("app", "test", server.URL), db, nil, nil, "app", ReplicaConfig{}, "", "")
+	desired := DesiredWorker{WorkerID: "pending", Name: "pending", Source: "main", GitSHA: "sha", LitestreamSHA: "ls", ProfileName: "low-volume", Region: "ord", Workload: workload.Config{LoadMode: "synthetic"}}
+	request, err := workerRequestForDesired(desired, "image", desired.WorkerID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return db, manager, desired, request
+}
+
+func TestProvisioningAdoptsLostCreationResponsesAfterRestart(t *testing.T) {
+	for _, phase := range []string{"volume", "machine"} {
+		t.Run(phase, func(t *testing.T) {
+			fake := &provisioningFly{loseVolume: phase == "volume", loseMachine: phase == "machine"}
+			path := filepath.Join(t.TempDir(), "restart.db")
+			db, manager, desired, request := provisioningFixture(t, fake, path)
+			if _, err := manager.CreateWorker(context.Background(), request); err == nil {
+				t.Fatal("lost response did not report uncertainty")
+			}
+			if got := mustWorker(t, db, request.WorkerID); got.Status != model.WorkerPending {
+				t.Fatalf("uncertain worker=%s", got.Status)
+			}
+			fake.mu.Lock()
+			fake.loseVolume = false
+			fake.loseMachine = false
+			fake.mu.Unlock()
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			var reopenErr error
+			db, reopenErr = model.Open(path)
+			if reopenErr != nil {
+				t.Fatal(reopenErr)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			restarted := NewManager(manager.fly, db, nil, nil, "app", ReplicaConfig{}, "", "")
+			if err := restarted.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, "image"); err != nil {
+				t.Fatal(err)
+			}
+			worker := mustWorker(t, db, request.WorkerID)
+			if worker.Status != model.WorkerRunning || worker.FlyMachineID != "machine-1" || worker.FlyVolumeID != "volume-1" {
+				t.Fatalf("not recovered: %+v", worker)
+			}
+			if fake.volumePosts != 1 || fake.machinePosts != 1 || fake.deletes != 0 {
+				t.Fatalf("unsafe mutation counts: volumes=%d machines=%d deletes=%d", fake.volumePosts, fake.machinePosts, fake.deletes)
+			}
+			events, err := db.ListEvidenceEvents("main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var unavailable, recovered bool
+			for _, event := range events {
+				unavailable = unavailable || event.EventType == "worker_provisioning_unavailable"
+				recovered = recovered || event.EventType == "worker_provisioning_recovered"
+			}
+			if !unavailable || !recovered {
+				t.Fatalf("lost attempt/recovery history: unavailable=%v recovered=%v", unavailable, recovered)
+			}
+		})
+	}
+}
+
+func TestLegacyPendingMissingResourcesRecoversWithoutCleanup(t *testing.T) {
+	for _, machineID := range []string{"", "destroyed"} {
+		t.Run(machineID, func(t *testing.T) {
+			fake := &provisioningFly{}
+			db, manager, desired, request := provisioningFixture(t, fake)
+			config, _ := marshalWorkloadConfig(normalizeWorkloadConfig(request.Workload))
+			worker := manager.newWorkerRecord(request, config)
+			worker.FlyMachineID = machineID
+			worker.FlyVolumeID = "old-volume"
+			if err := db.CreateWorker(worker); err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, "image"); err != nil {
+				t.Fatal(err)
+			}
+			if got := mustWorker(t, db, worker.ID); got.Status != model.WorkerRunning || got.FlyMachineID == machineID {
+				t.Fatalf("not recovered: %+v", got)
+			}
+			if fake.deletes != 0 || fake.volumePosts != 1 || fake.machinePosts != 1 {
+				t.Fatal("unsafe recovery mutation")
+			}
+		})
+	}
+}
+
+func TestLegacyPendingRetainsUnattributedVolume(t *testing.T) {
+	fake := &provisioningFly{volumes: []flyapi.Volume{{ID: "retained", Name: flyVolumeName("pending"), State: "created", Region: "ord", SizeGB: 10}}}
+	db, manager, desired, request := provisioningFixture(t, fake)
+	config, _ := marshalWorkloadConfig(normalizeWorkloadConfig(request.Workload))
+	if err := db.CreateWorker(manager.newWorkerRecord(request, config)); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, "image"); err == nil {
+		t.Fatal("unproven volume silently adopted")
+	}
+	if fake.deletes != 0 || fake.volumePosts != 0 || fake.machinePosts != 0 {
+		t.Fatal("mutated uncertain resources")
+	}
+}
+
+func TestConcurrentPendingRecoveryCreatesOnce(t *testing.T) {
+	fake := &provisioningFly{}
+	db, manager, desired, request := provisioningFixture(t, fake)
+	config, _ := marshalWorkloadConfig(normalizeWorkloadConfig(request.Workload))
+	if err := db.CreateWorker(manager.newWorkerRecord(request, config)); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		manager := NewManager(manager.fly, db, nil, nil, "app", ReplicaConfig{}, "", "")
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, "image")
+		}()
+	}
+	wg.Wait()
+	if fake.volumePosts != 1 || fake.machinePosts != 1 || fake.deletes != 0 {
+		t.Fatalf("duplicate recovery: volumes=%d machines=%d deletes=%d", fake.volumePosts, fake.machinePosts, fake.deletes)
+	}
+}
+
+func TestHeartbeatBeforeReconcileCompletesProvisioning(t *testing.T) {
+	fake := &provisioningFly{machineState: "created"}
+	db, manager, desired, request := provisioningFixture(t, fake)
+	if _, err := manager.CreateWorker(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := db.ExpectedWorkerRun(request.WorkerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(expected.ProfileConfig))
+	expected.ProfileHash = fmt.Sprintf("%x", digest[:8])
+	expected.ValidatorID = "soak-verifier:" + expected.GitSHA
+	payload, _ := json.Marshal(reporting.HeartbeatPayload{WorkerIdentity: *expected, SentAt: time.Now().UTC()})
+	heartbeat := httptest.NewRequest(http.MethodPost, "/heartbeat", bytes.NewReader(payload))
+	heartbeat.SetPathValue("id", request.WorkerID)
+	response := httptest.NewRecorder()
+	NewAPI(db, nil, nil, nil, nil, nil).handleHeartbeat(response, heartbeat)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("heartbeat failed: %d %s", response.Code, response.Body.String())
+	}
+	if worker := mustWorker(t, db, request.WorkerID); worker.Status != model.WorkerRunning {
+		t.Fatalf("heartbeat did not transition to running: %s", worker.Status)
+	}
+	fake.mu.Lock()
+	fake.machines[0].State = "started"
+	fake.mu.Unlock()
+	if err := manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, "image"); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := db.ActiveProvisioning(request.WorkerID)
+	if err != nil || attempt != nil {
+		t.Fatalf("heartbeat stranded active attempt: %+v %v", attempt, err)
+	}
+	worker := mustWorker(t, db, request.WorkerID)
+	worker.GitSHA = "next"
+	worker.Status = model.WorkerPending
+	if err := db.CreateWorker(worker); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.beginWorkerProvisioning(*worker, "next-image"); err != nil {
+		t.Fatalf("next deployment blocked: %v", err)
+	}
+}
+
+func TestStaleProvisioningCannotOverwriteMachine(t *testing.T) {
+	fake := &provisioningFly{}
+	db, manager, _, request := provisioningFixture(t, fake)
+	worker, err := manager.CreateWorker(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := model.ProvisioningAttempt{ID: "stale", WorkerID: worker.ID, Phase: "machine_ready", MachineID: "stale-machine", VolumeID: "stale-volume", GitSHA: worker.GitSHA, LitestreamSHA: worker.LitestreamSHA}
+	for _, state := range []string{"created", "started"} {
+		_, err := manager.finishWorkerProvisioning(*worker, stale, flyapi.Machine{ID: stale.MachineID, State: state}, true)
+		if err == nil {
+			t.Errorf("stale %s attempt accepted", state)
+		}
+		stored := mustWorker(t, db, worker.ID)
+		if stored.FlyMachineID != worker.FlyMachineID || stored.FlyVolumeID != worker.FlyVolumeID {
+			t.Fatalf("stale attempt overwrote resource identity")
+		}
+	}
+}
+
+func TestProvisioningRetainsSafeFailureClassification(t *testing.T) {
+	fake := &provisioningFly{}
+	db, manager, _, request := provisioningFixture(t, fake)
+	worker, err := manager.CreateWorker(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		cause error
+		want  string
+	}{
+		{&flyapi.APIError{StatusCode: 503, Body: "secret-provider-body"}, "HTTP 503"},
+		{context.DeadlineExceeded, "timeout"}, {context.Canceled, "canceled"},
+	} {
+		err := manager.provisioningUnavailable(*worker, model.ProvisioningAttempt{}, "Inventory unavailable", tc.cause)
+		if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "secret-provider-body") {
+			t.Fatalf("unsafe or missing failure class: %v", err)
+		}
+	}
+	events, err := db.ListEvidenceEvents("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found int
+	for _, event := range events {
+		if event.EventType == "worker_provisioning_unavailable" {
+			found++
+			if strings.Contains(event.Message, "secret-provider-body") {
+				t.Fatal("provider body persisted")
+			}
+		}
+	}
+	if found != 3 {
+		t.Fatalf("retained failures=%d", found)
+	}
+}
+
+func TestReplacementPreservesUnresolvedProvisioning(t *testing.T) {
+	fake := &provisioningFly{machineState: "created"}
+	_, manager, _, request := provisioningFixture(t, fake)
+	worker, err := manager.CreateWorker(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.GitSHA = "next"
+	if _, err := manager.replaceWorkerWithRequest(context.Background(), *worker, request); err == nil {
+		t.Fatal("replacement accepted unresolved provisioning")
+	}
+	if fake.deletes != 0 {
+		t.Fatal("replacement destroyed unresolved resources")
+	}
+}
+
+func TestProvisioningDiscoveryRefusesAmbiguity(t *testing.T) {
+	for _, scenario := range []string{"duplicate-volume", "duplicate-machine", "missing-created-machine", "wrong-workload", "inventory-error"} {
+		t.Run(scenario, func(t *testing.T) {
+			fake := &provisioningFly{loseMachine: true}
+			db, manager, desired, request := provisioningFixture(t, fake)
+			if _, err := manager.CreateWorker(context.Background(), request); err == nil {
+				t.Fatal("expected lost response")
+			}
+			fake.mu.Lock()
+			fake.loseMachine = false
+			switch scenario {
+			case "duplicate-volume":
+				copy := fake.volumes[0]
+				copy.ID = "duplicate"
+				fake.volumes = append(fake.volumes, copy)
+			case "duplicate-machine":
+				copy := fake.machines[0]
+				copy.ID = "duplicate"
+				fake.machines = append(fake.machines, copy)
+			case "missing-created-machine":
+				fake.machines = nil
+			case "wrong-workload":
+				fake.machines[0].Config.Env["SOAK_WORKLOAD_ID"] = "wrong"
+			case "inventory-error":
+				fake.readFailure = true
+			}
+			fake.mu.Unlock()
+			for range 2 {
+				if err := manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, "image"); err == nil {
+					t.Fatal("uncertain discovery accepted")
+				}
+			}
+			if fake.volumePosts != 1 || fake.machinePosts != 1 || fake.deletes != 0 {
+				t.Fatal("uncertainty caused resource mutation")
+			}
+			if mustWorker(t, db, request.WorkerID).Status != model.WorkerPending {
+				t.Fatal("uncertainty completed worker")
+			}
+		})
+	}
+}
+
+func TestProvisioningInterruptionIsUnavailableEvidence(t *testing.T) {
+	if got := incidentEventClass("worker_provisioning_interrupted"); got != "unavailable" {
+		t.Fatalf("interruption class=%q", got)
+	}
+	if got := incidentEventClass("worker_provisioning_recovered"); got != "unexpected" {
+		t.Fatalf("recovery class=%q", got)
+	}
+}
+
+func TestPendingAttemptCompletesBeforeNewDeployment(t *testing.T) {
+	fake := &provisioningFly{loseMachine: true}
+	db, manager, desired, request := provisioningFixture(t, fake)
+	if _, err := manager.CreateWorker(context.Background(), request); err == nil {
+		t.Fatal("expected lost response")
+	}
+	fake.loseMachine = false
+	desired.GitSHA = "next"
+	if err := manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, "next-image"); err != nil {
+		t.Fatal(err)
+	}
+	worker := mustWorker(t, db, request.WorkerID)
+	if worker.Status != model.WorkerRunning || worker.GitSHA != request.GitSHA {
+		t.Fatal("original attempt did not complete with its immutable target")
+	}
+	if fake.machinePosts != 1 || fake.volumePosts != 1 || fake.deletes != 0 {
+		t.Fatal("recovery replaced existing resources")
+	}
+}

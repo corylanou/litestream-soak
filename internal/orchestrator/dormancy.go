@@ -275,6 +275,14 @@ func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, 
 	}
 	env := m.workerEnv(worker, workloadCfg)
 	env["SOAK_RUN_ID"] = uuid.NewString()
+	provisioning, err := m.db.ActiveProvisioning(worker.ID)
+	if err != nil {
+		return nil, err
+	}
+	if provisioning != nil {
+		env["SOAK_RUN_ID"] = provisioning.ID
+	}
+
 	deployment, err := m.db.GetLatestDeployment(worker.Source)
 	if err != nil {
 		return nil, fmt.Errorf("get worker deployment: %w", err)
@@ -287,6 +295,7 @@ func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, 
 	env["SOAK_WORKLOAD_ID"] = fmt.Sprintf("%x", sha256.Sum256([]byte(expectedProfile)))
 	identity := reporting.WorkerIdentity{
 		ImageRef:      imageRef,
+		VolumeID:      volumeID,
 		ProfileConfig: expectedProfile,
 		WorkloadID:    env["SOAK_WORKLOAD_ID"],
 		WorkerID:      worker.ID,
@@ -343,7 +352,7 @@ func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, 
 			}
 			return machine, nil
 		}
-		if !retriableMachineCreateError(err) || attempt == 5 {
+		if provisioning != nil || !retriableMachineCreateError(err) || attempt == 5 {
 			return nil, err
 		}
 
