@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -53,12 +54,14 @@ type SchemaFixtureBoundary struct {
 }
 
 type SchemaFixtureSyncAttempt struct {
+	Status         string `json:"status"`
 	TXID           uint64 `json:"txid"`
 	ReplicatedTXID uint64 `json:"replicated_txid"`
 	Error          string `json:"error,omitempty"`
 }
 
 type SchemaFixtureResult struct {
+	ProcessEvidence  SchemaProcessEvidence   `json:"process_evidence"`
 	RemotePrefix     string                  `json:"remote_prefix,omitempty"`
 	Options          SchemaFixtureOptions    `json:"options"`
 	Verdict          string                  `json:"verdict"`
@@ -107,6 +110,20 @@ func RunSchemaFixture(ctx context.Context, options SchemaFixtureOptions) (result
 	}
 	defer func() { _ = evidence.Close() }()
 	defer func() {
+		processLog, readErr := os.Open(filepath.Join(dir, "replicate.log"))
+		if readErr == nil {
+			result.ProcessEvidence, readErr = readSchemaProcessEvidence(processLog)
+			_ = processLog.Close()
+			if options.SHA != schemaProcessPatternSHA {
+				result.ProcessEvidence.Status = "unsupported-version"
+			}
+		} else {
+			result.ProcessEvidence.Status = "unavailable"
+		}
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			retErr = errors.Join(retErr, readErr)
+		}
+		result.Verdict = schemaProcessVerdict(result.Verdict, result.ProcessEvidence)
 		if retErr != nil {
 			result.Error = retErr.Error()
 			if result.Verdict == "scenario_success" {
@@ -302,10 +319,15 @@ func verifySchemaFixture(ctx context.Context, v *Verifier, binary string, step s
 	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	for {
-		synced, err := v.syncOnceDB(syncCtx, time.Second, v.cfg.DBPath)
-		attempt := SchemaFixtureSyncAttempt{TXID: synced.TXID, ReplicatedTXID: synced.ReplicatedTXID}
+		synced, err := v.syncOnceDB(syncCtx, 30*time.Second, v.cfg.DBPath)
+		attempt := SchemaFixtureSyncAttempt{Status: "observed", TXID: synced.TXID, ReplicatedTXID: synced.ReplicatedTXID}
 		if err != nil {
 			attempt.Error = err.Error()
+			if schemaStartupUnavailable(step.name, err) {
+				attempt.Status = "startup-socket-unavailable"
+			} else {
+				attempt.Status = "failed"
+			}
 		}
 		boundary.SyncAttempts = append(boundary.SyncAttempts, attempt)
 		if err == nil && synced.TXID > 0 && synced.ReplicatedTXID >= synced.TXID {
@@ -313,8 +335,7 @@ func verifySchemaFixture(ctx context.Context, v *Verifier, binary string, step s
 			break
 		}
 		if err != nil {
-			_, socketErr := os.Stat(v.cfg.SocketPath)
-			if step.name != "initialize" || !errors.Is(socketErr, os.ErrNotExist) {
+			if !schemaStartupUnavailable(step.name, err) {
 				return err
 			}
 		}
@@ -354,4 +375,8 @@ func verifySchemaFixture(ctx context.Context, v *Verifier, binary string, step s
 	}
 	boundary.LogicalMatch = true
 	return nil
+}
+
+func schemaStartupUnavailable(step string, err error) bool {
+	return step == "initialize" && (errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED))
 }

@@ -234,3 +234,38 @@ func TestSchemaFixtureRejectsMissingBackfill(t *testing.T) {
 		t.Fatal("missing backfill passed")
 	}
 }
+
+func TestSchemaFixturePinnedRecoveryRetainsProcessIncident(t *testing.T) {
+	binary := os.Getenv("SOAK_SCHEMA_LITESTREAM_BINARY")
+	if binary == "" {
+		t.Skip("opt-in: requires pinned executable")
+	}
+	wrapper := filepath.Join(t.TempDir(), "litestream")
+	script := "#!/bin/sh\nif [ \"$1\" = replicate ]; then echo 'time=2026-09-09T12:00:00Z level=ERROR msg=\"replication failed before recovery\"'; fi\nexec \"$SOAK_SCHEMA_LITESTREAM_BINARY\" \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "run")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	result, err := RunSchemaFixture(ctx, SchemaFixtureOptions{Directory: dir, Binary: wrapper, SHA: schemaProcessPatternSHA, Rows: 128, PayloadBytes: 1024, Vacuum: "vacuum"})
+	if err != nil || result.Verdict != "recovered_with_incidents" || result.ProcessEvidence.IncidentCount != 1 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(result.Boundaries) != 10 {
+		t.Fatalf("missing actual boundaries: %+v", result.Boundaries)
+	}
+	for _, b := range result.Boundaries {
+		if !b.LogicalMatch {
+			t.Fatalf("invalid restore: %+v", b)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "result.json"))
+	if err != nil || !strings.Contains(string(data), "recovered_with_incidents") {
+		t.Fatalf("result evidence=%s err=%v", data, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "replicate.log"))
+	if err != nil || !strings.Contains(string(raw), "replication failed before recovery") {
+		t.Fatalf("raw log=%s err=%v", raw, err)
+	}
+}

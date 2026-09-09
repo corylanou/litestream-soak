@@ -38,6 +38,25 @@ retried into a successful result. Initialization waits for IPC readiness; that
 startup wait is not a recovery test. Every sync attempt, including readiness
 errors and lagging TXIDs, remains in the boundary evidence.
 
+After the process exits, structured process evidence consumes the retained raw
+log using patterns pinned to the tested Litestream SHA. ERROR/WARN records,
+failure/retry messages and error fields retain line numbers, severity, messages
+and aggregate counts. Up to 1,000 incident and unparsed-line details are retained
+in JSON; raw logs remain complete, and truncation is explicit. Unknown log
+formats, empty logs, read errors and unsupported binary versions never become a
+clean pass. Startup socket-unavailable attempts (missing socket or connection refused before
+the first successful sync) are labeled separately; the same errors after
+initialization remain failures. A race-test attempt exposed the socket-created
+but-not-listening interval and its failed output remains retained.
+
+All verified boundaries plus process incidents yield `recovered_with_incidents`,
+which exits nonzero and preserves all boundary proof. A partial/unavailable log
+without recognized incidents yields `inconclusive`. Existing operation failures
+remain failures. A pinned negative control injects an early ERROR record, then
+performs all ten real restores successfully and requires the recovered verdict
+and retained raw/structured incident. This is a classifier control, not a claim
+that a real replication fault was injected or calibrated.
+
 Boundary samples record database/WAL bytes, total local fixture file bytes
 (including retained restores, logs and Litestream cache), local replica bytes, available disk
 bytes, page/freelist counts, SQL operation duration and verification duration.
@@ -116,3 +135,9 @@ For a dedicated local emulator, start MinIO with a bounded data tmpfs and loopba
 port, create a dedicated test bucket, and pass that endpoint to the command.
 Do not point the fixture at a production bucket. The command and disk runner
 retain their resources and artifacts for review; cleanup is a separate action.
+
+One repeated 64 MiB MinIO run under concurrent local validation failed at growth
+with a sync HTTP 500 deadline error when individual sync requests had a one-second
+budget. That attempt and its raw output remain failure evidence. Sync requests
+now use the existing 30-second boundary budget; failures still stop the run and
+are never retried into success. Successful runs do not erase this observation.
