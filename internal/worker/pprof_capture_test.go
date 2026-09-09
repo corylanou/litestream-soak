@@ -880,6 +880,9 @@ func TestPprofUploadFailureDetails(t *testing.T) {
 	if err != nil || !strings.Contains(string(remoteBody), "InitialAccessDenied") || !strings.Contains(string(remoteBody), `"upload":"uploaded"`) {
 		t.Fatalf("remote metadata lost recovery history: %s, %v", remoteBody, err)
 	}
+	if string(remoteBody) != string(body) {
+		t.Fatal("remote recovery metadata differs from local counters and history")
+	}
 	failure := history[0].(map[string]any)
 	if failure["attempt"] != float64(1) || failure["at"] == "" || failure["stage"] != "manifest" || record["upload_attempts"] != float64(21) || record["upload_failure_count"] != float64(20) || record["upload_failures_dropped"] != float64(4) || record["upload_history_incomplete"] != true {
 		t.Fatalf("missing failure attribution: %s", body)
