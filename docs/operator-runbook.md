@@ -1627,3 +1627,32 @@ atomically. Recovery never erases the incident or establishes clean soak coverag
 operators must still verify the current physical identity, fresh heartbeat, and
 restore results after deployment. The exact interruption point of a legacy
 attempt remains unknown unless independent evidence establishes it.
+
+## Control deployment metric refresh health
+
+Worker reports persist their complete evidence before acknowledgement. They
+schedule deployment gauges separately, so comparison reads do not retain the
+per-worker report lock. One observer coalesces pending sources and runs at most
+one refresh at a time, with a five-second interval after each attempt and a
+ten-second read budget. Failed work remains pending for retry. Startup metric
+hydration also has a ten-second read budget. Shutdown cancels and waits for the
+observer before closing the control database.
+
+Deployment rollout and comparison gauges publish only after all snapshot reads
+succeed. A failed or cancelled refresh keeps the previous complete snapshot;
+old values are not evidence of current health. Inspect:
+
+- `soak_control_deployment_refresh_healthy`: latest attempt succeeded (1) or
+  failed (0).
+- `soak_control_deployment_refresh_last_success_unixtime`: freshness of the
+  last complete snapshot.
+- `soak_control_deployment_refresh_last_attempt_unixtime`: latest completed
+  attempt, including failures.
+- `soak_control_deployment_refresh_failures_total`: process-lifetime failures,
+  retained after successful refreshes.
+- `soak_control_deployment_alert_refresh_failures_total{source}`: failed alert
+  reads; one failed or absent source does not skip the other queued sources.
+
+Use counter increases across process restarts and retain incident observations
+alongside recovered health. Refresh coalescing affects derived gauges only;
+verification, event, and runtime evidence history is neither capped nor deleted.

@@ -282,7 +282,7 @@ func main() {
 	}
 	shutdownErrCh := make(chan error, 1)
 	go func() {
-		shutdownErrCh <- shutdownOnCancel(ctx, server, shutdownTimeout, api.WaitForRollouts)
+		shutdownErrCh <- shutdownOnCancel(ctx, server, shutdownTimeout, api.WaitForBackground)
 	}()
 
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {

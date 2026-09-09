@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -403,14 +404,17 @@ func NewControlMetrics(db *model.DB) *controlMetrics {
 		sourceComparisonFailure:   make(map[string]labelMetricState),
 		volumeInventory:           make(map[string]volumeMetricState),
 	}
-	m.syncFromDB(db)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := m.syncFromDB(ctx, db.WithReadContext(ctx))
+	observeDeploymentRefreshResult(err)
 	return m
 }
 
-func (m *controlMetrics) syncFromDB(db *model.DB) {
+func (m *controlMetrics) syncFromDB(ctx context.Context, db *model.DB) error {
 	workers, err := db.ListWorkers("")
 	if err != nil {
-		return
+		return err
 	}
 
 	for _, worker := range workers {
@@ -438,9 +442,7 @@ func (m *controlMetrics) syncFromDB(db *model.DB) {
 		}
 	}
 
-	m.observeLatestDeployment(db)
-	m.observeLatestDeploymentComparison(db)
-	m.observeSourceComparisons(db)
+	return m.refreshDeploymentMetrics(ctx, db)
 }
 
 func (m *controlMetrics) observeWorker(worker model.Worker) {
@@ -776,10 +778,13 @@ func (m *controlMetrics) publishDeploymentRollout(rollout DeploymentRolloutRespo
 	}
 }
 
-func (m *controlMetrics) observeLatestDeploymentComparison(db *model.DB) {
+func (m *controlMetrics) prepareLatestDeploymentComparison(db *model.DB) (func(), error) {
 	comparison, err := buildLatestDeploymentComparison(db, "main")
-	if err != nil || comparison == nil {
-		return
+	if err != nil {
+		return nil, err
+	}
+	if comparison == nil {
+		return func() {}, nil
 	}
 
 	headDeployment := comparison.Head.Deployment
@@ -923,63 +928,74 @@ func (m *controlMetrics) observeLatestDeploymentComparison(db *model.DB) {
 		}
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	return func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
 
-	previousInfo := m.comparisonInfo
-	previousWorkers := cloneLabelMetricStates(m.comparisonWorkers)
-	previousDeltas := cloneLabelMetricStates(m.comparisonDeltas)
-	previousFailures := cloneLabelMetricStates(m.comparisonFailures)
-	m.comparisonInfo = labelMetricState{labels: infoLabels}
-	m.comparisonWorkers = make(map[string]labelMetricState, len(workerStates))
-	for key, metric := range workerStates {
-		m.comparisonWorkers[key] = labelMetricState{labels: metric.labels}
-	}
-	m.comparisonDeltas = make(map[string]labelMetricState, len(deltaStates))
-	for key, metric := range deltaStates {
-		m.comparisonDeltas[key] = labelMetricState{labels: metric.labels}
-	}
-	m.comparisonFailures = make(map[string]labelMetricState, len(failureStates))
-	for key, metric := range failureStates {
-		m.comparisonFailures[key] = labelMetricState{labels: metric.labels}
-	}
-	if len(previousInfo.labels) > 0 && !sameMetricLabels(previousInfo.labels, infoLabels) {
-		controlLatestDeploymentComparisonInfo.WithLabelValues(previousInfo.labels...).Set(0)
-	}
-	controlLatestDeploymentComparisonInfo.WithLabelValues(infoLabels...).Set(1)
-
-	for _, previous := range previousWorkers {
-		if len(previous.labels) > 0 {
-			controlLatestDeploymentComparisonWorkers.WithLabelValues(previous.labels...).Set(0)
+		previousInfo := m.comparisonInfo
+		previousWorkers := cloneLabelMetricStates(m.comparisonWorkers)
+		previousDeltas := cloneLabelMetricStates(m.comparisonDeltas)
+		previousFailures := cloneLabelMetricStates(m.comparisonFailures)
+		m.comparisonInfo = labelMetricState{labels: infoLabels}
+		m.comparisonWorkers = make(map[string]labelMetricState, len(workerStates))
+		for key, metric := range workerStates {
+			m.comparisonWorkers[key] = labelMetricState{labels: metric.labels}
 		}
-	}
-	for _, metric := range workerStates {
-		controlLatestDeploymentComparisonWorkers.WithLabelValues(metric.labels...).Set(metric.value)
-	}
-
-	for _, previous := range previousDeltas {
-		if len(previous.labels) > 0 {
-			controlLatestDeploymentComparisonDelta.WithLabelValues(previous.labels...).Set(0)
+		m.comparisonDeltas = make(map[string]labelMetricState, len(deltaStates))
+		for key, metric := range deltaStates {
+			m.comparisonDeltas[key] = labelMetricState{labels: metric.labels}
 		}
-	}
-	for _, metric := range deltaStates {
-		controlLatestDeploymentComparisonDelta.WithLabelValues(metric.labels...).Set(metric.value)
-	}
-
-	for _, previous := range previousFailures {
-		if len(previous.labels) > 0 {
-			controlLatestDeploymentComparisonFailure.WithLabelValues(previous.labels...).Set(0)
+		m.comparisonFailures = make(map[string]labelMetricState, len(failureStates))
+		for key, metric := range failureStates {
+			m.comparisonFailures[key] = labelMetricState{labels: metric.labels}
 		}
-	}
-	for _, metric := range failureStates {
-		controlLatestDeploymentComparisonFailure.WithLabelValues(metric.labels...).Set(metric.value)
-	}
+		if len(previousInfo.labels) > 0 && !sameMetricLabels(previousInfo.labels, infoLabels) {
+			controlLatestDeploymentComparisonInfo.WithLabelValues(previousInfo.labels...).Set(0)
+		}
+		controlLatestDeploymentComparisonInfo.WithLabelValues(infoLabels...).Set(1)
+
+		for _, previous := range previousWorkers {
+			if len(previous.labels) > 0 {
+				controlLatestDeploymentComparisonWorkers.WithLabelValues(previous.labels...).Set(0)
+			}
+		}
+		for _, metric := range workerStates {
+			controlLatestDeploymentComparisonWorkers.WithLabelValues(metric.labels...).Set(metric.value)
+		}
+
+		for _, previous := range previousDeltas {
+			if len(previous.labels) > 0 {
+				controlLatestDeploymentComparisonDelta.WithLabelValues(previous.labels...).Set(0)
+			}
+		}
+		for _, metric := range deltaStates {
+			controlLatestDeploymentComparisonDelta.WithLabelValues(metric.labels...).Set(metric.value)
+		}
+
+		for _, previous := range previousFailures {
+			if len(previous.labels) > 0 {
+				controlLatestDeploymentComparisonFailure.WithLabelValues(previous.labels...).Set(0)
+			}
+		}
+		for _, metric := range failureStates {
+			controlLatestDeploymentComparisonFailure.WithLabelValues(metric.labels...).Set(metric.value)
+		}
+	}, nil
 }
 
-func (m *controlMetrics) observeSourceComparisons(db *model.DB) {
+func (m *controlMetrics) observeSourceComparisons(db *model.DB) error {
+	publish, err := m.prepareSourceComparisons(db)
+	if err != nil {
+		return err
+	}
+	publish()
+	return nil
+}
+
+func (m *controlMetrics) prepareSourceComparisons(db *model.DB) (func(), error) {
 	workers, err := db.ListWorkers("")
 	if err != nil {
-		return
+		return nil, err
 	}
 
 	headSources := make([]string, 0)
@@ -1007,7 +1023,10 @@ func (m *controlMetrics) observeSourceComparisons(db *model.DB) {
 
 	for _, headSource := range headSources {
 		comparison, err := buildLatestCrossSourceDeploymentComparison(db, "main", headSource)
-		if err != nil || comparison == nil || comparison.Base == nil {
+		if err != nil {
+			return nil, err
+		}
+		if comparison == nil || comparison.Base == nil {
 			continue
 		}
 
@@ -1126,55 +1145,57 @@ func (m *controlMetrics) observeSourceComparisons(db *model.DB) {
 		}
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	return func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
 
-	previousInfo := cloneLabelMetricStates(m.sourceComparisonInfo)
-	previousWorkers := cloneLabelMetricStates(m.sourceComparisonWorkers)
-	previousDeltas := cloneLabelMetricStates(m.sourceComparisonDeltas)
-	previousFailures := cloneLabelMetricStates(m.sourceComparisonFailure)
-	m.sourceComparisonInfo = infoStates
-	m.sourceComparisonWorkers = workerStates
-	m.sourceComparisonDeltas = deltaStates
-	m.sourceComparisonFailure = failureStates
+		previousInfo := cloneLabelMetricStates(m.sourceComparisonInfo)
+		previousWorkers := cloneLabelMetricStates(m.sourceComparisonWorkers)
+		previousDeltas := cloneLabelMetricStates(m.sourceComparisonDeltas)
+		previousFailures := cloneLabelMetricStates(m.sourceComparisonFailure)
+		m.sourceComparisonInfo = infoStates
+		m.sourceComparisonWorkers = workerStates
+		m.sourceComparisonDeltas = deltaStates
+		m.sourceComparisonFailure = failureStates
 
-	for _, current := range infoStates {
-		controlSourceComparisonInfo.WithLabelValues(current.labels...).Set(1)
-	}
-	for key, current := range workerStates {
-		controlSourceComparisonWorkers.WithLabelValues(current.labels...).Set(workerValues[key])
-	}
-	for key, current := range deltaStates {
-		controlSourceComparisonDelta.WithLabelValues(current.labels...).Set(deltaValues[key])
-	}
-	for key, current := range failureStates {
-		controlSourceComparisonFailure.WithLabelValues(current.labels...).Set(failureValues[key])
-	}
+		for _, current := range infoStates {
+			controlSourceComparisonInfo.WithLabelValues(current.labels...).Set(1)
+		}
+		for key, current := range workerStates {
+			controlSourceComparisonWorkers.WithLabelValues(current.labels...).Set(workerValues[key])
+		}
+		for key, current := range deltaStates {
+			controlSourceComparisonDelta.WithLabelValues(current.labels...).Set(deltaValues[key])
+		}
+		for key, current := range failureStates {
+			controlSourceComparisonFailure.WithLabelValues(current.labels...).Set(failureValues[key])
+		}
 
-	for key, previous := range previousInfo {
-		current, ok := infoStates[key]
-		if !ok || !sameMetricLabels(previous.labels, current.labels) {
-			controlSourceComparisonInfo.WithLabelValues(previous.labels...).Set(0)
+		for key, previous := range previousInfo {
+			current, ok := infoStates[key]
+			if !ok || !sameMetricLabels(previous.labels, current.labels) {
+				controlSourceComparisonInfo.WithLabelValues(previous.labels...).Set(0)
+			}
 		}
-	}
-	for key, previous := range previousWorkers {
-		current, ok := workerStates[key]
-		if !ok || !sameMetricLabels(previous.labels, current.labels) {
-			controlSourceComparisonWorkers.WithLabelValues(previous.labels...).Set(0)
+		for key, previous := range previousWorkers {
+			current, ok := workerStates[key]
+			if !ok || !sameMetricLabels(previous.labels, current.labels) {
+				controlSourceComparisonWorkers.WithLabelValues(previous.labels...).Set(0)
+			}
 		}
-	}
-	for key, previous := range previousDeltas {
-		current, ok := deltaStates[key]
-		if !ok || !sameMetricLabels(previous.labels, current.labels) {
-			controlSourceComparisonDelta.WithLabelValues(previous.labels...).Set(0)
+		for key, previous := range previousDeltas {
+			current, ok := deltaStates[key]
+			if !ok || !sameMetricLabels(previous.labels, current.labels) {
+				controlSourceComparisonDelta.WithLabelValues(previous.labels...).Set(0)
+			}
 		}
-	}
-	for key, previous := range previousFailures {
-		current, ok := failureStates[key]
-		if !ok || !sameMetricLabels(previous.labels, current.labels) {
-			controlSourceComparisonFailure.WithLabelValues(previous.labels...).Set(0)
+		for key, previous := range previousFailures {
+			current, ok := failureStates[key]
+			if !ok || !sameMetricLabels(previous.labels, current.labels) {
+				controlSourceComparisonFailure.WithLabelValues(previous.labels...).Set(0)
+			}
 		}
-	}
+	}, nil
 }
 
 type comparisonMetricValue struct {

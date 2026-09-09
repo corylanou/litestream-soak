@@ -529,7 +529,9 @@ func TestControlMetricsObserveSourceComparisonsEmitsMetricsAndZeroesRemovedSourc
 		Passed:      true,
 		DurationMS:  1000,
 	})
-	metrics.observeSourceComparisons(db)
+	if err := metrics.observeSourceComparisons(db); err != nil {
+		t.Fatal(err)
+	}
 
 	infoLabels := []string{"main", "pr-45-source", "sha-source-pr", "litestream-source-pr", "sha-source-main", "litestream-source-main", "insufficient_data"}
 	headPassedLabels := []string{"main", "pr-45-source", "head", "sha-source-pr", "litestream-source-pr", "passed"}
@@ -550,7 +552,9 @@ func TestControlMetricsObserveSourceComparisonsEmitsMetricsAndZeroesRemovedSourc
 	if err := db.DeleteWorker("worker-source-pr"); err != nil {
 		t.Fatalf("DeleteWorker() error = %v", err)
 	}
-	metrics.observeSourceComparisons(db)
+	if err := metrics.observeSourceComparisons(db); err != nil {
+		t.Fatal(err)
+	}
 
 	assertGaugeVecValue(t, controlSourceComparisonInfo, infoLabels, 0)
 	assertGaugeVecValue(t, controlSourceComparisonWorkers, headPassedLabels, 0)
