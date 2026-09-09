@@ -112,7 +112,7 @@ func Run(ctx context.Context, cfg Config) (result Result, runErr error) {
 		return result, err
 	}
 	defer func() { runErr = errors.Join(runErr, db.Close()) }()
-	if _, err := db.Exec("CREATE TABLE t(id INTEGER PRIMARY KEY,value TEXT NOT NULL)"); err != nil {
+	if _, err := db.Exec("CREATE TABLE t(id INTEGER PRIMARY KEY,value TEXT NOT NULL); CREATE INDEX fixture_id_idx ON t(id); PRAGMA user_version=218; PRAGMA application_id=218"); err != nil {
 		return result, err
 	}
 	r := &runner{ctx: ctx, cfg: cfg, result: &result, db: db, source: source, config: filepath.Join(cfg.Output, "litestream.yml")}

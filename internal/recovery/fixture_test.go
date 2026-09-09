@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -111,5 +112,73 @@ func TestRestoreExposureExcludesValidationAndNoopRetention(t *testing.T) {
 	}
 	if restoreExposed("time=2026-09-09T00:00:00.100Z msg=\"compaction complete\"\ntime=2026-09-09T00:00:00.200Z msg=\"l0 retention enforced\" deleted_count=0", "opening ltx file for restore level=0", start, end) {
 		t.Fatal("no-op deletion")
+	}
+}
+
+func TestFixtureOracleRejectsSchemaAndMetadataChanges(t *testing.T) {
+	for _, change := range []string{
+		"DROP INDEX value_idx",
+		"DROP INDEX value_idx; CREATE INDEX value_idx ON t(id)",
+		"ALTER TABLE t ADD COLUMN extra TEXT",
+		"PRAGMA user_version=8",
+		"PRAGMA application_id=43",
+	} {
+		t.Run(change, func(t *testing.T) {
+			dir := t.TempDir()
+			source, err := openDB(filepath.Join(dir, "source.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = source.Close() }()
+			path := filepath.Join(dir, "restored.db")
+			restored, err := openDB(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = restored.Close() }()
+			for _, db := range []*sql.DB{source, restored} {
+				if _, err := db.Exec("CREATE TABLE t(id INTEGER PRIMARY KEY,value TEXT); CREATE INDEX value_idx ON t(value); PRAGMA user_version=7; PRAGMA application_id=42"); err != nil {
+					t.Fatal(err)
+				}
+				if err := appendRow(context.Background(), db, 1); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := restored.Exec(change); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := validate(context.Background(), source, path, 1); err == nil {
+				t.Fatal("accepted unchanged rows with altered schema/application metadata")
+			}
+		})
+	}
+}
+
+func TestFixtureOracleAcceptsHistoricalPrefixWithMatchingSchema(t *testing.T) {
+	dir := t.TempDir()
+	source, err := openDB(filepath.Join(dir, "source.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = source.Close() }()
+	path := filepath.Join(dir, "restored.db")
+	restored, err := openDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restored.Close() }()
+	for _, db := range []*sql.DB{source, restored} {
+		if _, err := db.Exec("CREATE TABLE t(id INTEGER PRIMARY KEY,value TEXT); CREATE INDEX value_idx ON t(value); PRAGMA user_version=7; PRAGMA application_id=42"); err != nil {
+			t.Fatal(err)
+		}
+		if err := appendRow(context.Background(), db, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := appendRow(context.Background(), source, 2); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := validate(context.Background(), source, path, 1); err != nil || count != 1 {
+		t.Fatalf("historical prefix rejected: count=%d err=%v", count, err)
 	}
 }

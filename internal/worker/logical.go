@@ -39,6 +39,10 @@ type logicalSnapshot struct {
 }
 
 func readLogicalSnapshot(ctx context.Context, path string, limits logicalLimits) (logicalSnapshot, error) {
+	return readLogicalSnapshotMode(ctx, path, limits, false)
+}
+
+func readLogicalSnapshotMode(ctx context.Context, path string, limits logicalLimits, schemaOnly bool) (logicalSnapshot, error) {
 	var snapshot logicalSnapshot
 	uri := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}
 	db, err := sql.Open("sqlite", uri.String())
@@ -115,6 +119,10 @@ func readLogicalSnapshot(ctx context.Context, path string, limits logicalLimits)
 		return snapshot, err
 	}
 	copy(snapshot.schema[:], schemaHash.Sum(nil))
+	if schemaOnly {
+		snapshot.tables = nil
+		return snapshot, nil
+	}
 	for i := range snapshot.tables {
 		table, err := readLogicalTable(ctx, tx, snapshot.tables[i].name, &limits)
 		if err != nil {
@@ -311,6 +319,12 @@ func (v *Verifier) compareRestoredLogical(ctx context.Context, source logicalSna
 	}
 	if err != nil {
 		return fmt.Errorf("%s: restored comparison: %w", v.logicalEvidence, err)
+	}
+	if v.cfg.churnEnabled() {
+		if err := validateChurnRestore(ctx, v.cfg, restoredPath); err != nil {
+			return err
+		}
+		v.logicalEvidence += " application_invariants=true"
 	}
 	v.logicalEvidence += fmt.Sprintf(" schema_sha256=%x tables=%d logical_match=true", source.schema, len(source.tables))
 	return nil

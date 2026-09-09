@@ -58,8 +58,11 @@ boundary separately. These are row windows, not an estimate of time-based RPO.
 Historical and expired targets carry separate boundary scopes; intentionally
 excluded later commits are not reported as asynchronous loss.
 The oracle checks integrity, every ID/value/storage type, and complete append-only
-transaction prefixes using the rig oracle established by #215. It complements
-#204's general workload oracle; it does not claim coverage of arbitrary schemas.
+transaction prefixes using the rig oracle established by #215. It also uses
+#204's shared logical schema digest to compare tables, indexes, views, triggers,
+`user_version` and `application_id`. The schema-only wrapper excludes row digests,
+so a correct historical prefix does not need to equal the latest complete data.
+This fixture keeps schema and application metadata constant across its history.
 
 Every attempt retains its error, duration, log and exposure proof. Expected kills
 and unavailable expired targets retain their nonzero errors. Earlier unexpected

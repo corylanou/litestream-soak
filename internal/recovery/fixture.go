@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/rig"
+	"github.com/corylanou/litestream-soak/internal/worker"
 	_ "modernc.org/sqlite"
 )
 
@@ -69,7 +70,14 @@ func validate(ctx context.Context, source *sql.DB, path string, minimum int) (in
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM t").Scan(&count); err != nil {
 		return 0, err
 	}
-	return count, rig.ValidatePrefix(ctx, source, db, minimum, 1)
+	if err := rig.ValidatePrefix(ctx, source, db, minimum, 1); err != nil {
+		return count, err
+	}
+	var sourcePath string
+	if err := source.QueryRowContext(ctx, "SELECT file FROM pragma_database_list WHERE name='main'").Scan(&sourcePath); err != nil {
+		return count, err
+	}
+	return count, worker.CompareLogicalSchemas(ctx, sourcePath, path)
 }
 
 var messagePattern = regexp.MustCompile(`msg=("[^"]*"|[^ ]+)`)
