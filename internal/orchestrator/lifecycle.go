@@ -451,48 +451,109 @@ func (m *Manager) evaluateSuccessTeardown(ctx context.Context, policy SuccessTea
 		return
 	}
 
-	now := time.Now().UTC()
 	for _, source := range sources {
 		if !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
 			continue
 		}
 
-		deployment, err := m.db.GetLatestDeployment(source)
+		unlockSource, err := m.lockSource(ctx, source)
 		if err != nil {
-			slog.Error("Failed to get latest deployment for success teardown", "source", source, "error", err)
-			continue
-		}
-		if deployment == nil {
-			continue
-		}
-
-		evaluation, ok, err := successTeardownCandidate(m.db, *deployment, policy, now)
-		if err != nil {
-			slog.Error("Failed to evaluate success teardown", "source", source, "deployment_id", deployment.ID, "error", err)
-			continue
-		}
-		if !ok {
-			continue
-		}
-
-		archive, created, err := m.archiveSuccessRun(evaluation, now)
-		if err != nil {
-			slog.Error("Failed to archive successful run; skipping teardown", "source", source, "deployment_id", deployment.ID, "error", err)
-			continue
-		}
-		if created {
-			_ = m.db.RecordEvent("", "run_success_archived", evaluation.Summary, fmt.Sprintf("archive_id=%d source=%s", archive.ID, source))
-		}
-
-		for _, worker := range evaluation.Workers {
-			slog.Info("Destroying successful soak worker", "worker_id", worker.ID, "source", worker.Source, "deployment_id", deployment.ID)
-			if err := m.DestroyWorker(ctx, worker.ID); err != nil {
-				slog.Error("Failed to destroy successful soak worker", "worker_id", worker.ID, "error", err)
-				continue
+			if ctx.Err() != nil {
+				return
 			}
-			_ = m.db.RecordEvent(worker.ID, "run_success_worker_destroyed", "Destroyed worker after archived successful soak run", fmt.Sprintf("archive_id=%d", archive.ID))
+			slog.Error("Failed to lock source for success teardown", "source", source, "error", err)
+			continue
+		}
+		err = m.evaluateSuccessTeardownLocked(ctx, source, policy, time.Now().UTC())
+		unlockSource()
+		if err != nil {
+			slog.Error("Failed to evaluate success teardown", "source", source, "error", err)
 		}
 	}
+}
+
+func (m *Manager) evaluateSuccessTeardownLocked(ctx context.Context, source string, policy SuccessTeardownPolicy, now time.Time) error {
+	deployment, err := m.db.GetLatestDeployment(source)
+	if err != nil {
+		return fmt.Errorf("get latest deployment: %w", err)
+	}
+	if deployment == nil {
+		return nil
+	}
+	evaluation, ok, err := successTeardownCandidate(m.db, *deployment, policy, now)
+	if err != nil {
+		return fmt.Errorf("evaluate success teardown: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	lockedWorkers := make(map[string]struct{}, len(evaluation.Workers))
+	for _, worker := range evaluation.Workers {
+		unlock, err := m.lockWorker(ctx, worker.ID)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		lockedWorkers[worker.ID] = struct{}{}
+	}
+	latest, err := m.db.GetLatestDeployment(source)
+	if err != nil {
+		return fmt.Errorf("revalidate latest deployment: %w", err)
+	}
+	if latest == nil || latest.ID != deployment.ID || latest.Status != deployment.Status ||
+		!deploymentMatchesTarget(*latest, deployment.ImageRef, deployment.GitSHA, deployment.LitestreamSHA) {
+		return nil
+	}
+	for _, selected := range evaluation.Workers {
+		current, err := m.db.GetWorker(selected.ID)
+		if err != nil {
+			return fmt.Errorf("revalidate worker %s: %w", selected.ID, err)
+		}
+		if current.Source != selected.Source || current.FlyMachineID != selected.FlyMachineID ||
+			current.FlyVolumeID != selected.FlyVolumeID || !current.CreatedAt.Equal(selected.CreatedAt) ||
+			!workerMatchesDeployment(*current, *deployment) {
+			return nil
+		}
+	}
+	now = time.Now().UTC()
+	evaluation, ok, err = successTeardownCandidate(m.db, *latest, policy, now)
+	if err != nil {
+		return fmt.Errorf("revalidate success teardown: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	if len(evaluation.Workers) != len(lockedWorkers) {
+		return nil
+	}
+	for _, worker := range evaluation.Workers {
+		if _, locked := lockedWorkers[worker.ID]; !locked {
+			return nil
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	archive, created, err := m.archiveSuccessRun(evaluation, now)
+	if err != nil {
+		return fmt.Errorf("archive successful run; skipping teardown: %w", err)
+	}
+	if created {
+		_ = m.db.RecordEvent("", "run_success_archived", evaluation.Summary, fmt.Sprintf("archive_id=%d source=%s", archive.ID, source))
+	}
+	var cleanupErrors []error
+	for _, worker := range evaluation.Workers {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(cleanupErrors, err)...)
+		}
+		slog.Info("Destroying successful soak worker", "worker_id", worker.ID, "source", worker.Source, "deployment_id", deployment.ID)
+		if err := m.destroyWorker(ctx, worker.ID); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("destroy successful worker %s: %w", worker.ID, err))
+			continue
+		}
+		_ = m.db.RecordEvent(worker.ID, "run_success_worker_destroyed", "Destroyed worker after archived successful soak run", fmt.Sprintf("archive_id=%d", archive.ID))
+	}
+	return errors.Join(cleanupErrors...)
 }
 
 func (m *Manager) evaluateFailedSourcePause(ctx context.Context, policy FailedSourcePausePolicy) {
