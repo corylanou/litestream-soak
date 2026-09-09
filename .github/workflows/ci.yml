@@ -43,6 +43,26 @@ jobs:
         with:
           version: v2.12.2
 
+  compatibility:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: bash scripts/test-compatibility.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compatibility-${{ github.sha }}
+          include-hidden-files: true
+          path: |
+            .local/compatibility/**/run.log
+            .local/compatibility/**/*.buildinfo
+            .local/compatibility/**/replication-*/
+          if-no-files-found: error
+
   images:
     timeout-minutes: 35
     runs-on: ubuntu-latest

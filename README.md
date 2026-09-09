@@ -305,9 +305,7 @@ rolls the fleet.
 Litestream `main`, skips work if that SHA is already deployed, and otherwise
 builds a new worker image and notifies the main fleet. `.github/workflows/soak-pr.yml`
 builds PR-specific worker images from an upstream Litestream PR SHA and notifies
-the matching `pr-NNN` source. There are no repository `pull_request` workflows
-for this repo; PR verification is local and at ship time unless a workflow is
-manually dispatched.
+the matching `pr-NNN` source. PR CI runs unit/race tests, lint, image security checks, and the bounded real-binary compatibility suite.
 
 Grafana dashboards live in `grafana/`:
 
@@ -487,3 +485,39 @@ when a worker update was requested. Worker acceptance starts an asynchronous
 rollout; neither workflow success nor the checkpoint proves convergence or soak
 verification. Use the actual worker images and subsequent worker reports for
 those outcomes.
+
+## Real Litestream compatibility checks
+
+Run `bash scripts/test-compatibility.sh` locally for the same compatibility check
+used by PR CI. It builds real Litestream at
+`4ed7a308f6271ebfd2b0a6e4b70b03011a37e4a3` and the independent workload validator
+at `ae88b164dd6304bcbb654a681df767ee59042eed` with Go 1.25.13.
+An optional first argument selects another full lowercase 40-character candidate
+commit SHA; the workload stays fixed. Mutable refs are rejected. Network access
+to GitHub and Go module downloads, Git, a C compiler, and Go are required.
+The file-replica fixture needs no containers, cloud credentials, or provider.
+
+The check performs actual replication, IPC sync, TXID restore, and the worker's
+validation pipeline with the shared logical oracle. It changes and deletes a
+committed row independently, requires exactly one affected row, and requires
+oracle rejection. The production profile capturer collects CPU, heap, allocs,
+goroutine text, and memory-stat text; binary profiles must parse with Go pprof.
+Missing endpoints, incompatible versions, failed restores, invalid profiles, and
+unengaged fixtures fail the check instead of earning a compatibility pass.
+The pinned workload lacks TXID validation support; its documented latest-restore
+fallback remains visible and is checked against the quiescent logical source.
+
+Each invocation retains a separate `.local/compatibility/run.*` directory with
+build identity, logs, databases, and profile metadata. CI uploads diagnostic
+artifacts even on failure. There is no retry that can erase a failed run. The
+integration test has a two-minute timeout; CI bounds the build/check step or job
+to fifteen minutes. Direct `go test ./...` skips this opt-in test when binaries
+are absent; that skip is not compatibility evidence. Deployment workflows run
+the suite for the resolved candidate before notifying the fleet, and changes to
+the shared compatibility runner select both deployment components.
+
+This small deterministic fixture does not calibrate costly fault scenarios,
+prove provider behavior, or establish upstream base/head separation. Block and
+mutex sampling, traces, long soaks, and provider experiments remain separate,
+opt-in checks; their unexecuted state does not count as a pass. No fleet scenario
+is activated by this suite.
