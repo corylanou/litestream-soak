@@ -2,10 +2,12 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -16,21 +18,37 @@ func TestLogicalOraclePinnedLitestream(t *testing.T) {
 	if binary == "" {
 		t.Skip("opt-in: set SOAK_LOGICAL_LITESTREAM_BINARY to the pinned Litestream executable")
 	}
-	version, err := exec.Command(binary, "version").CombinedOutput()
-	if err != nil || strings.TrimSpace(string(version)) != "4ed7a308f6271ebfd2b0a6e4b70b03011a37e4a3" {
-		t.Fatalf("unexpected pinned binary: %s, %v", version, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	candidate := os.Getenv("SOAK_COMPATIBILITY_SHA")
+	if candidate == "" {
+		candidate = "4ed7a308f6271ebfd2b0a6e4b70b03011a37e4a3"
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(candidate) {
+		t.Fatal("unsupported: candidate must be immutable")
+	}
+	version, err := exec.CommandContext(ctx, binary, "version").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(version)) != candidate {
+		t.Fatalf("unsupported pinned binary: %s, %v", version, err)
 	}
 
 	workloadBinary := os.Getenv("SOAK_LOGICAL_WORKLOAD_BINARY")
 	if workloadBinary == "" {
 		t.Fatal("set SOAK_LOGICAL_WORKLOAD_BINARY to the pinned workload executable")
 	}
-	workloadVersion, err := exec.Command(workloadBinary, "version").CombinedOutput()
+	workloadVersion, err := exec.CommandContext(ctx, workloadBinary, "version").CombinedOutput()
 	if err != nil || !strings.HasPrefix(string(workloadVersion), "litestream-test ae88b164dd6304bcbb654a681df767ee59042eed\n") {
 		t.Fatalf("unexpected pinned workload: %s, %v", workloadVersion, err)
 	}
 	t.Logf("candidate=%s workload=%s", strings.TrimSpace(string(version)), strings.TrimSpace(string(workloadVersion)))
 	dir := t.TempDir()
+	if evidence := os.Getenv("SOAK_COMPATIBILITY_EVIDENCE"); evidence != "" {
+		dir, err = os.MkdirTemp(evidence, "replication-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("retained evidence: %s", dir)
+	}
 
 	toolDir := filepath.Join(dir, "tools")
 	if err := os.Mkdir(toolDir, 0o755); err != nil {
@@ -48,6 +66,9 @@ func TestLogicalOraclePinnedLitestream(t *testing.T) {
 	t.Setenv("PATH", toolDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("WORKLOAD_SHA", "ae88b164dd6304bcbb654a681df767ee59042eed")
 	cfg := DefaultConfig()
+	cfg.LitestreamSHA = candidate
+	cfg.WorkloadSHA = "ae88b164dd6304bcbb654a681df767ee59042eed"
+	cfg.ReplicaType = "file"
 	cfg.DataDir = dir
 	cfg.DBPath = filepath.Join(dir, "source.db")
 	cfg.ReplicaPath = filepath.Join(dir, "replica")
@@ -59,8 +80,7 @@ func TestLogicalOraclePinnedLitestream(t *testing.T) {
 	if err := os.WriteFile(cfg.ConfigPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
+
 	logPath := filepath.Join(dir, "replicate.log")
 	log, err := os.Create(logPath)
 	if err != nil {
@@ -130,6 +150,47 @@ func TestLogicalOraclePinnedLitestream(t *testing.T) {
 		}
 	}
 	t.Logf("real validateDB evidence: %s", v.logicalEvidence)
+	capturer := newPprofCapturer(&cfg)
+	capturer.captureSet(ctx, "baseline")
+	for _, kind := range []string{"cpu_profile", "heap", "allocs", "goroutine", "memstats"} {
+		records, err := filepath.Glob(filepath.Join(dir, "profiles", "*_"+kind+".*.json"))
+		if err != nil || len(records) != 1 {
+			t.Fatalf("unsupported profile %s: records=%v err=%v", kind, records, err)
+		}
+		body, err := os.ReadFile(records[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var record profileRecord
+		if err := json.Unmarshal(body, &record); err != nil {
+			t.Fatal(err)
+		}
+		if !record.EndpointAvailable || record.Error != "" || record.Status != "available" || record.CandidateSHA != candidate || record.WorkloadSHA != cfg.WorkloadSHA {
+			t.Fatalf("unsupported profile %s: %s", kind, body)
+		}
+		artifact := filepath.Join(dir, "profiles", record.Artifact)
+		info, err := os.Stat(artifact)
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("profile fixture not engaged: %s: %v", kind, err)
+		}
+		if kind == "cpu_profile" || kind == "heap" || kind == "allocs" {
+			output, err := exec.CommandContext(ctx, "go", "tool", "pprof", "-top", artifact).CombinedOutput()
+			if err != nil {
+				t.Fatalf("invalid %s profile: %v: %s", kind, err, output)
+			}
+		}
+		if kind == "goroutine" || kind == "memstats" {
+			body, err := os.ReadFile(artifact)
+			marker := "goroutine "
+			if kind == "memstats" {
+				marker = "# runtime.MemStats"
+			}
+			if err != nil || !strings.Contains(string(body), marker) {
+				t.Fatalf("invalid text profile %s: %v", kind, err)
+			}
+		}
+		t.Logf("profile=%s available=true bytes=%d", kind, info.Size())
+	}
 	restored := logicalTestDB(t, restoredPath, "")
 	var sourceSeq, restoredSeq int64
 	if err := db.QueryRow("SELECT coalesce(max(seq),0) FROM _litestream_seq").Scan(&sourceSeq); err != nil {
@@ -156,14 +217,38 @@ func TestLogicalOraclePinnedLitestream(t *testing.T) {
 	if err := compareLogicalSnapshots(advanced, actual); err != nil {
 		t.Fatalf("bookkeeping-only change: %v", err)
 	}
-	if _, err := restored.Exec("DELETE FROM t WHERE id=2"); err != nil {
-		t.Fatal(err)
-	}
-	altered, err := readLogicalSnapshot(ctx, restoredPath, cfg.logicalLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := compareLogicalSnapshots(expected, altered); err == nil {
-		t.Fatal("missing committed row in real restore passed")
+	for _, control := range []struct{ name, statement string }{
+		{"altered-data", "UPDATE t SET v='altered' WHERE id=2"},
+		{"missing-data", "DELETE FROM t WHERE id=2"},
+	} {
+		t.Run(control.name, func(t *testing.T) {
+			tx, err := restored.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tx.Rollback() }()
+			result, err := tx.Exec(control.statement)
+			if err != nil {
+				t.Fatal(err)
+			}
+			count, err := result.RowsAffected()
+			if err != nil || count != 1 {
+				t.Fatalf("inconclusive: fixture not engaged: rows=%d err=%v", count, err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			altered, err := readLogicalSnapshot(ctx, restoredPath, cfg.logicalLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := compareLogicalSnapshots(expected, altered); err == nil {
+				t.Fatal("negative control incorrectly passed")
+			}
+			t.Logf("fixture=%s engaged=true oracle=rejected", control.name)
+			if _, err := restored.Exec("INSERT OR REPLACE INTO t VALUES(2,CAST(x'610062' AS TEXT))"); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
