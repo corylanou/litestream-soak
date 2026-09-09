@@ -170,11 +170,7 @@ func main() {
 	mux.Handle("GET /debug/pprof/", http.DefaultServeMux)
 	api.RegisterRoutes(mux)
 
-	handler := http.Handler(mux)
-	if (basicAuthUsername != "" && basicAuthPassword != "") || adminBearerToken != "" {
-		handler = newAuthMiddleware(basicAuthUsername, basicAuthPassword, adminBearerToken, adminBasicFallbackEnabled)(handler)
-	}
-	handler = newWorkerAuthMiddleware(workerToken)(handler)
+	handler := newControlAuthHandler(mux, basicAuthUsername, basicAuthPassword, adminBearerToken, adminBasicFallbackEnabled, workerToken)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -505,4 +501,9 @@ func newWorkerAuthMiddleware(workerToken string) func(http.Handler) http.Handler
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func newControlAuthHandler(handler http.Handler, username, password, adminBearerToken string, adminBasicFallbackEnabled bool, workerToken string) http.Handler {
+	handler = newAuthMiddleware(username, password, adminBearerToken, adminBasicFallbackEnabled)(handler)
+	return newWorkerAuthMiddleware(workerToken)(handler)
 }

@@ -574,3 +574,82 @@ func TestWorkerAuthMiddlewareAllowsVerificationsAndEvents(t *testing.T) {
 		}
 	}
 }
+
+func TestControlAuthHandler(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		username      string
+		password      string
+		adminToken    string
+		basicFallback bool
+		method        string
+		path          string
+		authorization string
+		basicUser     string
+		basicPassword string
+		wantStatus    int
+	}{
+		{name: "missing admin credentials", path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "username only", username: "soak", path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "password only", password: "ui-password", path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "empty fallback credentials", basicFallback: true, path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "partial fallback username", username: "soak", basicFallback: true, basicUser: "soak", path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "partial fallback password", password: "ui-password", basicFallback: true, basicPassword: "ui-password", path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "unconfigured bearer", authorization: "Bearer admin-token", path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "missing bearer", adminToken: "admin-token", path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "wrong bearer", adminToken: "admin-token", authorization: "Bearer wrong-token", path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "empty bearer", adminToken: "admin-token", authorization: "Bearer ", path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "wrong scheme", adminToken: "admin-token", authorization: "Token admin-token", path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "valid bearer", adminToken: "admin-token", authorization: "Bearer admin-token", path: "/api/admin/pause-source", wantStatus: http.StatusNoContent},
+		{name: "bearer with partial basic credentials", username: "soak", adminToken: "admin-token", authorization: "Bearer admin-token", path: "/api/admin/pause-source", wantStatus: http.StatusNoContent},
+		{name: "basic fallback disabled", username: "soak", password: "ui-password", basicUser: "soak", basicPassword: "ui-password", path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "explicit basic fallback", username: "soak", password: "ui-password", basicFallback: true, basicUser: "soak", basicPassword: "ui-password", path: "/api/admin/pause-source", wantStatus: http.StatusNoContent},
+		{name: "wrong fallback password", username: "soak", password: "ui-password", basicFallback: true, basicUser: "soak", basicPassword: "wrong", path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "wrong fallback username", username: "soak", password: "ui-password", basicFallback: true, basicUser: "wrong", basicPassword: "ui-password", path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "worker token cannot administer", adminToken: "admin-token", authorization: "Bearer worker-token", path: "/api/admin/pause-source", wantStatus: http.StatusUnauthorized},
+		{name: "read without basic config", method: http.MethodGet, path: "/api/workers", wantStatus: http.StatusNoContent},
+		{name: "read with partial basic config", username: "soak", method: http.MethodGet, path: "/ui", wantStatus: http.StatusNoContent},
+		{name: "read with bearer-only config", adminToken: "admin-token", method: http.MethodGet, path: "/api/workers", wantStatus: http.StatusNoContent},
+		{name: "read requires configured basic", username: "soak", password: "ui-password", method: http.MethodGet, path: "/ui", wantStatus: http.StatusUnauthorized},
+		{name: "read accepts basic", username: "soak", password: "ui-password", basicUser: "soak", basicPassword: "ui-password", method: http.MethodGet, path: "/ui", wantStatus: http.StatusNoContent},
+		{name: "read rejects bearer in place of basic", username: "soak", password: "ui-password", adminToken: "admin-token", authorization: "Bearer admin-token", method: http.MethodGet, path: "/ui", wantStatus: http.StatusUnauthorized},
+		{name: "public health", username: "soak", password: "ui-password", method: http.MethodGet, path: "/healthz", wantStatus: http.StatusNoContent},
+		{name: "public head health", username: "soak", password: "ui-password", method: http.MethodHead, path: "/healthz", wantStatus: http.StatusNoContent},
+		{name: "public metrics", username: "soak", password: "ui-password", method: http.MethodGet, path: "/metrics", wantStatus: http.StatusNoContent},
+		{name: "webhook reaches separate authentication", username: "soak", password: "ui-password", path: "/webhooks/github", wantStatus: http.StatusNoContent},
+		{name: "worker requires token without admin config", path: "/api/workers/example/heartbeat", wantStatus: http.StatusUnauthorized},
+		{name: "worker accepts own token without admin config", authorization: "Bearer worker-token", path: "/api/workers/example/heartbeat", wantStatus: http.StatusNoContent},
+		{name: "worker accepts own token with admin config", username: "soak", password: "ui-password", adminToken: "admin-token", authorization: "Bearer worker-token", path: "/api/workers/example/events", wantStatus: http.StatusNoContent},
+		{name: "worker rejects admin token", adminToken: "admin-token", authorization: "Bearer admin-token", path: "/api/workers/example/verifications", wantStatus: http.StatusUnauthorized},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			called := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusNoContent)
+			})
+			handler := newControlAuthHandler(next, tt.username, tt.password, tt.adminToken, tt.basicFallback, "worker-token")
+			method := tt.method
+			if method == "" {
+				method = http.MethodPost
+			}
+			request := httptest.NewRequest(method, tt.path, nil)
+			request.Header.Set("Authorization", tt.authorization)
+			if tt.basicUser != "" || tt.basicPassword != "" {
+				request.SetBasicAuth(tt.basicUser, tt.basicPassword)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", response.Code, tt.wantStatus)
+			}
+			if called != (tt.wantStatus == http.StatusNoContent) {
+				t.Errorf("downstream handler called = %t, want %t", called, tt.wantStatus == http.StatusNoContent)
+			}
+		})
+	}
+}
