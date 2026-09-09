@@ -11,6 +11,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -108,9 +109,10 @@ func (a *GHArchiveAdapter) Rows() (RowIterator, error) {
 	}
 
 	return &ghArchiveIterator{
-		file:    f,
-		reader:  reader,
-		decoder: json.NewDecoder(reader),
+		file:      f,
+		reader:    reader,
+		decoder:   json.NewDecoder(reader),
+		namespace: uuid.NewString(),
 	}, nil
 }
 
@@ -128,11 +130,12 @@ type ghEvent struct {
 }
 
 type ghArchiveIterator struct {
-	file    *os.File
-	reader  io.ReadCloser
-	decoder *json.Decoder
-	event   ghEvent
-	err     error
+	file      *os.File
+	reader    io.ReadCloser
+	decoder   *json.Decoder
+	namespace string
+	event     ghEvent
+	err       error
 }
 
 func (it *ghArchiveIterator) Next() bool {
@@ -150,6 +153,7 @@ func (it *ghArchiveIterator) Timestamp() time.Time {
 
 func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 	e := it.event
+	e.ID = it.namespace + ":" + e.ID
 	ts := e.CreatedAt.Format(time.RFC3339)
 
 	tx, err := db.Begin()
@@ -168,7 +172,7 @@ func (it *ghArchiveIterator) Insert(db *sql.DB) error {
 		return fmt.Errorf("rows affected: %w", err)
 	}
 	if affected == 0 {
-		return tx.Commit()
+		return ErrRowSkipped
 	}
 
 	switch e.Type {

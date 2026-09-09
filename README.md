@@ -252,6 +252,31 @@ with `fly.control.toml` and the startup log fields in `cmd/soakctl/main.go`
 
 For detailed operator procedures, see `docs/operator-runbook.md`.
 
+## GH Archive replay writes
+
+Each GH Archive pass appends events using `<pass UUID>:<archive event ID>` as
+its parent ID and the same ID in child records. A fresh UUID is allocated when
+the dataset is opened, including after worker restarts. Duplicate archive IDs
+within a pass are skipped. Parent and child inserts share a transaction, so a
+child insert failure rolls back the parent. Existing records are retained;
+looping intentionally grows the database and WAL rather than becoming idle.
+The original archive ID remains the suffix of the stored ID.
+
+Replay metrics count input records, not SQL statements or child rows:
+
+- `soak_replay_attempts_total`: records reaching insertion, excluding retries.
+- `soak_replay_rows_total`: records with committed mutations, excluding duplicates.
+- `soak_replay_skipped_rows_total`: duplicates skipped without mutations.
+- `soak_replay_dropped_rows_total`: records whose insertion ultimately failed.
+- `soak_replay_errors_total`: individual insert errors, including failures followed
+  by a successful retry; duplicates are not errors.
+
+At completion, attempted records equal mutated plus skipped plus failed records.
+An in-flight or canceled attempt may not yet have a terminal outcome. Invalid
+GH Archive payloads still retain the parent and increment
+`soak_replay_gharchive_dropped_payloads_total`; they do not create a typed child.
+Pass logs report attempted, mutated, skipped, and failed record counts.
+
 ## Development
 
 Common local checks:
