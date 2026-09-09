@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -124,13 +125,26 @@ func (r *tenantRunner) finish(retErr error) error {
 	if retErr != nil {
 		r.report.Error = retErr.Error()
 	}
+	if r.report.Interrupted && len(r.report.Failures) == 0 {
+		r.report.Status = "incomplete"
+	}
+	for id, work := range r.ledger.work {
+		if work.pending {
+			r.report.PendingTenants = append(r.report.PendingTenants, id.name())
+		}
+		if work.attempt > 0 {
+			r.report.AttemptedTenants = append(r.report.AttemptedTenants, id.name())
+		}
+	}
+	sort.Strings(r.report.PendingTenants)
+	sort.Strings(r.report.AttemptedTenants)
 	r.report.FinishedAt = time.Now().UTC()
 	data, encodeErr := json.MarshalIndent(r.report, "", "  ")
 	if encodeErr == nil {
 		encodeErr = os.WriteFile(filepath.Join(r.dir, "report.json"), data, 0o600)
 	}
 	retErr = errors.Join(retErr, encodeErr)
-	if retErr != nil {
+	if encodeErr != nil {
 		r.report.Status = "failed"
 	}
 	return retErr

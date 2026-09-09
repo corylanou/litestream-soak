@@ -107,3 +107,11 @@ SOAK_TENANT_LITESTREAM_BINARY=/absolute/path/to/reference-litestream \
 Without that variable the integration test reports a skip; it is not a restore
 pass. Unit tests still cover fair pending work, generation isolation, bounds,
 failed-batch retention, and durable early-error detection.
+
+Global cancellation stops scheduling new tenant verification. Unscheduled work
+remains in `pending_tenants`; `attempted_tenants` lists only identities whose
+verification actually began. In-flight canceled requests and scenario events are
+marked interrupted rather than failed. `interrupted=true` with status `incomplete`
+means partial coverage without an observed failure; prior failures keep status
+`failed`. Per-operation/request deadlines while the run is active remain failures.
+Aborted runs still execute bounded process cleanup and retain its resource frame.

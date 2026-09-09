@@ -33,6 +33,9 @@ type TenantResourceFrame struct {
 }
 
 type TenantLifecycleReport struct {
+	Interrupted      bool                   `json:"interrupted"`
+	PendingTenants   []string               `json:"pending_tenants"`
+	AttemptedTenants []string               `json:"attempted_tenants"`
 	LogEvidence      TenantLogEvidence      `json:"log_evidence"`
 	StartedAt        time.Time              `json:"started_at"`
 	FinishedAt       time.Time              `json:"finished_at"`
@@ -57,18 +60,19 @@ type TenantLifecycleReport struct {
 }
 
 type tenantRunner struct {
-	options  TenantLifecycleOptions
-	report   *TenantLifecycleReport
-	ledger   *tenantLedger
-	dir      string
-	socket   string
-	config   string
-	process  *exec.Cmd
-	done     chan error
-	log      *lineBuffer
-	fullLog  *tenantProcessLog
-	verifier *Verifier
-	expected map[tenantID]logicalSnapshot
+	runContext context.Context
+	options    TenantLifecycleOptions
+	report     *TenantLifecycleReport
+	ledger     *tenantLedger
+	dir        string
+	socket     string
+	config     string
+	process    *exec.Cmd
+	done       chan error
+	log        *lineBuffer
+	fullLog    *tenantProcessLog
+	verifier   *Verifier
+	expected   map[tenantID]logicalSnapshot
 }
 
 func RunTenantLifecycle(ctx context.Context, options TenantLifecycleOptions) (report TenantLifecycleReport, retErr error) {
@@ -113,7 +117,7 @@ func RunTenantLifecycle(ctx context.Context, options TenantLifecycleOptions) (re
 		return report, err
 	}
 	report.RunDirectory = dir
-	r := &tenantRunner{options: options, report: &report, ledger: newTenantLedger(options.Tenants), dir: dir, log: newLineBuffer(120), expected: make(map[tenantID]logicalSnapshot)}
+	r := &tenantRunner{runContext: ctx, options: options, report: &report, ledger: newTenantLedger(options.Tenants), dir: dir, log: newLineBuffer(120), expected: make(map[tenantID]logicalSnapshot)}
 	r.socket = filepath.Join(os.TempDir(), fmt.Sprintf("tenant-%s.sock", filepath.Base(dir)))
 	r.config = filepath.Join(dir, "litestream.yml")
 	cfg := DefaultConfig()
@@ -135,7 +139,12 @@ func RunTenantLifecycle(ctx context.Context, options TenantLifecycleOptions) (re
 		return report, err
 	}
 	if err := r.run(ctx); err != nil {
-		r.event("scenario", tenantID{}, "failed", err.Error())
+		if ctx.Err() != nil {
+			report.Interrupted = true
+			r.event("scenario", tenantID{}, "interrupted", err.Error())
+		} else {
+			r.event("scenario", tenantID{}, "failed", err.Error())
+		}
 		return report, err
 	}
 	report.Status = "passed"
@@ -233,6 +242,9 @@ func (r *tenantRunner) wait(ctx context.Context, phase string, id tenantID, chec
 	defer ticker.Stop()
 	var last error
 	for {
+		if waitCtx.Err() != nil {
+			return errors.Join(waitCtx.Err(), last)
+		}
 		ok, err := check(waitCtx)
 		attempt := TenantLifecycleEvent{Phase: phase, Status: "pending", At: time.Now().UTC()}
 		if id.Generation > 0 {
@@ -243,7 +255,9 @@ func (r *tenantRunner) wait(ctx context.Context, phase string, id tenantID, chec
 		}
 		if err != nil {
 			attempt.Detail = err.Error()
-			if phase != "startup" {
+			if r.runContext != nil && r.runContext.Err() != nil && errors.Is(err, r.runContext.Err()) {
+				attempt.Status = "interrupted"
+			} else if phase != "startup" {
 				r.event(phase, id, "failed", err.Error())
 			}
 		}
@@ -325,7 +339,7 @@ func (r *tenantRunner) verify(ctx context.Context, id tenantID) error {
 	cmd.Stdout = io.MultiWriter(r.fullLog, r.log)
 	cmd.Stderr = cmd.Stdout
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("restore %s: %w", id.name(), err)
+		return fmt.Errorf("restore %s: %w", id.name(), errors.Join(err, opCtx.Err()))
 	}
 	actual, err := readLogicalSnapshot(opCtx, restored, r.verifier.cfg.logicalLimits())
 	if err != nil {
@@ -343,12 +357,22 @@ func (r *tenantRunner) verify(ctx context.Context, id tenantID) error {
 func (r *tenantRunner) verifyPending(ctx context.Context, phase string) error {
 	var failures []error
 	for _, id := range r.ledger.pending() {
+		if ctx.Err() != nil {
+			r.report.Interrupted = true
+			r.event(phase, tenantID{}, "interrupted", fmt.Sprintf("pending=%d: %v", len(r.ledger.pending()), ctx.Err()))
+			failures = append(failures, ctx.Err())
+			break
+		}
 		err := r.verify(ctx, id)
 		detail := "logical_match=true"
 		status := "passed"
 		if err != nil {
 			detail = err.Error()
 			status = "failed"
+			if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+				status = "interrupted"
+				r.report.Interrupted = true
+			}
 			failures = append(failures, err)
 		}
 		r.ledger.attempt(id, "", time.Now())

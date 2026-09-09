@@ -333,3 +333,84 @@ func TestTenantLifecycleLogEvidenceBound(t *testing.T) {
 		t.Fatal("lost line identities")
 	}
 }
+
+func TestTenantLifecycleCancellationRetainsUnexecutedWork(t *testing.T) {
+	for _, tc := range []struct{ before, priorFailure bool }{{true, false}, {false, false}, {false, true}} {
+		t.Run(fmt.Sprintf("before=%t/priorFailure=%t", tc.before, tc.priorFailure), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			dir := t.TempDir()
+			file, err := os.Create(filepath.Join(dir, "process.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(file, "time=2026-09-09T00:00:00Z level=INFO msg=started\n"); err != nil {
+				t.Fatal(err)
+			}
+			q := newTenantLedger(3)
+			for i := 0; i < 3; i++ {
+				if _, err := q.create(i, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			report := TenantLifecycleReport{ProcessLog: file.Name()}
+			r := tenantRunner{runContext: ctx, options: TenantLifecycleOptions{Timeout: time.Second}, dir: dir, report: &report, ledger: q, verifier: NewVerifier(DefaultConfig()), log: newLineBuffer(10), fullLog: &tenantProcessLog{file: file, remaining: 1 << 20}}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { cancel(); <-req.Context().Done() }))
+			defer server.Close()
+			r.verifier.httpClient = &http.Client{Transport: tenantTestTransport{base: server.URL}}
+			if tc.before {
+				cancel()
+			}
+			if tc.priorFailure {
+				r.event("sync", tenantID{0, 1}, "failed", "prior request deadline exceeded")
+			}
+			err = r.verifyPending(ctx, "initial")
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("error=%v", err)
+			}
+			if err := r.finish(err); !errors.Is(err, context.Canceled) {
+				t.Fatalf("finish=%v", err)
+			}
+			wantAttempts := 1
+			if tc.before {
+				wantAttempts = 0
+			}
+			wantStatus, wantFailures := "incomplete", 0
+			if tc.priorFailure {
+				wantStatus, wantFailures = "failed", 1
+			}
+			if len(report.AttemptedTenants) != wantAttempts || len(report.PendingTenants) != 3 || len(report.Failures) != wantFailures || !report.Interrupted || report.Status != wantStatus {
+				t.Fatalf("report=%+v", report)
+			}
+			if len(report.Attempts) != wantAttempts {
+				t.Fatalf("unexecuted request attempts=%+v", report.Attempts)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "report.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved TenantLifecycleReport
+			if err := json.Unmarshal(data, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved.Status != wantStatus || len(saved.PendingTenants) != 3 {
+				t.Fatalf("saved=%+v", saved)
+			}
+		})
+	}
+}
+
+func TestTenantLifecycleCancellationPreservesConcurrentFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	report := TenantLifecycleReport{}
+	r := tenantRunner{runContext: ctx, options: TenantLifecycleOptions{Timeout: time.Second}, report: &report}
+	failure := errors.New("sync returned 500")
+	err := r.wait(ctx, "sync", tenantID{0, 1}, func(context.Context) (bool, error) {
+		cancel()
+		return false, failure
+	})
+	if !errors.Is(err, failure) || len(report.Failures) != 1 {
+		t.Fatalf("cancellation erased real failure: err=%v report=%+v", err, report)
+	}
+}
