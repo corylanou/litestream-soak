@@ -12,11 +12,14 @@ import (
 )
 
 type Runner struct {
-	cfg Config
+	cfg      Config
+	profiles *pprofCapturer
 
 	litestreamManager
 	statsPoller
 	loadReplayManager
+	churnLoad     *churnLoad
+	churnEvidence churnEvidence
 
 	failureDebug            failureDebugState
 	noProgress              diskPressureNoProgressState
@@ -30,6 +33,7 @@ func NewRunner(cfg Config) *Runner {
 	runner := &Runner{
 		cfg: cfg,
 	}
+	runner.profiles = newPprofCapturer(&runner.cfg)
 	runner.litestreamManager = newLitestreamManager(&runner.cfg)
 	runner.statsPoller = newStatsPoller(&runner.cfg)
 	runner.statsPoller.litestreamPID = runner.litestreamManager.litestreamPID
@@ -50,6 +54,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	SetWorkerInfo(r.cfg)
 	startTime := time.Now()
 	r.reporter = NewReporter(r.cfg)
+	stopChurnUploader := r.startChurnUploader(runCtx)
+	defer stopChurnUploader()
 
 	if err := r.startS3FaultProxy(runCtx); err != nil {
 		return fmt.Errorf("start s3 fault proxy: %w", err)
@@ -77,10 +83,12 @@ func (r *Runner) Run(ctx context.Context) error {
 				snapshot := r.currentSnapshot()
 				metricsCondition := r.observeLitestreamMetricsCondition(snapshot.RuntimePayload)
 				if metricsCondition.ShouldReport {
+					r.triggerProfile(metricsCondition.EventType)
 					r.sendLitestreamMetricsEvent(runCtx, metricsCondition)
 				}
 				pressure := r.observeDiskPressureNoProgress(time.Now().UTC(), snapshot)
 				if pressure.ShouldReport {
+					r.triggerProfile("disk-pressure")
 					r.sendDiskFullEvent(runCtx, pressure)
 				}
 				if lastHeartbeat.IsZero() || time.Since(lastHeartbeat) >= 15*time.Second {
@@ -102,19 +110,34 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("write litestream config: %w", err)
 	}
 
-	if err := r.startLitestream(runCtx); err != nil {
+	litestreamCtx, cancelLitestream := context.WithCancel(context.WithoutCancel(runCtx))
+	if err := r.startLitestream(litestreamCtx); err != nil {
+		cancelLitestream()
 		return fmt.Errorf("start litestream: %w", err)
 	}
 	defer r.stopLitestream()
+	defer cancelLitestream()
 	r.monitorLitestream(runCtx, cancelRun)
+	stopProfiles := r.startProfileCapture(runCtx)
+	defer stopProfiles()
 
 	if err := r.waitForFirstSync(runCtx); err != nil {
 		return fmt.Errorf("wait for first sync: %w", err)
 	}
-	go newPprofCapturer(&r.cfg).Run(runCtx) // returns immediately when capture is disabled
 	go newReplicaLevelPoller(&r.cfg).Run(runCtx)
 
-	if r.cfg.ManyDBEnabled() {
+	if r.cfg.churnEnabled() {
+		load, err := startChurn(runCtx, r.cfg, func(op string, n int64, duration time.Duration, attemptErr error) {
+			if err := r.recordChurnAttempt(runCtx, op, n, duration, attemptErr); err != nil {
+				cancelRun(fmt.Errorf("persist churn evidence: %w", err))
+			}
+		})
+		if err != nil {
+			return err
+		}
+		r.churnLoad = load
+		defer load.Stop()
+	} else if r.cfg.ManyDBEnabled() {
 		if err := r.startManyDBLoad(runCtx); err != nil {
 			return fmt.Errorf("start many database load: %w", err)
 		}
@@ -140,6 +163,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	var pausers []loadPauser
+	if r.churnLoad != nil {
+		pausers = append(pausers, r.churnLoad.engine)
+	}
 	if r.loadSup != nil {
 		pausers = append(pausers, r.loadSup)
 	}
@@ -154,6 +180,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.verifier = NewVerifier(r.cfg, pausers...)
 	r.verifier.SetStartHook(r.sendVerificationStarted)
+	r.verifier.onProfileIncident = r.triggerProfile
 
 	if err := r.runVerifyLoop(runCtx); err != nil {
 		r.sendWorkerFailureEvent(err)
@@ -163,6 +190,9 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 func (r *Runner) populate(ctx context.Context) error {
+	if r.cfg.churnEnabled() {
+		return populateChurn(ctx, r.cfg)
+	}
 	if r.cfg.ManyDBEnabled() {
 		return populateManyDBs(ctx, r.cfg)
 	}
@@ -204,6 +234,9 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 			r.resetS3FaultProxyCycle()
 			result, err := r.verifier.RunCycle(ctx)
 			result = r.applyS3FaultProxyVerificationGuards(result)
+			if !result.Passed {
+				r.triggerProfile("verification-failed")
+			}
 			r.sendVerification(context.WithoutCancel(ctx), result)
 			if err != nil {
 				slog.Error("Verification cycle error", "error", err)

@@ -10,16 +10,10 @@ RUN go version -m /usr/local/bin/soakctl >/tmp/soakctl.buildinfo && cat /tmp/soa
 
 FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS flyctl
 ENV GOTOOLCHAIN=local
-ARG FLYCTL_VERSION=0.4.59
-ARG FLYCTL_SHA=d10482182142f259db338dcef34556a67702290c
-WORKDIR /src/flyctl
-RUN git clone https://github.com/superfly/flyctl.git . && \
-    git checkout --detach "${FLYCTL_SHA}" && \
-    test "$(git rev-parse HEAD)" = "${FLYCTL_SHA}"
-RUN go version && CGO_ENABLED=0 go build -tags production \
-    -ldflags "-s -w -X github.com/superfly/flyctl/internal/buildinfo.buildVersion=${FLYCTL_VERSION} -X github.com/superfly/flyctl/internal/buildinfo.commit=${FLYCTL_SHA} -X github.com/superfly/flyctl/internal/buildinfo.buildDate=$(git show -s --format=%cI HEAD)" \
-    -o /usr/local/bin/flyctl .
-RUN go version -m /usr/local/bin/flyctl >/tmp/flyctl.buildinfo && cat /tmp/flyctl.buildinfo
+COPY scripts/build-flyctl.sh /opt/build/
+RUN bash /opt/build/build-flyctl.sh /src/flyctl /usr/local/bin/flyctl
+RUN go version -m /usr/local/bin/flyctl && mkdir -p /tmp/security/flyctl && \
+    cp /usr/local/bin/flyctl.* /tmp/security/flyctl/
 
 FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
 RUN apt-get update && \
@@ -32,7 +26,8 @@ RUN apt-get update && \
 COPY --from=flyctl /usr/local/bin/flyctl /usr/local/bin/flyctl
 COPY --from=builder /usr/local/bin/soakctl /usr/local/bin/soakctl
 COPY --from=builder /tmp/soakctl.buildinfo /opt/soak/soakctl.buildinfo
-COPY --from=flyctl /tmp/flyctl.buildinfo /opt/soak/flyctl.buildinfo
+COPY --from=flyctl /usr/local/bin/flyctl.buildinfo /opt/soak/flyctl.buildinfo
+COPY --from=flyctl /tmp/security /opt/soak/security
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 RUN chmod 0755 /usr/local/bin/docker-entrypoint
 ENV SOAK_DATA_DB=/data/soakctl.db

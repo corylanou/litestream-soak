@@ -125,9 +125,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
-        with:
-          version: 0.4.59
+      - uses: ./.github/actions/setup-flyctl
 
       - id: build
         shell: bash
@@ -190,6 +188,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Verify candidate compatibility before fleet notification
+        timeout-minutes: 15
+        env:
+          CANDIDATE_SHA: ${{ needs.resolve-request.outputs.pr_sha }}
+        run: bash scripts/test-compatibility.sh "$CANDIDATE_SHA"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compatibility-${{ github.sha }}
+          include-hidden-files: true
+          path: |
+            .local/compatibility/**/run.log
+            .local/compatibility/**/*.buildinfo
+            .local/compatibility/**/replication-*/
+          if-no-files-found: error
 
       - shell: bash
         env:

@@ -1,6 +1,9 @@
 package orchestrator
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -282,4 +285,29 @@ func TestLatestPlatformEvent(t *testing.T) {
 
 func containsFold(value, needle string) bool {
 	return strings.Contains(strings.ToLower(value), strings.ToLower(needle))
+}
+
+func TestFetchAppPlatformLogsCommandContract(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+[ "$*" = "logs -a example-app --json --no-tail" ] || exit 2
+[ "$FLY_API_TOKEN" = "example-token" ] || exit 3
+printf '%s\n' '{"level":"error","instance":"example-machine","message":"out of memory","region":"ord","timestamp":"2026-09-09T10:00:00Z","meta":{"event":{"provider":"fly"}}}'
+`
+	if err := os.WriteFile(filepath.Join(dir, "flyctl"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	m := &Manager{platformLogToken: "example-token"}
+	logs, err := m.fetchAppPlatformLogs(context.Background(), "example-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 || logs[0].Instance != "example-machine" || logs[0].Timestamp.IsZero() {
+		t.Fatalf("unexpected logs: %+v", logs)
+	}
+	kind, _, ok := classifyPlatformLog(logs[0].entry())
+	if !ok || kind != "platform_oom" {
+		t.Fatalf("event = %q, %v", kind, ok)
+	}
 }
