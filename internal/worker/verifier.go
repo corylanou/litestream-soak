@@ -179,7 +179,12 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 		})
 	}()
 
-	time.Sleep(2 * time.Second)
+	select {
+	case <-ctx.Done():
+		v.failResult(ctx, &result, ctx.Err().Error())
+		return result, ctx.Err()
+	case <-time.After(2 * time.Second):
+	}
 
 	if err := recordVerificationStep(&result, "checkpoint", func() error {
 		residualBusy, cpErr := v.checkpoint(ctx)
@@ -635,7 +640,7 @@ func (v *Verifier) validate(ctx context.Context, txid uint64) (bool, error) {
 func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath string, txid uint64) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, v.cfg.LogicalTimeout)
 	defer cancel()
-	source, err := v.logicalValidation(ctx, sourcePath, txid)
+	source, err := v.captureVerificationBoundary(ctx, sourcePath, txid)
 	if err != nil {
 		return false, err
 	}
@@ -644,32 +649,16 @@ func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath stri
 		return false, err
 	}
 	defer cleanupConfig()
-
-	args := []string{
-		"validate",
-		"-source-db", sourcePath,
-		"-config", configPath,
-		"-restored-db", restoredPath,
-		"-check-type", "integrity",
-	}
-	if txid > 0 {
-		args = append(args, "-txid", formatTXID(txid))
-	}
-
-	cmd := exec.CommandContext(ctx, "litestream-test", args...)
+	args := []string{"restore", "-config", configPath, "-txid", formatTXID(txid), "-o", restoredPath, sourcePath}
+	cmd := exec.CommandContext(ctx, "litestream", args...)
 	if v.cfg.ReplicaType == "s3" {
 		cmd.Env = v.cfg.s3CommandEnv(v.cfg.S3FaultProxyEndpoint)
 	}
 	output, err := boundedValidationOutput(cmd)
-	if err != nil && txid > 0 && validateUnsupportedTXID(output) {
-		slog.Warn("litestream-test validate does not support -txid; retrying validation without pinned restore txid")
-		args = args[:len(args)-2]
-		v.logicalEvidence += " restore_boundary=latest-fallback"
-		cmd = exec.CommandContext(ctx, "litestream-test", args...)
-		if v.cfg.ReplicaType == "s3" {
-			cmd.Env = v.cfg.s3CommandEnv(v.cfg.S3FaultProxyEndpoint)
-		}
-		output, err = boundedValidationOutput(cmd)
+	if err != nil {
+		v.logicalEvidence += " restore_boundary=unavailable"
+	} else {
+		v.logicalEvidence += " restore_boundary=pinned"
 	}
 
 	slog.Info("Validate output", "output", string(output))
@@ -684,6 +673,9 @@ func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath stri
 		return false, metadata
 	}
 
+	if err := checkRestoredIntegrity(ctx, restoredPath); err != nil {
+		return false, err
+	}
 	if err := v.compareRestoredLogical(ctx, source, restoredPath); err != nil {
 		return false, err
 	}
@@ -771,9 +763,6 @@ func (v *Verifier) writePerDBValidateConfig(sourcePath string) (string, error) {
 }
 
 func (r VerificationResult) restoreTXID() uint64 {
-	if r.SyncReplicatedTXID > 0 {
-		return r.SyncReplicatedTXID
-	}
 	return r.SyncTXID
 }
 
@@ -807,10 +796,6 @@ func formatTXID(txid uint64) string {
 		return ""
 	}
 	return fmt.Sprintf("%016x", txid)
-}
-
-func validateUnsupportedTXID(output []byte) bool {
-	return strings.Contains(string(output), "flag provided but not defined: -txid")
 }
 
 func validationStepMetadata(ctx context.Context, cmd *exec.Cmd, output []byte, err error) *verificationStepMetadataError {

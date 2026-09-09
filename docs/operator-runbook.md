@@ -1050,8 +1050,9 @@ The verifier flow is:
 1. pause the load generator
 2. checkpoint SQLite
 3. wait for Litestream `/sync`
-4. run `litestream-test validate`
-5. resume the load generator
+4. reserve the SQLite writer, re-sync and capture the matching source boundary
+5. release the reservation and run `litestream restore -txid`, then independent integrity and logical comparison
+6. resume the load generator
 
 That flow is implemented in `internal/worker/verifier.go`.
 

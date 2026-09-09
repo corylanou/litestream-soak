@@ -536,7 +536,7 @@ func TestRunCycleCleansStaleRestoredFileBeforeValidate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	writeFakeLitestreamTest(t, dir, `
+	writeFakePinnedRestore(t, dir, `
 if [ -f "$RESTORED_PATH" ]; then
   printf present > "$MARKER_PATH"
 else

@@ -43,4 +43,4 @@ done
 SOAK_LOGICAL_LITESTREAM_BINARY="$evidence/litestream" \
 SOAK_LOGICAL_WORKLOAD_BINARY="$evidence/litestream-test" \
 SOAK_COMPATIBILITY_SHA="$candidate" SOAK_COMPATIBILITY_EVIDENCE="$evidence" \
-  go -C "$root" test ./internal/worker -run '^TestLogicalOraclePinnedLitestream$' -count=1 -v -timeout=2m
+  go -C "$root" test ./internal/worker -run '^Test(LogicalOraclePinnedLitestream|VerificationBoundaryPinnedBinary)$' -count=1 -v -timeout=2m

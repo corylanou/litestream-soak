@@ -49,8 +49,9 @@ func TestValidateLogicalContent(t *testing.T) {
 			logicalTestDB(t, cfg.DBPath, schema)
 			restored := cfg.DBPath + ".restored"
 			logicalTestDB(t, restored, schema+tt.change)
-			writeFakeLitestreamTest(t, dir, "exit 0\n")
+			writeFakePinnedRestore(t, dir, "exit 0\n")
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			startBoundarySyncFixture(t, &cfg, 42)
 			passed, err := NewVerifier(cfg).validate(context.Background(), 42)
 			if tt.want == "" {
 				if err != nil || !passed {
@@ -270,11 +271,13 @@ func TestManyDBLogicalVerification(t *testing.T) {
 				}
 				logicalTestDB(t, filepath.Join(fixtures, filepath.Base(path)), schema)
 			}
-			writeFakeLitestreamTest(t, dir, `
+			writeFakePinnedRestore(t, dir, `
 while [ "$#" -gt 0 ]; do
  case "$1" in
- -source-db) source="$2"; shift ;;
- -restored-db) restored="$2"; shift ;;
+ -config|-txid) shift ;;
+ -o) restored="$2"; shift ;;
+ *) source="$1" ;;
+
  esac
  shift
 done
@@ -464,11 +467,13 @@ func TestManyDBPendingCyclesRetainFailuresAndNewWrites(t *testing.T) {
 			}
 		}
 	}
-	writeFakeLitestreamTest(t, dir, `
+	writeFakePinnedRestore(t, dir, `
 while [ "$#" -gt 0 ]; do
  case "$1" in
- -source-db) source="$2"; shift ;;
- -restored-db) restored="$2"; shift ;;
+ -config|-txid) shift ;;
+ -o) restored="$2"; shift ;;
+ *) source="$1" ;;
+
  esac
  shift
 done
