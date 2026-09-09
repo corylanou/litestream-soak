@@ -6,6 +6,7 @@ import (
 	"debug/buildinfo"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -28,10 +29,12 @@ type profileBinary struct {
 }
 
 type profileUploadFailure struct {
-	At      time.Time `json:"at"`
-	Attempt uint64    `json:"attempt"`
-	Stage   string    `json:"stage"`
-	Error   string    `json:"error"`
+	At       time.Time `json:"at"`
+	Attempt  uint64    `json:"attempt"`
+	Stage    string    `json:"stage"`
+	Kind     string    `json:"kind,omitempty"`
+	ExitCode *int      `json:"exit_code,omitempty"`
+	Error    string    `json:"error"`
 }
 
 type profileRecord struct {
@@ -39,8 +42,10 @@ type profileRecord struct {
 	UploadFailuresDropped   uint64 `json:"upload_failures_dropped"`
 	UploadHistoryIncomplete bool   `json:"upload_history_incomplete"`
 
-	UploadAttempts uint64                 `json:"upload_attempts"`
-	UploadFailures []profileUploadFailure `json:"upload_failures,omitempty"`
+	UploadLastAttemptAt time.Time              `json:"upload_last_attempt_at,omitempty"`
+	ArtifactUploaded    bool                   `json:"artifact_uploaded,omitempty"`
+	UploadAttempts      uint64                 `json:"upload_attempts"`
+	UploadFailures      []profileUploadFailure `json:"upload_failures,omitempty"`
 
 	DeploymentID      int                      `json:"deployment_id"`
 	MachineID         string                   `json:"machine_id"`
@@ -169,15 +174,15 @@ func (c *pprofCapturer) retryPendingPhase(ctx context.Context, dir, phase string
 	if c.cfg.ReplicaType != "s3" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	if phase != "" {
-		slices.Reverse(entries)
+	type pendingRecord struct {
+		filename string
+		record   profileRecord
 	}
+	var pending []pendingRecord
 	for _, entry := range entries {
 		if ctx.Err() != nil {
 			return
@@ -197,8 +202,30 @@ func (c *pprofCapturer) retryPendingPhase(ctx context.Context, dir, phase string
 		if json.Unmarshal(body, &history) == nil && history.Attempts == nil {
 			record.UploadHistoryIncomplete = true
 		}
+		pending = append(pending, pendingRecord{filename, record})
+	}
+	slices.SortStableFunc(pending, func(a, b pendingRecord) int {
+		aTime, bTime := a.record.UploadLastAttemptAt, b.record.UploadLastAttemptAt
+		if aTime.IsZero() {
+			aTime = a.record.CapturedAt
+		}
+		if bTime.IsZero() {
+			bTime = b.record.CapturedAt
+		}
+		if order := aTime.Compare(bTime); order != 0 {
+			return order
+		}
+
+		return strings.Compare(a.filename, b.filename)
+	})
+	for _, item := range pending[:min(len(pending), 4)] {
+		if ctx.Err() != nil {
+			return
+		}
+		filename, record := item.filename, item.record
 		record.UploadAttempts++
-		if record.Status == "available" {
+		record.UploadLastAttemptAt = time.Now().UTC()
+		if record.Status == "available" && !record.ArtifactUploaded {
 			artifact := strings.TrimSuffix(filename, ".json")
 			if err := c.upload(ctx, artifact, filepath.Base(artifact)); err != nil {
 				record.addUploadFailure("artifact", err)
@@ -206,6 +233,8 @@ func (c *pprofCapturer) retryPendingPhase(ctx context.Context, dir, phase string
 				c.recordStatus(record.Phase, "upload-failed")
 				continue
 			}
+			record.ArtifactUploaded = true
+			c.saveRecord(ctx, filename, &record)
 		}
 		if err := c.uploadRecord(ctx, filename, &record); err != nil {
 			record.addUploadFailure("manifest", err)
@@ -251,7 +280,10 @@ func (r *Runner) startProfileCapture(ctx context.Context) func() {
 		finalCtx, finalCancel := context.WithTimeout(shutdownCtx, 5*time.Second)
 		r.profiles.captureSet(finalCtx, "final")
 		finalCancel()
-		r.profiles.retryPendingPhase(shutdownCtx, filepath.Join(r.cfg.DataDir, "profiles"), "final")
+		deadline, _ := shutdownCtx.Deadline()
+		uploadCtx, uploadCancel := context.WithDeadline(shutdownCtx, deadline.Add(-time.Second))
+		defer uploadCancel()
+		r.profiles.retryPendingPhase(uploadCtx, filepath.Join(r.cfg.DataDir, "profiles"), "final")
 	}
 }
 
@@ -360,7 +392,23 @@ func (c *pprofCapturer) uploadRecord(ctx context.Context, filename string, recor
 func (r *profileRecord) addUploadFailure(stage string, err error) {
 	r.UploadError = err.Error()
 	r.UploadFailureCount++
-	r.UploadFailures = append(r.UploadFailures, profileUploadFailure{At: time.Now().UTC(), Attempt: r.UploadAttempts, Stage: stage, Error: r.UploadError})
+	failure := profileUploadFailure{At: time.Now().UTC(), Attempt: r.UploadAttempts, Stage: stage, Error: r.UploadError, Kind: "upload_error"}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		code := exit.ExitCode()
+		failure.ExitCode = &code
+		failure.Kind = "subprocess_exit"
+	}
+	var command *profileUploadError
+	if errors.As(err, &command) && strings.Contains(command.diagnostic, "ERROR: S3 error:") {
+		failure.Kind = "provider_error"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		failure.Kind = "deadline_exceeded"
+	} else if errors.Is(err, context.Canceled) {
+		failure.Kind = "cancelled"
+	}
+	r.UploadFailures = append(r.UploadFailures, failure)
 	if len(r.UploadFailures) > 16 {
 		r.UploadFailures = append(r.UploadFailures[:1], r.UploadFailures[len(r.UploadFailures)-15:]...)
 		r.UploadFailuresDropped++

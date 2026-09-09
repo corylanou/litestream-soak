@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -312,7 +313,7 @@ func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) e
 		args = append(args, "--region="+c.cfg.S3Region)
 	}
 	args = append(args, "put", filePath, target)
-	uploadCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	uploadCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(uploadCtx, "s3cmd", args...)
 	cmd.WaitDelay = time.Second
@@ -325,10 +326,21 @@ func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) e
 	}
 	cmd.Env = append(cmd.Env, "AWS_ACCESS_KEY_ID="+c.cfg.S3AccessKey, "AWS_SECRET_ACCESS_KEY="+c.cfg.S3SecretKey, "AWS_SESSION_TOKEN="+c.cfg.S3SessionToken)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("upload profile: %w: %s", err, diagnostic.sanitized(c.cfg))
+		return &profileUploadError{cause: errors.Join(uploadCtx.Err(), err), diagnostic: diagnostic.sanitized(c.cfg)}
 	}
 	return nil
 }
+
+type profileUploadError struct {
+	cause      error
+	diagnostic string
+}
+
+func (e *profileUploadError) Error() string {
+	return fmt.Sprintf("upload profile: %v: %s", e.cause, e.diagnostic)
+}
+
+func (e *profileUploadError) Unwrap() error { return e.cause }
 
 type profileUploadDiagnostic struct {
 	body []byte
