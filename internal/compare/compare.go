@@ -8,6 +8,10 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
+
+	"github.com/corylanou/litestream-soak/internal/orchestrator"
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 type Contract struct {
@@ -60,17 +64,23 @@ type Incident struct {
 }
 
 type Observation struct {
-	WorkloadSeconds     float64                `json:"workload_seconds"`
-	ResourceSummary     map[string]float64     `json:"resource_summary,omitempty"`
-	ProgressSamples     int                    `json:"progress_samples"`
-	CapabilityNotes     map[string]string      `json:"capability_notes,omitempty"`
-	Request             Request                `json:"request"`
-	CompletedOperations int64                  `json:"completed_operations"`
-	Correctness         string                 `json:"correctness"`
-	Reliability         string                 `json:"reliability"`
-	Incidents           []Incident             `json:"incidents"`
-	Metrics             map[string]Measurement `json:"metrics"`
-	Error               string                 `json:"error,omitempty"`
+	StartedAt           time.Time                       `json:"started_at"`
+	FinishedAt          time.Time                       `json:"finished_at"`
+	VerifiedAt          time.Time                       `json:"verified_at"`
+	WorkloadAttempts    uint64                          `json:"workload_attempts"`
+	Maintenance         *reporting.MaintenanceEvidence  `json:"maintenance,omitempty"`
+	RunEvidence         *orchestrator.WorkerRunEvidence `json:"run_evidence,omitempty"`
+	WorkloadSeconds     float64                         `json:"workload_seconds"`
+	ResourceSummary     map[string]float64              `json:"resource_summary,omitempty"`
+	ProgressSamples     int                             `json:"progress_samples"`
+	CapabilityNotes     map[string]string               `json:"capability_notes,omitempty"`
+	Request             Request                         `json:"request"`
+	CompletedOperations int64                           `json:"completed_operations"`
+	Correctness         string                          `json:"correctness"`
+	Reliability         string                          `json:"reliability"`
+	Incidents           []Incident                      `json:"incidents"`
+	Metrics             map[string]Measurement          `json:"metrics"`
+	Error               string                          `json:"error,omitempty"`
 }
 
 type Summary struct {

@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -21,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/corylanou/litestream-soak/internal/reporting"
 	"github.com/corylanou/litestream-soak/internal/worker"
 	_ "modernc.org/sqlite"
 )
@@ -79,7 +79,7 @@ func payload(seed, id int64, size int) []byte {
 }
 
 func (l Local) Execute(ctx context.Context, r Request) (observation Observation, resultErr error) {
-	observation = Observation{Request: r, Correctness: "unavailable", Reliability: "unavailable", Metrics: map[string]Measurement{}}
+	observation = Observation{StartedAt: time.Now().UTC(), Request: r, Correctness: "unavailable", Reliability: "unavailable", Metrics: map[string]Measurement{}}
 	hardware, err := LocalHardware()
 	if err != nil {
 		return observation, err
@@ -121,6 +121,8 @@ func (l Local) Execute(ctx context.Context, r Request) (observation Observation,
 		if resultErr != nil {
 			observation.Error = resultErr.Error()
 		}
+		observation.FinishedAt = time.Now().UTC()
+		attachRunEvidence(&observation)
 		resultErr = errors.Join(resultErr, writeJSON(filepath.Join(dir, "observation.json"), observation))
 	}()
 	executable, err := os.Executable()
@@ -264,6 +266,7 @@ func (l Local) Execute(ctx context.Context, r Request) (observation Observation,
 	workloadStarted := time.Now()
 	for id := int64(0); id < r.Contract.OperationBudget; id++ {
 		started := time.Now()
+		observation.WorkloadAttempts++
 		if _, err := db.ExecContext(ctx, "INSERT INTO operations VALUES (?, ?)", id, payload(r.Contract.Seed, id, size)); err != nil {
 			return observation, err
 		}
@@ -333,17 +336,18 @@ func (l Local) Execute(ctx context.Context, r Request) (observation Observation,
 	}
 	if err := validateLocal(ctx, l.Fixture, target, r.Contract.Seed, r.Contract.OperationBudget, size); err != nil {
 		observation.Correctness = "fail"
+		observation.VerifiedAt = time.Now().UTC()
 		observation.Incidents = append(observation.Incidents, Incident{Category: "correctness", Detail: err.Error()})
 		return observation, err
 	}
 	if err := worker.CompareLogicalDatabases(ctx, source, target); err != nil {
 		observation.Correctness = "fail"
+		observation.VerifiedAt = time.Now().UTC()
 		observation.Incidents = append(observation.Incidents, Incident{Category: "logical_schema_or_data", Detail: err.Error()})
 		return observation, err
 	}
 	observation.Correctness = "pass"
-	observation.Reliability = "unavailable"
-	observation.CapabilityNotes = map[string]string{"reliability": "bounded local run retains process errors and warning/error log lines; no durable fleet incident ledger, restart history, or maintenance exposure eligibility"}
+	observation.VerifiedAt = time.Now().UTC()
 	finalDisk, err := dataBytes(dir)
 	if err != nil {
 		return observation, err
@@ -509,11 +513,14 @@ func recordLogEvidence(directory string, o *Observation) error {
 	if err != nil {
 		return err
 	}
-	adverse := regexp.MustCompile(`(?i)\b(error|warn|retry|retrying|retried|retries|failed|failure|timeout|timed out|recovered|corrupt|corruption|panic|unavailable)\b`)
+	e := reporting.MaintenanceEvidence{Epoch: o.Request.ReplicaPrefix, StartedAt: o.StartedAt, Complete: true}
 	for _, line := range strings.Split(string(data), "\n") {
-		if adverse.MatchString(line) {
+		before := e.Errors
+		e.ObserveLine(line)
+		if e.Errors > before {
 			o.Incidents = append(o.Incidents, Incident{Category: "replication_log", Detail: line})
 		}
 	}
+	o.Maintenance = &e
 	return nil
 }

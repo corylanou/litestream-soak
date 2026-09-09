@@ -124,8 +124,9 @@ not suppress subsequent pairs. Cancellation stops new executions and returns
 partial evidence. Each started run also retains its request, observation,
 source, replica, restored database, configuration and process logs. Preserve
 these artifacts when retrying; a later clean execution does not erase an earlier
-failure. This local evidence does not claim integration with the durable fleet
-incident ledger from #211.
+failure. Local observations use the shared #211 maintenance parser and complete-run
+eligibility evaluator. They remain local artifacts and are not submitted to the
+durable fleet incident journal.
 
 ## Executed matrix and controls
 
@@ -170,7 +171,7 @@ remains inconclusive and unavailable capabilities remain explicit.
 | Field | Measured scope or explicit limitation |
 |---|---|
 | Correctness | Exact restored fixture and operation rows; local control checks source rows |
-| Reliability | Unavailable as complete-run eligibility; process failures and all warning/error log lines retained, including recovered warnings |
+| Reliability | Shared complete-run evidence and eligibility reasons; bounded local runs remain unavailable for clean-soak eligibility, while observed incidents fail reliability even after successful restore |
 | CPU/operation | Candidate replication process user + system CPU, including startup/drain/shutdown, divided by completed operations |
 | Allocation/operation | Candidate runtime TotalAlloc delta from retained pprof heap text before writes and after sync, divided by completed operations; includes observation overhead |
 | RSS | Candidate process lifetime peak resident bytes from OS resource usage |
@@ -186,8 +187,15 @@ remains inconclusive and unavailable capabilities remain explicit.
 
 Candidate-only measurements in the no-Litestream control are explicitly
 unavailable. Unsupported CLI/configuration in a release is an execution failure,
-not a skipped pass. Log scanning is conservative and retains matching raw lines;
-it is not a complete structured incident detector. No maintenance exposure, restart reliability, or regional fleet result is inferred.
+not a skipped pass. The shared maintenance parser counts observed successful snapshots, compactions
+and positive retention, and retains adverse raw lines. Unknown log formats leave
+observation completeness false. Each run reports its actual operation attempts,
+mutations, verification timestamp and independently retained incidents. One final
+verification has zero measured verification span and cannot meet the shared
+24-hour span, one-hour gap and complete-history requirements. Local artifacts do
+not establish restart history or a regional fleet result; quiet logs cannot
+exclude unlogged retries. Successful pprof allocation capture records observed
+profiling capability without asserting continuous profile-history coverage.
 
 Each metric includes paired sample count, candidate-minus-baseline mean delta,
 a two-sided Student-t 95% interval, and the maximum absolute main/main paired
