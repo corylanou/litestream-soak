@@ -30,21 +30,22 @@ func TestScoreDeploymentWorkerRespectsWindowBounds(t *testing.T) {
 		Name:        "worker-main-low",
 		ProfileName: "low-volume",
 	}
-	deployment := model.Deployment{StartedAt: startedAt}
+	deployment := model.Deployment{ID: 1, StartedAt: startedAt}
+	worker.FlyMachineID = "machine"
 	tooEarly := startedAt.Add(-time.Minute)
 	inWindow := startedAt.Add(10 * time.Minute)
 	tooLate := windowEnd
 
 	outcome, verified := scoreDeploymentWorker(worker, deployment, []model.Verification{
 		{
-			WorkerID:    worker.ID,
+			Attributed: true, Run: fixtureRun(worker, deployment), WorkerID: worker.ID,
 			StartedAt:   tooLate.Add(-15 * time.Second),
 			CompletedAt: &tooLate,
 			Status:      "passed",
 			Passed:      true,
 		},
 		{
-			WorkerID:     worker.ID,
+			Attributed: true, Run: fixtureRun(worker, deployment), WorkerID: worker.ID,
 			StartedAt:    inWindow.Add(-15 * time.Second),
 			CompletedAt:  &inWindow,
 			Status:       "failed",
@@ -53,7 +54,7 @@ func TestScoreDeploymentWorkerRespectsWindowBounds(t *testing.T) {
 			ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": context deadline exceeded`,
 		},
 		{
-			WorkerID:    worker.ID,
+			Attributed: true, Run: fixtureRun(worker, deployment), WorkerID: worker.ID,
 			StartedAt:   tooEarly.Add(-15 * time.Second),
 			CompletedAt: &tooEarly,
 			Status:      "passed",
@@ -75,7 +76,7 @@ func TestScoreDeploymentWorkerRespectsWindowBounds(t *testing.T) {
 
 	_, verified = scoreDeploymentWorker(worker, deployment, []model.Verification{
 		{
-			WorkerID:    worker.ID,
+			Attributed: true, Run: fixtureRun(worker, deployment), WorkerID: worker.ID,
 			StartedAt:   tooEarly.Add(-15 * time.Second),
 			CompletedAt: &tooEarly,
 			Status:      "passed",
@@ -118,7 +119,7 @@ func TestBuildDeploymentRolloutIgnoresAbortedForVerifiedSinceDeploy(t *testing.T
 	})
 
 	passedAt := deployment.StartedAt.Add(5 * time.Minute).UTC()
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-aborted-after-pass",
 		StartedAt:   passedAt.Add(-2 * time.Minute),
 		CompletedAt: &passedAt,
@@ -129,7 +130,7 @@ func TestBuildDeploymentRolloutIgnoresAbortedForVerifiedSinceDeploy(t *testing.T
 	})
 
 	abortedAt := deployment.StartedAt.Add(10 * time.Minute).UTC()
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     "worker-aborted-after-pass",
 		StartedAt:    abortedAt.Add(-2 * time.Minute),
 		CompletedAt:  &abortedAt,
@@ -268,6 +269,10 @@ func TestBuildDeploymentScorecardExcludesRegionalWorkers(t *testing.T) {
 		StartedAt:     startedAt,
 	}
 
+	mustUpsertReadyDeployment(t, db, deployment)
+	deployment = mustLatestDeployment(t, db, "main")
+	startedAt = deployment.StartedAt
+
 	createTestWorker(t, db, model.Worker{
 		ID:            "worker-main-low-vol",
 		Name:          "worker-main-low-vol",
@@ -292,7 +297,7 @@ func TestBuildDeploymentScorecardExcludesRegionalWorkers(t *testing.T) {
 	})
 
 	passedAt := startedAt.Add(time.Minute)
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-low-vol",
 		StartedAt:   passedAt.Add(-15 * time.Second),
 		CompletedAt: &passedAt,
@@ -301,7 +306,7 @@ func TestBuildDeploymentScorecardExcludesRegionalWorkers(t *testing.T) {
 		Passed:      true,
 	})
 	failedAt := startedAt.Add(2 * time.Minute)
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     "worker-main-low-vol-syd",
 		StartedAt:    failedAt.Add(-15 * time.Second),
 		CompletedAt:  &failedAt,
@@ -382,7 +387,8 @@ func TestFixtureFailureRemainsReleaseBlocking(t *testing.T) {
 		Name:        "worker-main-low",
 		ProfileName: "low-volume",
 	}
-	deployment := model.Deployment{StartedAt: completedAt.Add(-time.Hour)}
+	deployment := model.Deployment{ID: 1, StartedAt: completedAt.Add(-time.Hour)}
+	worker.FlyMachineID = "machine"
 	verification := model.Verification{
 		WorkerID:     worker.ID,
 		StartedAt:    completedAt.Add(-time.Minute),
@@ -397,6 +403,8 @@ func TestFixtureFailureRemainsReleaseBlocking(t *testing.T) {
 		},
 	}
 
+	verification.Run = fixtureRun(worker, deployment)
+	verification.Attributed = true
 	outcome, verified := scoreDeploymentWorker(worker, deployment, []model.Verification{verification}, nil)
 	if !verified {
 		t.Fatal("verified = false, want true")

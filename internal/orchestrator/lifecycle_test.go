@@ -55,7 +55,7 @@ func TestSuccessTeardownCandidateRejectsFailureInWindow(t *testing.T) {
 	db := openTestDB(t)
 	deployment, worker := createCleanSuccessCandidate(t, db, "pr-1228", 1228)
 	failedAt := worker.CreatedAt.Add(5 * time.Hour)
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     worker.ID,
 		StartedAt:    failedAt.Add(-15 * time.Second),
 		CompletedAt:  &failedAt,
@@ -682,7 +682,7 @@ func TestFailedSourcePauseCandidatePausesKnownBadMain(t *testing.T) {
 	verifiedAt := time.Now().UTC().Add(time.Minute)
 	for _, age := range []time.Duration{40 * time.Second, 15 * time.Second} {
 		done := verifiedAt.Add(-age).Add(5 * time.Second)
-		mustRecordVerification(t, db, &model.Verification{
+		mustRecordAttributedFixture(t, db, &model.Verification{
 			WorkerID:     "worker-main-low-vol",
 			StartedAt:    verifiedAt.Add(-age),
 			CompletedAt:  &done,
@@ -692,7 +692,7 @@ func TestFailedSourcePauseCandidatePausesKnownBadMain(t *testing.T) {
 			ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": context deadline exceeded`,
 		})
 	}
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-read-heavy",
 		StartedAt:   verifiedAt.Add(-10 * time.Second),
 		CompletedAt: &verifiedAt,
@@ -816,7 +816,7 @@ func TestFailedSourcePauseCandidateDoesNotParkCleanScoringFleetForRegionalFailur
 	verifiedAt := deployment.StartedAt.Add(10 * time.Minute)
 	for _, profile := range append(scoringProfiles, "many-dbs-100-list", "many-dbs-100-dir") {
 		workerID := "worker-main-" + profile
-		mustRecordVerification(t, db, &model.Verification{
+		mustRecordAttributedFixture(t, db, &model.Verification{
 			WorkerID:    workerID,
 			StartedAt:   verifiedAt.Add(-time.Minute),
 			CompletedAt: &verifiedAt,
@@ -826,7 +826,7 @@ func TestFailedSourcePauseCandidateDoesNotParkCleanScoringFleetForRegionalFailur
 		})
 	}
 	amsCompletedAt := verifiedAt.Add(time.Minute)
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     "worker-main-high-vol-ams",
 		StartedAt:    amsCompletedAt.Add(-time.Minute),
 		CompletedAt:  &amsCompletedAt,
@@ -836,7 +836,7 @@ func TestFailedSourcePauseCandidateDoesNotParkCleanScoringFleetForRegionalFailur
 	})
 	for i := 1; i <= 3; i++ {
 		completedAt := verifiedAt.Add(time.Duration(i+1) * time.Minute)
-		mustRecordVerification(t, db, &model.Verification{
+		mustRecordAttributedFixture(t, db, &model.Verification{
 			WorkerID:     "worker-main-low-vol-syd",
 			StartedAt:    completedAt.Add(-time.Minute),
 			CompletedAt:  &completedAt,
@@ -880,7 +880,7 @@ func TestEvaluateFailedSourcePauseRejectsFleetWithoutReleaseQualityWorkers(t *te
 		Region:        "ord",
 	})
 	completedAt := deployment.StartedAt.Add(2 * time.Minute)
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     "worker-main-many-dbs-100-list",
 		StartedAt:    completedAt.Add(-time.Minute),
 		CompletedAt:  &completedAt,
@@ -1245,7 +1245,7 @@ func failedSourceCandidateForFailures(t *testing.T, failures []failedSourceTestF
 			if status == "passed" {
 				errorMessage = ""
 			}
-			mustRecordVerification(t, db, &model.Verification{
+			mustRecordAttributedFixture(t, db, &model.Verification{
 				WorkerID:     failure.workerID,
 				StartedAt:    completedAt.Add(-time.Minute),
 				CompletedAt:  &completedAt,
@@ -1325,7 +1325,7 @@ func TestEvaluateFailedSourcePauseReevaluatesKnownBadDormantWorkers(t *testing.T
 			for i := 0; i < test.failures; i++ {
 				startedAt := now.Add(time.Duration(i-test.failures) * time.Minute)
 				completedAt := startedAt.Add(5 * time.Second)
-				mustRecordVerification(t, db, &model.Verification{
+				mustRecordAttributedFixture(t, db, &model.Verification{
 					WorkerID:     "worker-main-known-bad",
 					StartedAt:    startedAt,
 					CompletedAt:  &completedAt,
@@ -1478,7 +1478,7 @@ func createCleanSuccessCandidate(t *testing.T, db *model.DB, source string, prNu
 	deployment.StartedAt = storedWorker.CreatedAt.Add(-25 * time.Hour)
 
 	passedAt := storedWorker.CreatedAt.Add(10 * time.Minute)
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    worker.ID,
 		StartedAt:   passedAt.Add(-15 * time.Second),
 		CompletedAt: &passedAt,
@@ -1522,19 +1522,19 @@ func TestFailedSourcePauseCandidateIgnoresSingleEnvironmentalBlip(t *testing.T) 
 	now := time.Now().UTC().Add(time.Minute)
 	for i := 9; i >= 1; i-- {
 		done := now.Add(-time.Duration(i*5) * time.Second).Add(time.Second)
-		mustRecordVerification(t, db, &model.Verification{
+		mustRecordAttributedFixture(t, db, &model.Verification{
 			WorkerID: "worker-main-low-vol-syd", StartedAt: now.Add(-time.Duration(i*5) * time.Second),
 			CompletedAt: &done, Status: "passed", CheckType: "integrity", Passed: true,
 		})
 	}
 	done := now
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID: "worker-main-low-vol-syd", StartedAt: now.Add(-2 * time.Second), CompletedAt: &done,
 		Status: "failed", CheckType: "integrity", Passed: false,
 		ErrorMessage: `restore failed: operation error S3: ListObjectsV2, https response error StatusCode: 408, RequestID: 1783, api error RequestCanceled: Request was canceled`,
 	})
 	for i := 0; i < 14; i++ {
-		mustRecordVerification(t, db, &model.Verification{
+		mustRecordAttributedFixture(t, db, &model.Verification{
 			WorkerID: fmt.Sprintf("worker-main-green-%02d", i), StartedAt: now.Add(-2 * time.Second),
 			CompletedAt: &done, Status: "passed", CheckType: "integrity", Passed: true,
 		})
@@ -1572,7 +1572,7 @@ func TestFailedSourcePauseCandidateSingleWorkerCorroborated(t *testing.T) {
 	now := time.Now().UTC().Add(time.Minute)
 	for _, age := range []time.Duration{40 * time.Second, 15 * time.Second} {
 		done := now.Add(-age).Add(time.Minute)
-		mustRecordVerification(t, db, &model.Verification{
+		mustRecordAttributedFixture(t, db, &model.Verification{
 			WorkerID: "worker-main-low-vol", StartedAt: now.Add(-age), CompletedAt: &done,
 			Status: "failed", CheckType: "integrity", Passed: false,
 			ErrorMessage: "validation failed (exit 1): integrity check mismatch",
@@ -1612,7 +1612,7 @@ func TestFailedSourcePauseCandidateSurvivesAbortStarvedHistory(t *testing.T) {
 	record := func(age time.Duration, status, msg string) {
 		t.Helper()
 		done := now.Add(-age).Add(time.Second)
-		mustRecordVerification(t, db, &model.Verification{
+		mustRecordAttributedFixture(t, db, &model.Verification{
 			WorkerID: "worker-main-low-vol", StartedAt: now.Add(-age), CompletedAt: &done,
 			Status: status, CheckType: "integrity", Passed: false, ErrorMessage: msg,
 		})
@@ -1656,7 +1656,7 @@ func TestFailedSourcePauseCandidateIgnoresDormantWorkersWithoutFailures(t *testi
 	now := time.Now().UTC().Add(time.Minute)
 	for _, id := range []string{"worker-main-a", "worker-main-b", "worker-main-c"} {
 		done := now
-		mustRecordVerification(t, db, &model.Verification{
+		mustRecordAttributedFixture(t, db, &model.Verification{
 			WorkerID: id, StartedAt: now.Add(-5 * time.Second), CompletedAt: &done,
 			Status: "passed", CheckType: "integrity", Passed: true,
 		})

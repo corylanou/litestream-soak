@@ -212,10 +212,36 @@ fleet, performs a rolling update, and resumes dormant workers for probing.
 Before each rollout step, the control plane checks whether a newer ready
 deployment superseded the current one; superseded rollouts are skipped.
 
-The release-quality views build rollout progress and scorecards from
-post-deployment verification windows. They report updated workers, workers still
-awaiting a fresh verification, failed workers, failure signatures, pass rate,
-and source-to-source or previous-rollout comparisons.
+The release-quality views require attributed verification evidence within
+post-deployment windows. Each verification retains its deployment ID, run and
+machine IDs, soak and Litestream SHAs, workload generator SHA, effective workload
+configuration and hash, and harness validator identity. `WORKLOAD_SHA` identifies
+the generator source independently of the Litestream candidate. An absent
+generator source remains unknown rather than being inferred from the candidate.
+
+Authenticated deployment-ready notifications supply the generator `workload_sha`
+from the image build. The notification helper reads the Dockerfile pin by default;
+a custom generator build must supply the matching seventh argument or
+`WORKLOAD_SHA`. A missing trusted generator SHA disables deployment credit.
+
+The control plane registers each expected run before machine creation and binds
+its machine ID after creation. Reports must match that run and the effective
+configuration derived from the worker configuration parser. Report ingestion and
+run replacement are serialized per worker. Mismatched reports retain their historical evidence but cannot update the current
+worker or earn deployment credit. During upgrades, legacy managed workers without
+a registered run can continue telemetry only when the reported machine, harness
+build, Litestream build, source, and profile match the persisted worker identity.
+These reports never register a run or earn deployment credit. Current runs without a deployment remain operational without earning
+release credit. Legacy verification rows remain readable with `attributed=false`;
+existing workers need a newly registered run before they can provide attributed
+evidence.
+
+Historical deployment scorecards retain attributed results after worker
+replacement. Live rollout and success teardown checks additionally require the
+current machine and run. The views report updated workers, workers still awaiting
+a fresh verification, failed workers, failure signatures, pass rate, and
+source-to-source or previous-rollout comparisons. Identified incident reports,
+including recovery reports, are retained individually.
 
 ## Operations And Usage
 

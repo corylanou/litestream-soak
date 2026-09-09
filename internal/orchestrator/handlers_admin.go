@@ -16,6 +16,7 @@ import (
 const deploymentReadyRolloutTimeout = 2 * time.Hour
 
 type deploymentReadyRequest struct {
+	WorkloadSHA   string `json:"workload_sha"`
 	SHA           string `json:"sha"`
 	LitestreamSHA string `json:"litestream_sha"`
 	Source        string `json:"source"`
@@ -41,6 +42,11 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(request.LitestreamSHA) == "" {
 		respondError(w, r, http.StatusBadRequest, nil, "litestream_sha is required")
+		return
+	}
+	request.WorkloadSHA = strings.TrimSpace(request.WorkloadSHA)
+	if request.WorkloadSHA != "" && (len(request.WorkloadSHA) != 40 || !validSHARe.MatchString(request.WorkloadSHA)) {
+		respondError(w, r, http.StatusBadRequest, nil, "workload_sha must be a full 40-character commit SHA")
 		return
 	}
 	if strings.TrimSpace(request.ImageRef) == "" {
@@ -77,7 +83,7 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.runRollout(func(rolloutCtx context.Context) {
-		imageRef, err := a.deployer.NotifyDeploymentReady(rolloutCtx, source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger, request.Repository)
+		imageRef, err := a.deployer.NotifyDeploymentReady(rolloutCtx, source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger, request.Repository, request.WorkloadSHA)
 		if err != nil {
 			slog.Error("Deployment ready rollout failed", "source", source, "sha", request.SHA, "litestream_sha", request.LitestreamSHA, "error", err)
 			_ = a.db.RecordEvent("", "deploy_ready_failed", fmt.Sprintf("Rollout failed for %s / litestream %s: %v", shortVersionValue(request.SHA), shortVersionValue(request.LitestreamSHA), err), imageRef)
@@ -91,6 +97,7 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 	writeAPIJSON(w, map[string]any{
 		"sha":            request.SHA,
 		"litestream_sha": request.LitestreamSHA,
+		"workload_sha":   request.WorkloadSHA,
 		"source":         source,
 		"repository":     request.Repository,
 		"image_ref":      request.ImageRef,
@@ -333,6 +340,9 @@ func readDeploymentReadyRequest(r *http.Request) (deploymentReadyRequest, error)
 	}
 	if strings.TrimSpace(request.LitestreamSHA) == "" {
 		request.LitestreamSHA = strings.TrimSpace(r.URL.Query().Get("litestream_sha"))
+	}
+	if strings.TrimSpace(request.WorkloadSHA) == "" {
+		request.WorkloadSHA = strings.TrimSpace(r.URL.Query().Get("workload_sha"))
 	}
 	if strings.TrimSpace(request.ImageRef) == "" {
 		request.ImageRef = strings.TrimSpace(r.URL.Query().Get("image"))

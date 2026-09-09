@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const deploymentColumns = "id, git_sha, litestream_sha, image_ref, source, repository, pr_number, status, started_at, completed_at, error_message"
+const deploymentColumns = "id, git_sha, litestream_sha, workload_sha, image_ref, source, repository, pr_number, status, started_at, completed_at, error_message"
 
 type deploymentScanner interface {
 	Scan(dest ...any) error
@@ -21,6 +21,7 @@ func scanDeployment(scanner deploymentScanner, dep *Deployment) error {
 		&dep.ID,
 		&dep.GitSHA,
 		&dep.LitestreamSHA,
+		&dep.WorkloadSHA,
 		&dep.ImageRef,
 		&dep.Source,
 		&dep.Repository,
@@ -47,9 +48,9 @@ func scanDeployment(scanner deploymentScanner, dep *Deployment) error {
 
 func (d *DB) CreateDeployment(dep *Deployment) (int64, error) {
 	result, err := d.exec(`
-		INSERT INTO deployments (git_sha, litestream_sha, image_ref, source, repository, pr_number, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		dep.GitSHA, dep.LitestreamSHA, dep.ImageRef, dep.Source, strings.TrimSpace(dep.Repository), dep.PRNumber, dep.Status,
+		INSERT INTO deployments (git_sha, litestream_sha, workload_sha, image_ref, source, repository, pr_number, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		dep.GitSHA, dep.LitestreamSHA, dep.WorkloadSHA, dep.ImageRef, dep.Source, strings.TrimSpace(dep.Repository), dep.PRNumber, dep.Status,
 	)
 	if err != nil {
 		return 0, err
@@ -123,10 +124,11 @@ func (d *DB) UpsertReadyDeployment(dep *Deployment) error {
 
 	var existingID int64
 	err = tx.QueryRow(
-		`SELECT id FROM deployments WHERE source = ? AND git_sha = ? AND litestream_sha = ? ORDER BY started_at DESC, id DESC LIMIT 1`,
+		`SELECT id FROM deployments WHERE source = ? AND git_sha = ? AND litestream_sha = ? AND workload_sha = ? ORDER BY started_at DESC, id DESC LIMIT 1`,
 		dep.Source,
 		dep.GitSHA,
 		dep.LitestreamSHA,
+		dep.WorkloadSHA,
 	).Scan(&existingID)
 	switch {
 	case err == nil:
@@ -140,9 +142,9 @@ func (d *DB) UpsertReadyDeployment(dep *Deployment) error {
 		)
 	case errors.Is(err, sql.ErrNoRows):
 		_, err = tx.Exec(`
-			INSERT INTO deployments (git_sha, litestream_sha, image_ref, source, repository, pr_number, status, started_at, completed_at, error_message)
-			VALUES (?, ?, ?, ?, ?, ?, 'ready', datetime('now'), datetime('now'), '')`,
-			dep.GitSHA, dep.LitestreamSHA, dep.ImageRef, dep.Source, repository, dep.PRNumber,
+			INSERT INTO deployments (git_sha, litestream_sha, workload_sha, image_ref, source, repository, pr_number, status, started_at, completed_at, error_message)
+			VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', datetime('now'), datetime('now'), '')`,
+			dep.GitSHA, dep.LitestreamSHA, dep.WorkloadSHA, dep.ImageRef, dep.Source, repository, dep.PRNumber,
 		)
 	default:
 		return err

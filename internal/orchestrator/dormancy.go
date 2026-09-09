@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
+	workerconfig "github.com/corylanou/litestream-soak/internal/worker"
 	"github.com/corylanou/litestream-soak/internal/workload"
 	"github.com/google/uuid"
 )
@@ -269,6 +272,36 @@ func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, 
 	}
 	env := m.workerEnv(worker, workloadCfg)
 	env["SOAK_RUN_ID"] = uuid.NewString()
+	deployment, err := m.db.GetLatestDeployment(worker.Source)
+	if err != nil {
+		return nil, fmt.Errorf("get worker deployment: %w", err)
+	}
+	effectiveConfig, err := workerconfig.WorkloadFromEnvironment(env)
+	if err != nil {
+		return nil, fmt.Errorf("resolve expected worker config: %w", err)
+	}
+	expectedProfile := effectiveConfig.JSON()
+	env["SOAK_WORKLOAD_ID"] = fmt.Sprintf("%x", sha256.Sum256([]byte(expectedProfile)))
+	identity := reporting.WorkerIdentity{
+		ImageRef:      imageRef,
+		ProfileConfig: expectedProfile,
+		WorkloadID:    env["SOAK_WORKLOAD_ID"],
+		WorkerID:      worker.ID,
+		RunID:         env["SOAK_RUN_ID"],
+		GitSHA:        worker.GitSHA,
+		LitestreamSHA: worker.LitestreamSHA,
+		Source:        worker.Source,
+		ProfileName:   worker.ProfileName,
+	}
+	if deployment != nil && workerMatchesDeployment(worker, *deployment) && deployment.ImageRef == imageRef {
+		identity.DeploymentID = deployment.ID
+		identity.WorkloadSHA = deployment.WorkloadSHA
+		env["SOAK_DEPLOYMENT_ID"] = fmt.Sprint(deployment.ID)
+	}
+	if err := m.db.ExpectWorkerRun(identity); err != nil {
+		return nil, fmt.Errorf("register worker run: %w", err)
+	}
+
 	env["SOAK_IMAGE_REF"] = imageRef
 	env["SOAK_VOLUME_ID"] = volumeID
 	if workloadCfg.VolumeSizeGB > 0 {
@@ -301,6 +334,10 @@ func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, 
 	for attempt := 1; attempt <= 5; attempt++ {
 		machine, err := m.flyClientForWorker(worker).CreateMachine(ctx, request)
 		if err == nil {
+			identity.MachineID = machine.ID
+			if err := m.db.ExpectWorkerRun(identity); err != nil {
+				return nil, fmt.Errorf("bind worker machine: %w", err)
+			}
 			return machine, nil
 		}
 		if !retriableMachineCreateError(err) || attempt == 5 {
@@ -472,6 +509,10 @@ func (m *Manager) DormantWorker(ctx context.Context, workerID, reason, signature
 	}
 	defer unlock()
 
+	return m.dormantWorkerLocked(ctx, workerID, reason, signature, resumeTrigger)
+}
+
+func (m *Manager) dormantWorkerLocked(ctx context.Context, workerID, reason, signature, resumeTrigger string) error {
 	worker, err := m.db.GetWorker(workerID)
 	if err != nil {
 		return fmt.Errorf("get worker: %w", err)
