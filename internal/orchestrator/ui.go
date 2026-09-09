@@ -54,19 +54,20 @@ type homeSummary struct {
 }
 
 type homeWorker struct {
-	Worker                   model.Worker
-	LatestVerification       *model.Verification
-	ActiveVerification       *reporting.ActiveVerification
-	Workload                 workload.Config
-	RuntimeSnapshotStatus    string
-	LitestreamMetricsStatus  string
-	CurrentFailureStage      string
-	CurrentFailureSignature  string
-	CurrentFailureCategory   string
-	CurrentFailureSeverity   string
-	CurrentProbableSubsystem string
-	CompletedSuccess         bool
-	Ticks                    []model.VerificationTick
+	Worker                        model.Worker
+	LatestVerification            *model.Verification
+	VerificationActivityUncertain bool
+	ActiveVerification            *reporting.ActiveVerification
+	Workload                      workload.Config
+	RuntimeSnapshotStatus         string
+	LitestreamMetricsStatus       string
+	CurrentFailureStage           string
+	CurrentFailureSignature       string
+	CurrentFailureCategory        string
+	CurrentFailureSeverity        string
+	CurrentProbableSubsystem      string
+	CompletedSuccess              bool
+	Ticks                         []model.VerificationTick
 }
 
 type homeSourceCard struct {
@@ -215,17 +216,18 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 
 	for _, workerSummary := range summaries {
 		card := homeWorker{
-			Worker:                   workerSummary.Worker,
-			LatestVerification:       workerSummary.LastVerification,
-			ActiveVerification:       workerSummary.ActiveVerification,
-			Workload:                 workerSummary.Workload,
-			RuntimeSnapshotStatus:    workerSummary.RuntimeSnapshotStatus,
-			LitestreamMetricsStatus:  workerSummary.LitestreamMetricsStatus,
-			CurrentFailureStage:      workerSummary.CurrentFailureStage,
-			CurrentFailureSignature:  workerSummary.CurrentFailureSignature,
-			CurrentProbableSubsystem: workerSummary.CurrentProbableSubsystem,
-			CompletedSuccess:         sourceHasSuccessArchive && workerSummary.Worker.Status == model.WorkerStopped,
-			Ticks:                    ticksByWorker[workerSummary.Worker.ID],
+			Worker:                        workerSummary.Worker,
+			LatestVerification:            workerSummary.LastVerification,
+			ActiveVerification:            workerSummary.ActiveVerification,
+			VerificationActivityUncertain: workerSummary.VerificationActivityUncertain,
+			Workload:                      workerSummary.Workload,
+			RuntimeSnapshotStatus:         workerSummary.RuntimeSnapshotStatus,
+			LitestreamMetricsStatus:       workerSummary.LitestreamMetricsStatus,
+			CurrentFailureStage:           workerSummary.CurrentFailureStage,
+			CurrentFailureSignature:       workerSummary.CurrentFailureSignature,
+			CurrentProbableSubsystem:      workerSummary.CurrentProbableSubsystem,
+			CompletedSuccess:              sourceHasSuccessArchive && workerSummary.Worker.Status == model.WorkerStopped,
+			Ticks:                         ticksByWorker[workerSummary.Worker.ID],
 		}
 		if card.CurrentFailureSignature != "" {
 			failureID := 0

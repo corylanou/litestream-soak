@@ -79,7 +79,10 @@ func (a *API) buildWorkerSummary(worker model.Worker) (WorkerSummaryResponse, er
 	if err == nil {
 		events = coalesceEventFeed(events)
 		summary.LatestPlatformEvent = latestPlatformEvent(events)
-		summary.ActiveVerification = activeVerificationFromEvents(events, verifications)
+		summary.ActiveVerification, summary.VerificationActivityUncertain, err = a.currentVerificationActivity(worker, events, verifications)
+		if err != nil {
+			return summary, err
+		}
 	}
 
 	return summary, nil
@@ -102,15 +105,21 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 	}
 	events = coalesceEventFeed(events)
 
+	active, uncertain, err := a.currentVerificationActivity(*worker, events, verifications)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+
 	response := &WorkerDetailResponse{
-		Worker:              *worker,
-		Workload:            resolveWorkerWorkload(*worker),
-		ReportedRuntime:     extractReportedRuntime(*worker, events),
-		LatestPlatformEvent: latestPlatformEvent(events),
-		ActiveVerification:  activeVerificationFromEvents(events, verifications),
-		RecentVerifications: verifications,
-		RecentEvents:        events,
-		TriageCommands:      buildTriageCommands(*worker, false),
+		Worker:                        *worker,
+		Workload:                      resolveWorkerWorkload(*worker),
+		ReportedRuntime:               extractReportedRuntime(*worker, events),
+		LatestPlatformEvent:           latestPlatformEvent(events),
+		ActiveVerification:            active,
+		VerificationActivityUncertain: uncertain,
+		RecentVerifications:           verifications,
+		RecentEvents:                  events,
+		TriageCommands:                buildTriageCommands(*worker, false),
 	}
 	response.RuntimeSnapshotStatus = reporting.SnapshotStatus(response.ReportedRuntime)
 	response.LitestreamMetricsStatus = reporting.LitestreamMetricsStatus(response.ReportedRuntime)
@@ -178,28 +187,29 @@ func (a *API) buildIncidentBundle(workerID string) (*IncidentBundle, int, error)
 	failureDebug := latestFailureDebugSnapshot(detail.RecentEvents)
 
 	bundle := &IncidentBundle{
-		GeneratedAt:             time.Now().UTC(),
-		Worker:                  detail.Worker,
-		Workload:                detail.Workload,
-		LatestFailure:           latestFailure,
-		LatestPlatformEvent:     detail.LatestPlatformEvent,
-		ActiveVerification:      detail.ActiveVerification,
-		ActiveFailure:           activeFailureDetected,
-		FailureStage:            failure.Stage,
-		FailureSignature:        failure.Signature,
-		FailureClassification:   failure.Classification,
-		ProbableSubsystem:       probableSubsystem,
-		RuntimeSnapshotStatus:   reporting.SnapshotStatus(reportedRuntime),
-		LitestreamMetricsStatus: reporting.LitestreamMetricsStatus(reportedRuntime),
-		ReportedRuntime:         reportedRuntime,
-		FailureDebug:            failureDebug,
-		Diagnosis:               diagnosis,
-		RelatedClusters:         relatedDiagnosisClusters(diagnosis, detail.Worker.ID, failure.Signature, probableSubsystem),
-		RecentVerifications:     detail.RecentVerifications,
-		RecentEvents:            detail.RecentEvents,
-		Machine:                 detail.Machine,
-		MachineError:            detail.MachineError,
-		TriageCommands:          buildTriageCommands(detail.Worker, detail.Machine != nil),
+		GeneratedAt:                   time.Now().UTC(),
+		Worker:                        detail.Worker,
+		Workload:                      detail.Workload,
+		LatestFailure:                 latestFailure,
+		LatestPlatformEvent:           detail.LatestPlatformEvent,
+		ActiveVerification:            detail.ActiveVerification,
+		VerificationActivityUncertain: detail.VerificationActivityUncertain,
+		ActiveFailure:                 activeFailureDetected,
+		FailureStage:                  failure.Stage,
+		FailureSignature:              failure.Signature,
+		FailureClassification:         failure.Classification,
+		ProbableSubsystem:             probableSubsystem,
+		RuntimeSnapshotStatus:         reporting.SnapshotStatus(reportedRuntime),
+		LitestreamMetricsStatus:       reporting.LitestreamMetricsStatus(reportedRuntime),
+		ReportedRuntime:               reportedRuntime,
+		FailureDebug:                  failureDebug,
+		Diagnosis:                     diagnosis,
+		RelatedClusters:               relatedDiagnosisClusters(diagnosis, detail.Worker.ID, failure.Signature, probableSubsystem),
+		RecentVerifications:           detail.RecentVerifications,
+		RecentEvents:                  detail.RecentEvents,
+		Machine:                       detail.Machine,
+		MachineError:                  detail.MachineError,
+		TriageCommands:                buildTriageCommands(detail.Worker, detail.Machine != nil),
 	}
 	bundle.Guide = buildIncidentGuide(bundle)
 	bundle.PromptModes = buildPromptModes(bundle.Guide.RecommendedPromptMode)
@@ -224,42 +234,104 @@ func latestFailureDebugSnapshot(events []model.Event) *reporting.FailureDebugSna
 	return nil
 }
 
-func activeVerificationFromEvents(events []model.Event, verifications []model.Verification) *reporting.ActiveVerification {
+func (a *API) currentVerificationActivity(worker model.Worker, events []model.Event, verifications []model.Verification) (*reporting.ActiveVerification, bool, error) {
+	expected, err := a.db.ExpectedWorkerRun(worker.ID)
+	if err != nil {
+		return nil, true, err
+	}
+	if expected == nil || expected.RunID == "" {
+		return nil, true, nil
+	}
+	start, err := a.db.LatestRunVerificationStart(*expected)
+	if err != nil {
+		return nil, true, err
+	}
+	if start != nil {
+		events = append(append([]model.Event(nil), events...), *start)
+	}
+	active, uncertain := activeVerificationFromEvents(worker, expected, events, nil)
+	if active == nil {
+		return nil, uncertain, nil
+	}
+	completion, err := a.db.RunVerificationCompletion(*expected, active.StartedAt, active.CheckType)
+	if err != nil {
+		return nil, true, err
+	}
+	if completion != nil {
+		verifications = append(append([]model.Verification(nil), verifications...), *completion)
+	}
+	active, uncertain = activeVerificationFromEvents(worker, expected, events, verifications)
+	return active, uncertain, nil
+}
+
+func activeVerificationFromEvents(worker model.Worker, expected *reporting.WorkerIdentity, events []model.Event, verifications []model.Verification) (*reporting.ActiveVerification, bool) {
+	if expected == nil || expected.RunID == "" || expected.WorkerID != worker.ID ||
+		(worker.FlyMachineID != "" && expected.MachineID != worker.FlyMachineID) ||
+		(worker.AppName != "" && expected.AppName != "" && expected.AppName != worker.AppName) {
+		return nil, true
+	}
+	var latest *reporting.ActiveVerification
+	uncertain := false
 	for _, event := range events {
 		if event.EventType != "verification_started" {
 			continue
 		}
-		var payload reporting.WorkerEventPayload
+		var payload struct {
+			reporting.WorkerEventPayload
+			Attributed bool `json:"attributed"`
+		}
 		if err := json.Unmarshal([]byte(event.Details), &payload); err != nil || payload.ActiveVerification == nil {
+			uncertain = true
 			continue
 		}
-
+		if !payload.Attributed || payload.RunID == "" {
+			uncertain = true
+			continue
+		}
+		if event.WorkerID != worker.ID || (worker.AppName != "" && payload.AppName != worker.AppName) || !sameVerificationRun(payload.WorkerIdentity, *expected) {
+			continue
+		}
 		active := *payload.ActiveVerification
-		if active.StartedAt.IsZero() {
-			active.StartedAt = event.CreatedAt.UTC()
+		if active.StartedAt.IsZero() || active.CheckType == "" {
+			uncertain = true
+			continue
 		}
-		if active.ObservedAt.IsZero() {
-			active.ObservedAt = event.CreatedAt.UTC()
+		if active.Status != "" && active.Status != "running" {
+			uncertain = true
+			continue
 		}
-		if active.Status == "" {
+		if latest == nil || active.StartedAt.After(latest.StartedAt) {
+			if active.ObservedAt.IsZero() {
+				active.ObservedAt = event.CreatedAt.UTC()
+			}
 			active.Status = "running"
+			latest = &active
 		}
-		for _, verification := range verifications {
-			if verification.StartedAt.Before(active.StartedAt) {
-				continue
-			}
-			if verification.CompletedAt != nil || verification.Status != "running" {
-				return nil
-			}
-		}
-
-		if !active.StartedAt.IsZero() {
-			active.AgeSeconds = time.Since(active.StartedAt).Seconds()
-			active.Stale = active.AgeSeconds > (2 * time.Hour).Seconds()
-		}
-		return &active
 	}
-	return nil
+	if latest == nil {
+		return nil, uncertain
+	}
+	for _, verification := range verifications {
+		if verification.Attributed && verification.WorkerID == worker.ID && (worker.AppName == "" || verification.Run.AppName == worker.AppName) && sameVerificationRun(verification.Run, *expected) &&
+			verification.StartedAt.Equal(latest.StartedAt) && verification.CheckType == latest.CheckType &&
+			(verification.CompletedAt != nil || verification.Status != "running") {
+			return nil, uncertain
+		}
+	}
+	latest.AgeSeconds = time.Since(latest.StartedAt).Seconds()
+	latest.Stale = latest.AgeSeconds > (2 * time.Hour).Seconds()
+	return latest, uncertain
+}
+
+func sameVerificationRun(identity, expected reporting.WorkerIdentity) bool {
+	return identity.RunID == expected.RunID && identity.WorkerID == expected.WorkerID &&
+		identity.MachineID == expected.MachineID && (expected.AppName == "" || identity.AppName == expected.AppName) &&
+		identity.DeploymentID == expected.DeploymentID && identity.GitSHA == expected.GitSHA &&
+		identity.LitestreamSHA == expected.LitestreamSHA && identity.WorkloadSHA == expected.WorkloadSHA &&
+		(expected.ProfileHash == "" || identity.ProfileHash == expected.ProfileHash) && identity.ImageRef == expected.ImageRef &&
+		identity.Source == expected.Source && identity.ProfileName == expected.ProfileName &&
+		identity.ProfileConfig == expected.ProfileConfig && identity.WorkloadID == expected.WorkloadID &&
+		(expected.VolumeID == "" || identity.VolumeID == expected.VolumeID)
 }
 
 func extractReportedRuntime(worker model.Worker, events []model.Event) *reporting.RuntimePayload {

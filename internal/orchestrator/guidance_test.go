@@ -474,38 +474,46 @@ func TestBuildDiagnosisSnapshotTracksActiveVerification(t *testing.T) {
 
 func TestActiveVerificationFromEventsClearsAfterCompletion(t *testing.T) {
 	startedAt := timeMustParse("2026-05-11T13:34:50Z")
-	details, err := json.Marshal(reporting.WorkerEventPayload{
+	identity := reporting.WorkerIdentity{WorkerID: "worker", RunID: "run"}
+	worker := model.Worker{ID: "worker"}
+	details, err := json.Marshal(struct {
+		reporting.WorkerEventPayload
+		Attributed bool `json:"attributed"`
+	}{WorkerEventPayload: reporting.WorkerEventPayload{
+		WorkerIdentity: identity,
 		ActiveVerification: &reporting.ActiveVerification{
 			StartedAt: startedAt,
 			CheckType: "integrity",
 			Status:    "running",
 		},
-	})
+	}, Attributed: true})
 	if err != nil {
 		t.Fatalf("marshal event details: %v", err)
 	}
 
 	events := []model.Event{
 		{
+			WorkerID:  "worker",
 			EventType: "verification_started",
 			Details:   string(details),
 			CreatedAt: startedAt,
 		},
 	}
-	if active := activeVerificationFromEvents(events, nil); active == nil {
+	if active, _ := activeVerificationFromEvents(worker, &identity, events, nil); active == nil {
 		t.Fatal("expected active verification before completion")
 	}
 
 	completedAt := startedAt.Add(2 * time.Minute)
 	verifications := []model.Verification{
 		{
+			WorkerID: "worker", Run: identity, Attributed: true, CheckType: "integrity",
 			StartedAt:   startedAt,
 			CompletedAt: &completedAt,
 			Status:      "passed",
 			Passed:      true,
 		},
 	}
-	if active := activeVerificationFromEvents(events, verifications); active != nil {
+	if active, _ := activeVerificationFromEvents(worker, &identity, events, verifications); active != nil {
 		t.Fatalf("active verification should clear after completion: %+v", active)
 	}
 }

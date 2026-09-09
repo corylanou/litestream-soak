@@ -28,23 +28,24 @@ type API struct {
 }
 
 type WorkerDetailResponse struct {
-	Worker                  model.Worker                     `json:"worker"`
-	Workload                workload.Config                  `json:"workload"`
-	LatestFailure           *model.Verification              `json:"latest_failure,omitempty"`
-	LatestPlatformEvent     *model.Event                     `json:"latest_platform_event,omitempty"`
-	ActiveVerification      *reporting.ActiveVerification    `json:"active_verification,omitempty"`
-	FailureStage            string                           `json:"failure_stage,omitempty"`
-	FailureSignature        string                           `json:"failure_signature,omitempty"`
-	FailureClassification   *reporting.FailureClassification `json:"failure_classification,omitempty"`
-	ProbableSubsystem       string                           `json:"probable_subsystem,omitempty"`
-	RuntimeSnapshotStatus   string                           `json:"runtime_snapshot_status,omitempty"`
-	LitestreamMetricsStatus string                           `json:"litestream_metrics_status,omitempty"`
-	ReportedRuntime         *reporting.RuntimePayload        `json:"reported_runtime,omitempty"`
-	TriageCommands          []string                         `json:"triage_commands,omitempty"`
-	RecentVerifications     []model.Verification             `json:"recent_verifications"`
-	RecentEvents            []model.Event                    `json:"recent_events"`
-	Machine                 *flyapi.DiagnosticMachine        `json:"machine,omitempty"`
-	MachineError            string                           `json:"machine_error,omitempty"`
+	Worker                        model.Worker                     `json:"worker"`
+	Workload                      workload.Config                  `json:"workload"`
+	LatestFailure                 *model.Verification              `json:"latest_failure,omitempty"`
+	LatestPlatformEvent           *model.Event                     `json:"latest_platform_event,omitempty"`
+	VerificationActivityUncertain bool                             `json:"verification_activity_uncertain"`
+	ActiveVerification            *reporting.ActiveVerification    `json:"active_verification,omitempty"`
+	FailureStage                  string                           `json:"failure_stage,omitempty"`
+	FailureSignature              string                           `json:"failure_signature,omitempty"`
+	FailureClassification         *reporting.FailureClassification `json:"failure_classification,omitempty"`
+	ProbableSubsystem             string                           `json:"probable_subsystem,omitempty"`
+	RuntimeSnapshotStatus         string                           `json:"runtime_snapshot_status,omitempty"`
+	LitestreamMetricsStatus       string                           `json:"litestream_metrics_status,omitempty"`
+	ReportedRuntime               *reporting.RuntimePayload        `json:"reported_runtime,omitempty"`
+	TriageCommands                []string                         `json:"triage_commands,omitempty"`
+	RecentVerifications           []model.Verification             `json:"recent_verifications"`
+	RecentEvents                  []model.Event                    `json:"recent_events"`
+	Machine                       *flyapi.DiagnosticMachine        `json:"machine,omitempty"`
+	MachineError                  string                           `json:"machine_error,omitempty"`
 }
 
 type FailureResponse struct {
@@ -59,24 +60,25 @@ type FailureResponse struct {
 }
 
 type WorkerSummaryResponse struct {
-	Worker                       model.Worker                     `json:"worker"`
-	Workload                     workload.Config                  `json:"workload"`
-	RuntimeSnapshotStatus        string                           `json:"runtime_snapshot_status,omitempty"`
-	LitestreamMetricsStatus      string                           `json:"litestream_metrics_status,omitempty"`
-	LastVerification             *model.Verification              `json:"last_verification,omitempty"`
-	LatestFailure                *model.Verification              `json:"latest_failure,omitempty"`
-	LatestPlatformEvent          *model.Event                     `json:"latest_platform_event,omitempty"`
-	ActiveVerification           *reporting.ActiveVerification    `json:"active_verification,omitempty"`
-	CurrentFailureStage          string                           `json:"current_failure_stage,omitempty"`
-	CurrentFailureSignature      string                           `json:"current_failure_signature,omitempty"`
-	CurrentFailureClassification *reporting.FailureClassification `json:"current_failure_classification,omitempty"`
-	CurrentProbableSubsystem     string                           `json:"current_probable_subsystem,omitempty"`
-	LatestFailureStage           string                           `json:"latest_failure_stage,omitempty"`
-	LatestFailureSignature       string                           `json:"latest_failure_signature,omitempty"`
-	LatestFailureClassification  *reporting.FailureClassification `json:"latest_failure_classification,omitempty"`
-	LatestProbableSubsystem      string                           `json:"latest_probable_subsystem,omitempty"`
-	Recovery                     *FailureRecovery                 `json:"recovery,omitempty"`
-	TriageCommands               []string                         `json:"triage_commands,omitempty"`
+	Worker                        model.Worker                     `json:"worker"`
+	Workload                      workload.Config                  `json:"workload"`
+	RuntimeSnapshotStatus         string                           `json:"runtime_snapshot_status,omitempty"`
+	LitestreamMetricsStatus       string                           `json:"litestream_metrics_status,omitempty"`
+	LastVerification              *model.Verification              `json:"last_verification,omitempty"`
+	LatestFailure                 *model.Verification              `json:"latest_failure,omitempty"`
+	LatestPlatformEvent           *model.Event                     `json:"latest_platform_event,omitempty"`
+	VerificationActivityUncertain bool                             `json:"verification_activity_uncertain"`
+	ActiveVerification            *reporting.ActiveVerification    `json:"active_verification,omitempty"`
+	CurrentFailureStage           string                           `json:"current_failure_stage,omitempty"`
+	CurrentFailureSignature       string                           `json:"current_failure_signature,omitempty"`
+	CurrentFailureClassification  *reporting.FailureClassification `json:"current_failure_classification,omitempty"`
+	CurrentProbableSubsystem      string                           `json:"current_probable_subsystem,omitempty"`
+	LatestFailureStage            string                           `json:"latest_failure_stage,omitempty"`
+	LatestFailureSignature        string                           `json:"latest_failure_signature,omitempty"`
+	LatestFailureClassification   *reporting.FailureClassification `json:"latest_failure_classification,omitempty"`
+	LatestProbableSubsystem       string                           `json:"latest_probable_subsystem,omitempty"`
+	Recovery                      *FailureRecovery                 `json:"recovery,omitempty"`
+	TriageCommands                []string                         `json:"triage_commands,omitempty"`
 }
 
 type FailureRecovery struct {
@@ -204,31 +206,32 @@ type DeploymentComparisonResponse struct {
 }
 
 type IncidentBundle struct {
-	GeneratedAt             time.Time                        `json:"generated_at"`
-	Worker                  model.Worker                     `json:"worker"`
-	Workload                workload.Config                  `json:"workload"`
-	LatestFailure           *model.Verification              `json:"latest_failure,omitempty"`
-	LatestPlatformEvent     *model.Event                     `json:"latest_platform_event,omitempty"`
-	ActiveVerification      *reporting.ActiveVerification    `json:"active_verification,omitempty"`
-	ActiveFailure           bool                             `json:"active_failure"`
-	FailureStage            string                           `json:"failure_stage,omitempty"`
-	FailureSignature        string                           `json:"failure_signature,omitempty"`
-	FailureClassification   *reporting.FailureClassification `json:"failure_classification,omitempty"`
-	ProbableSubsystem       string                           `json:"probable_subsystem,omitempty"`
-	RuntimeSnapshotStatus   string                           `json:"runtime_snapshot_status,omitempty"`
-	LitestreamMetricsStatus string                           `json:"litestream_metrics_status,omitempty"`
-	ReportedRuntime         *reporting.RuntimePayload        `json:"reported_runtime,omitempty"`
-	FailureDebug            *reporting.FailureDebugSnapshot  `json:"failure_debug,omitempty"`
-	Guide                   incidentGuide                    `json:"guide"`
-	Diagnosis               diagnosisSnapshot                `json:"diagnosis"`
-	RelatedClusters         []diagnosisCluster               `json:"related_clusters,omitempty"`
-	PromptModes             []promptModeInfo                 `json:"prompt_modes,omitempty"`
-	RecentVerifications     []model.Verification             `json:"recent_verifications"`
-	RecentEvents            []model.Event                    `json:"recent_events"`
-	Machine                 *flyapi.DiagnosticMachine        `json:"machine,omitempty"`
-	MachineError            string                           `json:"machine_error,omitempty"`
-	TriageCommands          []string                         `json:"triage_commands,omitempty"`
-	Prompt                  string                           `json:"prompt"`
+	GeneratedAt                   time.Time                        `json:"generated_at"`
+	Worker                        model.Worker                     `json:"worker"`
+	Workload                      workload.Config                  `json:"workload"`
+	LatestFailure                 *model.Verification              `json:"latest_failure,omitempty"`
+	LatestPlatformEvent           *model.Event                     `json:"latest_platform_event,omitempty"`
+	VerificationActivityUncertain bool                             `json:"verification_activity_uncertain"`
+	ActiveVerification            *reporting.ActiveVerification    `json:"active_verification,omitempty"`
+	ActiveFailure                 bool                             `json:"active_failure"`
+	FailureStage                  string                           `json:"failure_stage,omitempty"`
+	FailureSignature              string                           `json:"failure_signature,omitempty"`
+	FailureClassification         *reporting.FailureClassification `json:"failure_classification,omitempty"`
+	ProbableSubsystem             string                           `json:"probable_subsystem,omitempty"`
+	RuntimeSnapshotStatus         string                           `json:"runtime_snapshot_status,omitempty"`
+	LitestreamMetricsStatus       string                           `json:"litestream_metrics_status,omitempty"`
+	ReportedRuntime               *reporting.RuntimePayload        `json:"reported_runtime,omitempty"`
+	FailureDebug                  *reporting.FailureDebugSnapshot  `json:"failure_debug,omitempty"`
+	Guide                         incidentGuide                    `json:"guide"`
+	Diagnosis                     diagnosisSnapshot                `json:"diagnosis"`
+	RelatedClusters               []diagnosisCluster               `json:"related_clusters,omitempty"`
+	PromptModes                   []promptModeInfo                 `json:"prompt_modes,omitempty"`
+	RecentVerifications           []model.Verification             `json:"recent_verifications"`
+	RecentEvents                  []model.Event                    `json:"recent_events"`
+	Machine                       *flyapi.DiagnosticMachine        `json:"machine,omitempty"`
+	MachineError                  string                           `json:"machine_error,omitempty"`
+	TriageCommands                []string                         `json:"triage_commands,omitempty"`
+	Prompt                        string                           `json:"prompt"`
 }
 
 func NewAPI(db *model.DB, fly *flyapi.Client, metrics *controlMetrics, alerts *AlertDispatcher, manager *Manager, deployer *Deployer) *API {
