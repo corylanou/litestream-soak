@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/reporting"
 )
@@ -136,9 +137,9 @@ func (a *API) workerDetail(workerID string) (*WorkerDetailResponse, int, error) 
 
 		machine, err := flyClient.GetMachine(context.Background(), worker.FlyMachineID)
 		if err != nil {
-			response.MachineError = err.Error()
+			response.MachineError = flyapi.DiagnosticError(err)
 		} else {
-			response.Machine = machine
+			response.Machine = machine.Diagnostic()
 			response.TriageCommands = buildTriageCommands(*worker, true)
 		}
 	}

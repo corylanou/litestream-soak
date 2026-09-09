@@ -28,11 +28,11 @@ type Client struct {
 
 type APIError struct {
 	StatusCode int
-	Body       string
+	Body       string `json:"-"`
 }
 
 func (e *APIError) Error() string {
-	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Body)
+	return fmt.Sprintf("API error %d", e.StatusCode)
 }
 
 func IsNotFound(err error) bool {
