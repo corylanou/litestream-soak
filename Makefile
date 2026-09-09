@@ -1,3 +1,5 @@
+export GOTOOLCHAIN := go1.25.13
+
 LITESTREAM_SHA ?= main
 LITESTREAM_REPO ?= ../../../benbjohnson/litestream
 WORKER_IMAGE ?= registry.fly.io/litestream-soak:worker-$(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
@@ -7,14 +9,19 @@ LOCAL_DATA_DIR ?= /tmp/litestream-soak
 
 build:
 	go build -o bin/soakworker ./cmd/soakworker
+	go version -m bin/soakworker
 	go build -o bin/soakctl ./cmd/soakctl
+	go version -m bin/soakctl
 
 build-worker:
 	go build -o bin/soakworker ./cmd/soakworker
+	go version -m bin/soakworker
 
 build-deps:
+	git -C "$(LITESTREAM_REPO)" rev-parse HEAD
 	cd $(LITESTREAM_REPO) && go build -o $(CURDIR)/bin/litestream ./cmd/litestream
 	cd $(LITESTREAM_REPO) && go build -o $(CURDIR)/bin/litestream-test ./cmd/litestream-test
+	go version -m bin/litestream bin/litestream-test
 
 build-all: build build-deps
 

@@ -34,7 +34,7 @@ var dockerfileRuntimes = []struct {
 func TestDockerfileBaseImagesAreDigestPinned(t *testing.T) {
 	fromRE := regexp.MustCompile(`(?i)^FROM\s+(?:--platform=\S+\s+)?(\S+)`)
 	digestRE := regexp.MustCompile(`@sha256:[a-f0-9]{64}$`)
-	bases := []string{"golang:1.25", "debian:bookworm-slim"}
+	bases := []string{"golang:", "debian:"}
 
 	for _, path := range dockerfiles {
 		t.Run(path, func(t *testing.T) {
@@ -46,8 +46,8 @@ func TestDockerfileBaseImagesAreDigestPinned(t *testing.T) {
 
 				image := match[1]
 				for _, base := range bases {
-					if image == base || strings.HasPrefix(image, base+"@") {
-						if !strings.HasPrefix(image, base+"@sha256:") || !digestRE.MatchString(image) {
+					if strings.HasPrefix(image, base) {
+						if !digestRE.MatchString(image) {
 							t.Fatalf("%s must pin %s by digest, got %q", path, base, image)
 						}
 					}
@@ -311,31 +311,19 @@ func TestRuntimeStagesPrepareWritableDataDir(t *testing.T) {
 	}
 }
 
-func TestControlDockerfilePinsFlyctlWithChecksum(t *testing.T) {
+func TestControlDockerfileRebuildsPinnedFlyctl(t *testing.T) {
 	content := string(readFile(t, "Dockerfile.control"))
 	for _, want := range []string{
-		"ARG FLYCTL_VERSION=",
-		"ARG FLYCTL_AMD64_SHA256=",
-		"ARG FLYCTL_ARM64_SHA256=",
-		"https://github.com/superfly/flyctl/releases/download/",
-		"sha256sum -c",
+		"golang:1.26.6-bookworm@sha256:",
+		"ARG FLYCTL_VERSION=0.4.59",
+		"ARG FLYCTL_SHA=d10482182142f259db338dcef34556a67702290c",
+		`git checkout --detach "${FLYCTL_SHA}"`,
+		"CGO_ENABLED=0 go build",
+		"go version -m /usr/local/bin/flyctl",
 	} {
 		if !strings.Contains(content, want) {
-			t.Fatalf("Dockerfile.control must pin flyctl with checksum verification, missing %q", want)
+			t.Errorf("flyctl must preserve source identity and use a patched compiler: missing %q", want)
 		}
-	}
-
-	if strings.Contains(content, "https://fly.io/install.sh") {
-		t.Fatal("Dockerfile.control must not use the fly.io install script")
-	}
-
-	if strings.Contains(content, "ARG TARGETARCH=") || !strings.Contains(content, "ARG TARGETARCH\n") {
-		t.Fatal("Dockerfile.control must use BuildKit's TARGETARCH without overriding it")
-	}
-
-	curlPipeShRE := regexp.MustCompile(`(?m)curl[^\n|]*\|[^\n]*(?:^|\s)sh(?:\s|$)`)
-	if curlPipeShRE.MatchString(content) {
-		t.Fatal("Dockerfile.control must not pipe curl output into sh")
 	}
 }
 
@@ -389,4 +377,53 @@ func isRootUser(user string) bool {
 	}
 	name := strings.Split(fields[0], ":")[0]
 	return name == "root" || name == "0"
+}
+
+func TestBuildsUsePatchedToolchain(t *testing.T) {
+	for _, path := range dockerfiles {
+		t.Run(path, func(t *testing.T) {
+			content := string(readFile(t, path))
+			builders := 0
+			for _, stage := range strings.Split(content, "FROM ")[1:] {
+				if !strings.HasPrefix(stage, "golang:") {
+					continue
+				}
+				builders++
+				if !strings.HasPrefix(stage, "golang:1.25.13-bookworm@sha256:") && !strings.HasPrefix(stage, "golang:1.26.6-bookworm@sha256:") {
+					t.Error("Go builder must pin the patched compiler image")
+				}
+				if !strings.Contains(stage, "ENV GOTOOLCHAIN=local") {
+					t.Error("builder must prevent implicit compiler changes")
+				}
+				if !strings.Contains(stage, "go version -m") {
+					t.Error("builder must record actual binary compiler metadata")
+				}
+			}
+			if builders == 0 {
+				t.Fatal("no Go builders checked")
+			}
+		})
+	}
+	if !strings.Contains(string(readFile(t, "go.mod")), "\ngo 1.25.13\n") {
+		t.Error("maintained module must require the patched compiler")
+	}
+}
+
+func TestLocalBuildsPinAndAttributeToolchain(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want []string
+	}{
+		{"Makefile", []string{"export GOTOOLCHAIN := go1.25.13", "go version -m"}},
+		{"scripts/local-rig-one-shot.sh", []string{"export GOTOOLCHAIN=go1.25.13", `cache_key="$scenario-$sha-$GOTOOLCHAIN"`, "go version -m", `toolchain_metadata=`}},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			content := string(readFile(t, tc.path))
+			for _, want := range tc.want {
+				if !strings.Contains(content, want) {
+					t.Errorf("missing compiler pin or attribution: %s", want)
+				}
+			}
+		})
+	}
 }

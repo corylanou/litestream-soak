@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export GOTOOLCHAIN=go1.25.13
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 scenario="${1:-}"
@@ -21,7 +22,7 @@ esac
 
 sha="$("$root/scripts/resolve-litestream-sha.sh" "$ref")"
 cache_dir="$root/.local-rig/one-shot"
-cache_key="$scenario-$sha"
+cache_key="$scenario-$sha-$GOTOOLCHAIN"
 src_dir="$cache_dir/litestream-src/$cache_key"
 mod_dir="$cache_dir/harness/$cache_key"
 bin_dir="$cache_dir/litestream-bin/$cache_key"
@@ -56,7 +57,7 @@ cp "$root/scripts/local-rig-one-shot/main.go.tmpl" "$mod_dir/main.go"
 cat >"$mod_dir/go.mod" <<EOF
 module litestream-local-rig-one-shot
 
-go 1.25
+go 1.25.13
 
 require github.com/benbjohnson/litestream v0.0.0
 
@@ -73,7 +74,13 @@ if [ "$scenario" != "constrained-disk" ]; then
 fi
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-result_file="$results_dir/${scenario}-${sha:0:12}-$stamp.jsonl"
+result_file="$results_dir/${scenario}-${sha:0:12}-${GOTOOLCHAIN}-$stamp.jsonl"
+toolchain_metadata="${result_file%.jsonl}.buildinfo"
+{
+  go version
+  printf 'litestream_sha=%s\n' "$sha"
+  go version -m "$bin_dir/litestream" "$bin_dir/litestream-test"
+} >"$toolchain_metadata"
 
 run_host() {
   local run_id="$1"
@@ -100,6 +107,7 @@ run_constrained() {
     cd "$mod_dir"
     GOOS=linux GOARCH="$container_arch" CGO_ENABLED=0 go build -o "$binary" .
   )
+  go version -m "$binary" >>"$toolchain_metadata"
   local container="litestream-one-shot-${scenario}-${sha:0:8}-$stamp-$run_id"
   docker run \
     --name "$container" \
@@ -128,6 +136,7 @@ for run_id in $(seq 1 "$runs"); do
   fi
 done
 
+printf 'toolchain_metadata=%s\n' "$toolchain_metadata"
 printf 'result_file=%s\n' "$result_file"
 printf 'litestream_sha=%s\n' "$sha"
 printf 'litestream_bin=%s\n' "$bin_dir/litestream"

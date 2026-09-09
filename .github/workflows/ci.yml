@@ -23,7 +23,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - run: go test ./...
+      - run: go version
+      - run: go test -race ./...
       - run: go build ./...
 
   lint:
@@ -38,3 +39,23 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
+
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: [control, worker]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build images and record compiler metadata
+        env:
+          COMPONENT: ${{ matrix.component }}
+          LITESTREAM_SHA: 4ed7a308f6271ebfd2b0a6e4b70b03011a37e4a3
+        run: |
+          echo "litestream_sha=${LITESTREAM_SHA}"
+          docker build --progress=plain -f "Dockerfile.${COMPONENT}" \
+            --build-arg LITESTREAM_SHA="${LITESTREAM_SHA}" \
+            -t "soak-${COMPONENT}:ci" .
+          docker run --rm --entrypoint sh "soak-${COMPONENT}:ci" \
+            -c 'cat /opt/soak/*.buildinfo'

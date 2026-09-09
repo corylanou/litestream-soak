@@ -1,7 +1,9 @@
 ARG LITESTREAM_SHA=main
 
 # Stage 1: Build litestream + litestream-test from source
-FROM golang:1.25@sha256:9669c2ed28435af1b8989acb9fd5235346a912016cc8b152b694a9a91dced0a6 AS litestream-builder
+FROM golang:1.25.13-bookworm@sha256:e401dae1bf814e29204a8cb7915682e1780951e609ca0dd8865ee1937f510c48 AS litestream-builder
+ENV GOTOOLCHAIN=local
+RUN go version
 ARG LITESTREAM_SHA
 WORKDIR /src/litestream
 RUN git clone https://github.com/benbjohnson/litestream.git . && \
@@ -11,17 +13,22 @@ RUN go build \
     -ldflags "-s -w -X 'main.Version=${LITESTREAM_SHA}'" \
     -tags osusergo,netgo,sqlite_omit_load_extension \
     -o /usr/local/bin/litestream ./cmd/litestream
+RUN go version -m /usr/local/bin/litestream >/tmp/litestream.buildinfo && cat /tmp/litestream.buildinfo
 RUN CGO_CFLAGS="-DSQLITE_DEFAULT_WAL_AUTOCHECKPOINT=0" go build \
     -ldflags "-s -w -X 'main.Version=${LITESTREAM_SHA}'" \
     -o /usr/local/bin/litestream-test ./cmd/litestream-test
+RUN go version -m /usr/local/bin/litestream-test >/tmp/litestream-test.buildinfo && cat /tmp/litestream-test.buildinfo
 
 # Stage 2: Build soakworker
-FROM golang:1.25@sha256:9669c2ed28435af1b8989acb9fd5235346a912016cc8b152b694a9a91dced0a6 AS soakworker-builder
+FROM golang:1.25.13-bookworm@sha256:e401dae1bf814e29204a8cb7915682e1780951e609ca0dd8865ee1937f510c48 AS soakworker-builder
+ENV GOTOOLCHAIN=local
+RUN go version
 WORKDIR /src/soak
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN go build -ldflags "-s -w" -o /usr/local/bin/soakworker ./cmd/soakworker
+RUN go version -m /usr/local/bin/soakworker >/tmp/soakworker.buildinfo && cat /tmp/soakworker.buildinfo
 
 # Stage 3: Runtime image
 FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
@@ -52,6 +59,9 @@ COPY --from=litestream-builder /usr/local/bin/litestream-test /usr/local/bin/lit
 COPY --from=litestream-builder /tmp/litestream.sha /opt/soak/litestream.sha
 COPY --from=soakworker-builder /usr/local/bin/soakworker /usr/local/bin/soakworker
 COPY --from=soakworker-builder /src/soak/datasets /opt/soak/datasets
+COPY --from=litestream-builder /tmp/litestream.buildinfo /opt/soak/litestream.buildinfo
+COPY --from=litestream-builder /tmp/litestream-test.buildinfo /opt/soak/litestream-test.buildinfo
+COPY --from=soakworker-builder /tmp/soakworker.buildinfo /opt/soak/soakworker.buildinfo
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 RUN chmod 0755 /usr/local/bin/docker-entrypoint
 ENV LITESTREAM_SHA_FILE=/opt/soak/litestream.sha
