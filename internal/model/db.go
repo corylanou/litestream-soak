@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -39,6 +40,11 @@ CREATE TABLE IF NOT EXISTS workers (
     dormant_signature TEXT NOT NULL DEFAULT '',
     resume_trigger TEXT NOT NULL DEFAULT '',
     last_probe_at DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS expected_worker_runs (
+    worker_id TEXT PRIMARY KEY,
+    identity_json TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS verifications (
@@ -150,6 +156,7 @@ CREATE INDEX IF NOT EXISTS idx_volume_gc_attempts_app_retry ON volume_gc_attempt
 `
 
 type DB struct {
+	workerReports sync.Map
 	// writer serializes all mutations through a single SQLite connection
 	// (SQLite allows only one writer at a time). reader is a separate WAL
 	// connection pool sized for concurrency so dashboard/list reads are not
@@ -317,6 +324,8 @@ func ensureWorkerColumns(db *sql.DB) error {
 
 func ensureVerificationColumns(db *sql.DB) error {
 	statements := []string{
+		`ALTER TABLE verifications ADD COLUMN run_identity_json TEXT NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE verifications ADD COLUMN attributed BOOLEAN NOT NULL DEFAULT 0`,
 		`ALTER TABLE verifications ADD COLUMN failure_classification_json TEXT NOT NULL DEFAULT ''`,
 	}
 

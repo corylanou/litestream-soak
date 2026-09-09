@@ -50,6 +50,8 @@ type Worker struct {
 }
 
 type Verification struct {
+	Run                   reporting.WorkerIdentity         `json:"run"`
+	Attributed            bool                             `json:"attributed"`
 	ID                    int                              `json:"id"`
 	WorkerID              string                           `json:"worker_id"`
 	StartedAt             time.Time                        `json:"started_at"`
