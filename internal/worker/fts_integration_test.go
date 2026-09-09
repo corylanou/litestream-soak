@@ -132,21 +132,19 @@ func TestFTSPinnedRestoreComparison(t *testing.T) {
 				}
 				totals[phase] += work.Changes
 				profiles.captureSet(ctx, "fts-"+phase+"-after")
-				if err := v.waitForSync(ctx, nil); err != nil {
+				var boundary VerificationResult
+				if err := v.waitForSync(ctx, &boundary); err != nil {
 					encode(map[string]string{"sync_error": err.Error()})
 					t.Fatal(err)
 				}
-				synced, err = v.syncOnceDB(ctx, time.Second, cfg.DBPath)
-				if err != nil {
-					t.Fatal(err)
-				}
+				encode(map[string]any{"step": step, "sync_txid": formatTXID(boundary.SyncTXID), "replicated_txid": formatTXID(boundary.SyncReplicatedTXID)})
 				source, err := readLogicalSnapshot(ctx, cfg.DBPath, cfg.logicalLimits())
 				if err != nil {
 					t.Fatal(err)
 				}
 				restored := filepath.Join(dir, fmt.Sprintf("restored-%d.db", step))
-				output, restoreErr := exec.CommandContext(ctx, binary, "restore", "-config", cfg.ConfigPath, "-txid", formatTXID(synced.TXID), "-o", restored, cfg.DBPath).CombinedOutput()
-				encode(map[string]any{"step": step, "txid": formatTXID(synced.TXID), "restore_output": string(output), "restore_error": fmt.Sprint(restoreErr)})
+				output, restoreErr := exec.CommandContext(ctx, binary, "restore", "-config", cfg.ConfigPath, "-txid", formatTXID(boundary.SyncTXID), "-o", restored, cfg.DBPath).CombinedOutput()
+				encode(map[string]any{"step": step, "txid": formatTXID(boundary.SyncTXID), "restore_output": string(output), "restore_error": fmt.Sprint(restoreErr)})
 				if restoreErr != nil {
 					t.Fatalf("pinned restore: %s: %v", output, restoreErr)
 				}
