@@ -679,3 +679,16 @@ func TestProfilingCapabilitiesAndLegacyHistory(t *testing.T) {
 		})
 	}
 }
+
+func TestComparisonHTTPHonorsCancelledRequest(t *testing.T) {
+	db := openTestDB(t)
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodGet, "/api/deployments/compare/latest?source=main", nil).WithContext(ctx)
+	response := httptest.NewRecorder()
+	api.handleGetLatestDeploymentComparison(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("cancelled request continued: status=%d body=%s", response.Code, response.Body.String())
+	}
+}

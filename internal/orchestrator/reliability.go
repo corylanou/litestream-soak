@@ -79,7 +79,7 @@ type ReliabilityFinding struct {
 }
 
 func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Time) ([]WorkerRunEvidence, error) {
-	records, err := db.ListEvidenceVerifications(deploymentScorecardSource(deployment))
+	records, err := db.ListEvidenceVerifications(deploymentScorecardSource(deployment), model.EvidenceWindow{DeploymentID: deployment.ID, Start: deployment.StartedAt, End: end})
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +193,7 @@ func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Ti
 	if err := applyRuntimeEvidence(db, deployment, end, ensure); err != nil {
 		return nil, err
 	}
-	events, err := db.ListEvidenceEvents(deploymentScorecardSource(deployment))
+	events, err := db.ListEvidenceEvents(deploymentScorecardSource(deployment), model.EvidenceWindow{DeploymentID: deployment.ID, Start: deployment.StartedAt, End: end})
 	if err != nil {
 		return nil, err
 	}

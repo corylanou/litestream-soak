@@ -179,3 +179,37 @@ func TestEvidenceWithUnknownSourceRemainsVisible(t *testing.T) {
 		t.Fatalf("unknown evidence lost or credited: %+v %v", records, err)
 	}
 }
+
+func TestCompletedEvidenceBackfillDoesNotRevisitRawRows(t *testing.T) {
+	db := seriesTestDB(t)
+	if _, err := db.writer.Exec(`INSERT INTO events(event_type,message,details,created_at) VALUES ('startup_failure','recovered','{}',datetime('now')); CREATE TRIGGER reject_repeated_backfill BEFORE INSERT ON evidence_events BEGIN SELECT RAISE(FAIL, 'backfill repeated'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureEvidenceJournal(db.writer); err != nil {
+		t.Fatalf("completed backfill revisited retained rows: %v", err)
+	}
+}
+
+func TestEvidenceUpgradeFailureDoesNotMarkBackfillComplete(t *testing.T) {
+	db := seriesTestDB(t)
+	if _, err := db.writer.Exec(`DELETE FROM evidence_migrations; INSERT INTO events(event_type,message,details,created_at) VALUES ('provider_retry','recovered','{}',datetime('now')); CREATE TRIGGER reject_upgrade BEFORE INSERT ON evidence_events BEGIN SELECT RAISE(FAIL,'interrupted upgrade'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureEvidenceJournal(db.writer); err == nil {
+		t.Fatal("upgrade unexpectedly succeeded")
+	}
+	var count int
+	if err := db.reader.QueryRow(`SELECT count(*) FROM evidence_migrations`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("failed upgrade marked complete: %d %v", count, err)
+	}
+	if _, err := db.writer.Exec(`DROP TRIGGER reject_upgrade`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureEvidenceJournal(db.writer); err != nil {
+		t.Fatal(err)
+	}
+	events, err := db.ListEvidenceEvents("main")
+	if err != nil || len(events) != 1 || events[0].Message != "recovered" {
+		t.Fatalf("lost or duplicated upgrade evidence: %+v %v", events, err)
+	}
+}

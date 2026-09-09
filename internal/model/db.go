@@ -156,6 +156,7 @@ CREATE INDEX IF NOT EXISTS idx_volume_gc_attempts_app_retry ON volume_gc_attempt
 `
 
 type DB struct {
+	readContext   context.Context
 	workerReports sync.Map
 	// writer serializes all mutations through a single SQLite connection
 	// (SQLite allows only one writer at a time). reader is a separate WAL
@@ -226,14 +227,25 @@ func maxReaderConns() int {
 	return 4
 }
 
+func (d *DB) WithReadContext(ctx context.Context) *DB {
+	return &DB{reader: d.reader, readContext: ctx}
+}
+
+func (d *DB) queryContext() context.Context {
+	if d.readContext != nil {
+		return d.readContext
+	}
+	return context.Background()
+}
+
 // query runs a read on the concurrent reader pool.
 func (d *DB) query(query string, args ...any) (*sql.Rows, error) {
-	return d.reader.Query(query, args...)
+	return d.reader.QueryContext(d.queryContext(), query, args...)
 }
 
 // queryRow runs a single-row read on the concurrent reader pool.
 func (d *DB) queryRow(query string, args ...any) *sql.Row {
-	return d.reader.QueryRow(query, args...)
+	return d.reader.QueryRowContext(d.queryContext(), query, args...)
 }
 
 // exec runs a mutation on the serialized writer connection.
