@@ -97,6 +97,7 @@ func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResul
 			passed, err = v.validateDB(ctx, dbPath, restoredPath, result.restoreTXID())
 			return err
 		})
+		result.Steps[len(result.Steps)-1].OutputTail += "\n" + v.logicalEvidence
 		if validateErr != nil {
 			v.failResult(ctx, &result, fmt.Sprintf("restore validate %s: %v", name, validateErr))
 			slog.Error("Many database verification failed", "db", dbPath, "error", validateErr, "duration", time.Since(start))
@@ -109,6 +110,17 @@ func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResul
 			v.logResult(start, false, result.ErrorMessage)
 			return result, nil
 		}
+		if err := removeRestoredArtifacts(restoredPath); err != nil {
+			v.failResult(ctx, &result, fmt.Sprintf("clean restored artifacts for %s: %v", name, err))
+			v.logResult(start, false, result.ErrorMessage)
+			return result, err
+		}
+	}
+	if totalChanged > len(targets) {
+		err := fmt.Errorf("logical verification incomplete: verified %d of %d changed databases; increase VERIFY_CHANGED_LIMIT", len(targets), totalChanged)
+		v.failResult(ctx, &result, err.Error())
+		v.logResult(start, false, result.ErrorMessage)
+		return result, err
 	}
 
 	result.Status = "passed"

@@ -427,3 +427,17 @@ func TestLocalBuildsPinAndAttributeToolchain(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkerWorkloadBuildIsIndependentFromCandidate(t *testing.T) {
+	content := string(readFile(t, "Dockerfile.worker"))
+	for _, want := range []string{
+		"ARG WORKLOAD_SHA=ae88b164dd6304bcbb654a681df767ee59042eed",
+		`git checkout --detach "${WORKLOAD_SHA}"`,
+		"COPY --from=workload-builder /usr/local/bin/litestream-test",
+		"ENV WORKLOAD_SHA=${WORKLOAD_SHA}",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("independent workload build missing %q", want)
+		}
+	}
+}

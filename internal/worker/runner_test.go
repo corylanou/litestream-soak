@@ -570,9 +570,8 @@ exit 0
 	cfg.DataDir = dir
 	cfg.DBPath = filepath.Join(dir, "test.db")
 	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
-	if err := os.WriteFile(cfg.DBPath, []byte("db"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	logicalTestDB(t, cfg.DBPath, "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+	logicalTestDB(t, cfg.DBPath+".restored", "CREATE TABLE t (id INTEGER PRIMARY KEY)")
 	if err := os.WriteFile(cfg.ConfigPath, []byte("dbs: []\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -633,6 +632,8 @@ exit 1
 	}
 
 	dbPath := filepath.Join(dir, "dbs", "db-00011.db")
+	logicalTestDB(t, dbPath, "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+	logicalTestDB(t, dbPath+".restored", "CREATE TABLE t (id INTEGER PRIMARY KEY)")
 	verifier := NewVerifier(cfg)
 	passed, err := verifier.validateDB(context.Background(), dbPath, dbPath+".restored", 0)
 	if err != nil {
@@ -693,9 +694,8 @@ exit 0
 	cfg.DataDir = dir
 	cfg.DBPath = filepath.Join(dir, "test.db")
 	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
-	if err := os.WriteFile(cfg.DBPath, []byte("db"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	logicalTestDB(t, cfg.DBPath, "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+	logicalTestDB(t, cfg.DBPath+".restored", "CREATE TABLE t (id INTEGER PRIMARY KEY)")
 	if err := os.WriteFile(cfg.ConfigPath, []byte("dbs: []\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -750,9 +750,8 @@ func TestVerifierValidateUsesS3ProxyEnv(t *testing.T) {
 	cfg.S3Region = "auto"
 	cfg.S3FaultProxyEnabled = true
 	cfg.S3FaultProxyEndpoint = "http://127.0.0.1:19000"
-	if err := os.WriteFile(cfg.DBPath, []byte("db"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	logicalTestDB(t, cfg.DBPath, "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+	logicalTestDB(t, cfg.DBPath+".restored", "CREATE TABLE t (id INTEGER PRIMARY KEY)")
 	if err := os.WriteFile(cfg.ConfigPath, []byte("dbs: []\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -542,8 +542,10 @@ if [ -f "$RESTORED_PATH" ]; then
 else
   printf absent > "$MARKER_PATH"
 fi
+cp "$SOURCE_PATH" "$RESTORED_PATH"
 exit 0
 `)
+	t.Setenv("SOURCE_PATH", cfg.DBPath)
 	t.Setenv("RESTORED_PATH", restoredPath)
 	t.Setenv("MARKER_PATH", markerPath)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
