@@ -75,7 +75,7 @@ func (d *DB) ListVerificationStatsSince(source string, since time.Time) ([]Verif
 			FROM verifications
 			WHERE passed = 1
 				AND lower(trim(status)) <> 'failed'
-				AND lower(trim(status)) <> 'aborted'
+				AND lower(trim(status)) NOT IN ('aborted', 'pending')
 			GROUP BY worker_id
 		)
 		SELECT
@@ -208,7 +208,7 @@ func (d *DB) GetLatestFailedVerification(workerID string) (*Verification, error)
 	row := d.queryRow(`
 		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message, failure_classification_json, run_identity_json, attributed
 		FROM verifications
-		WHERE worker_id = ? AND (passed = 0 OR lower(trim(status)) = 'failed') AND lower(trim(status)) <> 'aborted'
+		WHERE worker_id = ? AND (passed = 0 OR lower(trim(status)) = 'failed') AND lower(trim(status)) NOT IN ('aborted', 'pending')
 		ORDER BY started_at DESC
 		LIMIT 1`,
 		workerID,
@@ -254,7 +254,7 @@ func (d *DB) ListRecentFailedVerifications(limit int) ([]Verification, error) {
 	rows, err := d.query(`
 		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message, failure_classification_json, run_identity_json, attributed
 		FROM verifications
-		WHERE (passed = 0 OR lower(trim(status)) = 'failed') AND lower(trim(status)) <> 'aborted'
+		WHERE (passed = 0 OR lower(trim(status)) = 'failed') AND lower(trim(status)) NOT IN ('aborted', 'pending')
 		ORDER BY started_at DESC
 		LIMIT ?`,
 		limit,

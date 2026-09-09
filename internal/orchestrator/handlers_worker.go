@@ -92,7 +92,8 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	payload.RuntimePayload = payload.Normalize(observedAt)
 	var vf verificationFailure
 	aborted := verificationStatusAborted(payload.Status)
-	failed := !payload.Passed && !aborted
+	pending := (model.Verification{Status: payload.Status}).Pending()
+	failed := !payload.Passed && !aborted && !pending
 	environmental := false
 	if failed {
 		computed := reporting.ClassifyVerificationFailureWithRuntime(payload.CheckType, payload.ErrorMessage, payload.ProfileName, &reportedRuntime, observedAt)
@@ -161,7 +162,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to record verification")
 		return
 	}
-	if !quarantined && !aborted && !environmental {
+	if !quarantined && !aborted && !pending && !environmental {
 		if err := a.db.UpdateWorkerVerificationState(workerID, payload.Passed, payload.Summary); err != nil {
 			respondError(w, r, http.StatusInternalServerError, err, "failed to update worker state")
 			return
@@ -177,6 +178,11 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	eventType := "verification_passed"
 	message := payload.Summary
 	switch {
+	case pending:
+		eventType = "verification_pending"
+		if message == "" {
+			message = "verification coverage pending"
+		}
 	case aborted:
 		eventType = "verification_aborted"
 		if message == "" {
@@ -209,7 +215,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if workerBeforeUpdate != nil && workerBeforeUpdate.Status == model.WorkerProbing {
-		if payload.Passed && !aborted {
+		if payload.Passed && !aborted && !pending {
 			_ = a.db.RecordEvent(workerID, "worker_probe_passed", "Worker probe verification passed", "")
 		} else if failed && environmental {
 			_ = a.db.RecordEvent(workerID, "worker_probe_environmental", "Worker probe hit a transient provider error; probe remains open", string(details))

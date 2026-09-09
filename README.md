@@ -205,6 +205,23 @@ Verification statuses are meaningful:
 - `aborted`: the cycle was interrupted, usually because the worker context was
   canceled. Aborted reports are recorded as events but do not mark the worker
   degraded.
+- `pending`: a bounded many-database batch succeeded, but coverage remains
+  outstanding. This is neither a pass nor a failure; it preserves prior failure
+  state and cannot qualify a rollout or success teardown.
+
+Many-database verification starts with every configured database pending,
+including untouched databases. Batches rotate past the last attempted database,
+so failure, cancellation, overflow, and repeatedly written databases cannot
+starve later paths. Only successful validation acknowledges the selected change
+generation; newer writes stay pending. The queue is held in memory and restarts
+conservatively enqueue all configured databases again. Pending age starts when a
+database first requires coverage and is preserved across retries and new writes.
+
+Worker metrics `soak_many_db_pending_count` and
+`soak_many_db_oldest_pending_age_seconds` expose outstanding coverage, including
+idle and deferred paths. Each selected cycle also reports these values in its
+`pending_coverage` step. A later successful batch does not erase prior failed
+reports or their diagnostic evidence.
 
 Deployments are recorded with soak Git SHA, Litestream SHA, image ref, source,
 and PR number. A deployment-ready notification creates or updates the source

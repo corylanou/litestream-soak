@@ -44,7 +44,7 @@ func buildChartSeries(stats []model.VerificationStat, from time.Time, hours int)
 			continue
 		}
 		verification := model.Verification{Status: stat.Status, Passed: stat.Passed}
-		if verification.Aborted() {
+		if verification.Inconclusive() {
 			continue
 		}
 		if verification.Failed() {
@@ -91,7 +91,7 @@ func passRateSummary(stats []model.VerificationStat) (float64, int) {
 	total := 0
 	for _, stat := range stats {
 		verification := model.Verification{Status: stat.Status, Passed: stat.Passed}
-		if verification.Aborted() {
+		if verification.Inconclusive() {
 			continue
 		}
 		total++

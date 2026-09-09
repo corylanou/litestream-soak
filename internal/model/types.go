@@ -70,12 +70,20 @@ func (v Verification) Aborted() bool {
 	return strings.EqualFold(strings.TrimSpace(v.Status), "aborted")
 }
 
+func (v Verification) Pending() bool {
+	return strings.EqualFold(strings.TrimSpace(v.Status), "pending")
+}
+
+func (v Verification) Inconclusive() bool {
+	return v.Aborted() || v.Pending()
+}
+
 func (v Verification) Failed() bool {
-	return !v.Aborted() && (!v.Passed || strings.EqualFold(strings.TrimSpace(v.Status), "failed"))
+	return !v.Inconclusive() && (!v.Passed || strings.EqualFold(strings.TrimSpace(v.Status), "failed"))
 }
 
 func (v Verification) Succeeded() bool {
-	return !v.Aborted() && v.Passed && !strings.EqualFold(strings.TrimSpace(v.Status), "failed")
+	return !v.Inconclusive() && v.Passed && !strings.EqualFold(strings.TrimSpace(v.Status), "failed")
 }
 
 type Deployment struct {

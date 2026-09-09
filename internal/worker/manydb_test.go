@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -143,25 +145,49 @@ func TestManyDBLoadDispatchesCyclicSlotsPerDatabase(t *testing.T) {
 	}
 }
 
-func TestManyDBLoadChangedPathsReset(t *testing.T) {
+func TestManyDBLoadChangedPathsRetainedUntilSuccess(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.DataDir = "/data"
 	cfg.NumDatabases = 5
-
-	paths := cfg.ManyDBPaths()
 	load := newManyDBLoad(&cfg)
-	load.markChanged(paths[3])
-	load.markChanged(paths[1])
-	load.markChanged(paths[3])
-
-	got := load.manyDBChangedPathsAndReset()
-	want := []string{paths[1], paths[3]}
-	if !slices.Equal(got, want) {
-		t.Fatalf("changed paths = %v, want %v", got, want)
+	paths := cfg.ManyDBPaths()
+	first := load.pendingManyDBChanges()
+	if len(first) != 5 {
+		t.Fatalf("untouched pending = %d, want 5", len(first))
 	}
+	load.markChanged(paths[0])
+	load.acknowledgeManyDBChange(first[0])
+	if got := len(load.pendingManyDBChanges()); got != 5 {
+		t.Fatalf("new generation lost: %d", got)
+	}
+	for _, change := range load.pendingManyDBChanges() {
+		load.acknowledgeManyDBChange(change)
+	}
+	if got := len(load.pendingManyDBChanges()); got != 0 {
+		t.Fatalf("pending = %d, want 0", got)
+	}
+	load.markChanged(paths[0])
+	load.acknowledgeManyDBChange(first[0])
+	if got := len(load.pendingManyDBChanges()); got != 1 {
+		t.Fatalf("stale acknowledgment lost requeued work: %d", got)
+	}
+}
 
-	if got := load.manyDBChangedPathsAndReset(); len(got) != 0 {
-		t.Fatalf("changed paths after reset = %v, want empty", got)
+func TestManyDBPendingFairness(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.NumDatabases = 5
+	cfg.VerifyChangedLimit = 2
+	load := newManyDBLoad(&cfg)
+	paths := cfg.ManyDBPaths()
+	for i := range 15 {
+		changes := load.pendingManyDBChanges()
+		if changes[0].path != paths[i%5] {
+			t.Fatalf("attempt %d: first=%s", i, changes[0].path)
+		}
+		load.attemptManyDBChange(changes[0])
+		load.markChanged(paths[0])
+	}
+	if got := len(load.pendingManyDBChanges()); got != 5 {
+		t.Fatalf("failed work lost: %d", got)
 	}
 }
 
@@ -505,7 +531,7 @@ func TestManyDBVerificationTargetsUseChangedPaths(t *testing.T) {
 	paths := cfg.ManyDBPaths()
 	changed := []string{paths[7], paths[2], paths[7], paths[4]}
 	targets, totalChanged := selectManyDBVerificationTargets(cfg, changed)
-	want := []string{paths[2], paths[4], paths[7]}
+	want := []string{paths[7], paths[2], paths[4]}
 
 	if totalChanged != len(want) {
 		t.Fatalf("totalChanged = %d, want %d", totalChanged, len(want))
@@ -526,7 +552,7 @@ func TestManyDBVerificationTargetsTruncateChangedPaths(t *testing.T) {
 	paths := cfg.ManyDBPaths()
 	changed := []string{paths[6], paths[1], paths[4], paths[8], paths[2]}
 	targets, totalChanged := selectManyDBVerificationTargets(cfg, changed)
-	want := []string{paths[1], paths[2], paths[4]}
+	want := []string{paths[6], paths[1], paths[4]}
 
 	if totalChanged != 5 {
 		t.Fatalf("totalChanged = %d, want 5", totalChanged)
@@ -548,5 +574,44 @@ func assertUniqueSubset(t *testing.T, all []string, subset []string) {
 			t.Fatalf("path %q is not in all paths %v", path, all)
 		}
 		seen[path] = true
+	}
+}
+
+func TestManyDBPendingMetricsAgeWithoutActivity(t *testing.T) {
+	t.Parallel()
+	cfg := DefaultConfig()
+	cfg.NumDatabases = 3
+	load := newManyDBLoad(&cfg)
+	now := time.Now().Add(time.Hour)
+	load.now = func() time.Time { return now }
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(load)
+	for _, elapsed := range []float64{0, 60} {
+		now = now.Add(time.Duration(elapsed) * time.Second)
+		metrics, err := registry.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, metric := range metrics {
+			value := metric.Metric[0].GetGauge().GetValue()
+			switch metric.GetName() {
+			case "soak_many_db_pending_count":
+				if value != 3 {
+					t.Fatalf("pending=%f", value)
+				}
+			case "soak_many_db_oldest_pending_age_seconds":
+				if value < 3600+elapsed {
+					t.Fatalf("oldest=%f", value)
+				}
+			default:
+				t.Fatalf("unexpected metric %s", metric.GetName())
+			}
+		}
+	}
+	for _, change := range load.pendingManyDBChanges() {
+		load.acknowledgeManyDBChange(change)
+	}
+	if count, age := load.manyDBPendingCoverage(); count != 0 || age != 0 {
+		t.Fatalf("drained=%d/%f", count, age)
 	}
 }

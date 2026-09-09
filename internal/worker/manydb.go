@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -24,8 +26,10 @@ type manyDBLoad struct {
 	wg     sync.WaitGroup
 	next   atomic.Uint64
 
-	changedMu sync.Mutex
-	changed   map[string]struct{}
+	changedMu        sync.Mutex
+	changed          map[string]manyDBChange
+	changeGeneration uint64
+	lastAttempt      string
 
 	mu      sync.Mutex
 	paused  bool
@@ -125,14 +129,17 @@ func manyDBDSN(dbPath string) string {
 }
 
 func newManyDBLoad(cfg *Config) *manyDBLoad {
-	return &manyDBLoad{
-		cfg:     cfg,
-		now:     time.Now,
-		changed: make(map[string]struct{}),
+	load := &manyDBLoad{cfg: cfg, now: time.Now, changed: make(map[string]manyDBChange)}
+	for _, path := range cfg.ManyDBPaths() {
+		load.markChanged(path)
 	}
+	return load
 }
 
 func (l *manyDBLoad) Start(ctx context.Context) error {
+	if err := prometheus.Register(l); err != nil {
+		return fmt.Errorf("register pending coverage metrics: %w", err)
+	}
 	activePaths := l.currentActivePaths()
 	if len(activePaths) == 0 || l.cfg.WriteRate <= 0 {
 		slog.Info("Many database load idle", "active_databases", len(activePaths), "write_rate", l.cfg.WriteRate)
@@ -350,7 +357,14 @@ func (l *manyDBLoad) Stop() {
 		cancel()
 	}
 	l.wg.Wait()
+	prometheus.Unregister(l)
 	SetLoadRunning(false)
+}
+
+type manyDBChange struct {
+	path       string
+	generation uint64
+	since      time.Time
 }
 
 func (l *manyDBLoad) markChanged(dbPath string) {
@@ -358,24 +372,61 @@ func (l *manyDBLoad) markChanged(dbPath string) {
 		return
 	}
 	l.changedMu.Lock()
+	defer l.changedMu.Unlock()
 	if l.changed == nil {
-		l.changed = make(map[string]struct{})
+		l.changed = make(map[string]manyDBChange)
 	}
-	l.changed[dbPath] = struct{}{}
-	l.changedMu.Unlock()
+	change, exists := l.changed[dbPath]
+	if !exists {
+		change = manyDBChange{path: dbPath, since: l.now()}
+	}
+	l.changeGeneration++
+	change.generation = l.changeGeneration
+	l.changed[dbPath] = change
 }
 
-func (l *manyDBLoad) manyDBChangedPathsAndReset() []string {
+func (l *manyDBLoad) pendingManyDBChanges() []manyDBChange {
 	l.changedMu.Lock()
 	defer l.changedMu.Unlock()
-
-	paths := make([]string, 0, len(l.changed))
-	for path := range l.changed {
-		paths = append(paths, path)
+	changes := make([]manyDBChange, 0, len(l.changed))
+	for _, change := range l.changed {
+		changes = append(changes, change)
 	}
-	clear(l.changed)
-	sort.Strings(paths)
-	return paths
+	sort.Slice(changes, func(i, j int) bool {
+		afterI, afterJ := changes[i].path > l.lastAttempt, changes[j].path > l.lastAttempt
+		if afterI != afterJ {
+			return afterI
+		}
+		return changes[i].path < changes[j].path
+	})
+	return changes
+}
+
+func (l *manyDBLoad) attemptManyDBChange(change manyDBChange) {
+	l.changedMu.Lock()
+	defer l.changedMu.Unlock()
+	l.lastAttempt = change.path
+}
+
+func (l *manyDBLoad) acknowledgeManyDBChange(change manyDBChange) {
+	l.changedMu.Lock()
+	defer l.changedMu.Unlock()
+	if current, ok := l.changed[change.path]; ok && current.generation == change.generation {
+		delete(l.changed, change.path)
+	}
+}
+
+func (l *manyDBLoad) manyDBPendingCoverage() (int, float64) {
+	l.changedMu.Lock()
+	defer l.changedMu.Unlock()
+	now := l.now()
+	oldest := now
+	for _, change := range l.changed {
+		if change.since.Before(oldest) {
+			oldest = change.since
+		}
+	}
+	return len(l.changed), max(0, now.Sub(oldest).Seconds())
 }
 
 func selectManyDBVerificationTargets(cfg Config, changed []string) ([]string, int) {
@@ -403,7 +454,6 @@ func selectManyDBVerificationTargets(cfg Config, changed []string) ([]string, in
 		seen[path] = struct{}{}
 		targets = append(targets, path)
 	}
-	sort.Strings(targets)
 
 	totalChanged := len(targets)
 	limit := cfg.manyDBVerifyChangedLimit()
@@ -411,4 +461,23 @@ func selectManyDBVerificationTargets(cfg Config, changed []string) ([]string, in
 		targets = targets[:limit]
 	}
 	return targets, totalChanged
+}
+
+func (l *manyDBLoad) coverageDescriptors() (*prometheus.Desc, *prometheus.Desc) {
+	labels := prometheus.Labels{"worker_id": l.cfg.WorkerID, "profile": l.cfg.ProfileName, "source": l.cfg.Source, "region": l.cfg.Region}
+	return prometheus.NewDesc("soak_many_db_pending_count", "Databases awaiting successful verification of their current generation, including untouched databases.", nil, labels),
+		prometheus.NewDesc("soak_many_db_oldest_pending_age_seconds", "Seconds since the oldest outstanding database first required verification; zero when coverage is current.", nil, labels)
+}
+
+func (l *manyDBLoad) Describe(ch chan<- *prometheus.Desc) {
+	count, age := l.coverageDescriptors()
+	ch <- count
+	ch <- age
+}
+
+func (l *manyDBLoad) Collect(ch chan<- prometheus.Metric) {
+	countDesc, ageDesc := l.coverageDescriptors()
+	count, age := l.manyDBPendingCoverage()
+	ch <- prometheus.MustNewConstMetric(countDesc, prometheus.GaugeValue, float64(count))
+	ch <- prometheus.MustNewConstMetric(ageDesc, prometheus.GaugeValue, age)
 }

@@ -306,3 +306,88 @@ func TestMalformedStoredClassificationIsIgnored(t *testing.T) {
 	}
 	assertMissing(t, stats[0].FailureClassification)
 }
+
+func TestFailedVerificationQueriesIgnorePending(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	worker := &Worker{
+		ID:            "worker-pending-failure-query",
+		Name:          "worker-pending-failure-query",
+		Status:        WorkerRunning,
+		Source:        "main",
+		GitSHA:        "abc123",
+		LitestreamSHA: "ls123",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+	}
+	if err := db.CreateWorker(worker); err != nil {
+		t.Fatalf("CreateWorker() error = %v", err)
+	}
+
+	failedAt := time.Date(2026, 4, 26, 14, 0, 0, 0, time.UTC)
+	failed := &Verification{
+		WorkerID:     worker.ID,
+		StartedAt:    failedAt.Add(-2 * time.Minute),
+		CompletedAt:  &failedAt,
+		Status:       "failed",
+		CheckType:    "integrity",
+		Passed:       false,
+		ErrorMessage: "checksum mismatch",
+	}
+	if err := db.RecordVerification(failed); err != nil {
+		t.Fatalf("RecordVerification(failed) error = %v", err)
+	}
+
+	pendingAt := failedAt.Add(10 * time.Minute)
+	pending := &Verification{
+		WorkerID:     worker.ID,
+		StartedAt:    pendingAt.Add(-2 * time.Minute),
+		CompletedAt:  &pendingAt,
+		Status:       "pending",
+		CheckType:    "integrity",
+		Passed:       false,
+		ErrorMessage: "litestream process stopped during verification",
+	}
+	if err := db.RecordVerification(pending); err != nil {
+		t.Fatalf("RecordVerification(pending) error = %v", err)
+	}
+
+	latest, err := db.GetLatestFailedVerification(worker.ID)
+	if err != nil {
+		t.Fatalf("GetLatestFailedVerification() error = %v", err)
+	}
+	if latest == nil {
+		t.Fatal("GetLatestFailedVerification() = nil, want failed verification")
+	}
+	if latest.ID != failed.ID {
+		t.Fatalf("latest failed ID = %d, want %d", latest.ID, failed.ID)
+	}
+
+	recent, err := db.ListRecentFailedVerifications(10)
+	if err != nil {
+		t.Fatalf("ListRecentFailedVerifications() error = %v", err)
+	}
+	if len(recent) != 1 {
+		t.Fatalf("len(recent) = %d, want 1: %+v", len(recent), recent)
+	}
+	if recent[0].ID != failed.ID {
+		t.Fatalf("recent[0].ID = %d, want %d", recent[0].ID, failed.ID)
+	}
+}
+
+func TestPendingVerificationIsInconclusive(t *testing.T) {
+	t.Parallel()
+	for _, passed := range []bool{false, true} {
+		v := Verification{Status: " Pending ", Passed: passed}
+		if !v.Pending() || !v.Inconclusive() || v.Aborted() || v.Failed() || v.Succeeded() {
+			t.Fatalf("pending classification: %+v", v)
+		}
+	}
+}

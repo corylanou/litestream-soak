@@ -443,3 +443,31 @@ func TestSingleWorkerCorroborationEnvironmentalResetsStreak(t *testing.T) {
 		t.Fatal("hitting the environmental failure should decide the walk, not exhaust it")
 	}
 }
+
+func TestEnvironmentalStreakTreatsPendingAsNeutral(t *testing.T) {
+	policy := EnvironmentalFailurePolicy{Bucket: "b", EscalateAfterConsecutive: 2}
+
+	now := time.Now().UTC()
+	envFailure := func(age time.Duration) model.Verification {
+		return model.Verification{Status: "failed", CheckType: "integrity", StartedAt: now.Add(-age), ErrorMessage: tigrisListNoSuchBucket}
+	}
+	pendingAt := func(age time.Duration) model.Verification {
+		return model.Verification{Status: "pending", CheckType: "integrity", StartedAt: now.Add(-age)}
+	}
+
+	interleaved := []model.Verification{pendingAt(5 * time.Minute), envFailure(10 * time.Minute), pendingAt(15 * time.Minute), envFailure(20 * time.Minute)}
+	if !environmentalStreakEscalated(interleaved, policy) {
+		t.Fatal("pending checks between environmental failures must not reset the streak (deleted-bucket bypass)")
+	}
+
+	stats := []model.VerificationStat{
+		{ID: 1, WorkerID: "w1", Source: "pr-1", Status: "failed", CheckType: "integrity", StartedAt: now.Add(-20 * time.Minute), ErrorMessage: tigrisListNoSuchBucket, HasPriorPass: true},
+		{ID: 2, WorkerID: "w1", Source: "pr-1", Status: "pending", CheckType: "integrity", StartedAt: now.Add(-15 * time.Minute), HasPriorPass: true},
+		{ID: 3, WorkerID: "w1", Source: "pr-1", Status: "failed", CheckType: "integrity", StartedAt: now.Add(-10 * time.Minute), ErrorMessage: tigrisListNoSuchBucket, HasPriorPass: true},
+		{ID: 4, WorkerID: "w1", Source: "pr-1", Status: "failed", CheckType: "integrity", StartedAt: now.Add(-5 * time.Minute), ErrorMessage: tigrisListNoSuchBucket, HasPriorPass: true},
+	}
+	escalated := escalatedEnvironmentalStatIDs(stats, policy)
+	if !escalated[4] {
+		t.Fatal("stats-path streak must escalate across interleaved pending checks")
+	}
+}

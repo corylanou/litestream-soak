@@ -431,7 +431,7 @@ func buildWorkerChartData(verifications []model.Verification) workerChartData {
 	series := &workerDurationSeries{}
 	for i := len(verifications) - 1; i >= 0; i-- {
 		v := verifications[i]
-		if v.Aborted() {
+		if v.Inconclusive() {
 			continue
 		}
 		series.Labels = append(series.Labels, v.StartedAt.Format(time.RFC3339))
@@ -462,7 +462,7 @@ func buildWorkerTicks(verifications []model.Verification) []model.VerificationTi
 func tickClass(tick model.VerificationTick) string {
 	verification := model.Verification{Status: tick.Status, Passed: tick.Passed}
 	switch {
-	case verification.Aborted():
+	case verification.Inconclusive():
 		return "tick-aborted"
 	case verification.Failed():
 		return "tick-fail"
@@ -474,6 +474,8 @@ func tickClass(tick model.VerificationTick) string {
 func tickLabel(tick model.VerificationTick) string {
 	verification := model.Verification{Status: tick.Status, Passed: tick.Passed}
 	switch {
+	case verification.Pending():
+		return "pending"
 	case verification.Aborted():
 		return "aborted"
 	case verification.Failed():
