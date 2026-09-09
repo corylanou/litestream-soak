@@ -70,6 +70,14 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusBadRequest, nil, "invalid payload")
 		return
 	}
+	if a.manager != nil {
+		unlockWorker, err := a.manager.lockWorker(r.Context(), workerID)
+		if err != nil {
+			respondError(w, r, http.StatusInternalServerError, err, "failed to lock worker")
+			return
+		}
+		defer unlockWorker()
+	}
 	unlockReports := a.db.LockWorkerReports(workerID)
 	defer unlockReports()
 	payload.WorkerID = workerID
@@ -208,7 +216,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		} else if failed && a.manager != nil {
 			signature := vf.Signature
 			reason := fmt.Sprintf("worker probe failed with %s; returning to dormant state", signature)
-			if err := a.manager.DormantWorker(r.Context(), workerID, reason, signature, "probe_failed"); err != nil {
+			if err := a.manager.dormantWorkerLocked(r.Context(), workerID, reason, signature, "probe_failed"); err != nil {
 				respondError(w, r, http.StatusInternalServerError, err, "failed to update worker state")
 				return
 			}

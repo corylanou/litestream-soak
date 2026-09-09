@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -503,5 +504,88 @@ func TestLegacyManagedWorkerUpgradeTelemetry(t *testing.T) {
 				t.Fatalf("legacy self-registered: %+v, %v", expected, err)
 			}
 		})
+	}
+}
+
+type observedLockContext struct {
+	context.Context
+	once    sync.Once
+	reached chan struct{}
+}
+
+func (c *observedLockContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.reached) })
+	return c.Context.Done()
+}
+
+func TestFailedProbeReplacementLockOrder(t *testing.T) {
+	db := openTestDB(t)
+	worker := model.Worker{ID: "probe", Name: "probe", FlyMachineID: "old-machine", Source: "main", GitSHA: "soak", LitestreamSHA: "ls", Status: model.WorkerProbing, ProfileName: "low-volume", ProfileConfig: "{}"}
+	createTestWorker(t, db, worker)
+	old := fixtureRun(worker, model.Deployment{ID: 1, GitSHA: "soak", LitestreamSHA: "ls", Source: "main"})
+	if err := db.ExpectWorkerRun(old); err != nil {
+		t.Fatal(err)
+	}
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	unlock := mustLockWorker(t, manager, worker.ID)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	observed := &observedLockContext{Context: ctx, reached: make(chan struct{})}
+	body, err := json.Marshal(reporting.VerificationPayload{WorkerIdentity: old, Status: "failed", Passed: false, ErrorMessage: "checksum mismatch", CheckType: "checksum", CompletedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/verification", bytes.NewReader(body)).WithContext(observed)
+	req.SetPathValue("id", worker.ID)
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { NewAPI(db, nil, nil, nil, manager, nil).handleVerification(response, req); close(done) }()
+	select {
+	case <-observed.reached:
+	case <-time.After(5 * time.Second):
+		unlock()
+		cancel()
+		t.Fatal("report did not reach lifecycle lock")
+	}
+	replacement := old
+	replacement.RunID = "replacement-run"
+	replacement.MachineID = "replacement-machine"
+	replaced := make(chan error, 1)
+	go func() { replaced <- db.ExpectWorkerRun(replacement) }()
+	select {
+	case err := <-replaced:
+		if err != nil {
+			unlock()
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		cancel()
+		unlock()
+		<-done
+		<-replaced
+		t.Fatal("report holds report lock while waiting for replacement lifecycle lock")
+	}
+	if err := db.UpdateWorkerMachine(worker.ID, replacement.MachineID, ""); err != nil {
+		unlock()
+		t.Fatal(err)
+	}
+	if err := db.UpdateWorkerStatus(worker.ID, model.WorkerRunning, ""); err != nil {
+		unlock()
+		t.Fatal(err)
+	}
+	unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("report failed to finish")
+	}
+	stored := mustWorker(t, db, worker.ID)
+	stops, _, _ := fly.replacementCounts()
+	if stored.Status != model.WorkerRunning || stored.FlyMachineID != replacement.MachineID || stops != 0 {
+		t.Fatalf("stale probe stopped replacement: worker=%+v stops=%d", stored, stops)
+	}
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }

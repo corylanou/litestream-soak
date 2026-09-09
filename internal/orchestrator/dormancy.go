@@ -509,6 +509,10 @@ func (m *Manager) DormantWorker(ctx context.Context, workerID, reason, signature
 	}
 	defer unlock()
 
+	return m.dormantWorkerLocked(ctx, workerID, reason, signature, resumeTrigger)
+}
+
+func (m *Manager) dormantWorkerLocked(ctx context.Context, workerID, reason, signature, resumeTrigger string) error {
 	worker, err := m.db.GetWorker(workerID)
 	if err != nil {
 		return fmt.Errorf("get worker: %w", err)
