@@ -90,13 +90,13 @@ jobs:
           else
             while IFS= read -r file; do
               case "$file" in
-                cmd/soakctl/*|internal/orchestrator/*|internal/model/*|internal/flyapi/*|internal/reporting/*|internal/workload/*|internal/s3util/*|scripts/build-flyctl.sh|scripts/scan-binary.sh|.github/actions/setup-flyctl/*|fly.control.toml|Dockerfile.control|docker-entrypoint.sh|.dockerignore|scripts/test-compatibility.sh|internal/workflows/*|go.mod|go.sum|.github/workflows/deploy-main.yml)
+                cmd/soakctl/*|internal/worker/*|internal/replay/*|internal/churn/*|internal/orchestrator/*|internal/model/*|internal/flyapi/*|internal/reporting/*|internal/workload/*|internal/s3util/*|scripts/build-flyctl.sh|scripts/scan-binary.sh|.github/actions/setup-flyctl/*|fly.control.toml|Dockerfile.control|docker-entrypoint.sh|.dockerignore|scripts/test-compatibility.sh|internal/workflows/*|go.mod|go.sum|.github/workflows/deploy-main.yml)
                   control_changed=true
                   ;;
               esac
 
               case "$file" in
-                cmd/soakworker/*|internal/worker/*|internal/replay/*|internal/workload/*|internal/reporting/*|fly.toml|Dockerfile.worker|docker-entrypoint.sh|datasets/*|.dockerignore|scripts/test-compatibility.sh|internal/workflows/*|go.mod|go.sum|scripts/notify-deployment-ready.sh|.github/workflows/deploy-main.yml)
+                cmd/soakworker/*|internal/churn/*|internal/s3util/*|internal/worker/*|internal/replay/*|internal/workload/*|internal/reporting/*|fly.toml|Dockerfile.worker|docker-entrypoint.sh|datasets/*|.dockerignore|scripts/test-compatibility.sh|internal/workflows/*|go.mod|go.sum|scripts/notify-deployment-ready.sh|.github/workflows/deploy-main.yml)
                   worker_changed=true
                   ;;
               esac

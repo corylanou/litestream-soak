@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,39 @@ func TestCompatibilitySharedComponentDetection(t *testing.T) {
 			before := initDeployRepository(t, dir)
 			commitDeployFile(t, dir, file)
 			runDeployDetection(t, dir, "push", before, "HEAD", true, true)
+		})
+	}
+}
+
+func TestDeployComponentsCoverProductionDependencies(t *testing.T) {
+	const module = "github.com/corylanou/litestream-soak/"
+	dependencies := map[string][2]bool{}
+	for component, command := range []string{"soakctl", "soakworker"} {
+		cmd := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", "./cmd/"+command)
+		cmd.Dir = filepath.Join("..", "..")
+		cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("production dependencies: %v: %s", err, output)
+		}
+		for _, dependency := range strings.Fields(string(output)) {
+			if !strings.HasPrefix(dependency, module) {
+				continue
+			}
+			packagePath := strings.TrimPrefix(dependency, module)
+			targets := dependencies[packagePath]
+			targets[component] = true
+			dependencies[packagePath] = targets
+		}
+	}
+	dependencies["internal/s3util"] = [2]bool{true, true}
+	for packagePath, targets := range dependencies {
+		t.Run(packagePath, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			before := initDeployRepository(t, dir)
+			commitDeployFile(t, dir, packagePath+"/example.go")
+			runDeployDetection(t, dir, "push", before, "HEAD", targets[0], targets[1])
 		})
 	}
 }

@@ -514,7 +514,13 @@ integration test has a two-minute timeout; CI bounds the build/check step or job
 to fifteen minutes. Direct `go test ./...` skips this opt-in test when binaries
 are absent; that skip is not compatibility evidence. Deployment workflows run
 the suite for the resolved candidate before notifying the fleet, and changes to
-the shared compatibility runner select both deployment components.
+the shared compatibility runner select both deployment components. Component
+mapping is regression-tested against the Linux production dependency graph of
+both commands using package-only changes; new repository dependencies must be
+mapped before CI passes. Worker configuration imports also make worker, replay,
+and churn changes relevant to the control binary. S3 helpers conservatively
+select both components. All five PR checks (test, lint, compatibility, control
+image, and worker image) must be green before integration.
 
 This small deterministic fixture does not calibrate costly fault scenarios,
 prove provider behavior, or establish upstream base/head separation. Block and
