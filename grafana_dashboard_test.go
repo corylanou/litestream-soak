@@ -26,3 +26,15 @@ func TestOverviewDashboardIncludesDiskFullSignalRecoveryGuard(t *testing.T) {
 		}
 	}
 }
+
+func TestResourceDashboardsExposeObservationValidity(t *testing.T) {
+	for _, path := range []string{"grafana/soak-drilldown-dashboard.json", "grafana/soak-source-compare-dashboard.json"} {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), "Resource Observation Status") || !strings.Contains(string(body), "Resource Observation Age") {
+			t.Fatalf("%s lacks resource validity panels", path)
+		}
+	}
+}

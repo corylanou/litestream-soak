@@ -302,3 +302,38 @@ func TestPostJSONUnreachableServer(t *testing.T) {
 		t.Errorf("expected error to mention 'send request', got: %v", err)
 	}
 }
+
+func TestHeartbeatPreservesResourceObservationMetadata(t *testing.T) {
+	received := make(chan reporting.HeartbeatPayload, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload reporting.HeartbeatPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		received <- payload
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	cfg := Config{
+		ControlBaseURL: server.URL, WorkerID: "resource-heartbeat",
+		DeploymentID: 7, RunID: "run-resource", MachineID: "machine-resource",
+		WorkloadID: "workload-resource", WorkloadSHA: strings.Repeat("a", 40),
+		GitSHA: strings.Repeat("b", 40), LitestreamSHA: strings.Repeat("c", 40),
+		ImageRef: "image-resource", Source: "main", ProfileName: "low-volume",
+	}
+	runner := NewRunner(cfg)
+	runner.reporter = NewReporter(cfg)
+	at := time.Now().UTC().Truncate(time.Second)
+	runner.snapshot.LitestreamProcess = reporting.ProcessObservation{Status: "stale", PID: 42, StartTicks: "100", CollectedAt: at}
+	runner.snapshot.WorkerProcess = reporting.ProcessObservation{Status: "unsupported"}
+	runner.snapshot.LocalStateStatus = "unavailable"
+	runner.snapshot.LitestreamRSSBytes = 4096
+	runner.sendHeartbeat(context.Background())
+	payload := <-received
+	if payload.DeploymentID != cfg.DeploymentID || payload.RunID != cfg.RunID || payload.MachineID != cfg.MachineID || payload.WorkloadID != cfg.WorkloadID || payload.WorkloadSHA != cfg.WorkloadSHA || payload.ValidatorID != "soak-verifier:"+cfg.GitSHA || payload.ProfileHash == "" || payload.ProfileConfig == "" {
+		t.Fatalf("run identity lost in heartbeat transport: %+v", payload.WorkerIdentity)
+	}
+	if payload.LitestreamProcess != runner.snapshot.LitestreamProcess || payload.WorkerProcess.Status != "unsupported" || payload.LocalStateStatus != "unavailable" || payload.LitestreamRSSBytes != 4096 {
+		t.Fatalf("resource metadata lost: %+v", payload)
+	}
+}

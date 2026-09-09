@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -374,5 +375,54 @@ litestream_db_disk_full{db="`+cfg.DBPath+`"} 0
 	}
 	if got := payload.LitestreamAllocRateBytesPerSec; got != 0 {
 		t.Fatalf("LitestreamAllocRateBytesPerSec = %f, want 0 when families absent", got)
+	}
+}
+
+func TestIPCFailurePreservesProcessObservations(t *testing.T) {
+	poller := newStatsPoller(&Config{})
+	poller.snapshot.LitestreamRSSBytes = 4096
+	poller.snapshot.LitestreamCPUSecondsTotal = 12.5
+	poller.snapshot.WorkerRSSBytes = 8192
+	poller.setLitestreamSnapshotFailure(time.Now(), fmt.Errorf("ipc unavailable"))
+	if poller.snapshot.LitestreamRSSBytes != 4096 || poller.snapshot.LitestreamCPUSecondsTotal != 12.5 || poller.snapshot.WorkerRSSBytes != 8192 {
+		t.Fatalf("IPC failure discarded process observations: %+v", poller.snapshot)
+	}
+}
+
+func TestManyDBLocalStateAggregate(t *testing.T) {
+	cfg := Config{DataDir: t.TempDir(), NumDatabases: 2}
+	cfg.DBPath = filepath.Join(cfg.DataDir, "unused.db")
+	for _, db := range cfg.ManyDBPaths() {
+		state := litestreamStateDir(db)
+		if err := os.MkdirAll(filepath.Join(state, "ltx", "0"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(state, "meta"), []byte("abc"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(state, "ltx", "0", "one.ltx"), []byte("12345"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	poller := newStatsPoller(&cfg)
+	poller.pollLitestreamLocalState()
+	if poller.snapshot.LitestreamDirSizeBytes != 16 || poller.snapshot.LitestreamLTXSizeBytes != 10 {
+		t.Fatalf("state bytes = %d/%d, want 16/10", poller.snapshot.LitestreamDirSizeBytes, poller.snapshot.LitestreamLTXSizeBytes)
+	}
+}
+
+func TestMetricsObservationsSurviveIPCFailure(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.SocketPath = filepath.Join(t.TempDir(), "missing.sock")
+	startStatsPollerMetricsServer(t, &cfg, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(litestreamMetricsExpositionWithMemStats))
+	}))
+	poller := newStatsPoller(&cfg)
+	poller.prevAllocAt = time.Now().Add(-time.Second)
+	poller.pollDBStats()
+	snapshot := poller.currentSnapshot()
+	if snapshot.LitestreamSnapshotHealthy || snapshot.LitestreamHeapInuseBytes != 50331648 || snapshot.LitestreamAllocRateBytesPerSec <= 0 || snapshot.LitestreamMetricsScrapeStatus != reporting.LitestreamMetricsScrapeStatusHealthy {
+		t.Fatalf("independent metrics observation lost after IPC failure: %+v", snapshot)
 	}
 }
