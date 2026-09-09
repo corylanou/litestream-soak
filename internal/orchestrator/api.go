@@ -13,16 +13,18 @@ import (
 )
 
 type API struct {
-	backgroundContext context.Context
-	rolloutMu         sync.Mutex
-	rolloutTasks      int
-	rolloutsDone      chan struct{}
-	db                *model.DB
-	fly               *flyapi.Client
-	metrics           *controlMetrics
-	alerts            *AlertDispatcher
-	manager           *Manager
-	deployer          *Deployer
+	backgroundContext      context.Context
+	deploymentObserverOnce sync.Once
+	deploymentObserver     *deploymentObserver
+	rolloutMu              sync.Mutex
+	rolloutTasks           int
+	rolloutsDone           chan struct{}
+	db                     *model.DB
+	fly                    *flyapi.Client
+	metrics                *controlMetrics
+	alerts                 *AlertDispatcher
+	manager                *Manager
+	deployer               *Deployer
 }
 
 type WorkerDetailResponse struct {

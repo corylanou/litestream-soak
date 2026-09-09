@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -535,7 +537,10 @@ func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (Deployme
 		}
 
 		verifications, err := db.ListVerifications(worker.ID, 20)
-		if err == nil && len(verifications) > 0 {
+		if err != nil {
+			return DeploymentRolloutResponse{}, err
+		}
+		if len(verifications) > 0 {
 			if observedAt, ok := verificationObservedAt(verifications[0]); ok && !observedAt.Before(worker.CreatedAt.UTC()) {
 				progress.LastVerificationAt = &observedAt
 			}
@@ -605,21 +610,27 @@ func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (Deployme
 	return response, nil
 }
 
-func (a *API) observeLatestDeploymentState(source string) {
+func (a *API) refreshDeploymentState(ctx context.Context, sources []string) error {
+	db := a.db.WithReadContext(ctx)
+	var result error
 	if a.metrics != nil {
-		a.metrics.observeLatestDeployment(a.db)
-		a.metrics.observeLatestDeploymentComparison(a.db)
-		a.metrics.observeSourceComparisons(a.db)
+		result = a.metrics.refreshDeploymentMetrics(ctx, db)
 	}
 	if a.alerts == nil {
-		return
+		return result
 	}
-
-	rollout, err := buildLatestDeploymentRollout(a.db, source)
-	if err != nil || rollout == nil {
-		return
+	for _, source := range sources {
+		rollout, err := buildLatestDeploymentRollout(db, source)
+		if err != nil {
+			deploymentAlertRefreshFailures.WithLabelValues(source).Inc()
+			result = errors.Join(result, err)
+			continue
+		}
+		if rollout != nil {
+			a.alerts.NotifyDeploymentAttention(*rollout)
+		}
 	}
-	a.alerts.NotifyDeploymentAttention(*rollout)
+	return result
 }
 
 func workerMatchesDeployment(worker model.Worker, deployment model.Deployment) bool {
