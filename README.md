@@ -190,6 +190,10 @@ A normal scenario deadline may interrupt the last attempt without invalidating
 earlier completed evidence; external cancellation marks the run aborted unless
 a failure was already observed.
 
+The opt-in [local recovery comparison](docs/recovery-rig.md) adds pinned-binary
+process kill/restart, interrupted restore, local-loss, active-write retention,
+point-in-time and follow-resume controls with independent replication boundaries.
+
 Calibration remains a separate local-only activity tracked by #107. Fixture
 verdict tests do not establish known-bad/base versus known-fixed/head Litestream
 separation. No parameter sweep or Fly A/B is implied by a successful rig run;
