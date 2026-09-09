@@ -122,6 +122,18 @@ func readLogicalSnapshot(ctx context.Context, path string, limits logicalLimits)
 		}
 		snapshot.tables[i] = table
 	}
+	ftsObjects := 0
+	for _, table := range snapshot.tables {
+		switch table.name {
+		case "fts_search", "fts_documents", "fts_progress":
+			ftsObjects++
+		}
+	}
+	if ftsObjects == 3 {
+		if _, err := checkFTSSearch(ctx, tx); err != nil {
+			return snapshot, err
+		}
+	}
 	return snapshot, nil
 }
 
@@ -148,7 +160,7 @@ func readLogicalTable(ctx context.Context, tx *sql.Tx, name string, limits *logi
 		}
 	}
 
-	columns, err := tx.QueryContext(ctx, "SELECT name, pk FROM pragma_table_xinfo(?) ORDER BY cid", name)
+	columns, err := tx.QueryContext(ctx, "SELECT name, pk FROM pragma_table_xinfo(?) WHERE hidden != 1 ORDER BY cid", name)
 	if err != nil {
 		return table, err
 	}
@@ -190,8 +202,8 @@ func readLogicalTable(ctx context.Context, tx *sql.Tx, name string, limits *logi
 	if err := tx.QueryRowContext(ctx, "SELECT type, wr FROM pragma_table_list WHERE schema='main' AND name=?", name).Scan(&kind, &withoutRowID); err != nil {
 		return table, err
 	}
-	if kind != "table" {
-		return table, fmt.Errorf("unsupported logical object type %q", kind)
+	if err := validateLogicalObject(ctx, tx, name, kind); err != nil {
+		return table, err
 	}
 	if withoutRowID != 0 {
 		ordering = nil
