@@ -56,6 +56,8 @@ is unsupported.
 | `low-volume` | `worker-main-low-vol` | Constant synthetic writes at low rate with a small initial database. |
 | `high-volume` | `worker-main-high-vol` | Higher-rate wave synthetic writes, larger payloads, more load workers, and a 100 GB volume. |
 | `burst-volume` | `worker-main-burst-vol` | Burst-pattern synthetic writes against a 100 GB volume. |
+| `overload-truncate0` | `worker-main-overload-truncate0` | Constant synthetic load with `truncate-page-n: 0`; observe actual WAL growth and drain, without assuming overload engaged. |
+| `pinned-reader` | `worker-main-pinned-reader` | Synthetic writes with a companion read transaction held for 4m, separated by 45s pauses; observe checkpoint and WAL behavior. |
 | `read-heavy` | `worker-main-read-heavy` | Constant synthetic writes with a high read ratio to exercise read-heavy contention. |
 | `gharchive-replay` | `worker-main-gharchive` | Replays GH Archive events from `https://data.gharchive.org/2025-01-01-0.json.gz`. |
 | `gharchive-mixed` | `worker-main-gharchive-mixed` | Combines wave synthetic load with looping GH Archive replay. |
@@ -65,9 +67,15 @@ is unsupported.
 | `low-vol-syd` | `worker-main-low-vol-syd` | Low-volume synthetic workload in `syd` for cross-region lag signal. |
 | `high-vol-ams` | `worker-main-high-vol-ams` | High-volume wave workload in `ams` for cross-region lag signal. |
 
-Regional workers measure cross-region behavior and are excluded from release
-quality scoring. The release-quality code only scores `ord` workers and
-explicitly excludes `low-vol-syd` and `high-vol-ams`.
+These are configured workload shapes, not achieved throughput or proof of a
+particular regression. For each profile’s trigger, measured work, assertions,
+capabilities, and limitations, see the [scenario inventory](docs/operator-runbook.md#scenario-inventory).
+
+Regional workers measure cross-region behavior. The legacy release score only
+scores `ord` workers and excludes `low-vol-syd` and `high-vol-ams`; retained
+complete-run reliability includes these regions and many-database profiles.
+See [run reliability](docs/run-reliability.md) for measured coverage, incident
+retention and comparison eligibility.
 
 The `fts-maintenance` profile is opt-in through `PROFILE=fts-maintenance`
 (or `LOAD_MODE=fts`); it is not added to any default fleet. It uses the worker's
@@ -120,7 +128,8 @@ flags are inert unless the base flag is also set. These profiles seed
 databases under `/data/dbs`, drive writes into the configured active subset
 with an in-process writer, rotate active membership on a deterministic
 interval, report aggregate runtime/process metrics only, and verify changed
-databases per cycle. They are excluded from release-quality scoring.
+databases per cycle. They are excluded from the legacy release score, but remain
+included in complete-run reliability.
 
 Many-DB baseline profiles connect Litestream directly to Tigris. The S3 proxy
 is disabled for them and is supported only for deliberate fault-injection
@@ -133,8 +142,9 @@ process stats.
 
 `many-dbs-500-dir-lowfreq` is the reduced-frequency control pair for
 `many-dbs-500-dir`: identical workload, but with longer retention and
-compaction intervals so the LIST/GC/CPU cost of compaction frequency can be
-measured directly.
+compaction intervals to compare observed GC/CPU and memory costs. Passive LIST
+cost is unavailable; this configuration pair alone does not establish a
+controlled experiment.
 
 | Interval | Default | Lowfreq |
 | --- | --- | --- |
@@ -164,9 +174,9 @@ Fixture-sensitive fault regressions, including constrained-disk and S3 fault
 proxy scenarios, are local/on-demand checks rather than always-on fleet gates.
 They require deliberately unhealthy fixtures, such as a tiny filesystem or a
 starved local cache, so prior Fly A/B runs are treated as inconclusive when the
-fixture did not engage the intended fault. The Litestream fixes for compaction
-resume and disk-full recovery are validated through
-`scripts/local-rig-one-shot.sh` instead.
+fixture did not engage the intended fault. Use `scripts/local-rig-one-shot.sh`
+to collect compaction-resume and disk-full recovery evidence. The existence of the runner is not evidence that a selected
+candidate or fixture passed.
 
 The `provider-request-canceled` local rig injects the production Tigris failure
 shape, HTTP 408 with API code `RequestCanceled`, into `ListObjectsV2` and
@@ -179,8 +189,9 @@ litestream #1151 (a permanently failed L0 upload that the replica position
 advanced past) by deleting an interior remote L0 file above the L1 boundary,
 then requires compaction and replication to self-heal: gap detected, position
 invalidated, missing file re-uploaded from local disk, compaction completes,
-and a full restore returns every row. Unpatched Litestream fails forever with
-`non-contiguous transaction ids`; litestream #1155 heals it.
+and a full restore returns every row. The target failure signature is
+`non-contiguous transaction ids`; use retained runs of the selected pins to
+establish whether the #1155 fix heals the engaged gap.
 
 The `snapshot-compaction-overlap` local rig measures the memory cost of the
 per-database maintenance overlap from litestream #1477 (an L9 snapshot and an
@@ -198,10 +209,11 @@ profile is sampled after sufficient growth and spacing under the run's `profiles
 sequential replica prefix is deleted before the overlap run, so a 16 GiB
 fixture needs roughly one copy's worth of local disk and object storage.
 Pass requires the overlap's heap growth to stay within 1.10x the larger
-sequential phase plus one multipart upload's fixed buffers, so unpatched
-Litestream (roughly additive) fails, a per-database serialization fix passes
-via the timeout path, and a disk-backed page index passes with lower
-bytes-per-page in every phase.
+sequential phase plus one multipart upload's fixed buffers, with the gate release
+reason retained. Those are fixture assertions, not results for an unexecuted
+candidate. Establish base/head separation with retained
+repeated runs before attributing an improvement to serialization or page-index
+changes.
 
 The `restore-retention-race` local rig reproduces the fleet failure where a
 restore fails mid-plan with `reopen ltx file at offset 0: file does not
@@ -329,6 +341,15 @@ release credit. Legacy verification rows remain readable with `attributed=false`
 existing workers need a newly registered run before they can provide attributed
 evidence.
 
+Current verification health is separate from historical cleanliness. Clean-soak
+eligibility requires at least two attributed completed checks, the required
+measured span, no gap over one hour, real workload progress, and observed
+successful snapshot, compaction and positive-deletion retention activity.
+It also requires complete history and attribution, a current pass and no
+unexpected incidents. Pending checks are neutral and block current eligibility;
+worker age and later recovery cannot substitute for missing or failed evidence.
+The [reliability contract](docs/run-reliability.md) specifies limits and findings.
+
 Historical deployment scorecards retain attributed results after worker
 replacement. Live rollout and success teardown checks additionally require the
 current machine and run. The views report updated workers, workers still awaiting
@@ -372,7 +393,10 @@ with `fly.control.toml` and the startup log fields in `cmd/soakctl/main.go`
 `fly.toml`, `internal/worker/config.go`, and the per-worker environment built by
 `internal/orchestrator/dormancy.go`.
 
-For detailed operator procedures, see `docs/operator-runbook.md`.
+For detailed operator procedures and the complete scenario inventory, see the
+[operator runbook](docs/operator-runbook.md). For pinned paired local experiments,
+see [reproducible comparisons](docs/reproducible-comparisons.md); fleet scorecards
+are observational and do not establish a controlled performance improvement.
 
 ## Replay pacing
 
