@@ -71,11 +71,13 @@ type manyDBChangeTracker interface {
 }
 
 type Verifier struct {
-	cfg           Config
-	pausers       []loadPauser
-	manyDBChanges manyDBChangeTracker
-	httpClient    *http.Client
-	onStart       func(context.Context, VerificationResult)
+	logicalEvidence    string
+	logicalWorkloadSHA string
+	cfg                Config
+	pausers            []loadPauser
+	manyDBChanges      manyDBChangeTracker
+	httpClient         *http.Client
+	onStart            func(context.Context, VerificationResult)
 
 	checkpointAttempts    int
 	checkpointRetryDelay  time.Duration
@@ -96,7 +98,12 @@ const (
 )
 
 func NewVerifier(cfg Config, pausers ...loadPauser) *Verifier {
+	workloadSHA := os.Getenv("WORKLOAD_SHA")
+	if workloadSHA == "" {
+		workloadSHA = "unknown"
+	}
 	verifier := &Verifier{
+		logicalWorkloadSHA:    workloadSHA,
 		cfg:                   cfg,
 		pausers:               pausers,
 		httpClient:            newIPCClient(cfg.SocketPath, cfg.verifySyncTimeout()+30*time.Second),
@@ -192,6 +199,7 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 		return err
 	})
 
+	result.Steps[len(result.Steps)-1].OutputTail += "\n" + v.logicalEvidence
 	if validateErr != nil {
 		v.failResult(ctx, &result, validateErr.Error())
 		slog.Error("Verification failed", "error", validateErr, "duration", time.Since(start))
@@ -612,6 +620,12 @@ func (v *Verifier) validate(ctx context.Context, txid uint64) (bool, error) {
 }
 
 func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath string, txid uint64) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, v.cfg.LogicalTimeout)
+	defer cancel()
+	source, err := v.logicalValidation(ctx, sourcePath, txid)
+	if err != nil {
+		return false, err
+	}
 	configPath, cleanupConfig, err := v.validateConfigPath(sourcePath)
 	if err != nil {
 		return false, err
@@ -623,7 +637,7 @@ func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath stri
 		"-source-db", sourcePath,
 		"-config", configPath,
 		"-restored-db", restoredPath,
-		"-check-type", v.cfg.VerifyType,
+		"-check-type", "integrity",
 	}
 	if txid > 0 {
 		args = append(args, "-txid", formatTXID(txid))
@@ -633,10 +647,16 @@ func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath stri
 	if v.cfg.ReplicaType == "s3" {
 		cmd.Env = v.cfg.s3CommandEnv(v.cfg.S3FaultProxyEndpoint)
 	}
-	output, err := cmd.CombinedOutput()
+	output, err := boundedValidationOutput(cmd)
 	if err != nil && txid > 0 && validateUnsupportedTXID(output) {
 		slog.Warn("litestream-test validate does not support -txid; retrying validation without pinned restore txid")
-		return v.validateDB(ctx, sourcePath, restoredPath, 0)
+		args = args[:len(args)-2]
+		v.logicalEvidence += " restore_boundary=latest-fallback"
+		cmd = exec.CommandContext(ctx, "litestream-test", args...)
+		if v.cfg.ReplicaType == "s3" {
+			cmd.Env = v.cfg.s3CommandEnv(v.cfg.S3FaultProxyEndpoint)
+		}
+		output, err = boundedValidationOutput(cmd)
 	}
 
 	slog.Info("Validate output", "output", string(output))
@@ -651,7 +671,22 @@ func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath stri
 		return false, metadata
 	}
 
+	if err := v.compareRestoredLogical(ctx, source, restoredPath); err != nil {
+		return false, err
+	}
 	return true, nil
+}
+
+func boundedValidationOutput(cmd *exec.Cmd) ([]byte, error) {
+	var output bytes.Buffer
+	writer := &limitedBuffer{buf: &output, limit: syncDiagnosticOutputLimit}
+	cmd.Stdout, cmd.Stderr = writer, writer
+	cmd.WaitDelay = time.Second
+	err := cmd.Run()
+	if output.Len() == syncDiagnosticOutputLimit {
+		_, _ = output.WriteString("\n[validation output truncated]")
+	}
+	return output.Bytes(), err
 }
 
 func (v *Verifier) validateConfigPath(sourcePath string) (string, func(), error) {

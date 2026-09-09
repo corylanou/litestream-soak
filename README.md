@@ -104,6 +104,11 @@ measured directly.
 | L0 retention | 5m (upstream) | 1h |
 | L0 retention check | 15s (upstream) | 2m |
 
+Worker restore checks also compare an independent, consistent source snapshot
+against restored schema and typed row contents. See [logical verification](docs/logical-verification.md)
+for the equality contract, resource budgets, bookkeeping policy, and opt-in real
+restore test.
+
 ## Fleet Sources
 
 The `main` source is the long-running baseline fleet. Failures there are

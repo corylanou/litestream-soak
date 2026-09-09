@@ -59,6 +59,12 @@ type Config struct {
 	LoadDuration time.Duration
 
 	// Verification
+	LogicalMaxRows       int64
+	LogicalMaxBytes      int64
+	LogicalMaxObjects    int
+	LogicalMaxValueBytes int
+	LogicalTimeout       time.Duration
+
 	VerifyInterval           time.Duration
 	MonitorInterval          time.Duration
 	ReplicaLevelPollInterval time.Duration // how often replica LTX level counts are listed for metrics; 0 disables
@@ -165,6 +171,12 @@ func DefaultConfig() Config {
 		LoadMode:    "synthetic",
 		ReplaySpeed: 10.0,
 		ReplayLoop:  true,
+
+		LogicalMaxRows:       1_000_000_000,
+		LogicalMaxBytes:      1 << 40,
+		LogicalMaxObjects:    4096,
+		LogicalMaxValueBytes: 64 << 20,
+		LogicalTimeout:       30 * time.Minute,
 
 		VerifyInterval:           30 * time.Minute,
 		MonitorInterval:          15 * time.Second,
@@ -539,6 +551,9 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid REPLICA_LEVEL_POLL_INTERVAL: must not be negative")
 		}
 		c.ReplicaLevelPollInterval = d
+	}
+	if err := loadLogicalConfig(&c); err != nil {
+		return c, err
 	}
 	if v := os.Getenv("VERIFY_TYPE"); v != "" {
 		c.VerifyType = v
