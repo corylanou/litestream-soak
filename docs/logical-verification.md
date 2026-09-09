@@ -108,13 +108,17 @@ identity belongs to audit issue #205.
 
 `TestLogicalOraclePinnedLitestream` requires a binary built from
 `4ed7a308f6271ebfd2b0a6e4b70b03011a37e4a3`, with that SHA as `main.Version`.
-Set `SOAK_LOGICAL_LITESTREAM_BINARY` to its absolute path and run:
+Set `SOAK_LOGICAL_LITESTREAM_BINARY` to its absolute path and
+`SOAK_LOGICAL_WORKLOAD_BINARY` to `litestream-test` built from
+`ae88b164dd6304bcbb654a681df767ee59042eed`, with that SHA as `main.Version`. Run:
 
 ```sh
 GOTOOLCHAIN=go1.25.13 go test ./internal/worker -run TestLogicalOraclePinnedLitestream -count=1 -v
 ```
 
 The test starts a temporary file replica, commits byte-sensitive rows in WAL,
-forces checkpoint bookkeeping, restores a pinned TXID, verifies logical equality,
+forces checkpoint bookkeeping, restores a pinned TXID, and exercises the actual
+`validateDB` pipeline with both real binaries, including its labeled TXID fallback
+and restored-path handling. It verifies logical equality,
 advances the bookkeeping sequence, and proves deletion of a committed row fails.
 It does not use production credentials or change fleet configuration.

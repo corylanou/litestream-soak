@@ -20,7 +20,33 @@ func TestLogicalOraclePinnedLitestream(t *testing.T) {
 	if err != nil || strings.TrimSpace(string(version)) != "4ed7a308f6271ebfd2b0a6e4b70b03011a37e4a3" {
 		t.Fatalf("unexpected pinned binary: %s, %v", version, err)
 	}
+
+	workloadBinary := os.Getenv("SOAK_LOGICAL_WORKLOAD_BINARY")
+	if workloadBinary == "" {
+		t.Fatal("set SOAK_LOGICAL_WORKLOAD_BINARY to the pinned workload executable")
+	}
+	workloadVersion, err := exec.Command(workloadBinary, "version").CombinedOutput()
+	if err != nil || !strings.HasPrefix(string(workloadVersion), "litestream-test ae88b164dd6304bcbb654a681df767ee59042eed\n") {
+		t.Fatalf("unexpected pinned workload: %s, %v", workloadVersion, err)
+	}
+	t.Logf("candidate=%s workload=%s", strings.TrimSpace(string(version)), strings.TrimSpace(string(workloadVersion)))
 	dir := t.TempDir()
+
+	toolDir := filepath.Join(dir, "tools")
+	if err := os.Mkdir(toolDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]string{"litestream": binary, "litestream-test": workloadBinary} {
+		absolute, err := filepath.Abs(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(absolute, filepath.Join(toolDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", toolDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("WORKLOAD_SHA", "ae88b164dd6304bcbb654a681df767ee59042eed")
 	cfg := DefaultConfig()
 	cfg.DataDir = dir
 	cfg.DBPath = filepath.Join(dir, "source.db")
@@ -89,6 +115,21 @@ func TestLogicalOraclePinnedLitestream(t *testing.T) {
 	if err := compareLogicalSnapshots(expected, actual); err != nil {
 		t.Fatal(err)
 	}
+
+	validatedPath := filepath.Join(dir, "pipeline-restored.db")
+	passed, err := v.validateDB(ctx, cfg.DBPath, validatedPath, synced.TXID)
+	if err != nil || !passed {
+		t.Fatalf("real validateDB pipeline: passed=%v err=%v", passed, err)
+	}
+	if _, err := os.Stat(validatedPath); err != nil {
+		t.Fatalf("pipeline restored path: %v", err)
+	}
+	for _, want := range []string{"restore_boundary=latest-fallback", "synthetic_workload=litestream:ae88b164dd6304bcbb654a681df767ee59042eed", "logical_match=true"} {
+		if !strings.Contains(v.logicalEvidence, want) {
+			t.Fatalf("missing pipeline evidence %q: %s", want, v.logicalEvidence)
+		}
+	}
+	t.Logf("real validateDB evidence: %s", v.logicalEvidence)
 	restored := logicalTestDB(t, restoredPath, "")
 	var sourceSeq, restoredSeq int64
 	if err := db.QueryRow("SELECT coalesce(max(seq),0) FROM _litestream_seq").Scan(&sourceSeq); err != nil {
