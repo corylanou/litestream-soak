@@ -50,14 +50,19 @@ func (m *Manager) beginWorkerProvisioning(worker model.Worker, image string, siz
 	return attempt, nil
 }
 
-func provisioningEvent(worker model.Worker, a model.ProvisioningAttempt, kind, message string) (model.Event, error) {
+func provisioningEvent(worker model.Worker, a model.ProvisioningAttempt, kind, message string, observations ...flyapi.Volume) (model.Event, error) {
+	var observed *flyapi.Volume
+	if len(observations) > 0 {
+		observed = &observations[0]
+	}
 	body, err := json.Marshal(struct {
 		reporting.WorkerIdentity
-		AttemptID string `json:"attempt_id"`
-		Phase     string `json:"phase"`
-		VolumeID  string `json:"provisioning_volume_id"`
-		MachineID string `json:"provisioning_machine_id"`
-	}{WorkerIdentity: reporting.WorkerIdentity{DeploymentID: a.DeploymentID, WorkloadSHA: a.WorkloadSHA, ImageRef: a.ImageRef, WorkerID: worker.ID, Source: worker.Source, GitSHA: worker.GitSHA, LitestreamSHA: worker.LitestreamSHA, ProfileName: worker.ProfileName, Region: worker.Region, RunID: a.ID, MachineID: worker.FlyMachineID}, AttemptID: a.ID, Phase: a.Phase, VolumeID: a.VolumeID, MachineID: a.MachineID})
+		ObservedVolume *flyapi.Volume `json:"observed_volume,omitempty"`
+		AttemptID      string         `json:"attempt_id"`
+		Phase          string         `json:"phase"`
+		VolumeID       string         `json:"provisioning_volume_id"`
+		MachineID      string         `json:"provisioning_machine_id"`
+	}{ObservedVolume: observed, WorkerIdentity: reporting.WorkerIdentity{DeploymentID: a.DeploymentID, WorkloadSHA: a.WorkloadSHA, ImageRef: a.ImageRef, WorkerID: worker.ID, Source: worker.Source, GitSHA: worker.GitSHA, LitestreamSHA: worker.LitestreamSHA, ProfileName: worker.ProfileName, Region: worker.Region, RunID: a.ID, MachineID: worker.FlyMachineID}, AttemptID: a.ID, Phase: a.Phase, VolumeID: a.VolumeID, MachineID: a.MachineID})
 	if err != nil {
 		return model.Event{}, err
 	}
@@ -241,6 +246,22 @@ func (m *Manager) recoverPendingWorker(ctx context.Context, workerID, image stri
 			return err
 		}
 	}
+	for _, volume := range volumes {
+		relevant := volume.ID == worker.FlyVolumeID || volume.Name == flyVolumeName(worker.Name) || (a != nil && (volume.ID == a.VolumeID || volume.Name == a.VolumeName))
+		if relevant {
+			kind := "worker_provisioning_volume_observed"
+			if retiringProvisioningVolume(volume) {
+				kind = "worker_provisioning_retiring_volume"
+			}
+			event, err := provisioningEvent(*worker, report, kind, "Observed volume metadata retained without cleanup", volume)
+			if err != nil {
+				return err
+			}
+			if err := m.db.RecordEvent(event.WorkerID, event.EventType, event.Message, event.Details); err != nil {
+				return err
+			}
+		}
+	}
 	if a == nil {
 		expected, err := m.db.ExpectedWorkerRun(workerID)
 		if err != nil {
@@ -288,6 +309,9 @@ func (m *Manager) recoverPendingWorker(ctx context.Context, workerID, image stri
 		}
 		for _, volume := range volumes {
 			if volume.ID == worker.FlyVolumeID || volume.Name == flyVolumeName(worker.Name) {
+				if retiringProvisioningVolume(volume) && unreferencedProvisioningVolume(volume, machines) {
+					continue
+				}
 				return m.provisioningUnavailable(*worker, report, "Legacy volume may contain retained evidence; ownership needs operator accounting")
 			}
 		}
@@ -319,7 +343,7 @@ func (m *Manager) recoverPendingWorker(ctx context.Context, workerID, image stri
 	}
 	if len(ownedVolumes) == 1 {
 		volume := ownedVolumes[0]
-		if volume.SizeGB < a.VolumeSizeGB || volume.Region != worker.Region || volume.State == "destroyed" || (a.VolumeID != "" && a.VolumeID != volume.ID) {
+		if volume.SizeGB < a.VolumeSizeGB || volume.Region != worker.Region || !adoptableProvisioningVolume(volume) || (a.VolumeID != "" && a.VolumeID != volume.ID) {
 			return m.provisioningUnavailable(*worker, *a, "Attempt volume state is inconsistent")
 		}
 		if a.Phase == "volume_requested" {
@@ -393,7 +417,7 @@ func mountedProvisioningVolume(machine flyapi.Machine, volumes []flyapi.Volume) 
 		return flyapi.Volume{}, false
 	}
 	for _, volume := range volumes {
-		if volume.ID == machine.Config.Mounts[0].Volume && volume.State != "destroyed" && (volume.AttachedMachineID == "" || volume.AttachedMachineID == machine.ID) {
+		if volume.ID == machine.Config.Mounts[0].Volume && adoptableProvisioningVolume(volume) && (volume.AttachedMachineID == "" || volume.AttachedMachineID == machine.ID) {
 			return volume, true
 		}
 	}
@@ -423,4 +447,29 @@ func provisioningExpectedMachineMatches(machine flyapi.Machine, expected *report
 		return false
 	}
 	return expected.VolumeID == "" || expected.VolumeID == machine.Config.Mounts[0].Volume
+}
+
+func retiringProvisioningVolume(volume flyapi.Volume) bool {
+	return volume.State == "pending_destroy" || volume.State == "scheduling_destroy"
+}
+
+func adoptableProvisioningVolume(volume flyapi.Volume) bool {
+	return volume.AttachedAllocID == "" && (volume.State == "created" || volume.State == "hydrating")
+}
+
+func unreferencedProvisioningVolume(volume flyapi.Volume, machines []flyapi.Machine) bool {
+	if volume.AttachedMachineID != "" || volume.AttachedAllocID != "" {
+		return false
+	}
+	for _, machine := range machines {
+		if machine.State == "destroyed" {
+			continue
+		}
+		for _, mount := range machine.Config.Mounts {
+			if mount.Volume == volume.ID {
+				return false
+			}
+		}
+	}
+	return true
 }
