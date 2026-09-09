@@ -127,10 +127,17 @@ func RunTenantLifecycle(ctx context.Context, options TenantLifecycleOptions) (re
 	}
 	r.fullLog = &tenantProcessLog{file: logFile, remaining: 64 << 20}
 	defer func() {
+		hadProcess := r.process != nil
 		stopErr := r.stop()
 		if stopErr != nil {
 			r.event("cleanup", tenantID{}, "failed", stopErr.Error())
 			retErr = errors.Join(retErr, stopErr)
+		}
+		if hadProcess {
+			if stopErr == nil {
+				r.event("cleanup", tenantID{}, "passed", "replication process exited and was reaped after scenario")
+			}
+			r.frame("cleanup")
 		}
 		report.Failures = append(report.Failures, r.ledger.failures...)
 		report.LogTail = r.log.Lines()
@@ -238,16 +245,17 @@ func (r *tenantRunner) stop() error {
 		return nil
 	}
 	cmd := r.process
-	r.process = nil
 	if err := cmd.Process.Signal(os.Interrupt); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return err
 	}
 	select {
 	case err := <-r.done:
+		r.process = nil
 		return err
 	case <-time.After(10 * time.Second):
 		killErr := cmd.Process.Kill()
 		waitErr := <-r.done
+		r.process = nil
 		return errors.Join(errors.New("litestream did not stop within cleanup bound"), killErr, waitErr)
 	}
 }

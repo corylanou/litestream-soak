@@ -256,3 +256,22 @@ func (tr tenantTestTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	copy.URL = target
 	return http.DefaultTransport.RoundTrip(copy)
 }
+
+func TestTenantLifecycleFailedProcessStillReportsCleanup(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "litestream")
+	script := "#!/bin/sh\nif [ \"$1\" = version ]; then echo " + tenantLitestreamSHA + "; exit 0; fi\nexit 7\n"
+	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report, err := RunTenantLifecycle(context.Background(), TenantLifecycleOptions{Binary: binary, Root: dir, Mode: "watch", Tenants: 2, SHA: tenantLitestreamSHA, Capabilities: "directory-v1", Timeout: time.Second, SyncTimeout: time.Second})
+	if err == nil || report.Status != "failed" {
+		t.Fatalf("unexpected success: %+v %v", report, err)
+	}
+	if len(report.Resources) == 0 || !report.Resources[len(report.Resources)-1].ProcessExited {
+		t.Fatalf("missing failed-run cleanup proof: %+v", report.Resources)
+	}
+	if _, err := os.Stat(filepath.Join(report.RunDirectory, "report.json")); err != nil {
+		t.Fatal(err)
+	}
+}
