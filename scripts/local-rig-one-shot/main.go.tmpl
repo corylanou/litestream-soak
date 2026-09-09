@@ -24,12 +24,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/benbjohnson/litestream"
 	"github.com/benbjohnson/litestream/file"
 	lss3 "github.com/benbjohnson/litestream/s3"
+	"github.com/corylanou/litestream-soak/internal/rig"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/superfly/ltx"
@@ -62,6 +64,7 @@ type result struct {
 	LitestreamRef string                `json:"litestream_ref"`
 	LitestreamSHA string                `json:"litestream_sha"`
 	Run           int                   `json:"run"`
+	Outcome       string                `json:"outcome,omitempty"`
 	Pass          bool                  `json:"pass"`
 	Operation     string                `json:"operation"`
 	Error         string                `json:"error,omitempty"`
@@ -1278,6 +1281,19 @@ const (
 	raceRowBlobSize          = 2048
 )
 
+type raceRestoreClient struct {
+	litestream.ReplicaClient
+	l0Opens atomic.Int64
+}
+
+func (c *raceRestoreClient) OpenLTXFile(ctx context.Context, level int, minTXID, maxTXID ltx.TXID, offset, size int64) (io.ReadCloser, error) {
+	reader, err := c.ReplicaClient.OpenLTXFile(ctx, level, minTXID, maxTXID, offset, size)
+	if level == 0 && err == nil {
+		c.l0Opens.Add(1)
+	}
+	return reader, err
+}
+
 // runRestoreRetentionRace reproduces the restore-vs-L0-retention race seen on
 // the soak fleet: a restore plan is computed from the replica listing, then
 // while the plan's files are read one by one, L1 compaction covers the plan's
@@ -1286,8 +1302,20 @@ const (
 // monitors drive compaction and retention here (that is where per-database
 // maintenance serialization lives), a writer streams L0 files continuously,
 // and full restores run back to back for the scenario duration.
-func runRestoreRetentionRace(ctx context.Context, cfg config) (result, error) {
-	res := baseResult(cfg, "restore-during-retention")
+func runRestoreRetentionRace(ctx context.Context, cfg config) (res result, runErr error) {
+	res = baseResult(cfg, "restore-during-retention")
+	res.Outcome = "inconclusive"
+	res.Stats["stage"] = "setup"
+	res.Stats["calibration"] = "not_executed; parameter sweep tracked by #107"
+	defer func() {
+		if runErr != nil {
+			res.Error = runErr.Error()
+			if ctx.Err() != nil {
+				res.Outcome = "aborted"
+			}
+			runErr = nil
+		}
+	}()
 	duration := time.Duration(intEnv("ONE_SHOT_RACE_SECONDS", raceDefaultSeconds)) * time.Second
 	l0Retention := time.Duration(intEnv("ONE_SHOT_RACE_L0_RETENTION_MS", raceDefaultL0RetentionMS)) * time.Millisecond
 
@@ -1308,6 +1336,7 @@ func runRestoreRetentionRace(ctx context.Context, cfg config) (result, error) {
 	defer removeDBArtifacts(dbPath)
 
 	var logBuf safeBuffer
+	defer func() { res.Logs = logBuf.Lines() }()
 	counter := &raceLogCounter{
 		Handler: slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}),
 		counts:  &raceLogCounts{m: make(map[string]int)},
@@ -1374,6 +1403,8 @@ func runRestoreRetentionRace(ctx context.Context, cfg config) (result, error) {
 		syncsDone int64
 		rowsTotal = int64(64)
 	)
+	var syncedRows atomic.Int64
+	syncedRows.Store(64)
 	writerWG.Add(1)
 	go func() {
 		defer writerWG.Done()
@@ -1392,6 +1423,7 @@ func runRestoreRetentionRace(ctx context.Context, cfg config) (result, error) {
 				return
 			}
 			syncsDone++
+			syncedRows.Store(rowsTotal)
 		}
 	}()
 
@@ -1411,12 +1443,23 @@ func runRestoreRetentionRace(ctx context.Context, cfg config) (result, error) {
 		lastRaceErr, lastOtherErr                       string
 		restoreTotal                                    time.Duration
 	)
+	res.Stats["stage"] = "restores"
+	var evidence rig.RecoveryEvidence
+	var records []map[string]any
 	for i := 0; runCtx.Err() == nil; i++ {
+		attemptStart := time.Now()
+		record := map[string]any{"attempt": i + 1, "started_at": attemptStart.UTC(), "stage": "plan", "restored_valid": false}
+		records = append(records, record)
 		plan, planErr := litestream.CalcRestorePlan(runCtx, client, 0, time.Time{}, logger)
 		if planErr != nil {
-			if runCtx.Err() != nil {
+			record["duration_ms"] = time.Since(attemptStart).Milliseconds()
+			record["error"] = planErr.Error()
+			record["stage"] = "plan"
+			if rig.AttemptVerdict(planErr, runCtx.Err() != nil, false, false) == "aborted" {
+				record["outcome"] = "aborted"
 				break
 			}
+			record["outcome"] = "unrelated_failure"
 			// A listing failure is not a restore attempt; note it and back
 			// off rather than spinning on the replica.
 			otherFailures++
@@ -1440,36 +1483,75 @@ func runRestoreRetentionRace(ctx context.Context, cfg config) (result, error) {
 		}
 
 		restorePath := filepath.Join(cfg.WorkDir, fmt.Sprintf("restored-%d.db", i))
+		record["stage"] = "restore"
+		observedClient := &raceRestoreClient{ReplicaClient: client}
+		restoreDB.Replica.Client = observedClient
+		minimumRows := int(syncedRows.Load())
+		retentionBefore := counter.count("l0 retention enforced")
+		deletedBefore := counter.count("l0 files deleted")
+		compactionBefore := counter.count("compaction complete")
+		busyBefore := counter.count("maintenance busy, will retry") + counter.count("maintenance busy, skipping")
 		start := time.Now()
 		err := restoreDB.Replica.Restore(runCtx, litestream.RestoreOptions{OutputPath: restorePath})
-		if runCtx.Err() != nil && err != nil {
-			_ = os.Remove(restorePath)
-			break // deadline hit mid-restore; neither a verdict nor a timing sample
+		restoreElapsed := time.Since(start)
+		record["restore_ms"] = restoreElapsed.Milliseconds()
+		record["sampled_plan_l0_files"] = planL0
+		retentionDuring := counter.count("l0 retention enforced") - retentionBefore
+		compactionsDuring := counter.count("compaction complete") - compactionBefore
+		record["retention_runs_during_restore"] = retentionDuring
+		record["compactions_during_restore"] = compactionsDuring
+		record["minimum_replicated_rows"] = minimumRows
+		busyDuring := counter.count("maintenance busy, will retry") + counter.count("maintenance busy, skipping") - busyBefore
+		record["maintenance_busy_during_restore"] = busyDuring
+		l0Opens := int(observedClient.l0Opens.Load())
+		record["restore_l0_opens"] = l0Opens
+		deletedDuring := counter.count("l0 files deleted") - deletedBefore
+		record["l0_files_deleted_during_restore"] = deletedDuring
+		exposed := rig.MaintenanceExposed(l0Opens, deletedDuring, compactionsDuring)
+		if err == nil {
+			record["stage"] = "validation"
+			restored, openErr := sql.Open("sqlite", restorePath)
+			if openErr != nil {
+				err = openErr
+			} else {
+				err = rig.ValidatePrefix(ctx, sqldb, restored, minimumRows, raceRowsPerSync)
+				_ = restored.Close()
+			}
 		}
-		restoreTotal += time.Since(start)
+		record["duration_ms"] = time.Since(attemptStart).Milliseconds()
+		outcome := rig.AttemptVerdict(err, runCtx.Err() != nil, err == nil, exposed)
+		record["outcome"] = outcome
+		if outcome == "aborted" {
+			record["error"] = err.Error()
+			_ = os.Remove(restorePath)
+			break
+		}
 		attempts++
+		restoreTotal += restoreElapsed
 		if err != nil {
+			record["error"] = err.Error()
 			failures++
 			// The fleet signature is specifically a plan file vanishing between
 			// listing and reading; anything else is a different failure.
-			if msg := err.Error(); strings.Contains(msg, "reopen ltx file") && strings.Contains(msg, "file does not exist") {
+			if msg := err.Error(); outcome == "target_signature_observed" {
 				raceFailures++
 				lastRaceErr = msg
 			} else {
 				otherFailures++
 				lastOtherErr = msg
 			}
-		} else if restoredRowCount(restorePath) <= 0 {
-			failures++
-			otherFailures++
-			lastOtherErr = "restored database unreadable or empty"
+		} else {
+			evidence.ValidRestores++
+			record["restored_valid"] = true
+			if exposed {
+				evidence.ExposedRestores++
+			}
 		}
 		_ = os.Remove(restorePath)
 	}
 	cancelRun()
 	writerWG.Wait()
 
-	lines := logBuf.Lines()
 	retentionRuns := counter.count("l0 retention enforced")
 	busyRefusals := counter.count("maintenance busy, will retry") + counter.count("maintenance busy, skipping")
 	compactions := counter.count("compaction complete")
@@ -1490,6 +1572,7 @@ func runRestoreRetentionRace(ctx context.Context, cfg config) (result, error) {
 	res.Stats["max_plan_l0_files_at_start"] = maxPlanL0
 	res.Stats["max_l0_backlog"] = maxL0Backlog
 	res.Stats["l0_retention_runs"] = retentionRuns
+	res.Stats["l0_files_deleted"] = counter.count("l0 files deleted")
 	res.Stats["compactions_complete"] = compactions
 	res.Stats["maintenance_busy_refusals"] = busyRefusals
 	if attempts > 0 {
@@ -1501,17 +1584,27 @@ func runRestoreRetentionRace(ctx context.Context, cfg config) (result, error) {
 	if lastOtherErr != "" {
 		res.Stats["last_other_error"] = lastOtherErr[:min(len(lastOtherErr), 400)]
 	}
-	res.Logs = tailStrings(lines, 20)
+	res.Stats["attempts"] = records
+	res.Stats["calibration"] = "not_executed; parameter sweep tracked by #107"
+	evidence.TargetFailures = raceFailures
+	evidence.OtherFailures = otherFailures
+	evidence.Aborted = ctx.Err() != nil
 
 	if writerErr != nil {
 		res.Error = writerErr.Error()
-		return res, nil
+		res.Stats["writer_error"] = writerErr.Error()
+		evidence.OtherFailures++
 	}
-	if attempts == 0 {
-		res.Error = "no restore completed within the scenario window"
-		return res, nil
+	res.Stats["other_failures"] = evidence.OtherFailures
+	res.Stats["recovery_evidence"] = evidence
+	res.Stats["stage"] = "completed"
+	if evidence.Aborted {
+		res.Stats["stage"] = "cancelled"
+		res.Stats["cancellation_error"] = ctx.Err().Error()
+		res.Error = errors.Join(writerErr, ctx.Err()).Error()
 	}
-	res.Pass = raceFailures == 0
+	res.Outcome = evidence.Verdict()
+	res.Pass = res.Outcome == "scenario_success"
 	return res, nil
 }
 
@@ -1535,6 +1628,14 @@ func (h *raceLogCounter) Enabled(context.Context, slog.Level) bool { return true
 func (h *raceLogCounter) Handle(ctx context.Context, r slog.Record) error {
 	h.counts.mu.Lock()
 	h.counts.m[r.Message]++
+	if r.Message == "l0 retention enforced" {
+		r.Attrs(func(attr slog.Attr) bool {
+			if attr.Key == "deleted_count" && attr.Value.Kind() == slog.KindInt64 && attr.Value.Int64() > 0 {
+				h.counts.m["l0 files deleted"] += int(attr.Value.Int64())
+			}
+			return true
+		})
+	}
 	h.counts.mu.Unlock()
 	if r.Level < slog.LevelInfo {
 		return nil

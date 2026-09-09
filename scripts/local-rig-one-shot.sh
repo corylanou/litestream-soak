@@ -54,19 +54,23 @@ if [ ! -x "$bin_dir/litestream" ] || [ ! -x "$bin_dir/litestream-test" ]; then
 fi
 
 cp "$root/scripts/local-rig-one-shot/main.go.tmpl" "$mod_dir/main.go"
+cp "$root/scripts/local-rig-one-shot/main_test.go.tmpl" "$mod_dir/main_test.go"
 cat >"$mod_dir/go.mod" <<EOF
-module litestream-local-rig-one-shot
+module github.com/corylanou/litestream-soak/local-rig-one-shot
 
 go 1.25.13
 
 require github.com/benbjohnson/litestream v0.0.0
+require github.com/corylanou/litestream-soak v0.0.0
 
 replace github.com/benbjohnson/litestream => $src_dir
+replace github.com/corylanou/litestream-soak => $root
 EOF
 
 (
   cd "$mod_dir"
   go mod tidy
+  go test .
 )
 
 if [ "$scenario" != "constrained-disk" ]; then

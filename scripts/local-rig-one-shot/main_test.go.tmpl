@@ -1,0 +1,61 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/benbjohnson/litestream"
+	"github.com/superfly/ltx"
+)
+
+type rigTestClient struct {
+	litestream.ReplicaClient
+	err error
+}
+
+func (c rigTestClient) OpenLTXFile(context.Context, int, ltx.TXID, ltx.TXID, int64, int64) (io.ReadCloser, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	return io.NopCloser(strings.NewReader("ltx")), nil
+}
+
+func TestRaceRestoreClientObservesSuccessfulL0Opens(t *testing.T) {
+	c := &raceRestoreClient{ReplicaClient: rigTestClient{}}
+	for _, level := range []int{0, 1, 0} {
+		reader, err := c.OpenLTXFile(context.Background(), level, 1, 1, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = reader.Close()
+	}
+	c.ReplicaClient = rigTestClient{err: errors.New("missing object")}
+	if _, err := c.OpenLTXFile(context.Background(), 0, 1, 1, 0, 0); err == nil {
+		t.Fatal("lost open failure")
+	}
+	if got := c.l0Opens.Load(); got != 2 {
+		t.Fatalf("counted %d successful L0 opens, want 2", got)
+	}
+}
+
+func TestRaceLogCounterRequiresPositiveDeletions(t *testing.T) {
+	c := &raceLogCounter{Handler: slog.NewTextHandler(io.Discard, nil), counts: &raceLogCounts{m: map[string]int{}}}
+	for _, count := range []int{0, 3, 0, 2, -1} {
+		record := slog.NewRecord(time.Now(), slog.LevelInfo, "l0 retention enforced", 0)
+		record.AddAttrs(slog.Int("deleted_count", count))
+		if err := c.Handle(context.Background(), record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := c.count("l0 files deleted"); got != 5 {
+		t.Fatalf("deleted %d, want 5", got)
+	}
+	if got := c.count("l0 retention enforced"); got != 5 {
+		t.Fatalf("runs %d, want 5", got)
+	}
+}

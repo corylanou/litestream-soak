@@ -164,9 +164,33 @@ retention (L1 every 2s, L0 retention 2s checked every second, overridable via
 window (`ONE_SHOT_RACE_SECONDS`, default 90), and full restores run back to
 back. It reports restores attempted/failed, race failures, max plan depth and
 L0 backlog, and counts of compactions, retention runs, and maintenance-busy
-refusals from the Litestream log. It passes only with zero race failures, so
-it is a measurement of whether a given Litestream ref narrows or widens the
-race, not a regression gate that unpatched main is expected to clear.
+refusals from the Litestream log. Outcomes distinguish `scenario_success`,
+`target_signature_observed`, `unrelated_failure`, `aborted`, and `inconclusive`.
+Success requires a completed, logically valid restore with observed L0 object opens
+and both compaction and positive L0 deletion counts observed during that
+restore. No-op retention runs and maintenance-busy refusals are diagnostic
+only. Zero exposure
+is inconclusive. Unrelated errors and earlier self-healing failures prevent
+success; both failure counts remain visible if both classes occur.
+
+Each planning/restore attempt retains its start time, elapsed time, error, and
+maintenance observations and actual L0 opens, including interrupted attempts. All captured logs
+are retained. Logical validation compares every restored ID and value against
+the append-only source prefix, checks SQLite storage types and complete
+transaction boundaries, and requires at least the row count known to be
+replicated before the restore. This is a fixture-specific prefix check, not
+the general workload oracle tracked by #204. Sampled plans and backlog maxima
+are observations, not exact restore plans or continuous peak measurements.
+A normal scenario deadline may interrupt the last attempt without invalidating
+earlier completed evidence; external cancellation marks the run aborted unless
+a failure was already observed.
+
+Calibration remains a separate local-only activity tracked by #107. Fixture
+verdict tests do not establish known-bad/base versus known-fixed/head Litestream
+separation. No parameter sweep or Fly A/B is implied by a successful rig run;
+the result explicitly records calibration as unexecuted. Preserve cause-specific
+controls and obtain the #107 base-3/3-fail and head-3/3-pass evidence before
+promoting parameters. This rig remains opt-in.
 
 PR fleets use sources named `pr-NNN`. The PR workflow builds a worker image with
 `LITESTREAM_SHA` set to the upstream PR head SHA, then notifies the control
