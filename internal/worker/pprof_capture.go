@@ -24,6 +24,8 @@ const (
 )
 
 type pprofCapturer struct {
+	onRecord     func(*profileRecord)
+	onStatus     func(string, string)
 	cfg          *Config
 	gate         chan struct{}
 	statusMu     sync.Mutex
@@ -167,6 +169,7 @@ func (c *pprofCapturer) captureSet(ctx context.Context, label string) {
 func (c *pprofCapturer) captureEndpoint(ctx context.Context, label, name, endpoint string, timeout time.Duration) {
 	dir := filepath.Join(c.cfg.DataDir, "profiles")
 	if err := os.MkdirAll(dir, 0700); err != nil {
+		c.publishProfileStatus(label, "storage-write-failed: "+err.Error())
 		slog.Warn("Create pprof directory failed", "error", err)
 		return
 	}

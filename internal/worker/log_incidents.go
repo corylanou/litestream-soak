@@ -29,11 +29,11 @@ func (r *Runner) observeLogIncidents(cancelRun context.CancelCauseFunc) {
 			RuntimePayload: reporting.RuntimePayload{MaintenanceEvidence: evidence},
 			WorkloadEvent:  reporting.WorkloadEvent{WorkloadEventID: fmt.Sprintf("log:%s:%d", evidence.Epoch, evidence.Errors)},
 		}
-		if err := r.persistChurnEvidence(event); err != nil {
+		if err := r.persistRunEvidence(event); err != nil {
 			cancelRun(fmt.Errorf("preserve Litestream log incident: %w", err))
 			return err
 		}
-		r.requestChurnFlush()
+		r.requestEvidenceFlush()
 		return nil
 	}
 }

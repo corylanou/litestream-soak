@@ -95,7 +95,7 @@ func TestCleanSoakRejectsUnmeasuredAge(t *testing.T) {
 func TestRunEligibilityRequiresMeasuredCoverage(t *testing.T) {
 	start := time.Now().UTC().Add(-25 * time.Hour)
 	end := start.Add(24 * time.Hour)
-	valid := WorkerRunEvidence{CurrentHealth: "passed", HistoryComplete: true, VerificationCount: 25, WorkloadProgress: 100, MaintenanceObservations: 3, MaintenanceSnapshots: 1, MaintenanceCompactions: 1, MaintenanceRetentions: 1, FirstVerification: &start, LastVerification: &end, VerifiedSpanSeconds: (24 * time.Hour).Seconds(), MaxVerificationGapSeconds: 3600}
+	valid := WorkerRunEvidence{ProfileCapability: "disabled", CurrentHealth: "passed", HistoryComplete: true, VerificationCount: 25, WorkloadProgress: 100, MaintenanceObservations: 3, MaintenanceSnapshots: 1, MaintenanceCompactions: 1, MaintenanceRetentions: 1, FirstVerification: &start, LastVerification: &end, VerifiedSpanSeconds: (24 * time.Hour).Seconds(), MaxVerificationGapSeconds: 3600}
 	cases := []struct {
 		name   string
 		change func(*WorkerRunEvidence)
@@ -111,6 +111,7 @@ func TestRunEligibilityRequiresMeasuredCoverage(t *testing.T) {
 		{"short span", func(e *WorkerRunEvidence) { e.VerifiedSpanSeconds = 100 }},
 		{"no current pass", func(e *WorkerRunEvidence) { e.CurrentHealth = "unknown" }},
 	}
+	observeProfilingEvidence(&valid, model.RuntimeEvidence{Attributed: true}, reporting.ProfilingEvidence{ProfileCapability: "observed", ProfileEpoch: "continuous", ProfileHistoryComplete: true, ProfileStatusCounts: map[string]uint64{"cpu-rate-limited": 80, "block-disabled": 80}})
 	evaluateRunEligibility(&valid, start, &end, time.Hour, 24*time.Hour)
 	if !valid.Eligible {
 		t.Fatalf("measured run rejected: %+v", valid)
@@ -184,7 +185,7 @@ func TestReliabilityMeasuresProgressAndMaintenanceWithPendingNeutral(t *testing.
 	run := fixtureRun(worker, deployment)
 	for i := 0; i <= 24; i++ {
 		at := deployment.StartedAt.Add(time.Duration(i) * time.Hour)
-		runtime := reporting.RuntimePayload{DBTXID: uint64(i + 1), SnapshotCollectedAt: at, LitestreamSnapshotHealthy: true}
+		runtime := reporting.RuntimePayload{ProfilingEvidence: reporting.ProfilingEvidence{ProfileCapability: "disabled", ProfileHistoryComplete: true}, DBTXID: uint64(i + 1), SnapshotCollectedAt: at, LitestreamSnapshotHealthy: true}
 		if err := db.UpdateWorkerRuntimeSnapshot(worker.ID, runtime); err != nil {
 			t.Fatal(err)
 		}
@@ -348,7 +349,7 @@ func addMeasuredSuccessEvidence(t *testing.T, db *model.DB, workerID string) {
 	}
 	now := time.Now().UTC()
 	for i, at := range []time.Time{deployment.StartedAt, now} {
-		if err := db.UpdateWorkerRuntimeSnapshot(workerID, reporting.RuntimePayload{SnapshotCollectedAt: at, LitestreamSnapshotHealthy: true, DBTXID: uint64(i + 1), DBStatus: "replicating"}); err != nil {
+		if err := db.UpdateWorkerRuntimeSnapshot(workerID, reporting.RuntimePayload{ProfilingEvidence: reporting.ProfilingEvidence{ProfileCapability: "disabled", ProfileHistoryComplete: true}, SnapshotCollectedAt: at, LitestreamSnapshotHealthy: true, DBTXID: uint64(i + 1), DBStatus: "replicating"}); err != nil {
 			t.Fatal(err)
 		}
 		mustRecordAttributedFixture(t, db, &model.Verification{WorkerID: workerID, StartedAt: at, CompletedAt: &at, Status: "passed", Passed: true, CheckType: "integrity"})
@@ -395,7 +396,7 @@ func TestMaintenanceReporterJournalEligibility(t *testing.T) {
 		observed.ObserveLine(line)
 	}
 	for i, at := range []time.Time{deployment.StartedAt, time.Now().UTC()} {
-		runtime := reporting.RuntimePayload{MaintenanceEvidence: observed, DBTXID: uint64(i + 1), SnapshotCollectedAt: at, LitestreamSnapshotHealthy: true, DBStatus: "replicating"}
+		runtime := reporting.RuntimePayload{ProfilingEvidence: reporting.ProfilingEvidence{ProfileCapability: "disabled", ProfileHistoryComplete: true}, MaintenanceEvidence: observed, DBTXID: uint64(i + 1), SnapshotCollectedAt: at, LitestreamSnapshotHealthy: true, DBStatus: "replicating"}
 		if err := reporter.SendHeartbeat(context.Background(), reporting.HeartbeatPayload{RuntimePayload: runtime, SentAt: at}); err != nil {
 			t.Fatal(err)
 		}
@@ -436,7 +437,7 @@ func assertHTTPOutOfOrderReplay(t *testing.T, db *model.DB, deployment model.Dep
 			Message   string `json:"message"`
 		}{WorkerIdentity: run, workloadEvidenceCounters: workloadEvidenceCounters{Epoch: epoch, Present: true, Attempts: attempts, Mutations: mutations, Errors: failures}, EventID: id, Message: "immutable workload failure"}
 		if kind == "heartbeat" {
-			payload.RuntimePayload = reporting.RuntimePayload{MaintenanceEvidence: maintenance, SnapshotCollectedAt: at, LitestreamSnapshotHealthy: true, DBTXID: 101}
+			payload.RuntimePayload = reporting.RuntimePayload{ProfilingEvidence: reporting.ProfilingEvidence{ProfileCapability: "disabled", ProfileHistoryComplete: true}, MaintenanceEvidence: maintenance, SnapshotCollectedAt: at, LitestreamSnapshotHealthy: true, DBTXID: 101}
 		} else {
 			payload.EventType = "workload_error"
 		}
@@ -619,5 +620,62 @@ func TestMissingVerificationHistoryIsUnknown(t *testing.T) {
 	}
 	if len(evidence) != 1 || evidence[0].HistoryComplete {
 		t.Fatalf("missing history claimed complete: %+v", evidence)
+	}
+}
+
+func TestProfilingUploadRecoveryRetainsFailure(t *testing.T) {
+	db := openTestDB(t)
+	deployment, worker := createCleanSuccessCandidate(t, db, "pr-211", 211)
+	run := fixtureRun(worker, deployment)
+	run.MachineID = "machine"
+	record := reporting.ProfileRecordEvidence{DeploymentID: deployment.ID, WorkerID: worker.ID, MachineID: run.MachineID, RunID: run.RunID, Artifact: "sample.pprof", Status: "available", Upload: "pending", UploadFailureCount: 1, UploadFailures: []reporting.ProfileUploadFailureEvidence{{Attempt: 1, Error: "signal: killed", Stage: "artifact", At: time.Now().UTC()}}}
+	incident := record.Incidents()[0]
+	incident.Run = run
+	eventBody, _ := json.Marshal(struct {
+		reporting.WorkerEventPayload
+		Attributed bool `json:"attributed"`
+	}{reporting.WorkerEventPayload{WorkerIdentity: run, EventType: incident.Kind, Message: incident.Message, WorkloadEvent: reporting.WorkloadEvent{WorkloadEventID: incident.ID}}, true})
+	for i := 0; i < 2; i++ {
+		if err := db.RecordEvent(worker.ID, incident.Kind, incident.Message, string(eventBody)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, status := range []string{"pending", "uploaded"} {
+		record.Upload = status
+		runtime := reporting.RuntimePayload{LitestreamSnapshotHealthy: true, SnapshotCollectedAt: time.Now().UTC(), ProfilingEvidence: reporting.ProfilingEvidence{ProfileCapability: "observed", ProfileEpoch: "epoch", ProfileHistoryComplete: true, ProfileRecords: []reporting.ProfileRecordEvidence{record}, ProfileIncidents: []reporting.ProfileIncident{incident}}}
+		raw, _ := json.Marshal(runtime)
+		if err := db.RecordRuntimeEvidence(run, raw, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	evidence, err := buildRunReliability(db, deployment, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence) != 1 || evidence[0].UnexpectedFailures != 1 || evidence[0].Eligible {
+		t.Fatalf("profiling failure disappeared: %+v", evidence)
+	}
+}
+
+func TestProfilingCapabilitiesAndLegacyHistory(t *testing.T) {
+	for _, tt := range []struct {
+		name, capability string
+		counts           map[string]uint64
+		complete         bool
+		unknown          bool
+	}{
+		{name: "disabled", capability: "disabled", complete: true},
+		{name: "rate limited", capability: "observed", counts: map[string]uint64{"cpu-rate-limited": 3, "block-disabled": 1}, complete: true},
+		{name: "legacy failed delivery", capability: "disabled", counts: map[string]uint64{"upload-failed": 75}, unknown: true},
+		{name: "truncated", capability: "observed", complete: false, unknown: true},
+		{name: "unreported", unknown: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e := WorkerRunEvidence{}
+			observeProfilingEvidence(&e, model.RuntimeEvidence{Attributed: true}, reporting.ProfilingEvidence{ProfileCapability: tt.capability, ProfileHistoryComplete: tt.complete, ProfileStatusCounts: tt.counts})
+			if e.UnexpectedFailures != 0 || (e.IncompleteObservations > 0) != tt.unknown {
+				t.Fatalf("capability=%+v", e)
+			}
+		})
 	}
 }

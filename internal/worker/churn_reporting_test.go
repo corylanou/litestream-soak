@@ -58,7 +58,7 @@ func TestChurnOutboxReplaysOriginalIdentity(t *testing.T) {
 	cfg.ControlBaseURL = server.URL
 	restarted := NewRunner(cfg)
 	restarted.reporter = NewReporter(cfg)
-	if err := restarted.flushChurnEvidence(context.Background()); err != nil {
+	if err := restarted.flushRunEvidence(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if event.RunID != "old-run" || event.WorkerID != "old-worker" || event.WorkloadErrorsTotal != 1 || event.EventType != "workload_error" {
@@ -85,7 +85,7 @@ func TestChurnFailedDeliveryRemainsPending(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := r.flushChurnEvidence(context.Background()); err == nil {
+	if err := r.flushRunEvidence(context.Background()); err == nil {
 		t.Fatal("failed delivery hidden")
 	}
 	files, err := filepath.Glob(filepath.Join(cfg.DataDir, "churn-outbox", "*.json"))
@@ -204,7 +204,7 @@ func TestChurnBlockedDeliveryDoesNotBlockRecording(t *testing.T) {
 	}
 	r.reporter = NewReporter(cfg)
 	uploadDone := make(chan error, 1)
-	go func() { uploadDone <- r.flushChurnEvidence(context.Background()) }()
+	go func() { uploadDone <- r.flushRunEvidence(context.Background()) }()
 	<-entered
 	done := make(chan struct{})
 	go func() {
@@ -254,10 +254,10 @@ func TestChurnRetryPreservesExactEvent(t *testing.T) {
 	if err := r.recordChurnAttempt(context.Background(), "claim", 0, 2*time.Millisecond, errors.New("original failure")); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.flushChurnEvidence(context.Background()); err == nil {
+	if err := r.flushRunEvidence(context.Background()); err == nil {
 		t.Fatal("expected failed send")
 	}
-	if err := r.flushChurnEvidence(context.Background()); err != nil {
+	if err := r.flushRunEvidence(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(received) != 2 || received[0].WorkloadEventID == "" || !reflect.DeepEqual(received[0], received[1]) {
@@ -276,7 +276,7 @@ func TestChurnOutboxCapacityFailsClosed(t *testing.T) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < churnOutboxMaxEvents; i++ {
+	for i := 0; i < evidenceOutboxMaxEvents; i++ {
 		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%d.json", i)), []byte("{}"), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -286,7 +286,7 @@ func TestChurnOutboxCapacityFailsClosed(t *testing.T) {
 		t.Fatalf("capacity not enforced: %v", err)
 	}
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != churnOutboxMaxEvents {
+	if err != nil || len(entries) != evidenceOutboxMaxEvents {
 		t.Fatalf("existing evidence changed: %d %v", len(entries), err)
 	}
 }
@@ -301,7 +301,7 @@ func TestChurnUploaderDeliversAndStops(t *testing.T) {
 	cfg.ControlBaseURL = server.URL
 	r := NewRunner(cfg)
 	r.reporter = NewReporter(cfg)
-	stop := r.startChurnUploader(context.Background())
+	stop := r.startEvidenceUploader(context.Background())
 	defer stop()
 	if err := r.recordChurnAttempt(context.Background(), "claim", 0, time.Millisecond, errors.New("failure")); err != nil {
 		t.Fatal(err)
@@ -325,7 +325,7 @@ func TestChurnOutboxByteLimitFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := file.Truncate(churnOutboxMaxBytes); err != nil {
+	if err := file.Truncate(evidenceOutboxMaxBytes); err != nil {
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {

@@ -65,6 +65,7 @@ type ProcessObservation struct {
 }
 
 type RuntimePayload struct {
+	ProfilingEvidence
 	WorkloadCounters
 	MaintenanceEvidence
 	LitestreamProcess     ProcessObservation `json:"litestream_process"`

@@ -40,7 +40,7 @@ func TestLogIncidentsSurviveRestartWithOriginalIdentity(t *testing.T) {
 	defer server.Close()
 	reporter := &Reporter{baseURL: server.URL, client: server.Client(), identity: reporting.WorkerIdentity{WorkerID: "worker", RunID: "replacement"}}
 	runner.reporter = reporter
-	if err := runner.flushChurnEvidence(ctx); err != nil {
+	if err := runner.flushRunEvidence(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if len(received) != 2 {
@@ -57,7 +57,7 @@ func TestLogIncidentsSurviveRestartWithOriginalIdentity(t *testing.T) {
 	if received[0]["message"] == received[1]["message"] {
 		t.Fatal("individual errors coalesced")
 	}
-	if err := runner.flushChurnEvidence(ctx); err != nil {
+	if err := runner.flushRunEvidence(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if len(received) != 2 {
@@ -86,7 +86,7 @@ func TestLogOutboxPersistenceFailureStopsRun(t *testing.T) {
 func TestLogOutboxCapacityAndNetworkIsolation(t *testing.T) {
 	runner := NewRunner(Config{DataDir: t.TempDir()})
 	event := reporting.WorkerEventPayload{WorkerIdentity: reporting.WorkerIdentity{WorkerID: "worker"}, Message: "first"}
-	if err := runner.persistChurnEvidence(event); err != nil {
+	if err := runner.persistRunEvidence(event); err != nil {
 		t.Fatal(err)
 	}
 	entered := make(chan struct{})
@@ -100,12 +100,12 @@ func TestLogOutboxCapacityAndNetworkIsolation(t *testing.T) {
 	runner.reporter = &Reporter{baseURL: server.URL, client: server.Client()}
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.flushChurnEvidence(context.Background())
+		done <- runner.flushRunEvidence(context.Background())
 	}()
 	<-entered
 	event.WorkloadEventID = "two"
 	queued := make(chan error, 1)
-	go func() { queued <- runner.persistChurnEvidence(event) }()
+	go func() { queued <- runner.persistRunEvidence(event) }()
 	select {
 	case err := <-queued:
 		if err != nil {
@@ -120,7 +120,7 @@ func TestLogOutboxCapacityAndNetworkIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	event.Message = strings.Repeat("x", 16*1024*1024)
-	if err := runner.persistChurnEvidence(event); err == nil {
+	if err := runner.persistRunEvidence(event); err == nil {
 		t.Fatal("capacity limit not enforced")
 	}
 }
@@ -203,7 +203,7 @@ func TestProcessFinalFragmentReachesDurableJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-runner.litestreamDoneChan()
-	if err := runner.flushChurnEvidence(ctx); err != nil {
+	if err := runner.flushRunEvidence(ctx); err != nil {
 		t.Fatal(err)
 	}
 	events, err := db.ListEvidenceEvents("main")

@@ -12,8 +12,9 @@ import (
 )
 
 type Runner struct {
-	cfg      Config
-	profiles *pprofCapturer
+	profileEvidence profileEvidenceState
+	cfg             Config
+	profiles        *pprofCapturer
 
 	litestreamManager
 	statsPoller
@@ -56,10 +57,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	startTime := time.Now()
 	r.reporter = NewReporter(r.cfg)
 	r.observeLogIncidents(cancelRun)
-	stopChurnUploader := r.startChurnUploader(runCtx)
+	r.observeProfiling(cancelRun)
+	stopEvidenceUploader := r.startEvidenceUploader(runCtx)
 	defer func() {
-		stopChurnUploader()
-		if err := r.flushChurnEvidence(context.WithoutCancel(runCtx)); err != nil {
+		stopEvidenceUploader()
+		if err := r.flushRunEvidence(context.WithoutCancel(runCtx)); err != nil {
 			slog.Warn("Final evidence delivery pending", "error", err)
 		}
 	}()

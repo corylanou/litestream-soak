@@ -34,7 +34,7 @@ func (b *lineBuffer) Write(p []byte) (int, error) {
 
 	text := b.pending + string(p)
 	parts := strings.Split(text, "\n")
-	if len(parts[len(parts)-1]) > churnOutboxMaxBytes {
+	if len(parts[len(parts)-1]) > evidenceOutboxMaxBytes {
 		b.maintenance.Complete = false
 		err := fmt.Errorf("log observation unavailable: incomplete line exceeds evidence capacity")
 		if b.onIncomplete != nil {

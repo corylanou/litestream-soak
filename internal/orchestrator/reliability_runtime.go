@@ -76,6 +76,7 @@ func applyRuntimeEvidence(db *model.DB, deployment model.Deployment, end *time.T
 		if err := json.Unmarshal(record.RuntimeJSON, &runtime); err != nil {
 			return err
 		}
+		observeProfilingEvidence(e, record, runtime.ProfilingEvidence)
 		if record.Kind != "event" && reporting.SnapshotStatus(&runtime) != reporting.RuntimeSnapshotStatusHealthy {
 			e.IncompleteObservations++
 			incident("runtime_unavailable", "unavailable", runtime.LitestreamSnapshotError)

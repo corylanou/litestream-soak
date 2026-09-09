@@ -74,3 +74,17 @@ remain unknown. Evidence
 journals intentionally have no destructive retention policy; disk growth and
 long-lived history query costs need operational monitoring. Data deleted before
 this migration cannot be reconstructed and is never inferred from worker age.
+
+Profiling evidence reports detection capability separately from capture and
+remote delivery. A later successful upload retains each earlier observed upload
+failure, including its original diagnostic and run identity. Capture failures and
+unavailable status evidence use the same durable outbox. Heartbeat snapshots,
+retained manifests, and replayed events share exact incident IDs, so one failure
+counts once even after manifest pruning. Lost or legacy adverse history remains
+incomplete. Disabled sampling and CPU rate limiting are neutral; overflowing the
+recent status ring with neutral entries does not invalidate continuous observation.
+
+Detection is limited to observed logs, runtime reports, and profiling evidence.
+Quiet logs cannot prove the absence of unlogged SDK retries. Profile availability
+or successful remote delivery cannot prove nonzero CPU samples or support a CPU
+performance claim.

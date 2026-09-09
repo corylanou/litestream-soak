@@ -30,6 +30,10 @@ type RunIncident struct {
 }
 
 type WorkerRunEvidence struct {
+	ProfileRecords            []reporting.ProfileRecordEvidence `json:"profile_records,omitempty"`
+	ProfileCapability         string                            `json:"profile_capability"`
+	DetectionLimitations      []string                          `json:"detection_limitations"`
+	profileIncidentIDs        map[string]bool
 	WorkerID                  string        `json:"worker_id"`
 	Profile                   string        `json:"profile"`
 	Region                    string        `json:"region"`
@@ -103,7 +107,7 @@ func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Ti
 		evidenceKey := id + "\x00" + profile + "\x00" + region
 		e := byWorker[evidenceKey]
 		if e == nil {
-			e = &WorkerRunEvidence{WorkerID: id, Profile: profile, Region: region, CurrentHealth: "unknown", HistoryComplete: true, Incidents: []RunIncident{}}
+			e = &WorkerRunEvidence{WorkerID: id, Profile: profile, Region: region, CurrentHealth: "unknown", HistoryComplete: true, DetectionLimitations: []string{"Unlogged SDK retries are not observable", "Profile availability does not prove nonzero CPU samples or enabled target sampling"}, Incidents: []RunIncident{}}
 			byWorker[evidenceKey] = e
 		}
 		return e
@@ -132,6 +136,9 @@ func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Ti
 			e.WorkloadSHA = v.Run.WorkloadSHA
 			e.ProfileHash = v.Run.ProfileHash
 			e.HistoryComplete = e.HistoryComplete && record.HistoryComplete
+		}
+		if attributed && record.Runtime.ProfileCapability != "" {
+			observeProfilingEvidence(e, model.RuntimeEvidence{Run: v.Run, Attributed: true, ReceivedAt: at}, record.Runtime.ProfilingEvidence)
 		}
 		pending := strings.EqualFold(v.Status, "pending")
 		if pending {
@@ -224,6 +231,9 @@ func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Ti
 		}
 		e := ensure(event.WorkerID, payload.ProfileName, payload.Region)
 		attributed := payload.Attributed && (model.Verification{Attributed: true, Run: payload.WorkerIdentity}).MatchesDeployment(model.Worker{ID: event.WorkerID}, deployment)
+		if strings.HasPrefix(payload.WorkloadEventID, "profile:") && e.profileIncidentIDs[payload.WorkloadEventID] {
+			continue
+		}
 		e.Incidents = append(e.Incidents, RunIncident{IncidentEventID: payload.IncidentEventID, WorkloadEventID: payload.WorkloadEventID, Operation: payload.Operation, ErrorKind: payload.ErrorKind, EventID: event.ID, Run: payload.WorkerIdentity, At: event.CreatedAt, Kind: event.EventType, Classification: kind, Message: event.Message, Attributed: attributed})
 		if !attributed {
 			e.UnattributedObservations++
@@ -299,6 +309,9 @@ func evaluateRunEligibility(e *WorkerRunEvidence, start time.Time, end *time.Tim
 		end = &now
 	}
 	e.EligibilityReasons = nil
+	if e.ProfileCapability != "disabled" && e.ProfileCapability != "observed" {
+		e.EligibilityReasons = append(e.EligibilityReasons, "profiling observation capability is pending or unknown")
+	}
 	if !e.HistoryComplete || e.UnattributedObservations > 0 {
 		e.EligibilityReasons = append(e.EligibilityReasons, "history incomplete or attribution unproven")
 	}
