@@ -1,0 +1,455 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/benbjohnson/litestream"
+	"github.com/corylanou/litestream-soak/internal/rig"
+	"github.com/corylanou/litestream-soak/internal/worker"
+)
+
+type recoveryOptions struct {
+	PhaseSeconds    int    `json:"phase_seconds"`
+	WriteRate       int    `json:"write_rate"`
+	Workers         int    `json:"workers"`
+	PayloadBytes    int    `json:"payload_bytes"`
+	TruncatePageN   int    `json:"truncate_page_n"`
+	PinHoldSeconds  int    `json:"pinned_reader_hold_seconds"`
+	PinPauseSeconds int    `json:"pinned_reader_pause_seconds"`
+	ProviderClass   string `json:"provider_class"`
+}
+
+func readRecoveryOptions() (recoveryOptions, error) {
+	o := recoveryOptions{PhaseSeconds: 10, WriteRate: 600, Workers: 8, PayloadBytes: 2048, PinHoldSeconds: 4, PinPauseSeconds: 1, ProviderClass: os.Getenv("ONE_SHOT_PROVIDER_CLASS")}
+	if o.ProviderClass != "local-emulator" && o.ProviderClass != "real-provider" {
+		return o, fmt.Errorf("ONE_SHOT_PROVIDER_CLASS must be local-emulator or real-provider")
+	}
+	for _, v := range []struct {
+		key      string
+		value    *int
+		min, max int
+	}{
+		{"ONE_SHOT_RECOVERY_PHASE_SECONDS", &o.PhaseSeconds, 1, 600},
+		{"ONE_SHOT_RECOVERY_WRITE_RATE", &o.WriteRate, 1, 100000},
+		{"ONE_SHOT_RECOVERY_WORKERS", &o.Workers, 1, 128},
+		{"ONE_SHOT_RECOVERY_PAYLOAD_BYTES", &o.PayloadBytes, 1, 1048576},
+		{"ONE_SHOT_RECOVERY_TRUNCATE_PAGE_N", &o.TruncatePageN, 0, 10000000},
+		{"ONE_SHOT_RECOVERY_PIN_HOLD_SECONDS", &o.PinHoldSeconds, 0, 600},
+		{"ONE_SHOT_RECOVERY_PIN_PAUSE_SECONDS", &o.PinPauseSeconds, 1, 600},
+	} {
+		if raw := os.Getenv(v.key); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < v.min || n > v.max {
+				return o, fmt.Errorf("%s must be between %d and %d", v.key, v.min, v.max)
+			}
+			*v.value = n
+		}
+	}
+	return o, nil
+}
+
+type recoveryOperation struct {
+	ElapsedSeconds  float64 `json:"elapsed_seconds"`
+	Operation       string  `json:"operation"`
+	Error           string  `json:"error,omitempty"`
+	DurationSeconds float64 `json:"duration_seconds"`
+}
+
+func runOfflineBacklog(ctx context.Context, cfg config) (res result, runErr error) {
+	res = baseResult(cfg, "offline-backlog-recovery")
+	evidenceDir := os.Getenv("ONE_SHOT_RECOVERY_EVIDENCE_DIR")
+	if evidenceDir == "" {
+		evidenceDir = filepath.Join(cfg.WorkDir, "evidence")
+	}
+	if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
+		return res, err
+	}
+	journal, err := os.OpenFile(filepath.Join(evidenceDir, "recovery-events.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return res, err
+	}
+	defer func() {
+		if err := journal.Close(); err != nil {
+			res.Error = err.Error()
+			res.Pass = false
+		}
+	}()
+	var journalMu sync.Mutex
+	var journalErr error
+	persist := func(kind string, value any) {
+		journalMu.Lock()
+		defer journalMu.Unlock()
+		if err := json.NewEncoder(journal).Encode(map[string]any{"kind": kind, "evidence": value}); err != nil {
+			journalErr = err
+		}
+	}
+	defer func() {
+		journalMu.Lock()
+		defer journalMu.Unlock()
+		if journalErr != nil {
+			res.Error = journalErr.Error()
+			res.Pass = false
+			res.Outcome = "evidence_failure"
+		}
+	}()
+	logFile, err := os.OpenFile(filepath.Join(evidenceDir, "litestream.log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return res, err
+	}
+	defer func() { _ = logFile.Close() }()
+	var logs safeBuffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.MultiWriter(&logs, logFile), &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer func() {
+		slog.SetDefault(previousLogger)
+		finalizeRecoveryResult(&res, logs.Lines())
+		if runErr != nil {
+			res.Error = runErr.Error()
+			res.Pass = false
+			res.Outcome = "unrelated_failure"
+			if ctx.Err() != nil {
+				res.Outcome = "aborted"
+			}
+			runErr = nil
+		}
+	}()
+	o, err := readRecoveryOptions()
+	if err != nil {
+		return res, err
+	}
+	res.Stats["controls"] = o
+	res.Stats["effective_writer_concurrency"] = 1
+	res.Stats["writer_model"] = "configured goroutines with serialized commits and source sync for exact boundary tracking"
+	res.Stats["related_issues"] = []int{187, 192, 204, 214, 215}
+	res.Stats["resource_limits"] = recoveryLimits(cfg.WorkDir)
+	phaseDuration := time.Duration(o.PhaseSeconds) * time.Second
+	schedule := rig.RecoverySchedule(phaseDuration, o.WriteRate)
+	res.Stats["schedule"] = schedule
+	persist("config", res)
+	proxy := newFaultProxy(faultProxyConfig{TargetEndpoint: cfg.S3Endpoint})
+	if err := proxy.Start(ctx); err != nil {
+		return res, err
+	}
+	defer func() { _ = proxy.Close(context.Background()) }()
+	start := time.Now()
+	var scheduleStart atomic.Int64
+	handler := rig.NewRecoveryHandler(schedule, func() time.Duration {
+		if n := scheduleStart.Load(); n != 0 {
+			return time.Since(time.Unix(0, n))
+		}
+		return 0
+	}, proxy)
+	handler.OnRequest = func(event rig.RecoveryRequest) { persist("request", event) }
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return res, err
+	}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = server.Serve(listener) }()
+	defer func() {
+		shutdownCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			_ = server.Close()
+			res.Pass = false
+			res.Error = err.Error()
+		}
+		res.Stats["requests"] = handler.Events()
+	}()
+	cfg.S3Endpoint = "http://" + listener.Addr().String()
+	client := newS3Client(cfg, cfg.S3Prefix, 0, 0)
+	dbPath := filepath.Join(cfg.WorkDir, "source.db")
+	if fileExists(dbPath) {
+		return res, fmt.Errorf("recovery requires a fresh work directory")
+	}
+	db, store, source, err := openLitestreamDB(ctx, dbPath, client, litestream.CompactionLevels{{Level: 0}})
+	if err != nil {
+		return res, err
+	}
+	defer func() { _ = source.Close(); _ = store.Close(context.Background()) }()
+	db.TruncatePageN = o.TruncatePageN
+	source.SetMaxOpenConns(o.Workers + 2)
+	if err := insertRows(ctx, source, 0, 1, o.PayloadBytes); err != nil {
+		return res, err
+	}
+	if err := syncDB(ctx, db); err != nil {
+		return res, err
+	}
+	start = time.Now()
+	scheduleStart.Store(start.UnixNano())
+	runCtx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+
+	var mu sync.Mutex
+	var writeMu sync.Mutex
+	committed := int64(1)
+	boundaries := map[uint64]int64{currentTXID(db): 1}
+	operations := []recoveryOperation{}
+	measurements := rig.RecoveryMeasurements{}
+	defer func() {
+		cancel()
+		wg.Wait()
+		res.Stats["operations"] = operations
+		res.Stats["measurements"] = measurements
+		persist("measurements", measurements)
+	}()
+	record := func(name string, at time.Time, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		op := recoveryOperation{ElapsedSeconds: time.Since(start).Seconds(), Operation: name, Error: errorString(err), DurationSeconds: time.Since(at).Seconds()}
+		operations = append(operations, op)
+		persist("operation", op)
+	}
+	if o.PinHoldSeconds > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			worker.RunPinnedReader(runCtx, dbPath, time.Duration(o.PinHoldSeconds)*time.Second, time.Duration(o.PinPauseSeconds)*time.Second)
+		}()
+	}
+	for i := 0; i < o.Workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(time.Second * time.Duration(o.Workers) / time.Duration(o.WriteRate))
+			defer ticker.Stop()
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case <-ticker.C:
+					if schedule.At(time.Since(start)).WriteRate == 0 {
+						continue
+					}
+					at := time.Now()
+					writeMu.Lock()
+					mu.Lock()
+					next := int(committed)
+					mu.Unlock()
+					err := insertRows(runCtx, source, next, 1, o.PayloadBytes)
+					mu.Lock()
+					if err == nil {
+						committed++
+					}
+					mu.Unlock()
+					writeMu.Unlock()
+					if err != nil {
+						record("write", at, err)
+					}
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				at := time.Now()
+				writeMu.Lock()
+				err := db.Sync(runCtx)
+				mu.Lock()
+				if err == nil {
+					boundaries[currentTXID(db)] = committed
+				}
+				mu.Unlock()
+				writeMu.Unlock()
+				if err != nil {
+					record("source-sync", at, err)
+				}
+			}
+		}
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+				at := time.Now()
+				attemptCtx, stop := context.WithTimeout(runCtx, phaseDuration/2)
+				err := db.Replica.Sync(attemptCtx)
+				stop()
+				record("replica-sync", at, err)
+			}
+		}
+	}()
+	drain := rig.RecoveryMeasurements{}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for time.Since(start) < 5*phaseDuration {
+		select {
+		case <-ctx.Done():
+			return res, ctx.Err()
+		case <-ticker.C:
+		}
+		disk, err := recoveryDiskBytes(cfg.WorkDir, evidenceDir)
+		if err != nil {
+			return res, err
+		}
+		var usage syscall.Rusage
+		if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
+			return res, err
+		}
+		rss := uint64(usage.Maxrss)
+		if runtime.GOOS == "linux" {
+			rss *= 1024
+		}
+		mu.Lock()
+		elapsed := time.Since(start)
+		replicatedTXID := uint64(db.Replica.Pos().TXID)
+		replicated := int64(0)
+		for txid, rows := range boundaries {
+			if txid <= replicatedTXID {
+				replicated = max(replicated, rows)
+			}
+		}
+		sample := rig.RecoverySample{ElapsedSeconds: elapsed.Seconds(), CommittedRows: committed, ReplicatedRows: replicated, DiskBytes: disk, MemoryBytes: rss}
+		mu.Unlock()
+		if elapsed >= 5*phaseDuration {
+			break
+		}
+		measurements.Observe(sample)
+		persist("sample", sample)
+		if elapsed >= 4*phaseDuration {
+			drain.Observe(sample)
+		}
+	}
+	cancel()
+	wg.Wait()
+	res.Stats["measurements"] = measurements
+	res.Stats["memory_measurement"] = "process peak RSS (includes harness); sampled every 100ms"
+	res.Stats["replicated_rows_per_second"] = drain.CatchUpRowsPerSecond()
+	res.Stats["net_drain_rows_per_second"] = drain.NetDrainRowsPerSecond()
+	res.Stats["writes_during_drain"] = int64(0)
+	if len(drain.Samples) > 1 {
+		res.Stats["writes_during_drain"] = drain.Samples[len(drain.Samples)-1].CommittedRows - drain.Samples[0].CommittedRows
+	}
+	finalCtx, stop := context.WithTimeout(ctx, 2*phaseDuration)
+	defer stop()
+	at := time.Now()
+	err = syncDB(finalCtx, db)
+	record("final-sync", at, err)
+	res.Stats["operations"] = operations
+	if err != nil {
+		return res, err
+	}
+	restoreDB := litestream.NewDB(filepath.Join(cfg.WorkDir, "restore-source.db"))
+	restoreDB.Replica = litestream.NewReplica(restoreDB)
+	restoreDB.Replica.Client = client
+	restorePath := filepath.Join(cfg.WorkDir, "restored.db")
+	at = time.Now()
+	err = restoreDB.Replica.Restore(finalCtx, litestream.RestoreOptions{OutputPath: restorePath})
+	record("restore", at, err)
+	res.Stats["operations"] = operations
+	if err != nil {
+		return res, err
+	}
+	restored, err := sql.Open("sqlite", restorePath)
+	if err != nil {
+		return res, err
+	}
+	defer func() { _ = restored.Close() }()
+	if err := rig.ValidatePrefix(finalCtx, source, restored, int(committed), 1); err != nil {
+		return res, err
+	}
+	res.Stats["validated_committed_rows"] = committed
+	res.Stats["recovered"] = true
+	res.Stats["pinned_reader_engaged"] = containsSubstring(logs.Lines(), "Pinned reader holding read transaction")
+	res.Stats["faults_engaged"] = map[string]bool{"offline": handler.Engaged("offline"), "latency": handler.Engaged("latency"), "throttle": handler.Engaged("throttle")}
+	incidents := 0
+	for _, op := range operations {
+		if op.Error != "" {
+			incidents++
+		}
+	}
+	requestSummary := rig.SummarizeRecoveryRequests(handler.Events())
+	res.Stats["request_summary"] = requestSummary
+	res.Stats["operation_failures"] = incidents
+	res.Stats["drained_while_writing"] = drain.DrainedWhileWriting()
+	engaged := handler.Engaged("offline") && handler.Engaged("latency") && handler.Engaged("throttle") && measurements.MaxLagRows > 0
+	if o.PinHoldSeconds > 0 && !res.Stats["pinned_reader_engaged"].(bool) {
+		engaged = false
+	}
+	res.Outcome = rig.BacklogVerdict(engaged, true, drain.DrainedWhileWriting(), incidents+requestSummary.UnexpectedHTTPFailures+requestSummary.TransportFailures+requestSummary.SDKRetries+requestSummary.InjectedFailures)
+	res.Pass = res.Outcome == "scenario_success"
+	return res, nil
+}
+
+func recoveryDiskBytes(root, evidenceDir string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path == evidenceDir {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		return nil
+	})
+	return total, err
+}
+
+func recoveryLimits(workDir string) map[string]string {
+	cpu, _ := os.ReadFile("/sys/fs/cgroup/cpu.max")
+	memory, _ := os.ReadFile("/sys/fs/cgroup/memory.max")
+	mounts, _ := os.ReadFile("/proc/mounts")
+	if resolved, err := filepath.EvalSymlinks(workDir); err == nil {
+		workDir = resolved
+	}
+	return rig.RecoveryLimits(workDir, string(cpu), string(memory), string(mounts))
+}
+
+func finalizeRecoveryResult(res *result, logs []string) {
+	res.Logs = logs
+	logIncidents := []string{}
+	for _, line := range logs {
+		if strings.Contains(line, "level=WARN") || strings.Contains(line, "level=ERROR") {
+			logIncidents = append(logIncidents, line)
+		}
+	}
+	res.Stats["log_incidents"] = logIncidents
+	requests, _ := res.Stats["requests"].([]rig.RecoveryRequest)
+	summary := rig.SummarizeRecoveryRequests(requests)
+	res.Stats["request_summary"] = summary
+	incidents := len(logIncidents) + summary.SDKRetries + summary.InjectedFailures + summary.UnexpectedHTTPFailures + summary.TransportFailures
+	if incidents > 0 && res.Outcome == "scenario_success" {
+		res.Pass = false
+		res.Outcome = "recovered_with_incidents"
+	}
+}

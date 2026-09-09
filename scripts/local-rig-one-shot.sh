@@ -13,12 +13,22 @@ if [ -z "$scenario" ]; then
 fi
 
 case "$scenario" in
-  compaction-source-stream-drop|uploadpart-retry-quota|provider-http-408|provider-request-canceled|constrained-disk|l0-gap-heal|snapshot-compaction-overlap|restore-retention-race) ;;
+  offline-backlog|compaction-source-stream-drop|uploadpart-retry-quota|provider-http-408|provider-request-canceled|constrained-disk|l0-gap-heal|snapshot-compaction-overlap|restore-retention-race) ;;
   *)
     printf 'unknown scenario: %s\n' "$scenario" >&2
     exit 2
     ;;
 esac
+
+if [ "$scenario" = "offline-backlog" ]; then
+  if [ -z "${ONE_SHOT_PROVIDER_CLASS:-}" ] && [ -z "${S3_ENDPOINT:-}" ]; then
+    export ONE_SHOT_PROVIDER_CLASS=local-emulator
+  fi
+  case "${ONE_SHOT_PROVIDER_CLASS:-}" in
+    local-emulator|real-provider) ;;
+    *) printf 'offline-backlog requires ONE_SHOT_PROVIDER_CLASS=local-emulator or real-provider for an explicit endpoint\n' >&2; exit 2 ;;
+  esac
+fi
 
 sha="$("$root/scripts/resolve-litestream-sha.sh" "$ref")"
 cache_dir="$root/.local-rig/one-shot"
@@ -55,6 +65,8 @@ fi
 
 cp "$root/scripts/local-rig-one-shot/main.go.tmpl" "$mod_dir/main.go"
 cp "$root/scripts/local-rig-one-shot/main_test.go.tmpl" "$mod_dir/main_test.go"
+cp "$root/scripts/local-rig-one-shot/recovery.go.tmpl" "$mod_dir/recovery.go"
+cp "$root/scripts/local-rig-one-shot/recovery_test.go.tmpl" "$mod_dir/recovery_test.go"
 cat >"$mod_dir/go.mod" <<EOF
 module github.com/corylanou/litestream-soak/local-rig-one-shot
 
@@ -73,7 +85,7 @@ EOF
   go test .
 )
 
-if [ "$scenario" != "constrained-disk" ]; then
+if [ "$scenario" != "constrained-disk" ] && [ "${ONE_SHOT_PROVIDER_CLASS:-local-emulator}" = "local-emulator" ] && [ "${ONE_SHOT_SKIP_EMULATOR_START:-0}" != "1" ]; then
   docker compose -f "$root/docker-compose.yml" up -d minio minio-init >/dev/null
 fi
 
@@ -128,12 +140,46 @@ run_constrained() {
       --file-replica /replica
 }
 
+run_recovery_constrained() {
+  local run_id="$1"
+  local binary="$mod_dir/recovery-linux-$container_arch"
+  (cd "$mod_dir" && GOOS=linux GOARCH="$container_arch" CGO_ENABLED=0 go build -o "$binary" .)
+  go version -m "$binary" >>"$toolchain_metadata"
+  local container="litestream-recovery-${sha:0:8}-$stamp-$run_id"
+  local evidence_dir="$results_dir/${scenario}-${sha:0:12}-$stamp-$run_id-evidence"
+  mkdir -p "$evidence_dir"
+  local env_args=()
+  for key in ONE_SHOT_PROVIDER_CLASS ONE_SHOT_RECOVERY_PHASE_SECONDS ONE_SHOT_RECOVERY_WRITE_RATE ONE_SHOT_RECOVERY_WORKERS ONE_SHOT_RECOVERY_PAYLOAD_BYTES ONE_SHOT_RECOVERY_TRUNCATE_PAGE_N ONE_SHOT_RECOVERY_PIN_HOLD_SECONDS ONE_SHOT_RECOVERY_PIN_PAUSE_SECONDS AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+    env_args+=(--env "$key")
+  done
+  local run_status=0
+  docker run \
+    --name "$container" \
+    --cpus "${ONE_SHOT_CPUS:-1}" \
+    --memory "${ONE_SHOT_MEMORY:-512m}" \
+    --memory-swap "${ONE_SHOT_MEMORY:-512m}" \
+    --mount "type=bind,source=$binary,target=/usr/local/bin/one-shot,readonly" \
+    --mount "type=tmpfs,destination=/data,tmpfs-size=${ONE_SHOT_TMPFS_SIZE:-384m}" \
+    --mount "type=bind,source=$evidence_dir,target=/evidence" \
+    --env ONE_SHOT_RECOVERY_EVIDENCE_DIR=/evidence \
+    "${env_args[@]}" \
+    alpine:3.20 /usr/local/bin/one-shot \
+    --scenario "$scenario" --litestream-ref "$ref" --litestream-sha "$sha" \
+    --run "$run_id" --work-dir /data/work \
+    --s3-endpoint "$endpoint" --s3-bucket "$bucket" \
+    --s3-prefix "one-shot/$scenario/$sha/$stamp/$run_id" || run_status=$?
+  docker inspect --format '{{json .State}}' "$container" > "$evidence_dir/container-state.json" || run_status=1
+  return "$run_status"
+}
+
 # A failing run no longer aborts the remaining runs: multi-run invocations are
 # how flaky or statistical scenarios (restore-retention-race) get their
 # counts. The exit status still reports whether every run passed.
 status=0
 for run_id in $(seq 1 "$runs"); do
-  if [ "$scenario" = "constrained-disk" ]; then
+  if [ "$scenario" = "offline-backlog" ] && [ "${ONE_SHOT_RECOVERY_CONTAINER:-0}" = "1" ]; then
+    run_recovery_constrained "$run_id" | tee -a "$result_file" || status=1
+  elif [ "$scenario" = "constrained-disk" ]; then
     run_constrained "$run_id" | tee -a "$result_file" || status=1
   else
     run_host "$run_id" | tee -a "$result_file" || status=1

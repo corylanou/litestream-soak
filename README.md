@@ -190,6 +190,10 @@ A normal scenario deadline may interrupt the last attempt without invalidating
 earlier completed evidence; external cancellation marks the run aborted unless
 a failure was already observed.
 
+The opt-in [offline backlog recovery rig](docs/offline-backlog-recovery.md) adds
+scheduled connectivity faults, constrained resources, and measured catch-up
+under continuing writes while preserving failures and final data boundaries.
+
 Calibration remains a separate local-only activity tracked by #107. Fixture
 verdict tests do not establish known-bad/base versus known-fixed/head Litestream
 separation. No parameter sweep or Fly A/B is implied by a successful rig run;
