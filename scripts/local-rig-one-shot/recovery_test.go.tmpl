@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"testing"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/rig"
 )
 
 func TestRecoveryOptionsRejectInvalidControls(t *testing.T) {
@@ -76,5 +79,57 @@ func TestRecoveryOptionsRequireProviderClass(t *testing.T) {
 	t.Setenv("ONE_SHOT_PROVIDER_CLASS", "")
 	if _, err := readRecoveryOptions(); err == nil {
 		t.Fatal("accepted unlabeled provider evidence")
+	}
+}
+
+func TestRecoveryResultRetainsSelfHealingIncidents(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		requests []rig.RecoveryRequest
+		logs     []string
+		want     string
+	}{
+		{name: "clean", want: "scenario_success"},
+		{name: "SDK retry only", requests: []rig.RecoveryRequest{{Status: 200, SDKRequest: "attempt=2; max=10"}}, want: "recovered_with_incidents"},
+		{name: "expected injection only", requests: []rig.RecoveryRequest{{Status: 503, Injected: true}}, want: "recovered_with_incidents"},
+		{name: "WARN only", logs: []string{"level=WARN msg=self-healed"}, want: "recovered_with_incidents"},
+		{name: "ERROR only", logs: []string{"level=ERROR msg=self-healed"}, want: "recovered_with_incidents"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			res := func() (res result) {
+				res = baseResult(config{}, "offline-backlog-recovery")
+				res.Pass = true
+				res.Outcome = "scenario_success"
+				res.Stats["requests"] = tt.requests
+				res.Stats["recovered"] = true
+				res.Stats["validated_committed_rows"] = int64(10)
+				defer finalizeRecoveryResult(&res, tt.logs)
+				return res
+			}()
+			if res.Outcome != tt.want || res.Pass != (tt.want == "scenario_success") {
+				t.Fatalf("pass=%v outcome=%s", res.Pass, res.Outcome)
+			}
+			if res.Stats["recovered"] != true || res.Stats["validated_committed_rows"] != int64(10) {
+				t.Fatal("erased final recovery evidence")
+			}
+			summary := res.Stats["request_summary"].(rig.RecoveryRequestSummary)
+			if !reflect.DeepEqual(summary, rig.SummarizeRecoveryRequests(tt.requests)) || !reflect.DeepEqual(res.Logs, tt.logs) {
+				t.Fatal("erased request or log evidence")
+			}
+			if len(res.Stats["log_incidents"].([]string)) != len(tt.logs) {
+				t.Fatal("lost log incidents")
+			}
+		})
+	}
+}
+
+func TestRecoveryFinalizationPreservesStrongerOutcomes(t *testing.T) {
+	for _, outcome := range []string{"aborted", "unrelated_failure", "inconclusive", "evidence_failure"} {
+		res := baseResult(config{}, "offline-backlog-recovery")
+		res.Outcome = outcome
+		finalizeRecoveryResult(&res, []string{"level=WARN msg=incident"})
+		if res.Outcome != outcome || res.Pass {
+			t.Fatalf("%+v", res)
+		}
 	}
 }

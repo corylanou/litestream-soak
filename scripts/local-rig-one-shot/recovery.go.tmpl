@@ -119,18 +119,7 @@ func runOfflineBacklog(ctx context.Context, cfg config) (res result, runErr erro
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.MultiWriter(&logs, logFile), &slog.HandlerOptions{Level: slog.LevelDebug})))
 	defer func() {
 		slog.SetDefault(previousLogger)
-		res.Logs = logs.Lines()
-		logIncidents := []string{}
-		for _, line := range res.Logs {
-			if strings.Contains(line, "level=WARN") || strings.Contains(line, "level=ERROR") {
-				logIncidents = append(logIncidents, line)
-			}
-		}
-		res.Stats["log_incidents"] = logIncidents
-		if len(logIncidents) > 0 && res.Outcome == "scenario_success" {
-			res.Pass = false
-			res.Outcome = "recovered_with_incidents"
-		}
+		finalizeRecoveryResult(&res, logs.Lines())
 		if runErr != nil {
 			res.Error = runErr.Error()
 			res.Pass = false
@@ -406,7 +395,7 @@ func runOfflineBacklog(ctx context.Context, cfg config) (res result, runErr erro
 	if o.PinHoldSeconds > 0 && !res.Stats["pinned_reader_engaged"].(bool) {
 		engaged = false
 	}
-	res.Outcome = rig.BacklogVerdict(engaged, true, drain.DrainedWhileWriting(), incidents+requestSummary.UnexpectedHTTPFailures+requestSummary.TransportFailures)
+	res.Outcome = rig.BacklogVerdict(engaged, true, drain.DrainedWhileWriting(), incidents+requestSummary.UnexpectedHTTPFailures+requestSummary.TransportFailures+requestSummary.SDKRetries+requestSummary.InjectedFailures)
 	res.Pass = res.Outcome == "scenario_success"
 	return res, nil
 }
@@ -444,4 +433,23 @@ func recoveryLimits(workDir string) map[string]string {
 		workDir = resolved
 	}
 	return rig.RecoveryLimits(workDir, string(cpu), string(memory), string(mounts))
+}
+
+func finalizeRecoveryResult(res *result, logs []string) {
+	res.Logs = logs
+	logIncidents := []string{}
+	for _, line := range logs {
+		if strings.Contains(line, "level=WARN") || strings.Contains(line, "level=ERROR") {
+			logIncidents = append(logIncidents, line)
+		}
+	}
+	res.Stats["log_incidents"] = logIncidents
+	requests, _ := res.Stats["requests"].([]rig.RecoveryRequest)
+	summary := rig.SummarizeRecoveryRequests(requests)
+	res.Stats["request_summary"] = summary
+	incidents := len(logIncidents) + summary.SDKRetries + summary.InjectedFailures + summary.UnexpectedHTTPFailures + summary.TransportFailures
+	if incidents > 0 && res.Outcome == "scenario_success" {
+		res.Pass = false
+		res.Outcome = "recovered_with_incidents"
+	}
 }

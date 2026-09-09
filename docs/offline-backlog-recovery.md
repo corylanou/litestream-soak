@@ -95,9 +95,11 @@ prefix oracle from #215/#204.
 A success requires fault engagement, pinned-reader engagement when enabled,
 observed backlog, drain under continuing writes, and valid restored data.
 `inconclusive` means required exposure or drain was absent. Operation failures,
-unexpected HTTP failures, or warning/error logs prevent a clean success, even
-if data subsequently recovers (`recovered_with_incidents`). Expected injected
-HTTP failures remain separately visible. External cancellation is `aborted`.
+unexpected HTTP failures, SDK retries, injected HTTP failures, or warning/error
+logs prevent a clean success, even if data subsequently recovers
+(`recovered_with_incidents`). Expected injected HTTP failures retain their
+separate category but do not constitute clean no-failure evidence. Deferred
+finalization rechecks requests after shutdown and includes WARN/ERROR logs. External cancellation is `aborted`.
 
 Incremental request, operation, and sample journals and Litestream logs are
 written outside the constrained tmpfs in container mode. The launcher also
