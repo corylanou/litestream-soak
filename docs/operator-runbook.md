@@ -934,9 +934,18 @@ the latest 64 events). Each artifact is limited to 8 MiB. Local retention
 keeps 96 non-baseline artifacts and four baseline artifacts with their JSON
 manifests. Pending S3 uploads are excluded from pruning. At 256 directory
 entries, new capture stops with an explicit unavailable log until evidence is
-retrieved and space is freed. Uploads and retry batches each have a
-three-second deadline; pending uploads are retried by a separate loop after
-capture and every 30 seconds, including after restart. There is no automatic
+retrieved and space is freed. Each upload command has a 15-second deadline.
+A retry pass attempts at most four records, each with sequential artifact and
+manifest commands (at most 120 seconds of command time plus bounded process
+cleanup). The separate uploader selects the least-recently-attempted pending
+records first, using persisted `upload_last_attempt_at` (capture time for new records).
+Historical failure counts do not penalize scheduling, and fresh arrivals do not
+continually jump ahead of waiting retries. It wakes after capture and every
+30 seconds, including after restart.
+Successful artifact delivery is persisted as `artifact_uploaded=true`; a later
+manifest retry resumes without resending the artifact. Shutdown cancellation
+still applies to every command. Final capture and delivery share ten seconds,
+with one second reserved for upload process cleanup. There is no automatic
 expiry of failed uploads. This bounds disk use without deleting unuploaded
 evidence. Capture itself is best effort; logs report failures and
 queue/storage limits rather than treating missing evidence as success.
@@ -947,7 +956,12 @@ succeed. A failed attempt stores `upload_error` separately from capture errors,
 with stderr limited to 4 KiB and configured credentials redacted. Successful
 artifact and manifest delivery clears that current error. The first failure
 and latest 15 failures remain in `upload_failures`, with UTC timestamps, attempt numbers, delivery
-stage, and sanitized causes. `upload_attempts` counts all attempts and
+stage, and sanitized causes. New failures also record `kind` as
+`deadline_exceeded`, `cancelled`, `subprocess_exit`, `provider_error` (an explicit
+S3 error diagnostic), or `upload_error`, plus `exit_code` when a subprocess
+exited. A killed subprocess is classified as a deadline only when its context
+actually expired; historical kills without that evidence remain unattributed.
+`upload_attempts` counts all attempts and
 `upload_failure_count` counts failures.
 When capacity is exhausted, the first cause remains, `upload_failures_dropped`
 counts omitted entries, and `upload_history_incomplete=true` explicitly marks

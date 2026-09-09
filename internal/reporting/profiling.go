@@ -16,10 +16,12 @@ type ProfilingEvidence struct {
 }
 
 type ProfileUploadFailureEvidence struct {
-	At      time.Time `json:"at"`
-	Attempt uint64    `json:"attempt"`
-	Stage   string    `json:"stage"`
-	Error   string    `json:"error"`
+	At       time.Time `json:"at"`
+	Attempt  uint64    `json:"attempt"`
+	Stage    string    `json:"stage"`
+	Kind     string    `json:"kind,omitempty"`
+	ExitCode *int      `json:"exit_code,omitempty"`
+	Error    string    `json:"error"`
 }
 
 type ProfileRecordEvidence struct {
@@ -34,6 +36,7 @@ type ProfileRecordEvidence struct {
 	CapturedAt              time.Time                      `json:"captured_at"`
 	Upload                  string                         `json:"upload"`
 	UploadError             string                         `json:"upload_error,omitempty"`
+	UploadLastAttemptAt     time.Time                      `json:"upload_last_attempt_at,omitempty"`
 	UploadAttempts          uint64                         `json:"upload_attempts"`
 	UploadFailureCount      uint64                         `json:"upload_failure_count"`
 	UploadFailuresDropped   uint64                         `json:"upload_failures_dropped"`
