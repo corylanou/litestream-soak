@@ -137,11 +137,15 @@ func (c *pprofCapturer) newRecord(label, kind, artifact string) *profileRecord {
 }
 
 func (c *pprofCapturer) saveRecord(ctx context.Context, filename string, record *profileRecord) {
+	if c.onRecord != nil {
+		c.onRecord(record)
+	}
 	body, err := json.Marshal(record)
 	if err == nil {
 		err = writeProfileJSON(filename, body)
 	}
 	if err != nil {
+		c.publishProfileStatus(record.Phase, "metadata-write-failed: "+err.Error())
 		slog.Warn("Persist pprof metadata failed", "error", err)
 		return
 	}
@@ -277,10 +281,12 @@ type profileStatus struct {
 }
 
 func (c *pprofCapturer) recordStatus(phase, reason string) {
+	c.publishProfileStatus(phase, reason)
 	c.statusMu.Lock()
 	defer c.statusMu.Unlock()
 	dir := filepath.Join(c.cfg.DataDir, "profiles")
 	if err := os.MkdirAll(dir, 0700); err != nil {
+		c.publishProfileStatus(phase, "status-write-failed: "+err.Error())
 		slog.Warn("Persist profile status", "error", err)
 		return
 	}
@@ -304,6 +310,7 @@ func (c *pprofCapturer) recordStatus(phase, reason string) {
 		err = writeProfileJSON(filename, body)
 	}
 	if err != nil {
+		c.publishProfileStatus(phase, "status-write-failed: "+err.Error())
 		slog.Warn("Persist profile status", "error", err)
 	}
 	slog.Info("Profile capture status", "phase", phase, "reason", reason)

@@ -564,8 +564,8 @@ func TestBuildLatestDeploymentComparison(t *testing.T) {
 	if comparison == nil {
 		t.Fatal("comparison = nil, want non-nil")
 	}
-	if comparison.Verdict != "mixed" {
-		t.Fatalf("Verdict = %q, want mixed", comparison.Verdict)
+	if comparison.Verdict != "worse" {
+		t.Fatalf("Verdict = %q, want worse", comparison.Verdict)
 	}
 	if comparison.PassDelta != 0 {
 		t.Fatalf("PassDelta = %d, want 0", comparison.PassDelta)
@@ -846,8 +846,8 @@ func TestBuildRequestedDeploymentComparisonCrossSource(t *testing.T) {
 	if comparison.BaseSource != "main" || comparison.HeadSource != "pr-1228" {
 		t.Fatalf("sources = %q/%q, want main/pr-1228", comparison.BaseSource, comparison.HeadSource)
 	}
-	if comparison.Verdict != "better" {
-		t.Fatalf("Verdict = %q, want better", comparison.Verdict)
+	if comparison.Verdict != "insufficient_data" {
+		t.Fatalf("Verdict = %q, want insufficient_data", comparison.Verdict)
 	}
 	if comparison.PassDelta != 1 {
 		t.Fatalf("PassDelta = %d, want 1", comparison.PassDelta)

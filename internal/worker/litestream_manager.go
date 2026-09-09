@@ -392,6 +392,7 @@ func (m *litestreamManager) startLitestream(ctx context.Context) error {
 
 	go func(cmd *exec.Cmd) {
 		err := cmd.Wait()
+		err = errors.Join(err, m.litestreamLog.FlushPending())
 		m.litestreamMu.Lock()
 		m.litestreamErr = err
 		m.litestreamExit = processExitSnapshot("litestream", time.Now().UTC(), err)

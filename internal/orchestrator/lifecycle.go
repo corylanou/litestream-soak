@@ -721,6 +721,20 @@ func successTeardownCandidate(db *model.DB, deployment model.Deployment, policy 
 		return successTeardownEvaluation{}, false, nil
 	}
 
+	evidence, err := buildRunReliability(db, deployment, &now)
+	if err != nil {
+		return successTeardownEvaluation{}, false, err
+	}
+	if len(evidence) == 0 {
+		return successTeardownEvaluation{}, false, nil
+	}
+	for i := range evidence {
+		evaluateRunEligibility(&evidence[i], deployment.StartedAt, &now, time.Hour, policy.Threshold)
+		if !evidence[i].Eligible {
+			return successTeardownEvaluation{}, false, nil
+		}
+	}
+
 	rollout, err := buildDeploymentRollout(db, deployment)
 	if err != nil {
 		return successTeardownEvaluation{}, false, err

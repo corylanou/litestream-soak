@@ -399,6 +399,28 @@
             </div>
           </div>
         </div>
+        <h3>Complete-run reliability</h3>
+        <p>Current health can recover while earlier incidents remain. Clean-soak eligibility requires measured coverage, workload progress, and maintenance exposure. Regional and many-database profiles remain visible here.</p>
+        {{range .ReleaseComparison.Head.Reliability}}
+        <details class="section-details">
+          <summary>{{.Profile}} / {{.Region}} — {{.WorkerID}}</summary>
+          <div class="details-body">
+            <p>Current health: {{.CurrentHealth}} · Unexpected incidents: {{.UnexpectedFailures}} · Expected injections: {{.ExpectedInjections}}</p>
+            <p>Completed verifications: {{.VerificationCount}} · Measured span: {{printf "%.0f" .VerifiedSpanSeconds}}s · Largest gap: {{printf "%.0f" .MaxVerificationGapSeconds}}s · Workload progress: {{.WorkloadProgress}} transactions · Maintenance observations: {{.MaintenanceObservations}}</p>
+            <p>Workload attempts: {{.WorkloadAttempts}} · Mutations: {{.WorkloadMutations}} · Errors: {{.WorkloadErrors}} (including {{.WorkloadBusy}} busy)</p>
+            <p>Profiling detection: {{.ProfileCapability}}</p>
+            {{if .ProfileRecords}}<ul>{{range .ProfileRecords}}<li>{{.Artifact}}: capture {{.Status}}, delivery {{.Upload}}, retained upload failures {{.UploadFailureCount}}{{if .Sampling}}; sampling: {{.Sampling}}{{end}}</li>{{end}}</ul>{{end}}
+            {{if .DetectionLimitations}}<ul>{{range .DetectionLimitations}}<li>{{.}}</li>{{end}}</ul>{{end}}
+            <p>Unattributed observations: {{.UnattributedObservations}} · Pending observations: {{.PendingObservations}} · Incomplete observations: {{.IncompleteObservations}} · Legacy release scoring: {{.ReleaseScoringReason}}</p>
+            {{if .Eligible}}<p>Eligible for a clean soak.</p>{{else}}<p>Not eligible for a clean soak:</p><ul>{{range .EligibilityReasons}}<li>{{.}}</li>{{end}}</ul>{{end}}
+            {{if .Incidents}}<ul>{{range .Incidents}}<li>{{formatTime .At}} · {{.Kind}} · {{.Classification}}{{if not .Attributed}} · attribution unproven{{end}}: {{.Message}}</li>{{end}}</ul>{{end}}
+          </div>
+        </details>
+        {{else}}<p>Complete-run evidence is unavailable; coverage is unknown.</p>{{end}}
+        {{if .ReleaseComparison.ReliabilityFindings}}
+        <h3>Reliability findings</h3>
+        <ul>{{range .ReleaseComparison.ReliabilityFindings}}<li>{{.Profile}} / {{.Region}}: {{.Classification}} (baseline incidents {{.BaseFailures}}, candidate incidents {{.HeadFailures}})</li>{{end}}</ul>
+        {{end}}
         {{if .ReleaseComparison.RegressedWorkers}}
         <p style="margin-top:10px;"><strong>Regressed:</strong>
           {{range $index, $worker := .ReleaseComparison.RegressedWorkers}}{{if $index}}, {{end}}<a href="/ui/workers/{{pathEscape $worker.WorkerID}}">{{$worker.Name}}</a>{{end}}

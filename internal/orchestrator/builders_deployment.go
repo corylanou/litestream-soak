@@ -203,6 +203,7 @@ func finalizeDeploymentComparison(comparison *DeploymentComparisonResponse, head
 		return
 	}
 
+	comparison.ReliabilityFindings = compareRunReliability(comparison.Base.Reliability, comparison.Head.Reliability)
 	baseScorecard := *comparison.Base
 	headScorecard := comparison.Head
 
@@ -277,6 +278,7 @@ func finalizeDeploymentComparison(comparison *DeploymentComparisonResponse, head
 		comparison.AwaitingDelta = 0
 	}
 	comparison.Summary = summarizeDeploymentComparison(*comparison)
+	applyReliabilityVerdict(comparison)
 }
 
 func comparisonOutcomePassed(outcome DeploymentWorkerOutcome) bool {
@@ -328,7 +330,8 @@ func buildDeploymentScorecard(db *model.DB, deployment model.Deployment, windowE
 	}
 
 	finalizeDeploymentScorecard(&scorecard, failureCounts)
-	return scorecard, nil
+	scorecard.Reliability, err = buildRunReliability(db, deployment, windowEnd)
+	return scorecard, err
 }
 
 func deploymentScorecardSource(deployment model.Deployment) string {

@@ -165,6 +165,7 @@ type SourceTeardownResponse struct {
 }
 
 type DeploymentScorecard struct {
+	Reliability             []WorkerRunEvidence       `json:"reliability"`
 	Deployment              model.Deployment          `json:"deployment"`
 	WindowStart             time.Time                 `json:"window_start"`
 	WindowEnd               *time.Time                `json:"window_end,omitempty"`
@@ -183,20 +184,21 @@ type DeploymentScorecard struct {
 }
 
 type DeploymentComparisonResponse struct {
-	BaseSource       string                    `json:"base_source"`
-	HeadSource       string                    `json:"head_source"`
-	ComparisonKind   string                    `json:"comparison_kind,omitempty"`
-	Base             *DeploymentScorecard      `json:"base,omitempty"`
-	Head             DeploymentScorecard       `json:"head"`
-	Verdict          string                    `json:"verdict"`
-	Summary          string                    `json:"summary"`
-	PassDelta        int                       `json:"pass_delta"`
-	FailDelta        int                       `json:"fail_delta"`
-	AwaitingDelta    int                       `json:"awaiting_delta"`
-	ImprovedWorkers  []DeploymentWorkerOutcome `json:"improved_workers,omitempty"`
-	RegressedWorkers []DeploymentWorkerOutcome `json:"regressed_workers,omitempty"`
-	NewFailures      []DeploymentFailureCount  `json:"new_failures,omitempty"`
-	ResolvedFailures []DeploymentFailureCount  `json:"resolved_failures,omitempty"`
+	ReliabilityFindings []ReliabilityFinding      `json:"reliability_findings"`
+	BaseSource          string                    `json:"base_source"`
+	HeadSource          string                    `json:"head_source"`
+	ComparisonKind      string                    `json:"comparison_kind,omitempty"`
+	Base                *DeploymentScorecard      `json:"base,omitempty"`
+	Head                DeploymentScorecard       `json:"head"`
+	Verdict             string                    `json:"verdict"`
+	Summary             string                    `json:"summary"`
+	PassDelta           int                       `json:"pass_delta"`
+	FailDelta           int                       `json:"fail_delta"`
+	AwaitingDelta       int                       `json:"awaiting_delta"`
+	ImprovedWorkers     []DeploymentWorkerOutcome `json:"improved_workers,omitempty"`
+	RegressedWorkers    []DeploymentWorkerOutcome `json:"regressed_workers,omitempty"`
+	NewFailures         []DeploymentFailureCount  `json:"new_failures,omitempty"`
+	ResolvedFailures    []DeploymentFailureCount  `json:"resolved_failures,omitempty"`
 }
 
 type IncidentBundle struct {

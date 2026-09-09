@@ -28,6 +28,7 @@ type churnEvidence struct {
 
 func (r *Runner) currentSnapshot() runtimeSnapshot {
 	snapshot := r.statsPoller.currentSnapshot()
+	snapshot.ProfilingEvidence = r.profilingSnapshot()
 	if r.cfg.churnEnabled() {
 		r.churnEvidence.mu.Lock()
 		r.initializeChurnCounters()
@@ -68,18 +69,18 @@ func (r *Runner) recordChurnAttempt(_ context.Context, op string, n int64, d tim
 		WorkloadEvent:  reporting.WorkloadEvent{WorkloadEventID: fmt.Sprintf("%s:%d", counters.WorkloadCounterEpoch, counters.WorkloadAttemptsTotal), WorkloadMode: r.cfg.LoadMode, WorkloadOperation: op, WorkloadErrorKind: kind, WorkloadLatencySeconds: d.Seconds()},
 	}
 	r.churnEvidence.mu.Unlock()
-	err := r.persistChurnEvidence(event)
+	err := r.persistRunEvidence(event)
 	if err != nil {
 		return err
 	}
-	r.requestChurnFlush()
+	r.requestEvidenceFlush()
 	return nil
 }
 
-const churnOutboxMaxEvents = 1024
-const churnOutboxMaxBytes = 16 << 20
+const evidenceOutboxMaxEvents = 1024
+const evidenceOutboxMaxBytes = 16 << 20
 
-func (r *Runner) persistChurnEvidence(event reporting.WorkerEventPayload) error {
+func (r *Runner) persistRunEvidence(event reporting.WorkerEventPayload) error {
 	r.churnEvidence.persistMu.Lock()
 	defer r.churnEvidence.persistMu.Unlock()
 	dir := filepath.Join(r.cfg.DataDir, "churn-outbox")
@@ -104,8 +105,8 @@ func (r *Runner) persistChurnEvidence(event reporting.WorkerEventPayload) error 
 		}
 		used += info.Size()
 	}
-	if len(entries) >= churnOutboxMaxEvents || used+int64(len(body)) > churnOutboxMaxBytes {
-		return fmt.Errorf("churn evidence unavailable: outbox capacity exceeded (%d events, %d bytes)", len(entries), used)
+	if len(entries) >= evidenceOutboxMaxEvents || used+int64(len(body)) > evidenceOutboxMaxBytes {
+		return fmt.Errorf("run evidence unavailable: outbox capacity exceeded (%d events, %d bytes)", len(entries), used)
 	}
 	file, err := os.OpenFile(path+".tmp", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
@@ -120,10 +121,10 @@ func (r *Runner) persistChurnEvidence(event reporting.WorkerEventPayload) error 
 	if err := os.Rename(path+".tmp", path); err != nil {
 		return err
 	}
-	return syncChurnDirectory(dir)
+	return syncEvidenceDirectory(dir)
 }
 
-func syncChurnDirectory(path string) error {
+func syncEvidenceDirectory(path string) error {
 	dir, err := os.Open(path)
 	if err != nil {
 		return err
@@ -131,7 +132,7 @@ func syncChurnDirectory(path string) error {
 	return errors.Join(dir.Sync(), dir.Close())
 }
 
-func (r *Runner) flushChurnEvidence(ctx context.Context) error {
+func (r *Runner) flushRunEvidence(ctx context.Context) error {
 	if r.reporter == nil || !r.reporter.Enabled() {
 		return nil
 	}
@@ -167,7 +168,7 @@ func (r *Runner) flushChurnEvidence(ctx context.Context) error {
 		}
 		r.churnEvidence.persistMu.Lock()
 		removeErr := os.Remove(path)
-		syncErr := syncChurnDirectory(dir)
+		syncErr := syncEvidenceDirectory(dir)
 		r.churnEvidence.persistMu.Unlock()
 		if err := errors.Join(removeErr, syncErr); err != nil {
 			return err
@@ -176,7 +177,7 @@ func (r *Runner) flushChurnEvidence(ctx context.Context) error {
 	return nil
 }
 
-func (r *Runner) requestChurnFlush() {
+func (r *Runner) requestEvidenceFlush() {
 	r.churnEvidence.mu.Lock()
 	if r.churnEvidence.notify == nil {
 		r.churnEvidence.notify = make(chan struct{}, 1)
@@ -189,11 +190,11 @@ func (r *Runner) requestChurnFlush() {
 	}
 }
 
-func (r *Runner) startChurnUploader(ctx context.Context) func() {
+func (r *Runner) startEvidenceUploader(ctx context.Context) func() {
 	if r.reporter == nil || !r.reporter.Enabled() {
 		return func() {}
 	}
-	r.requestChurnFlush()
+	r.requestEvidenceFlush()
 	r.churnEvidence.mu.Lock()
 	notify := r.churnEvidence.notify
 	r.churnEvidence.mu.Unlock()
@@ -210,8 +211,8 @@ func (r *Runner) startChurnUploader(ctx context.Context) func() {
 			case <-notify:
 			case <-ticker.C:
 			}
-			if err := r.flushChurnEvidence(ctx); err != nil && ctx.Err() == nil {
-				slog.Warn("Churn evidence delivery pending", "error", err)
+			if err := r.flushRunEvidence(ctx); err != nil && ctx.Err() == nil {
+				slog.Warn("Run evidence delivery pending", "error", err)
 			}
 		}
 	}()
