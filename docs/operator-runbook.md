@@ -868,7 +868,10 @@ stage, and sanitized causes. `upload_attempts` counts all attempts and
 `upload_failure_count` counts failures.
 When capacity is exhausted, the first cause remains, `upload_failures_dropped`
 counts omitted entries, and `upload_history_incomplete=true` explicitly marks
-the partial history. Delivered manifests retain this history after recovery.
+the partial history. Legacy pending manifests without attempt counters are
+also marked incomplete: their earlier causes and counts were not recorded.
+Counters cover attempts observed by this uploader. Delivered manifests retain
+this history after recovery.
 Uploads use the configured credentials, ignoring inherited AWS credential overrides and user s3cmd config.
 The process deadline bounds CLI retries; `--max-retries` is not a supported
 s3cmd option. CI exercises the installed CLI with signed local S3 requests.

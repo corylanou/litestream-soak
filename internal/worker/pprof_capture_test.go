@@ -782,8 +782,8 @@ func TestPprofActualCLI(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.DataDir = t.TempDir()
 	cfg.ReplicaType = "s3"
-	cfg.S3Bucket, cfg.S3Path, cfg.S3Region = "bucket", "run", "us-east-1"
-	cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3SessionToken = "example-access", "example-secret", "example-token"
+	cfg.S3Bucket, cfg.S3Path, cfg.S3Region = "bucket", "run", testS3Region
+	cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3SessionToken = testS3AccessKey, testS3SecretKey, testS3SessionToken
 	var requests atomic.Int32
 	var denied atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -795,7 +795,12 @@ func TestPprofActualCLI(t *testing.T) {
 			t.Error("missing signed request or session token")
 		}
 		body, _ := io.ReadAll(r.Body)
-		if denied.Load() {
+		signed := r.Clone(r.Context())
+		signed.Header.Set("Authorization", strings.ReplaceAll(r.Header.Get("Authorization"), ",", ", "))
+		if string(body) != "profile evidence" {
+			t.Error("invalid profile payload")
+		}
+		if denied.Load() || !validS3SignatureForTest(signed) {
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = io.WriteString(w, "<Error><Code>AccessDenied</Code><Message>Denied by test</Message></Error>")
 			return
@@ -821,6 +826,11 @@ func TestPprofActualCLI(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "AccessDenied") {
 		t.Fatalf("missing actual CLI failure: %v", err)
 	}
+	denied.Store(false)
+	cfg.S3SecretKey = "incorrect-secret"
+	if err := newPprofCapturer(&cfg).upload(context.Background(), artifact, "sample.pprof"); err == nil {
+		t.Fatal("invalid signing secret was accepted")
+	}
 }
 
 func TestPprofUploadFailureDetails(t *testing.T) {
@@ -841,8 +851,14 @@ func TestPprofUploadFailureDetails(t *testing.T) {
 		t.Fatal(err)
 	}
 	filename := filepath.Join(profiles, "sample.pprof.json")
-	c.saveRecord(context.Background(), filename, &profileRecord{Upload: "pending", Status: "unavailable"})
+	if err := os.WriteFile(filename, []byte(`{"upload":"pending","status":"unavailable"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	c.retryPending(context.Background(), profiles)
+	initial, _ := os.ReadFile(filename)
+	if !strings.Contains(string(initial), `"upload_history_incomplete":true`) {
+		t.Fatal("legacy pending evidence incorrectly claims complete history")
+	}
 	if err := os.WriteFile(executable, []byte(strings.ReplaceAll(script, "InitialAccessDenied", "LaterAccessDenied")), 0700); err != nil {
 		t.Fatal(err)
 	}

@@ -187,6 +187,12 @@ func (c *pprofCapturer) retryPendingPhase(ctx context.Context, dir, phase string
 		if err != nil || json.Unmarshal(body, &record) != nil || record.Upload != "pending" || (phase != "" && record.Phase != phase) {
 			continue
 		}
+		var history struct {
+			Attempts *uint64 `json:"upload_attempts"`
+		}
+		if json.Unmarshal(body, &history) == nil && history.Attempts == nil {
+			record.UploadHistoryIncomplete = true
+		}
 		record.UploadAttempts++
 		if record.Status == "available" {
 			artifact := strings.TrimSuffix(filename, ".json")
