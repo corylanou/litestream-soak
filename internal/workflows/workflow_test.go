@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -285,4 +286,188 @@ func casePatternMatches(pattern, file string) bool {
 		}
 	}
 	return false
+}
+
+func TestDeployMainAffectedComponents(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		file    string
+		control bool
+		worker  bool
+	}{
+		{"internal/reporting/types.go", true, true},
+		{"internal/workload/config.go", true, true},
+		{"internal/s3util/delete.go", true, false},
+		{"internal/model/db.go", true, false},
+		{"internal/flyapi/client.go", true, false},
+		{"cmd/soakctl/main.go", true, false},
+		{"internal/orchestrator/ui/index.html", true, false},
+		{"cmd/soakworker/main.go", false, true},
+		{"internal/worker/runner.go", false, true},
+		{"internal/replay/engine.go", false, true},
+		{"datasets/example.csv", false, true},
+		{"Dockerfile.control", true, false},
+		{"Dockerfile.worker", false, true},
+		{"fly.control.toml", true, false},
+		{"fly.toml", false, true},
+		{"docker-entrypoint.sh", true, true},
+		{".dockerignore", true, true},
+		{"go.mod", true, true},
+		{"go.sum", true, true},
+		{".github/workflows/deploy-main.yml", true, true},
+		{"scripts/notify-deployment-ready.sh", false, true},
+		{"README.md", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.file, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			before := initDeployRepository(t, dir)
+			commitDeployFile(t, dir, tt.file)
+			runDeployDetection(t, dir, "push", before, "HEAD", tt.control, tt.worker)
+		})
+	}
+}
+
+func TestDeployMainRevisionRange(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		event   string
+		before  string
+		after   string
+		control bool
+		worker  bool
+	}{
+		{"multi-commit push", "push", "", "HEAD", true, true},
+		{"manual dispatch", "workflow_dispatch", "HEAD", "HEAD", true, true},
+		{"new branch", "push", strings.Repeat("0", 40), "HEAD", true, true},
+		{"unavailable before", "push", strings.Repeat("a", 40), "HEAD", true, true},
+		{"unavailable after", "push", "", strings.Repeat("a", 40), true, true},
+		{"empty diff", "push", "HEAD", "HEAD", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			before := initDeployRepository(t, dir)
+			commitDeployFile(t, dir, "cmd/soakctl/main.go")
+			commitDeployFile(t, dir, "cmd/soakworker/main.go")
+			commitDeployFile(t, dir, "README.md")
+			if tt.before != "" {
+				before = tt.before
+			}
+			runDeployDetection(t, dir, tt.event, before, tt.after, tt.control, tt.worker)
+		})
+	}
+}
+
+func initDeployRepository(t *testing.T, dir string) string {
+	t.Helper()
+	deployGit(t, dir, "init", "-q")
+	deployGit(t, dir, "-c", "user.name=Workflow Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-qm", "Initial")
+	return deployGit(t, dir, "rev-parse", "HEAD")
+}
+
+func commitDeployFile(t *testing.T, dir, file string) {
+	t.Helper()
+	path := filepath.Join(dir, file)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	deployGit(t, dir, "add", "--", file)
+	deployGit(t, dir, "-c", "user.name=Workflow Test", "-c", "user.email=test@example.com", "commit", "-qm", "Change")
+}
+
+func deployGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, output)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func runDeployDetection(t *testing.T, dir, event, before, after string, control, worker bool) {
+	t.Helper()
+	workflow := readWorkflow(t, "deploy-main.yml")
+	_, block, ok := strings.Cut(workflow, "      - id: detect\n")
+	if !ok {
+		t.Fatal("missing detection step")
+	}
+	_, block, ok = strings.Cut(block, "        run: |\n")
+	if !ok {
+		t.Fatal("missing detection script")
+	}
+	var lines []string
+	for _, line := range strings.Split(block, "\n") {
+		if line != "" && !strings.HasPrefix(line, "          ") {
+			break
+		}
+		lines = append(lines, strings.TrimPrefix(line, "          "))
+	}
+	script := strings.NewReplacer("${{ github.event_name }}", event, "${{ github.event.before }}", before, "${{ github.sha }}", after).Replace(strings.Join(lines, "\n"))
+	outputPath := filepath.Join(t.TempDir(), "outputs")
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GITHUB_OUTPUT="+outputPath, "EVENT_NAME="+event, "BEFORE_SHA="+before, "AFTER_SHA="+after)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("detect: %v\n%s", err, output)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "control_changed=" + strconv.FormatBool(control) + "\nworker_changed=" + strconv.FormatBool(worker) + "\n"
+	if string(data) != expected {
+		t.Fatalf("outputs = %q, want %q\n%s", data, expected, output)
+	}
+	if event == "push" && (before == strings.Repeat("a", 40) || after == strings.Repeat("a", 40)) && !strings.Contains(string(output), "::warning::") {
+		t.Fatalf("unavailable revision did not emit a warning: %s", output)
+	}
+}
+
+func TestDeployMainCheckoutIncludesPushBase(t *testing.T) {
+	t.Parallel()
+	workflow := readWorkflow(t, "deploy-main.yml")
+	changes, _, ok := strings.Cut(workflow, "  verify:\n")
+	if !ok || !strings.Contains(changes, "fetch-depth: 0") {
+		t.Fatal("change detection must fetch full history for multi-commit pushes")
+	}
+	for _, binding := range []string{
+		"EVENT_NAME: ${{ github.event_name }}",
+		"BEFORE_SHA: ${{ github.event.before }}",
+		"AFTER_SHA: ${{ github.sha }}",
+	} {
+		if !strings.Contains(changes, binding) {
+			t.Fatalf("missing detector input binding %q", binding)
+		}
+	}
+}
+
+func TestDeployMainRenamedAndDeletedInputs(t *testing.T) {
+	t.Parallel()
+	for _, operation := range []string{"rename", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			initDeployRepository(t, dir)
+			commitDeployFile(t, dir, "internal/reporting/types.go")
+			before := deployGit(t, dir, "rev-parse", "HEAD")
+			if operation == "rename" {
+				deployGit(t, dir, "mv", "internal/reporting/types.go", "archived.txt")
+			} else {
+				deployGit(t, dir, "rm", "internal/reporting/types.go")
+			}
+			deployGit(t, dir, "-c", "user.name=Workflow Test", "-c", "user.email=test@example.com", "commit", "-qm", "Remove input")
+			runDeployDetection(t, dir, "push", before, "HEAD", true, true)
+		})
+	}
 }

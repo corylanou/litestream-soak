@@ -26,33 +26,41 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - id: detect
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
           control_changed=false
           worker_changed=false
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ] || [ "${BEFORE_SHA}" = "0000000000000000000000000000000000000000" ]; then
+            control_changed=true
+            worker_changed=true
+          elif ! changed_files="$(git -c core.quotePath=false diff --no-renames --name-only "${BEFORE_SHA}" "${AFTER_SHA}" --)"; then
+            echo "::warning::Unable to determine changed paths; selecting both components for deployment."
             control_changed=true
             worker_changed=true
           else
             while IFS= read -r file; do
               case "$file" in
-                cmd/soakctl/*|internal/orchestrator/*|internal/model/*|internal/flyapi/*|fly.control.toml|Dockerfile.control|docker-entrypoint.sh|go.mod|go.sum)
+                cmd/soakctl/*|internal/orchestrator/*|internal/model/*|internal/flyapi/*|internal/reporting/*|internal/workload/*|internal/s3util/*|fly.control.toml|Dockerfile.control|docker-entrypoint.sh|.dockerignore|go.mod|go.sum|.github/workflows/deploy-main.yml)
                   control_changed=true
                   ;;
               esac
 
               case "$file" in
-                cmd/soakworker/*|internal/worker/*|internal/replay/*|internal/workload/*|internal/reporting/*|internal/model/*|internal/flyapi/*|fly.toml|Dockerfile.worker|docker-entrypoint.sh|datasets/*|go.mod|go.sum)
+                cmd/soakworker/*|internal/worker/*|internal/replay/*|internal/workload/*|internal/reporting/*|fly.toml|Dockerfile.worker|docker-entrypoint.sh|datasets/*|.dockerignore|go.mod|go.sum|scripts/notify-deployment-ready.sh|.github/workflows/deploy-main.yml)
                   worker_changed=true
                   ;;
               esac
-            done < <(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}")
+            done <<< "${changed_files}"
           fi
 
           echo "control_changed=${control_changed}" >> "${GITHUB_OUTPUT}"
