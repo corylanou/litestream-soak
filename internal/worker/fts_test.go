@@ -2,7 +2,9 @@ package worker
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -238,5 +240,30 @@ func TestFTSPhaseSearchResults(t *testing.T) {
 				t.Fatalf("step=%d term=%s count=%d want=%d", step, term, count, counts[i])
 			}
 		}
+	}
+}
+
+func TestFTSWriterReservesBeforeReading(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fts.db")
+	db, err := openFTS(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	other, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Close() }()
+	_, err = other.ExecContext(ctx, "UPDATE fts_progress SET step=step+1 WHERE id=1")
+	if err == nil || !strings.Contains(err.Error(), "locked") {
+		t.Fatalf("competing write=%v; FTS transaction must reserve writer before reading progress", err)
 	}
 }

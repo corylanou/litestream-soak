@@ -19,7 +19,10 @@ func openFTS(ctx context.Context, path string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, err
 	}
-	uri := url.URL{Scheme: "file", Path: path}
+	uri := url.URL{Scheme: "file", Path: path, RawQuery: url.Values{
+		"_txlock": {"immediate"},
+		"_pragma": {"busy_timeout(5000)", "wal_autocheckpoint(0)"},
+	}.Encode()}
 	db, err := sql.Open("sqlite", uri.String())
 	if err != nil {
 		return nil, err
