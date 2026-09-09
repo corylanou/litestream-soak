@@ -871,7 +871,32 @@ counts omitted entries, and `upload_history_incomplete=true` explicitly marks
 the partial history. Legacy pending manifests without attempt counters are
 also marked incomplete: their earlier causes and counts were not recorded.
 Counters cover attempts observed by this uploader. Delivered manifests retain
-this history after recovery.
+this history after recovery. An empty `upload_error` describes current delivery
+health only; it does not clear `upload_failure_count` or make incomplete legacy
+history clean. Read-only incident snapshots should retain these fields together
+with capture availability and run identity rather than reduce them to one pass
+flag. A manifest without earlier attempt counters cannot establish zero prior
+failures, even after successful delivery.
+
+The merged uploader and its local signed-request CI test do not establish live
+Fly-to-Tigris delivery. After deployment, independently retrieve the remote
+artifact and manifest, compare their identity and artifact digest with local
+evidence, and retain earlier delivery failures. Until that check is performed,
+report live remote delivery as unverified.
+
+On September 9, 2026, the coordinator verified delivery on deployed harness
+`8346a06905b3ea0f7134cb6c9507fc7ca920c9c4`, worker `worker-main-gharchive`,
+machine `e820910cd406d8`, run `d753b920-dd7a-45c0-ae1f-37b9f42a548a`.
+Remote GETs for startup CPU, baseline heap, allocs, goroutine and MemStats
+artifacts plus all five JSON manifests exited successfully and matched local
+bytes. The retained audit proof records SHA-256 for all ten objects.
+The goroutine manifest's first delivery attempt failed at
+`2026-09-09T17:55:32.022789126Z` with `signal: killed`; attempt two delivered it.
+Both local and remote manifests retained `upload_failure_count=1` and the
+original manifest-stage failure. This is verified delivery with a recovered
+incident, not a historically clean run or proof for every worker. Run reliability
+must retain this failure independently of the current uploaded status.
+
 Uploads use the configured credentials, ignoring inherited AWS credential overrides and user s3cmd config.
 The process deadline bounds CLI retries; `--max-retries` is not a supported
 s3cmd option. CI exercises the installed CLI with signed local S3 requests.
@@ -1061,8 +1086,9 @@ Related per-worker series on the control plane:
 
 For the tier comparison table, pull idle CPU
 (`rate(soak_control_worker_litestream_cpu_seconds_total[1h])`), goroutines,
-heap/stack in-use, allocation rate, and LIST/hour per profile, and divide by
-database count for per-DB scaling. Compare `many-dbs-500-dir` against
+heap/stack in-use and allocation rate per profile. Dividing aggregate values by
+database count gives an average, not per-database attribution. LIST/hour is
+unavailable for direct-to-Tigris baselines; do not substitute zero. Compare `many-dbs-500-dir` against
 `many-dbs-500-dir-lowfreq` for the reduced-frequency lever.
 
 ## Current Operator Mental Model
@@ -1116,3 +1142,373 @@ Useful follow-up docs:
 - a failure-signature catalog with examples
 - a Grafana panel guide with screenshots
 - a "known failure shapes" page that maps signature to likely subsystem
+
+
+## Scenario inventory
+
+This inventory describes configured behavior, not executed results. Default fleet
+reconciliation activates the 13 profiles below for `main` and supported `pr-N`
+sources. Explicit worker environment overrides can differ from fleet defaults;
+retain the effective configuration and hash with every result. A profile name or
+UI charter expresses intent and does not prove throughput, contention, fault
+engagement, or a clean historical run.
+
+Every default row uses the worker restore pipeline: quiesce load, sync, restore,
+validate integrity and the independent logical source snapshot. Record individual
+failed, aborted, pending, and passed cycles. A pass covers that snapshot only.
+All require compatible Litestream and independent workload binaries, SQLite,
+a usable replica, and storage. Fleet runs additionally require Fly and Tigris;
+local file-replica results do not establish provider behavior. Runtime, process,
+and profile measurements require the corresponding endpoints and OS support;
+missing/stale observations remain unavailable. The row-specific requirements and
+limits below supplement this shared contract.
+
+| Default profile | Configured trigger/work and actual evidence to inspect | Assertions and limitations beyond the shared restore check | Additional capabilities |
+| --- | --- | --- | --- |
+| `low-volume` | Constant synthetic target 10, one generator worker, 1 KiB payload; inspect completed work and errors. | Baseline restore correctness; low offered load does not isolate every platform or harness failure. | Synthetic generator. |
+| `high-volume` | Wave target 500, eight workers, 4 KiB payload; inspect actual writes, lag, WAL and resource samples. | No automatic proof of saturation or sustained 500 writes/s; 100 GB volume is capacity, not database size. | Synthetic wave load; multipart configuration. |
+| `burst-volume` | Burst target 1000, four workers, 2 KiB payload; inspect burst work and subsequent lag/WAL drain. | Sampled maxima can miss spikes; configured bursts do not prove a backlog formed or drained. | Synthetic burst load. |
+| `read-heavy` | Target 80, six workers, read ratio 0.95; inspect generator work/errors and restore results. | Read ratio is configuration; no application read-latency or stale-read oracle is implied. | Generator read support. |
+| `gharchive-replay` | Loop the configured GH Archive hour at speed 300; inspect attempted events, affected rows, no-ops, errors and schedule lag. | Insert replay is not a GitHub service workload; speed is timestamp scaling, not achieved throughput. | Download/decompress the configured archive. |
+| `gharchive-mixed` | Archive speed 120 plus wave target 50 with two synthetic workers; inspect both producers independently. | One producer succeeding cannot establish work by the other. | Archive and synthetic capabilities. |
+| `taxi-replay` | Loop bundled taxi CSV at speed 90; inspect committed replay work and lag. | Small fixture insert coverage, not a production taxi database or query benchmark. | Bundled taxi dataset. |
+| `taxi-mixed` | Taxi speed 60 plus wave target 40 with two synthetic workers; inspect both producers. | Concurrent timing and commit order are not reproducible from speed alone. | Taxi and synthetic capabilities. |
+| `orders-replay` | Loop bundled orders JSONL at speed 45; inspect committed events/errors. | Order-shaped inserts do not implement checkout, payments, or a full transactional application. | Bundled orders dataset. |
+| `low-vol-syd` | Low-volume configuration in Sydney; inspect actual lag and restore results. | Regional diagnostic; legacy-score exclusion does not exclude retained reliability. Distance alone is not measured network latency. | Fly Sydney placement. |
+| `high-vol-ams` | High-volume configuration in Amsterdam; inspect actual load, lag and resources. | Regional diagnostic; included in retained reliability; no cross-region throughput guarantee. | Fly Amsterdam placement. |
+| `overload-truncate0` | Constant target 600, eight workers, 2 KiB payload, zero truncate threshold; inspect WAL/backlog and completed work. | Restore check does not assert WAL boundedness or prove overload engaged. | Candidate accepts `truncate-page-n: 0`; adequate disk. |
+| `pinned-reader` | Constant target 200, four workers; companion transaction holds 4m with 45s pauses; inspect reader events and WAL/checkpoint observations. | Require actual reader engagement before attributing checkpoint effects; no query-latency guarantee. | Companion SQLite reader. |
+
+Many-database profiles are opt-in and excluded from the legacy release score;
+they participate in retained complete-run reliability. All seed a
+fixed set, rotate a 2% active subset, and use an in-process writer. Inspect
+committed work, pending database count/age, individual restore outcomes, and
+aggregate process/runtime samples. A successful batch is not full coverage;
+untouched and deferred databases remain obligations. These profiles do not
+exercise dynamic tenant creation/removal. Directory mode requires candidate
+directory discovery support; list mode requires explicit database configuration.
+Neither mode supplies native passive S3 LIST counts.
+
+| Opt-in profile | Activation | Actual workload and assertion | Specific limitation/capability |
+| --- | --- | --- | --- |
+| `many-dbs-100-list` | `SOAK_ENABLE_MANY_DB_FLEET=true` | 100 configured databases, two writer workers; rotating restore coverage. | Explicit list support; aggregate metrics cannot locate a per-DB leak. |
+| `many-dbs-100-dir` | Same base flag | 100 directory-discovered databases, two writer workers; rotating restore coverage. | Directory support; verify discovery rather than infer it from configuration. |
+| `many-dbs-500-list` | Base flag plus `SOAK_ENABLE_MANY_DB_500=true` | 500 listed databases, three writer workers; rotating restore coverage. | List support; incomplete batches remain pending. |
+| `many-dbs-500-dir` | Base flag plus 500 flag | 500 directory databases, three writer workers; default maintenance cadence. | Directory support; sampled resources are not exact peaks. |
+| `many-dbs-500-dir-lowfreq` | Base flag plus 500 flag | Same 500-directory workload with relaxed maintenance intervals. | Candidate interval support; compare matched completed work and age, not just profile averages. |
+| `many-dbs-1000-dir` | Base flag plus `SOAK_ENABLE_MANY_DB_1000=true` | 1000 directory databases, four writer workers; rotating restore coverage. | Directory support and sufficient resources; not a demonstrated maximum supported DB count. |
+
+Queue and cache are explicit `LOAD_MODE=queue` and `LOAD_MODE=cache` workloads,
+not default fleet entries. Both require the churn-capable worker, a dedicated
+SQLite database and compatible replica/restore binaries. See the
+[churn contract](churn/README.md) for complete configurations and execution.
+Queue measures affected rows and transaction attempts across enqueue, claim,
+retry, completion/receipt, expiration and deletion; its restored-state assertions
+include valid transitions and receipt consistency. Cache measures upserts and
+expiration sweeps and checks bounded keys and valid values/expiry ticks.
+Both use the shared logical oracle, retain busy/other failures, and report
+attempt latency excluding pacing. Logical TTL is not wall-clock expiry;
+conditional no-ops are not mutations, and concurrent commit order is not fixed
+by the seed. Bounded live rows do not bound physical disk or WAL size.
+
+### FTS maintenance
+
+`PROFILE=fts-maintenance` or `LOAD_MODE=fts` explicitly activates the worker's
+built-in FTS5 workload; it is absent from the default fleet. The versioned
+64-document corpus repeats eight committed phases: insert, update, delete,
+query, merge, update, query and optimize. `WRITE_RATE` targets phases per second,
+not rows; synthetic payload/read/worker settings do not alter the corpus.
+Committed progress resumes after restart. FTS cannot be combined with many-DB.
+
+Inspect committed operation counts separately from affected document rows,
+checked queries and actual maintenance changes. Match counts, phase duration and
+failures remain separate measurements. Verification pauses at a committed
+boundary and compares document rowids/values, visible FTS columns and recognized
+FTS5 shadow objects with the shared logical oracle. Independent document-table
+search checks cover terms, phrases, prefixes and absent tokens on both source
+and restore. Unknown virtual modules remain unsupported; shadow objects are
+compared rather than omitted. An independently rebuilt equivalent index can differ
+from the exact replicated state this oracle requires.
+
+Required capabilities are SQLite FTS5 in the worker and restore validator,
+compatible pinned replication/restore binaries and the FTS-aware logical oracle.
+Initialization or phase failure is retained and stops the workload. See the
+[FTS restore comparison](../README.md#opt-in-fts-restore-comparison) for immutable
+binary inputs and the explicit opt-in real test; absent binaries mean skipped.
+
+Litestream profiles bracket phase boundaries; the separate `worker_cpu` capture
+covers SQLite phase execution. These measure different processes and intervals.
+The coordinator-reviewed same-binary development calibration completed 16 restore
+boundaries and parsed 82 profile artifacts, but all 16 worker CPU profiles had
+zero samples. Parsing success therefore supplies no CPU-performance evidence.
+Earlier failed attempts remain retained. This calibration is not a demonstrated
+main-versus-candidate improvement or proof of remote profile delivery. Short
+phases, profiler conflicts, unavailable endpoints and upload failures must remain
+explicit in comparison evidence.
+
+### Deliberate fault rigs
+
+Invoke `bash scripts/local-rig-one-shot.sh <scenario> <immutable-sha> <runs>`
+only against disposable fixtures. These are opt-in local scenarios, not fleet
+activation requests. The runner builds the selected upstream source and requires
+Git, network/module access, Go and a C compiler. S3 scenarios use local MinIO via
+Docker Compose; constrained disk requires the runner's constrained filesystem.
+Record resolved SHA, compiler, fixture parameters, full logs, structured outcome,
+fault engagement, and every attempt. Local MinIO behavior does not establish
+Tigris behavior. Missing capabilities or unengaged fixtures are not passes.
+
+| Scenario/profile | Trigger and actual measured work | Oracle/assertions and limitations | Specific capability |
+| --- | --- | --- | --- |
+| `compaction-source-stream-drop` | Drop source GET streams during compaction; count GET/range GET exposure and inspect L2 coverage. | Expected error signature or resumed compaction depends on the tested branch; a boolean alone is not recovery proof. | S3 fault proxy and compactor API/range reads. |
+| `uploadpart-retry-quota` | Reset multipart requests; count injected failures and unique parts. | Checks retry-quota signature or expected fault/part counts; not full application restore equivalence. | Multipart upload and reset-capable proxy. |
+| `provider-http-408` | Inject one provider HTTP 408 during restore; retain request count and restore output. | Requires injection and restored fixture rows; not a general provider retry guarantee. | Compatible S3 restore and proxy. |
+| `provider-request-canceled` | Inject HTTP 408 with `RequestCanceled` on listing. | Requires one injected failure and restored fixture rows; timeout extensions are not SDK retry fixes. | S3 listing and proxy error-body support. |
+| `constrained-disk` | Fill constrained fixture; inspect disk-full signal and TXID progress before/after recovery. | Distinguish expected failure detection from recovered progress; do not infer recovery from process survival. | Actual constrained filesystem and disk-full metrics/logs. |
+| `l0-gap-heal` | Remove an interior fixture L0 above L1; inspect gap detection/re-upload and restored rows. | Requires engaged gap and complete fixture restore; opt-in destructive fixture operation, not a production repair procedure. | Isolated S3 prefix and retained local L0. |
+| `snapshot-compaction-overlap` | Gate snapshot stream during L1 work; compare sampled heap growth with sequential phases. | Enforces fixture memory budget and retains gate reason; growth/final heap captures are not exact peak profiles. | Upstream maintenance APIs, sufficient local/object storage; APFS cloning optimization on macOS. |
+| `restore-retention-race` | Concurrent writes, restores, compaction and retention; retain actual L0 opens/deletions during restore. | Requires exposed, logically valid restore; earlier failures block clean success. Sampled plans are not actual complete restore plans. | Maintenance logs, object-open observations and fixture prefix oracle. |
+
+Worker-only aliases `s3-flap` select the uploadpart fault configuration and
+`provider-408-requestcanceled` selects `provider-http-408`; the latter name must
+not be mistaken for the separate `provider-request-canceled` error-body fixture.
+Selecting a worker profile with `PROFILE` does not invoke the one-shot rig or
+establish its assertions. Keep the S3 observe proxy disabled for baseline runs.
+Calibration remains separate: retain repeated known-bad/base and known-fixed/head
+runs, including the #107 requirement of base 3/3 failures and head 3/3 passes.
+No successful unit test establishes that separation or authorizes Fly A/B.
+
+### Local lifecycle, schema and backlog scenarios
+
+These merged runners remain opt-in and do not add fleet workers. Their detailed
+guides contain invocation parameters, retained artifact formats and separate
+executed-development evidence. Require pinned binaries and a new isolated output
+directory; retain every failed attempt when repeating a scenario.
+
+| Scenario and trigger | Actual work and metrics | Oracle/assertions | Capabilities and limitations |
+| --- | --- | --- | --- |
+| [Fresh start](persistent-upgrades.md), `soakupgrade -mode fresh-start` | Each arm starts with its own binary and independent new state; fixed-count deterministic churn and pre/post restores. Retains binary/compiler identities and every check. | Integrity plus shared logical schema, application metadata and typed rows; supported rollback is separately checked. | Explicit binary digests and `ltx-v1` transition contract; local file replica only. Same-binary calibration is not version separation. |
+| [Persistent upgrade](persistent-upgrades.md), `soakupgrade -mode persistent-upgrade` | Age baseline through at least two snapshots, two compactions, positive retention deletion and committed updates/deletes; seal quiescent complete state and copy independently into both arms. | Validate before/after continuation and declared rollback against candidate-written history. Fixture incidents survive reuse; missing aging exposure is inconclusive. | Compatible pinned formats and declared rollback support; no provider object-copy/version-history or fleet migration evidence. Elapsed age alone is insufficient. |
+| [Schema and reclamation](schema-fixture.md), `schemafixture` with `-vacuum vacuum` or `incremental` | Growth, deletion, reuse, indexes, column/backfill, table rebuild, rollback and reclamation across ten paused boundaries. Measures operation/verification duration, pages/freelist, local bytes/headroom and S3 object bytes when selected. | TXID-pinned restore, shared logical oracle and application row/payload checks. Incidents prevent clean success. Low-headroom variant must engage actual constrained storage. | Compatible sync/TXID restore; optional S3/emulator credentials and isolated prefix. Boundary samples are not peaks or atomic bucket snapshots. Disk-full negative-control command success still describes a failed scenario. |
+| [Offline backlog](offline-backlog-recovery.md), one-shot `offline-backlog` | Idle, injected 503 outage, latency, 429 throttling and reconnect while writing; records request/operation journals, row lag, net drain, sampled storage/RSS and observed container limits. | Requires faults, optional pinned reader, backlog and drain under continuing writes, plus final prefix validation. Injected/provider failures, retries and warnings remain incidents after recovery. | S3 proxy and explicit emulator/provider classification; cgroups/mount evidence for actual limits. Effective writer concurrency is one. Final recovery after writers stop does not establish drain under load. |
+
+### Crash, historical restore and tenant lifecycle
+
+[The recovery runner](recovery-rig.md), `soakrecovery`, activates the following
+bounded local file-replica controls against an explicitly hashed binary and new
+fixture directory. Every attempt retains duration, errors, logs and exposure.
+The common oracle validates integrity, typed append-only transaction prefixes,
+and shared schema/application metadata. Schema remains constant in this fixture;
+historical rows are not required to equal the latest source rows.
+
+| Recovery control | Actual trigger/work and assertions | Capability and measurement limits |
+| --- | --- | --- |
+| Replicator crash/restart | Confirm child SIGKILL, commit while offline, validate available replica, restart and restore again. | Process interruption is not power loss. Report committed, restore-confirmed and unconfirmed row boundaries separately; row loss is not time-based RPO. |
+| Interrupted restore | Kill only after nonempty restore output, then validate recovery to a separate destination. | A restore finishing before the kill is unengaged; process termination without valid recovery is not success. |
+| Follow resume | Interrupt follow, reopen the same output and saved TXID sidecar, observe resume and validate a new commit. | Requires advertised follow flags and the selected pin's resume contract; unsupported checks remain unexecuted. |
+| Restore during maintenance | Restore while writes continue; require actual L0 opens, compaction and positive retention deletion during the restore process. | Subsequent oracle time does not count as exposure. Individual unexposed attempts remain observations; at least one valid exposed restore is required. |
+| Timestamp/retention | Restore a target before later commits, repeat after retention, and validate latest recovery separately. | Requires advertised timestamp support. Retained targets match their original prefix; expired targets require the pin's explicit unavailable error. Later excluded commits are not asynchronous loss. |
+| Local loss | Quarantine source, sidecars and cache, then recover from the remaining replica and compare with the retained oracle. | Generated fixture state only; no proof of provider durability, actual hardware loss or aged-format upgrade compatibility. |
+
+Earlier unexpected errors, warnings, retries and self-healing messages prevent a
+clean recovery verdict. Expected kills and expired-target errors remain visible.
+The shared `CompareLogicalSchemas` wrapper supplies schema/application-metadata
+comparison without row digests; the recovery prefix oracle still validates rows.
+This complements full `CompareLogicalDatabases` equality rather than weakening it.
+
+[The tenant fixture](tenant-lifecycle.md), `tenantfixture`, is separately opt-in
+with `-mode static` or `watch` and 2–1000 tenants. It seeds all but one tenant,
+restores initial state, creates the last tenant at runtime, writes ten hot-tenant
+rows and one per cold tenant, retires the hot generation, recreates it under a
+new name/prefix, then restarts and restores live and retained generations. Static
+mode requires non-discovery before restart; watch mode requires runtime discovery
+and removal. Every tenant restore uses the bounded logical oracle and exact
+generation identity. It requires the declared `directory-v1` configuration,
+watcher/list/sync/file-restore contract and a pinned candidate.
+
+Inspect per-tenant phase results, pending/attempted identities, oldest pending
+age, registry counts and retained process incidents. Linux read-only `/proc`
+frames provide RSS, CPU counters and FDs; unsupported platforms report that
+explicitly. Removal requires registry disappearance and, on Linux, no open source
+or sidecar descriptors. CPU counters reset on restart. Cleanup frames establish
+process exit, not a universal leak threshold. Writes/restores are serialized;
+this is neither same-filename/prefix reuse nor S3/provider coverage.
+
+A two-tenant smoke does not establish 100/500/1000 scale coverage. Preserve each
+tier's failures and partial outcomes independently. Cancellation leaves
+unscheduled identities pending; interrupted work is incomplete unless prior
+failures already make the run failed. Per-request/operation timeouts during an
+active run remain failures. Changing deadlines or retrying a tier creates a new
+experiment and cannot replace the original failed evidence. No clean full-scale
+claim follows from a later small smoke or successful cleanup.
+
+The shared `worker.CompareLogicalDatabases` entry point exposes the worker's
+bounded logical comparison to local rigs: schema, application metadata and typed
+row contents under the same recognized bookkeeping policy. It is an equality
+oracle, not a workload generator, fault-engagement detector or performance gate.
+Fixture-specific application and historical-prefix checks remain separate.
+
+## Evidence required for comparisons
+
+The [merged reliability contract](run-reliability.md) exposes `reliability` and
+`reliability_findings` alongside the legacy latest-result scorecard. All regions
+and profiles contribute retained evidence. Clean eligibility requires at least
+two attributed completed verifications, the configured measured span (24 hours
+in comparison reports), and no leading, internal or trailing gap over one hour.
+Active runs measure trailing gaps to the present. Real workload progress,
+positive-size snapshot and compaction completions, and retention with positive
+deletions are all required, along with current pass, complete history/attribution
+and no unexpected incident or incomplete observation. Configured intervals and
+zero-deletion retention are not maintenance exposure. Short local experiments
+cannot earn this long-soak eligibility merely by restoring correct data.
+
+Pending verification adds neither a completed check nor a failure and blocks
+current eligibility. Exact event identities deduplicate replay; per-epoch counter
+maxima retain progress/errors without inflating them. Recovered profile failures
+remain incidents after delivery and manifest pruning. Disabled sampling and CPU
+rate limits are neutral, including when they fill the recent status ring; lost
+adverse history remains incomplete. Comparison credit additionally requires
+matching workloads/profiles, equal completed-check counts and measured spans
+within one minute. Missing or ambiguous profile pairs remain inconclusive.
+
+The control plane journals received evidence independently of worker replacement
+and raw-history pruning. Its journals have no destructive retention policy, so
+monitor disk and query cost. The bounded worker outbox survives restart only on
+retained storage; persistence/capacity failures stop work, and destroyed or
+unobserved evidence cannot be reconstructed. Quiet logs cannot exclude unlogged
+SDK retries. These are observation limits, not permissions to assume a clean run.
+
+Treat current health and historical outcome separately. A later successful
+restore can show recovery while the original failure remains an incident.
+Recovered, aborted, pending, unsupported, and unexecuted checks must remain
+visible. Archive failures before replacing workers; never turn a failed attempt
+into a clean pass by retrying it or averaging it with faster runs.
+
+| Comparison | Required setup and evidence | What it cannot establish alone |
+| --- | --- | --- |
+| Fresh | Independently initialized baseline and candidate fixtures with fixed dataset, seed, offered work, replica settings and resources. | Upgrade compatibility with aged replicas. |
+| Persistent | Recorded aged source/replica state, isolated copies, age/churn history and before/after logical validation. Record fresh fallback or failed volume fork. | A fresh fallback cannot earn persistent-upgrade coverage. |
+| Recovery | Observed crash/fault/offline engagement, committed and confirmed-replicated boundaries, retained interrupted attempts and validated restored state. | Process restart alone does not prove recovery; final catch-up after stopping writes does not prove drain under continuing writes. |
+
+Pin baseline, release and candidate to immutable SHAs; record independent
+workload and validator identity, binary digest/compiler, effective configuration,
+run/machine/deployment identity, source age, region, provider and resource limits.
+Match completed work as well as offered rate. Keep favorable, representative and
+saturated load conditions separate; include no-Litestream controls when measuring
+replication overhead, repeat runs and vary order to expose warm-cache/order bias.
+Report spread and missing observations rather than a single favorable delta.
+
+Metric collection must be read-only. A sync/checkpoint request changes the
+experiment even when it does not wait; retain any such earlier run as an
+observer-intervention result. If the selected pin lacks read-only transaction-lag
+observations, report lag unavailable rather than force sync or infer zero lag.
+S3 transferred upload/download bytes and retained file-replica bytes describe
+different quantities and must not share a comparable storage-size label.
+
+Assess correctness, incidents, recovery, latency, throughput, lag, CPU, memory,
+allocation, disk/WAL/backlog, file descriptors and provider requests separately.
+An improvement in one dimension never cancels a regression in another. Unknown
+capability is not zero cost. Compare CPU intervals and allocation rates with
+matched durations/work; distinguish RSS, live heap, allocation and sampled
+maxima. Per-process totals divided by database count are averages. Pprof captures
+require matching binaries and phase; availability, parse validity and successful
+remote delivery are separate checks. Block/mutex endpoints do not prove sampling
+was enabled. Profile collection itself can perturb resource measurements.
+
+### Controlled local comparison runner
+
+Use [soakcompare](reproducible-comparisons.md) for explicit paired local
+experiments; deployment scorecards remain observational. Pin main, baseline,
+release or candidate refs once, record the clean harness/compiler and binary
+digests, inspect an immutable fixture, and execute the pinned plan with a new
+experiment ID. The runner performs `16 × repeats` executions: main/main
+calibration and baseline/candidate comparison, both arms, and four controls.
+Pair order alternates; each arm gets isolated fresh state and the same operation
+budget. It never activates a fleet.
+
+| Comparison control | Actual work | Assertions and limits |
+| --- | --- | --- |
+| Favorable | One committed 128-byte insert per operation, with 1ms pacing. | Shared logical plus independent expected-operation/fixture validation; favorable is a named control, not a universal best case. |
+| Representative | One committed 1,024-byte insert per operation, with 1ms pacing. | Same correctness checks; does not represent every production workload. |
+| Saturation pressure | Unpaced single-writer 16,384-byte inserts. | Same correctness checks; saturation must be observed rather than inferred from the name. |
+| No Litestream | Paced 1,024-byte inserts without a replica process. | Validate source rows; candidate allocation, FD, lag, restore and object-request metrics are unavailable. |
+
+File or S3 replication, bounded final sync, shutdown and restore run against the
+selected real binary. Compatible CLI/configuration and required endpoints must
+be observed; unsupported execution is retained as failure. Linux FD observations
+require `/proc`; allocation requires candidate pprof TotalAlloc, and transaction
+lag requires read-only source/replica TXIDs. The exercised 4ed7 pin exposes local
+TXID and last-sync time but no replica TXID, so transaction lag is unavailable;
+replica sync age is a separate metric. S3 request and transfer counts include
+observer overhead, retries and restores; retained S3 size is unavailable without
+inventory. The detailed guide defines CPU, RSS, allocation, latency and disk
+measurement scopes; none is interchangeable with another.
+
+Reports retain paired deltas, Student-t 95% intervals and a main/main noise floor.
+Missing pairs/capabilities and noisy intervals prevent directional performance
+claims. Host contention, temporal dependence and multiple comparisons limit
+inference. `no_adverse_observed` means no adverse evidence in completed scheduled
+runs, not a clean-soak pass. A single final verification has zero measured span;
+local artifacts do not establish continuous history, fleet eligibility or durable
+fleet-journal delivery. Preserve all failures and partial executions. Earlier
+collector tests with placeholder identities or synthetic fixture age are not
+clean provenance/aging evidence; mutating sync-probe runs remain separately
+labeled observer-intervention evidence.
+
+### Unresolved measured incident
+
+[Issue #255](https://github.com/corylanou/litestream-soak/issues/255) tracks a
+retained level-9 snapshot failure in the clean comparison CLI campaign: all 32
+executions restored correct data, but one baseline saturation execution logged
+`write snapshot ltx: read database page 306: invalid argument`. The campaign's
+overall verdict is `adverse` and performance is `inconclusive`.
+Both arms used Litestream `4ed7a308f6271ebfd2b0a6e4b70b03011a37e4a3`; the
+clean Go 1.25.13 harness was `211975ccffcd5512d64c2df5307df750f77454da` on
+macOS arm64 with a local file replica. This same-binary run demonstrates neither
+candidate improvement nor a root cause or fix. A similar error during tenant
+calibration is a related observation, not proof of a common cause. Preserve the
+original report and per-execution artifacts; later correct restores or quiet
+repeats cannot replace the failed evidence. Investigation remains separate from
+these operating procedures.
+
+[Issue #257](https://github.com/corylanou/litestream-soak/issues/257) separately
+tracks control-plane startup and scorecard delays observed after the reliability
+deployment. A rollout request completed in 0.51 seconds while comparison requests
+timed out at 20 and 30 seconds; an intervening comparison took 5.08 seconds.
+These are different endpoints and retained attempts, not a clean latency result.
+The exact contribution of startup migration, I/O, decoding and contention remains
+unestablished. Follow-up harness remediation and live validation are separate
+from the Litestream snapshot investigation in #255.
+
+## Validation and deployment evidence checklist
+
+For a local change, run these from the checkout and retain exit status/output:
+
+```sh
+GOTOOLCHAIN=go1.25.13 go build ./...
+GOTOOLCHAIN=go1.25.13 go test ./...
+GOTOOLCHAIN=go1.25.13 go test -race ./...
+GOTOOLCHAIN=go1.25.13 golangci-lint run
+GOTOOLCHAIN=go1.25.13 govulncheck ./...
+bash scripts/test-compatibility.sh
+```
+
+Ordinary tests can skip real-binary scenarios when required binaries are absent;
+record that as unexecuted. Changed-source coverage measures changed source files;
+documentation-only diffs have no changed-source percentage. The compatibility
+runner retains identities and artifacts and exercises real replication, restore,
+negative data controls and parseable profiles. It does not execute long soaks,
+expensive fault calibration, S3 provider comparisons, or live deployment checks.
+
+Before integration, require all five PR checks: test, lint, compatibility and
+both image checks. After an authorized deployment, the coordinator must verify
+actual control/worker images and pinned identities, Fly health, fleet rollout
+convergence, fresh attributed verification and historical incidents. A successful
+notification only accepts asynchronous rollout work. A health endpoint proves
+neither restored data correctness nor historical cleanliness.
+
+Verify local profile manifests and parse artifacts, then independently verify
+remote artifact and manifest delivery. Preserve upload failures after recovery;
+retain the volume if evidence remains pending. Dashboard JSON in this repository
+does not prove a live Grafana import: verify the intended host/organization,
+datasource, panel queries and displayed identities. Never publish credentials,
+environment dumps or unsanitized artifact bundles as documentation evidence.
