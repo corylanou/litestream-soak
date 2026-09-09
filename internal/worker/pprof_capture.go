@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,11 +24,18 @@ const (
 )
 
 type pprofCapturer struct {
-	cfg *Config
+	cfg          *Config
+	gate         chan struct{}
+	statusMu     sync.Mutex
+	uploadWake   chan struct{}
+	events       chan string
+	identityOnce sync.Once
+	binaries     map[string]profileBinary
+	lastCPU      time.Time
 }
 
 func newPprofCapturer(cfg *Config) *pprofCapturer {
-	return &pprofCapturer{cfg: cfg}
+	return &pprofCapturer{cfg: cfg, events: make(chan string, 16), gate: make(chan struct{}, 1), uploadWake: make(chan struct{}, 1)}
 }
 
 // Run captures Litestream pprof profiles for every worker profile (the
@@ -38,86 +46,181 @@ func (c *pprofCapturer) Run(ctx context.Context) {
 		return
 	}
 
+	uploadDone := make(chan struct{})
+	go func() { defer close(uploadDone); c.runUploads(ctx) }()
+	defer func() { <-uploadDone }()
+	defer func() {
+		c.recordStatus("collector", "cancelled")
+		for {
+			select {
+			case label := <-c.events:
+				c.recordStatus(label, "queue-cancelled")
+			default:
+				return
+			}
+		}
+	}()
+	ready := time.NewTimer(5 * time.Second)
+	defer ready.Stop()
+	poll := time.NewTicker(100 * time.Millisecond)
+	defer poll.Stop()
+	waiting := true
+	for waiting {
+		if _, err := os.Stat(c.cfg.SocketPath); err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ready.C:
+			waiting = false
+		case <-poll.C:
+		}
+	}
 	c.captureSet(ctx, "baseline")
-
 	hourly := time.NewTicker(time.Hour)
 	defer hourly.Stop()
-	cpu := time.NewTicker(time.Hour)
-	defer cpu.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case label := <-c.events:
+			c.captureSet(ctx, label)
 		case <-hourly.C:
 			c.captureSet(ctx, "hourly")
-		case <-cpu.C:
-			c.captureEndpoint(ctx, "cpu", "profile", "profile?seconds=90", 100*time.Second)
 		}
 	}
 }
 
+func (c *pprofCapturer) Trigger(label string) {
+	if c == nil || !c.cfg.PprofCaptureEnabled {
+		return
+	}
+	select {
+	case c.events <- label:
+	default:
+		c.recordStatus(label, "queue-full")
+	}
+}
+
 func (c *pprofCapturer) captureSet(ctx context.Context, label string) {
-	c.captureEndpoint(ctx, label, "heap", "heap", 10*time.Second)
-	c.captureEndpoint(ctx, label, "allocs", "allocs", 10*time.Second)
-	c.captureEndpoint(ctx, label, "goroutine", "goroutine?debug=2", 10*time.Second)
-	// heap?debug=1 emits the text heap profile followed by a full
-	// runtime.MemStats dump (StackInuse/StackSys/HeapInuse/...), which the
-	// binary debug=0 heap profile does not carry. Captured for over-time
-	// stack/heap tracking.
-	c.captureEndpoint(ctx, label, "memstats", "heap?debug=1", 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	select {
+	case c.gate <- struct{}{}:
+	case <-ctx.Done():
+		c.recordStatus(label, "cancelled-waiting")
+		return
+	}
+	defer func() { <-c.gate }()
+	defer func() {
+		if ctx.Err() != nil {
+			c.recordStatus(label, "cancelled")
+		}
+		select {
+		case c.uploadWake <- struct{}{}:
+		default:
+		}
+	}()
+	if label != "final" {
+		cpuLabel := label
+		if label == "baseline" {
+			cpuLabel = "startup"
+		}
+		if time.Since(c.lastCPU) >= time.Minute {
+			c.lastCPU = time.Now()
+			c.captureEndpoint(ctx, cpuLabel, "cpu_profile", "profile?seconds=5", 7*time.Second)
+		} else {
+			c.recordStatus(label, "cpu-rate-limited")
+		}
+	} else {
+		c.recordStatus(label, "cpu-skipped-shutdown")
+	}
+	for _, item := range []struct{ name, endpoint string }{
+		{"heap", "heap"}, {"allocs", "allocs"}, {"goroutine", "goroutine?debug=2"}, {"memstats", "heap?debug=1"},
+	} {
+		if ctx.Err() != nil {
+			return
+		}
+		c.captureEndpoint(ctx, label, item.name, item.endpoint, 5*time.Second)
+	}
+	if label == "final" {
+		return
+	}
+
+	for _, name := range []string{"block", "mutex", "trace"} {
+		if ctx.Err() != nil {
+			return
+		}
+		if os.Getenv("SOAK_PPROF_"+strings.ToUpper(name)) != "true" {
+			c.recordStatus(label, name+"-disabled")
+			continue
+		}
+		endpoint := name
+		if name == "trace" {
+			endpoint += "?seconds=1"
+		}
+		c.captureEndpoint(ctx, label, name, endpoint, 3*time.Second)
+	}
 }
 
 func (c *pprofCapturer) captureEndpoint(ctx context.Context, label, name, endpoint string, timeout time.Duration) {
-	client := newIPCClient(c.cfg.SocketPath, timeout)
-	defer client.CloseIdleConnections()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/debug/pprof/"+endpoint, nil)
-	if err != nil {
-		slog.Warn("Create pprof request failed", "profile", name, "error", err)
-		return
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		slog.Warn("Pprof capture failed", "profile", name, "error", err)
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		slog.Warn("Pprof capture returned non-OK status", "profile", name, "status", resp.Status)
-		return
-	}
-
 	dir := filepath.Join(c.cfg.DataDir, "profiles")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		slog.Warn("Create pprof directory failed", "profile", name, "error", err)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		slog.Warn("Create pprof directory failed", "error", err)
+		return
+	}
+	if !c.captureSpaceAvailable(dir) {
+		c.recordStatus(label, "storage-full")
 		return
 	}
 	ext := "pprof"
 	if name == "goroutine" || name == "memstats" {
 		ext = "txt"
 	}
-	filename := fmt.Sprintf("%s_%s_%s.%s", time.Now().UTC().Format("20060102T150405Z"), label, name, ext)
+	filename := fmt.Sprintf("%s_%s_%s.%s", time.Now().UTC().Format("20060102T150405.000000000Z"), profileLabel(label), name, ext)
 	target := filepath.Join(dir, filename)
-	f, err := os.Create(target)
+	record := c.newRecord(label, name, filename)
+	if name == "block" || name == "mutex" {
+		record.Sampling = "unverified: target sampling rate is not exposed by this endpoint"
+	}
+	defer func() {
+		c.saveRecord(ctx, target+".json", record)
+		c.pruneLocalProfiles(dir, pprofLocalRetentionFiles)
+	}()
+	client := newIPCClient(c.cfg.SocketPath, timeout)
+	defer client.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/debug/pprof/"+endpoint, nil)
 	if err != nil {
-		slog.Warn("Create pprof file failed", "profile", name, "error", err)
+		record.Error = err.Error()
 		return
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		_ = f.Close()
-		_ = os.Remove(target)
-		slog.Warn("Write pprof file failed", "profile", name, "error", err)
+	resp, err := client.Do(req)
+	if err != nil {
+		record.Error = err.Error()
 		return
 	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(target)
-		slog.Warn("Close pprof file failed", "profile", name, "error", err)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		record.Error = resp.Status
 		return
 	}
-	slog.Info("Captured Litestream pprof", "profile", name, "path", target)
-	c.upload(ctx, target, filename)
-	c.pruneLocalProfiles(dir, pprofLocalRetentionFiles)
+	record.EndpointAvailable = true
+	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		record.Error = err.Error()
+		return
+	}
+	n, copyErr := io.Copy(f, io.LimitReader(resp.Body, pprofMaxCaptureBytes+1))
+	closeErr := f.Close()
+	if copyErr != nil || closeErr != nil || n == 0 || n > pprofMaxCaptureBytes {
+		record.Error = fmt.Sprintf("incomplete capture: bytes=%d copy=%v close=%v", n, copyErr, closeErr)
+		if err := os.Remove(target); err != nil {
+			slog.Warn("Remove incomplete profile", "error", err)
+		}
+		return
+	}
+	record.Status = "available"
 }
 
 type pprofProfileFile struct {
@@ -141,7 +244,10 @@ func (c *pprofCapturer) pruneLocalProfiles(dir string, keep int) {
 	// accumulate baselines without bound.
 	var files, baselines []pprofProfileFile
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() || strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		if c.pending(filepath.Join(dir, entry.Name())) {
 			continue
 		}
 		info, err := entry.Info()
@@ -175,43 +281,41 @@ func removeOldest(dir string, files []pprofProfileFile, keep int) {
 		target := filepath.Join(dir, file.name)
 		if err := os.Remove(target); err != nil {
 			slog.Warn("Remove old pprof file failed", "file", target, "error", err)
+		} else if err := os.Remove(target + ".json"); err != nil && !os.IsNotExist(err) {
+			slog.Warn("Remove old pprof metadata failed", "error", err)
 		}
 	}
 }
 
-func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) {
-	if c.cfg.ReplicaType != "s3" || c.cfg.S3Bucket == "" || c.cfg.S3AccessKey == "" || c.cfg.S3SecretKey == "" {
-		return
+func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) error {
+	if c.cfg.ReplicaType != "s3" {
+		return nil
+	}
+	if c.cfg.S3Bucket == "" || c.cfg.S3AccessKey == "" || c.cfg.S3SecretKey == "" {
+		return fmt.Errorf("profile upload credentials or bucket unavailable")
 	}
 	endpoint, err := url.Parse(c.cfg.S3Endpoint)
-	if err != nil {
-		slog.Warn("Parse S3 endpoint for pprof upload failed", "endpoint", c.cfg.S3Endpoint, "error", err)
-		return
+	if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") {
+		return fmt.Errorf("invalid profile upload endpoint")
 	}
-	host := endpoint.Host
-	if host == "" {
-		host = strings.TrimPrefix(strings.TrimPrefix(c.cfg.S3Endpoint, "https://"), "http://")
+	target := "s3://" + c.cfg.S3Bucket + "/" + path.Join(strings.Trim(c.cfg.S3Path, "/"), "profiles", filename)
+	args := []string{"--host=" + endpoint.Host, "--host-bucket=" + endpoint.Host, "--max-retries=0"}
+	if endpoint.Scheme == "http" {
+		args = append(args, "--no-ssl")
+	} else {
+		args = append(args, "--ssl")
 	}
-	if host == "" {
-		return
+	if c.cfg.S3Region != "" {
+		args = append(args, "--region="+c.cfg.S3Region)
 	}
-
-	prefix := strings.Trim(strings.TrimPrefix(c.cfg.S3Path, "/"), "/")
-	target := "s3://" + c.cfg.S3Bucket + "/" + path.Join(prefix, "profiles", filename)
-	uploadCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	args = append(args, "put", filePath, target)
+	uploadCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(uploadCtx, "sh", "-c", `s3cmd --access_key="$AWS_ACCESS_KEY_ID" --secret_key="$AWS_SECRET_ACCESS_KEY" --host="$S3CMD_HOST" --host-bucket="%(bucket)s.$S3CMD_HOST" put "$SOAK_PPROF_FILE" "$SOAK_PPROF_TARGET"`)
-	cmd.Env = append(os.Environ(),
-		"AWS_ACCESS_KEY_ID="+c.cfg.S3AccessKey,
-		"AWS_SECRET_ACCESS_KEY="+c.cfg.S3SecretKey,
-		"S3CMD_HOST="+host,
-		"SOAK_PPROF_FILE="+filePath,
-		"SOAK_PPROF_TARGET="+target,
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		slog.Warn("Pprof S3 upload failed", "target", target, "error", err, "output", tailString(string(output), 2048))
-		return
+	cmd := exec.CommandContext(uploadCtx, "s3cmd", args...)
+	cmd.WaitDelay = time.Second
+	cmd.Env = append(os.Environ(), "AWS_ACCESS_KEY_ID="+c.cfg.S3AccessKey, "AWS_SECRET_ACCESS_KEY="+c.cfg.S3SecretKey, "AWS_SESSION_TOKEN="+c.cfg.S3SessionToken)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("upload profile: %w", err)
 	}
-	slog.Info("Uploaded Litestream pprof", "target", target)
+	return nil
 }

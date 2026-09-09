@@ -150,7 +150,7 @@ with its full page index resident while the L1 compaction runs, releasing when
 the compaction finishes or on a timeout (which is how a Litestream that
 serializes per-database maintenance shows up, recorded in
 `gate_release_reason`). `runtime.MemStats` is sampled throughout and a heap
-profile is written at each phase's peak under the run's `profiles/` directory. Fixture copies are APFS clones on macOS and the
+profile is sampled after sufficient growth and spacing under the run's `profiles/` directory. This is a sampled growth profile, not an exact peak profile. A separate final heap profile is written even for phases shorter than the sampling interval, including failed phases. Fixture copies are APFS clones on macOS and the
 sequential replica prefix is deleted before the overlap run, so a 16 GiB
 fixture needs roughly one copy's worth of local disk and object storage.
 Pass requires the overlap's heap growth to stay within 1.10x the larger

@@ -74,6 +74,7 @@ type manyDBChangeTracker interface {
 }
 
 type Verifier struct {
+	onProfileIncident  func(string)
 	logicalEvidence    string
 	logicalWorkloadSHA string
 	cfg                Config
@@ -407,6 +408,9 @@ func (v *Verifier) waitForSyncDB(ctx context.Context, result *VerificationResult
 
 		if syncResp.ReplicatedTXID >= syncResp.TXID {
 			if degradedAfter > 0 && time.Since(startedAt) > degradedAfter {
+				if v.onProfileIncident != nil {
+					v.onProfileIncident("sync-recovered")
+				}
 				slog.Warn("Litestream sync completed after degraded threshold",
 					"elapsed", time.Since(startedAt).Round(time.Second),
 					"degraded_after", degradedAfter,
@@ -431,6 +435,9 @@ func (v *Verifier) waitForSyncDB(ctx context.Context, result *VerificationResult
 			"lag", lag)
 		if !degradedLogged && degradedAfter > 0 && time.Since(startedAt) > degradedAfter {
 			degradedLogged = true
+			if v.onProfileIncident != nil {
+				v.onProfileIncident("sync-degraded")
+			}
 			slog.Warn("Litestream sync exceeded degraded threshold; continuing until hard timeout",
 				"elapsed", time.Since(startedAt).Round(time.Second),
 				"degraded_after", degradedAfter,
