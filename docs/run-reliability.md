@@ -88,3 +88,25 @@ Detection is limited to observed logs, runtime reports, and profiling evidence.
 Quiet logs cannot prove the absence of unlogged SDK retries. Profile availability
 or successful remote delivery cannot prove nonzero CPU samples or support a CPU
 performance claim.
+
+Journal reads use indexed deployment selection plus a separate legacy time
+window. Explicit deployment identity retains late evidence regardless of arrival
+time. All matching rows remain available; no recent-history cap can make a run
+clean. HTTP comparisons propagate request cancellation to database reads.
+
+Journal initialization logs start, backfill row counts and duration, index work,
+and completion. A transaction records successful historical backfill; subsequent
+opens skip raw-history scans when the completion marker and journal triggers are
+present. Existing pre-marker databases perform one catch-up pass. Failed upgrades
+roll back the completion marker and retry without dropping retained evidence.
+
+The local retained-history regression fixture uses 50,000 verifications and
+50,001 events with large JSON payloads. In one local run, unscoped reads took
+3.20 seconds; indexed head/base comparisons took 0.40–1.11 milliseconds while
+retaining the matching recovered incident as ineligible. The simulated pre-marker
+upgrade took 850 milliseconds, and repeat opens took 0.53–0.66 milliseconds on a
+1.14 GB final fixture. These warm local measurements demonstrate exclusion of
+unrelated history, not a production latency guarantee or a bound on a run with
+extensive matching history. They do not establish the cause of the earlier live
+startup delay. Run the large fixture with
+`SOAK_LARGE_EVIDENCE_TEST=1 go test ./internal/orchestrator -run TestRetainedHistoryComparisonCost -count=1 -v`.

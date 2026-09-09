@@ -21,7 +21,7 @@ type workloadEvidenceCounters struct {
 }
 
 func applyRuntimeEvidence(db *model.DB, deployment model.Deployment, end *time.Time, ensure func(string, string, string) *WorkerRunEvidence) error {
-	records, err := db.ListRuntimeEvidence(deploymentScorecardSource(deployment), deployment.ID)
+	records, err := db.ListRuntimeEvidence(deploymentScorecardSource(deployment), deployment.ID, model.EvidenceWindow{DeploymentID: deployment.ID, Start: deployment.StartedAt, End: end})
 	if err != nil {
 		return err
 	}

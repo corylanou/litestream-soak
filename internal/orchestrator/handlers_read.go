@@ -29,7 +29,7 @@ func (a *API) handleListWorkerSummaries(w http.ResponseWriter, r *http.Request) 
 }
 
 func (a *API) handleListDeployments(w http.ResponseWriter, r *http.Request) {
-	deployments, err := a.db.ListDeployments(strings.TrimSpace(r.URL.Query().Get("source")), readLimit(r, 10))
+	deployments, err := a.db.WithReadContext(r.Context()).ListDeployments(strings.TrimSpace(r.URL.Query().Get("source")), readLimit(r, 10))
 	if err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to list deployments")
 		return
@@ -37,7 +37,7 @@ func (a *API) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 
 	rollouts := make([]DeploymentRolloutResponse, 0, len(deployments))
 	for _, deployment := range deployments {
-		rollout, err := a.buildDeploymentRollout(deployment)
+		rollout, err := buildDeploymentRollout(a.db.WithReadContext(r.Context()), deployment)
 		if err != nil {
 			respondError(w, r, http.StatusInternalServerError, err, "failed to build deployment rollout")
 			return
@@ -49,7 +49,7 @@ func (a *API) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleGetLatestDeployment(w http.ResponseWriter, r *http.Request) {
-	deployment, err := a.db.GetLatestDeployment(strings.TrimSpace(r.URL.Query().Get("source")))
+	deployment, err := a.db.WithReadContext(r.Context()).GetLatestDeployment(strings.TrimSpace(r.URL.Query().Get("source")))
 	if err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to load latest deployment")
 		return
@@ -59,7 +59,7 @@ func (a *API) handleGetLatestDeployment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	rollout, err := a.buildDeploymentRollout(*deployment)
+	rollout, err := buildDeploymentRollout(a.db.WithReadContext(r.Context()), *deployment)
 	if err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to build deployment rollout")
 		return
@@ -69,7 +69,7 @@ func (a *API) handleGetLatestDeployment(w http.ResponseWriter, r *http.Request) 
 }
 
 func (a *API) handleGetLatestDeploymentPrompt(w http.ResponseWriter, r *http.Request) {
-	deployment, err := a.db.GetLatestDeployment(strings.TrimSpace(r.URL.Query().Get("source")))
+	deployment, err := a.db.WithReadContext(r.Context()).GetLatestDeployment(strings.TrimSpace(r.URL.Query().Get("source")))
 	if err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to load latest deployment")
 		return
@@ -79,7 +79,7 @@ func (a *API) handleGetLatestDeploymentPrompt(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	rollout, err := a.buildDeploymentRollout(*deployment)
+	rollout, err := buildDeploymentRollout(a.db.WithReadContext(r.Context()), *deployment)
 	if err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to build deployment rollout")
 		return
@@ -91,7 +91,7 @@ func (a *API) handleGetLatestDeploymentPrompt(w http.ResponseWriter, r *http.Req
 }
 
 func (a *API) handleGetLatestDeploymentComparison(w http.ResponseWriter, r *http.Request) {
-	comparison, err := a.buildRequestedDeploymentComparison(
+	comparison, err := buildRequestedDeploymentComparison(a.db.WithReadContext(r.Context()),
 		strings.TrimSpace(r.URL.Query().Get("source")),
 		strings.TrimSpace(r.URL.Query().Get("base_source")),
 		strings.TrimSpace(r.URL.Query().Get("head_source")),
@@ -109,7 +109,7 @@ func (a *API) handleGetLatestDeploymentComparison(w http.ResponseWriter, r *http
 }
 
 func (a *API) handleGetLatestDeploymentComparisonPrompt(w http.ResponseWriter, r *http.Request) {
-	comparison, err := a.buildRequestedDeploymentComparison(
+	comparison, err := buildRequestedDeploymentComparison(a.db.WithReadContext(r.Context()),
 		strings.TrimSpace(r.URL.Query().Get("source")),
 		strings.TrimSpace(r.URL.Query().Get("base_source")),
 		strings.TrimSpace(r.URL.Query().Get("head_source")),
@@ -136,7 +136,7 @@ func (a *API) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rollout, err := a.buildDeploymentRollout(*deployment)
+	rollout, err := buildDeploymentRollout(a.db.WithReadContext(r.Context()), *deployment)
 	if err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to build deployment rollout")
 		return
