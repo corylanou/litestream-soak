@@ -833,14 +833,61 @@ The standard worker image includes `curl`, `jq`, `ripgrep`, `procps`,
 
 ### Pulling pprof captures from a worker
 
-Every worker captures Litestream pprof profiles from its control socket: a
-baseline set at start, then hourly heap, allocs, goroutine, and `memstats`
-captures plus a 90s CPU profile. They are kept under `/data/profiles` on the
-machine (the newest 96 periodic captures plus the newest baseline set) and
-uploaded to the replica bucket under the worker's `profiles/` prefix. Set `SOAK_PPROF_CAPTURE=false` on a worker to turn it off.
+Every worker begins capture before waiting for initial sync, waits up to five
+seconds for the control socket, and takes baseline heap, allocs, goroutine,
+and text MemStats evidence plus a five-second startup CPU sample taken first.
+Hourly capture continues. Verification failures, sync degradation/recovery,
+and disk/metrics condition changes queue incident captures, including
+recovered conditions; existing failure reports remain independent. Shutdown has a ten-second total budget: cancel and join collection, allow up
+to five seconds for final non-CPU capture while Litestream remains running,
+then use a three-second upload batch bounded by the remaining deadline. Final
+artifacts are uploaded newest first, ahead of older pending captures. A
+crashed process may only produce unavailable manifests.
+
+Capture sets are serialized and bounded to 45 seconds. CPU sampling is limited
+to once per minute; rate limiting, cancellations, a full 16-event queue, and
+storage exhaustion are recorded in `status.json` (cumulative reason counts and
+the latest 64 events). Each artifact is limited to 8 MiB. Local retention
+keeps 96 non-baseline artifacts and four baseline artifacts with their JSON
+manifests. Pending S3 uploads are excluded from pruning. At 256 directory
+entries, new capture stops with an explicit unavailable log until evidence is
+retrieved and space is freed. Uploads and retry batches each have a
+three-second deadline; pending uploads are retried by a separate loop after
+capture and every 30 seconds, including after restart. There is no automatic
+expiry of failed uploads. This bounds disk use without deleting unuploaded
+evidence. Capture itself is best effort; logs report failures and
+queue/storage limits rather than treating missing evidence as success.
+
+A delivered remote manifest reports `upload=uploaded`; the local manifest
+stays pending until both artifact (when available) and manifest delivery
+succeed. Failed final uploads remain local and cannot survive destruction of
+the volume. Retain and retrieve the volume when shutdown reports upload
+failure.
+
+JSON sidecars include shared run/deployment/workload identities, independent
+candidate/workload/worker SHA, effective workload hash/configuration,
+validator ID/version, phase, image, capture availability, upload state, and
+installed binary SHA-256 and Go build/runtime metadata. Missing binaries/build
+identity are explicit. Use the recorded image and binary digest to retrieve
+matching binaries; never assume the current branch matches an older profile.
+Uploads follow the replica endpoint's HTTP/HTTPS scheme and force-path-style
+addressing. Credentials are passed through environment variables, not command
+arguments or logs.
+
+Set `SOAK_PPROF_CAPTURE=false` to disable capture. `SOAK_PPROF_BLOCK=true`,
+`SOAK_PPROF_MUTEX=true`, and `SOAK_PPROF_TRACE=true` opt into additional
+endpoint requests (trace is one second). Unsupported endpoints produce
+unavailable manifests. Block/mutex sampling must already be enabled by the
+target binary; an available endpoint does not prove sampling is enabled; its
+manifest labels sampling as unverified. The collector never changes the
+target's runtime sampling configuration. No fleet scenarios are enabled by
+these changes.
+
+Set `SOAK_PROFILE_MATCH` to a timestamp or phase substring to select matching
+artifacts. The mutable `status.json` is refreshed on retrieval.
 
 `scripts/pull-profiles.sh <source> <profile> [count]` downloads the newest
-captures straight off the machine with flyctl (`<profile>` is the worker-name
+binary profiles, text evidence, and matching JSON manifests straight off the machine with flyctl (`<profile>` is the worker-name
 suffix such as `high-vol` or `many-dbs-100-dir`; the profile name such as
 `high-volume` also works when `SOAK_BASIC_AUTH_USERNAME`/`PASSWORD` are set,
 since the script then resolves it through the control plane) (it reads the access token from
