@@ -74,6 +74,15 @@ func TestPullProfilesIncludesTextAndMatchingMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
+	for _, name := range []string{"python3", "tr", "awk", "sort", "tail", "sed", "mkdir", "mktemp", "mv", "rm", "basename"} {
+		executable, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(executable, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	mock := `#!/bin/sh
 case "$1 $2" in
 "machines list") printf '[{"name":"worker-main-example","state":"started","id":"example"}]' ;;
@@ -86,7 +95,7 @@ esac
 	}
 	cmd := exec.Command("bash", script, "main", "example", "1")
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "FLY_ACCESS_TOKEN=example")
+	cmd.Env = append(os.Environ(), "PATH="+dir, "FLY_ACCESS_TOKEN=example")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("retrieval: %v\n%s", err, output)

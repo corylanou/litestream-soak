@@ -80,7 +80,7 @@ mkdir -p "$dest"
 
 # Newest <count> of each capture kind (heap, allocs, cpu), by name (timestamp-prefixed).
 files="$(fly ssh console -a "$app" --machine "$machine" -C "sh -c 'ls /data/profiles'" 2>/dev/null \
-  | tr -d '\r' | rg '^([0-9]{8}T[0-9]{6}(\.[0-9]+)?Z_[A-Za-z0-9_.-]+|status\.json)$' || true)"
+  | tr -d '\r' | awk '/^([0-9]{8}T[0-9]{6}(\.[0-9]+)?Z_[A-Za-z0-9_.-]+|status\.json)$/' || true)"
 if [ -z "$files" ]; then
   printf 'no captures under /data/profiles on %s (%s)\n' "$worker" "$machine" >&2
   exit 1
@@ -88,21 +88,21 @@ fi
 
 all_files="$files"
 if [ -n "${SOAK_PROFILE_MATCH:-}" ]; then
-  files="$(printf '%s\n' "$files" | rg -F -- "$SOAK_PROFILE_MATCH" || true)"
+  files="$(printf '%s\n' "$files" | awk -v text="$SOAK_PROFILE_MATCH" 'index($0, text)' || true)"
 fi
 selected=""
-if printf '%s\n' "$all_files" | rg -Fxq status.json; then selected="status.json"; fi
+if printf '%s\n' "$all_files" | awk '$0 == "status.json" { found=1 } END { exit !found }'; then selected="status.json"; fi
 for kind in _heap.pprof _allocs.pprof _cpu_profile.pprof _goroutine.txt _memstats.txt _block.pprof _mutex.pprof _trace.pprof .json; do
   if [ "$kind" = ".json" ]; then
-    picked="$(printf '%s\n' "$files" | rg '\.json$' | sort | tail -n "$count" || true)"
+    picked="$(printf '%s\n' "$files" | awk '/\.json$/' | sort | tail -n "$count" || true)"
   else
-    picked="$(printf '%s\n' "$files" | rg -F -- "$kind" | rg -v '\.json$' | sort | tail -n "$count" || true)"
+    picked="$(printf '%s\n' "$files" | awk -v suffix="$kind" 'length($0) >= length(suffix) && substr($0, length($0)-length(suffix)+1) == suffix' | sort | tail -n "$count" || true)"
   fi
   selected="$(printf '%s\n%s' "$selected" "$picked")"
 done
 selected="$(printf '%s\n' "$selected" | sed '/^$/d')"
 for file in $selected; do
-  if printf '%s\n' "$files" | rg -Fxq -- "$file.json"; then
+  if printf '%s\n' "$files" | awk -v name="$file.json" '$0 == name { found=1 } END { exit !found }'; then
     selected="$(printf '%s\n%s' "$selected" "$file.json")"
   fi
 done
