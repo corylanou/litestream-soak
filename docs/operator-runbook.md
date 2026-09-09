@@ -1628,6 +1628,34 @@ operators must still verify the current physical identity, fresh heartbeat, and
 restore results after deployment. The exact interruption point of a legacy
 attempt remains unknown unless independent evidence establishes it.
 
+### Retiring volume inventory
+
+Fly's volume inventory includes records that are being deleted or are soft-deleted.
+The default `fly volumes list` hides deletion-state records; use `--all` for
+resource accounting. An earlier default-list absence is incomplete evidence,
+not proof that the provider record no longer exists. See the official
+[volume states](https://fly.io/docs/volumes/volume-states/),
+[CLI listing options](https://fly.io/docs/flyctl/volumes-list/), and
+[client-side filtering](https://github.com/superfly/fly-go/blob/main/flaps/flaps_volumes.go).
+
+Legacy recovery can proceed past `pending_destroy` and `scheduling_destroy`
+records only when they have no machine or allocation attachment and no actual
+non-destroyed machine mounts them. Stale IDs in the pending worker row do not
+count as active attachments. The previous machine must still be confirmed missing
+or destroyed. Recovery retains the old volume ID, name, state, region, size,
+attachment references, and creation time in the event journal, together with the
+original worker/machine identity. It then creates a uniquely named volume and
+uses a new volume-specific replica prefix without touching the retiring records.
+
+Retiring volumes are never adopted. Adoption requires `created` or `hydrating`
+state and the existing ownership, configuration, and immutable-target checks.
+Unknown states, live same-name records, conflicting attachments, or active machine
+mounts remain ambiguous. A retiring volume belonging to a current durable attempt
+also leaves that attempt unresolved; recovery does not discard its creation
+intent or issue another create request. Other provider deletion/transition states
+are conservatively blocked. Every observed matching volume's safe metadata is
+retained, and recovery never turns the original interruption into a clean run.
+
 ## Control deployment metric refresh health
 
 Worker reports persist their complete evidence before acknowledgement. They

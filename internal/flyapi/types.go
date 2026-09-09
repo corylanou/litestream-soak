@@ -102,6 +102,7 @@ type Volume struct {
 	SizeGB            int       `json:"size_gb"`
 	Region            string    `json:"region"`
 	AttachedMachineID string    `json:"attached_machine_id"`
+	AttachedAllocID   string    `json:"attached_alloc_id"`
 	CreatedAt         time.Time `json:"created_at"`
 }
 
