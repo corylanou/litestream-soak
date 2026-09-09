@@ -124,12 +124,23 @@ Set `SOAK_LOGICAL_LITESTREAM_BINARY` to its absolute path and
 `ae88b164dd6304bcbb654a681df767ee59042eed`, with that SHA as `main.Version`. Run:
 
 ```sh
-GOTOOLCHAIN=go1.25.13 go test ./internal/worker -run TestLogicalOraclePinnedLitestream -count=1 -v
+GOTOOLCHAIN=go1.25.13 go test ./internal/worker -run '^Test(LogicalOraclePinnedLitestream|VerificationBoundaryPinnedBinary)$' -count=1 -v
 ```
 
 The test starts a temporary file replica, commits byte-sensitive rows in WAL,
 forces checkpoint bookkeeping, restores a pinned TXID, and exercises the actual
-`validateDB` pipeline with both real binaries, including its labeled TXID fallback
-and restored-path handling. It verifies logical equality,
-advances the bookkeeping sequence, and proves deletion of a committed row fails.
-It does not use production credentials or change fleet configuration.
+`validateDB` pipeline through direct pinned restore and independent integrity
+and logical checks. It verifies restored-path handling, advances the bookkeeping
+sequence, and proves deletion of a committed row fails. The workload helper
+remains independently pinned; its unsupported TXID flag is no longer a restore
+fallback.
+
+`TestVerificationBoundaryPinnedBinary` additionally checks the clean embedded
+revision and Go 1.25.13 build identity. It exercises writer-reserved sync and
+source capture against that binary, then commits newer replica data: the older
+pinned restore must match while an unpinned latest restore must fail comparison.
+Failed boundary acquisitions are logged before fresh acquisition; historical
+failures remain evidence even when a subsequent acquisition passes. These local
+file-replica controls do not establish production latency or the cause of the
+historical Amsterdam mismatch. Neither test uses production credentials or
+changes fleet configuration.
