@@ -14,6 +14,9 @@ func TestCompareLogicalSchemasIgnoresRowDifferences(t *testing.T) {
 	if err := CompareLogicalSchemas(context.Background(), source, restored); err != nil {
 		t.Fatal(err)
 	}
+	if err := CompareLogicalDatabases(context.Background(), source, restored); err == nil {
+		t.Fatal("whole-database comparison accepted a historical prefix")
+	}
 }
 
 func TestCompareLogicalSchemasRejectsMetadataAndReadFailures(t *testing.T) {

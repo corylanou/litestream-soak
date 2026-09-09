@@ -69,6 +69,47 @@ Regional workers measure cross-region behavior and are excluded from release
 quality scoring. The release-quality code only scores `ord` workers and
 explicitly excludes `low-vol-syd` and `high-vol-ams`.
 
+The `fts-maintenance` profile is opt-in through `PROFILE=fts-maintenance`
+(or `LOAD_MODE=fts`); it is not added to any default fleet. It uses the worker's
+built-in SQLite FTS5 engine and a fixed, versioned `fts-v1` corpus of 64 document
+IDs. Eight committed phases repeat: insert, update, delete, query, merge,
+update, query, optimize. Inserts replace the previous cycle's remaining
+documents. `WRITE_RATE` controls phases per second (default 1 for this profile,
+allowed 1–1000), not document rows per second. Progress is committed atomically
+with each phase, so restarts resume the sequence. Other synthetic/replay knobs
+such as initial size, payload size, read ratio, and worker count do not change
+this corpus. FTS and many-database mode cannot be combined.
+
+FTS verification pauses the workload at a committed boundary. The shared
+logical oracle compares document values and rowids, FTS5 visible columns, and
+all recognized FTS5 shadow tables. It also checks term, phrase, prefix, and
+missing-token searches against the independent document table on both source
+and restore. Unknown virtual modules remain unsupported. Shadow tables are
+compared rather than excluded; equivalent indexes reorganized independently
+may therefore differ, which is appropriate for a pinned replication restore.
+
+`soak_fts_available` reports initialization success or failure. The
+`soak_fts_operations_total` and `soak_fts_changes_total` counters separate
+committed phase commands from actual document changes, checked queries, and
+maintenance internal changes. Maintenance uses SQLite `total_changes()` on
+the transaction connection and excludes the command row, so no-op maintenance
+contributes zero changes. `soak_fts_matches_total`, `soak_fts_phase_seconds`,
+and `soak_fts_failures_total` expose checked result rows, operation duration,
+and failures. Phase logs include committed progress and counts. Failures stop
+the run and are reported; they are not retried into a passing result.
+
+With profile capture enabled, each distinct FTS phase is bracketed by
+synchronous `fts-<phase>-before` and `fts-<phase>-after` Litestream profile sets,
+with `-failed` on errors, at first execution and at most once per phase per
+hour. Litestream captures describe phase boundaries. A separate `worker_cpu` profile
+starts before and stops after each sampled SQLite phase; short operations may
+produce no CPU samples, and concurrent profiler conflicts remain unavailable
+evidence rather than passing captures. Profile metadata retains run/candidate/
+workload identities and unavailable/rate-limited/upload-failed evidence.
+Profile overhead is excluded from phase duration metrics. Use immutable binary
+identities and the same corpus/rate for candidate versus baseline comparisons;
+no fleet activation is implied by selecting this profile locally.
+
 Many-database profiles are opt-in with `SOAK_ENABLE_MANY_DB_FLEET=true`.
 When enabled, the main and PR fleets also reconcile `many-dbs-100-list` and
 `many-dbs-100-dir`. Two nested flags extend the tier ladder: with
@@ -538,3 +579,20 @@ prove provider behavior, or establish upstream base/head separation. Block and
 mutex sampling, traces, long soaks, and provider experiments remain separate,
 opt-in checks; their unexecuted state does not count as a pass. No fleet scenario
 is activated by this suite.
+
+### Opt-in FTS restore comparison
+
+`TestFTSPinnedRestoreComparison` requires caller-selected immutable binaries.
+Set `SOAK_FTS_BASELINE_BINARY`, `SOAK_FTS_BASELINE_SHA`,
+`SOAK_FTS_CANDIDATE_BINARY`, and `SOAK_FTS_CANDIDATE_SHA` to absolute executable
+paths and their full commit SHAs. Each executable must have clean embedded build metadata matching its expected
+SHA and Go 1.25.13; pseudo-version output is retained without using its
+shortened SHA as identity. Set `SOAK_FTS_EVIDENCE_DIR` to an absolute local
+artifact directory and `SOAK_FTS_WORKER_SHA` to the tested soak revision, then
+run `GOTOOLCHAIN=go1.25.13 go test ./internal/worker -run
+TestFTSPinnedRestoreComparison -count=1 -v`. The test never selects a moving
+ref. It retains per-role databases, pinned restore output, replication logs,
+actual-work counts, profile artifacts and metadata, and an expected negative
+restore failure. It checks all eight phase boundaries for both roles. Without
+the binary settings this test is explicitly skipped; the regular unit suite
+alone is not real Litestream restore evidence.

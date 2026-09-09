@@ -155,6 +155,16 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 
+	var fts *ftsLoad
+	if r.cfg.LoadMode == "fts" {
+		var err error
+		fts, err = r.startFTS(runCtx, func(err error) { cancelRun(err) })
+		if err != nil {
+			return err
+		}
+		defer fts.Stop()
+	}
+
 	var pinned *pinnedReader
 	if r.cfg.PinnedReaderHold > 0 && !r.cfg.ManyDBEnabled() {
 		pinned = newPinnedReader(r.cfg.DBPath, r.cfg.PinnedReaderHold, r.cfg.PinnedReaderPause)
@@ -165,6 +175,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	var pausers []loadPauser
 	if r.churnLoad != nil {
 		pausers = append(pausers, r.churnLoad.engine)
+	}
+	if fts != nil {
+		pausers = append(pausers, fts)
 	}
 	if r.loadSup != nil {
 		pausers = append(pausers, r.loadSup)
@@ -192,6 +205,15 @@ func (r *Runner) Run(ctx context.Context) error {
 func (r *Runner) populate(ctx context.Context) error {
 	if r.cfg.churnEnabled() {
 		return populateChurn(ctx, r.cfg)
+	}
+	if r.cfg.LoadMode == "fts" {
+		db, err := openFTS(ctx, r.cfg.DBPath)
+		if err != nil {
+			ftsCapability.WithLabelValues(r.cfg.WorkerID).Set(0)
+			ftsFailures.WithLabelValues(r.cfg.WorkerID).Inc()
+			return err
+		}
+		return db.Close()
 	}
 	if r.cfg.ManyDBEnabled() {
 		return populateManyDBs(ctx, r.cfg)
