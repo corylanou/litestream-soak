@@ -112,7 +112,7 @@ func TestChurnLoadLifecycle(t *testing.T) {
 	if err := r.populate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	load, err := startChurn(ctx, cfg)
+	load, err := startChurn(ctx, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

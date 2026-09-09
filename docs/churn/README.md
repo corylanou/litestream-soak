@@ -59,7 +59,25 @@ Metrics retain each failed attempt even when later operations succeed:
   failures; the queue retry operation is an application state transition.
 
 All metrics carry mode, operation, worker_id, profile, and source. Error counters
-also carry kind. Metrics are process-lifetime counters, as with replay metrics.
+also carry kind. Prometheus metrics are process-lifetime counters. Heartbeats,
+verification reports, and workload_error events additionally carry
+workload_counters_present, workload_counter_epoch, workload_attempts_total,
+workload_mutations_total, workload_busy_total, and workload_errors_total.
+Errors includes busy; other errors equals errors minus busy. Counter epochs are
+unique per process, including restarts that reuse a machine/run ID. The retained
+run-evidence consumer groups by immutable identity and epoch and uses cumulative
+maxima, so retrying delivery cannot double-count failures.
+
+Before sending an error event, the worker atomically writes and fsyncs a local
+outbox record under DATA_DIR/churn-outbox. Pending records coalesce to the latest
+cumulative totals per epoch, preserving every error count and the latest error
+message. Successful delivery removes the pending record; failed sends retry on
+heartbeats, including after restart, with the original worker/run identity.
+Outbox replay is at least once. Evidence persistence failure stops the workload.
+The control-plane retention/comparison consumer is delivered by issue #211.
+Retained volumes preserve unsent evidence; destroying a volume before delivery
+cannot preserve its unreported tail, so missing epochs/coverage must remain
+unknown rather than clean. No fleet or volume destruction is part of this task.
 
 Restore validation first compares the shared logical oracle's schema and typed
 row digests, then checks application invariants in the actual restored database.

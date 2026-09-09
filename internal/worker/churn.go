@@ -51,12 +51,15 @@ type churnLoad struct {
 	db     *sql.DB
 }
 
-func startChurn(ctx context.Context, cfg Config) (*churnLoad, error) {
+func startChurn(ctx context.Context, cfg Config, observe churn.Observer) (*churnLoad, error) {
 	db, err := churn.Open(ctx, cfg.DBPath)
 	if err != nil {
 		return nil, err
 	}
-	engine := churn.New(cfg.LoadMode, cfg.Churn, func(op string, n int64, d time.Duration, err error) { recordChurn(cfg, op, n, d, err) })
+	if observe == nil {
+		observe = func(op string, n int64, d time.Duration, err error) { recordChurn(cfg, op, n, d, err) }
+	}
+	engine := churn.New(cfg.LoadMode, cfg.Churn, observe)
 	if err := engine.Start(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, err

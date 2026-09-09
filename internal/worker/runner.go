@@ -18,7 +18,8 @@ type Runner struct {
 	litestreamManager
 	statsPoller
 	loadReplayManager
-	churnLoad *churnLoad
+	churnLoad     *churnLoad
+	churnEvidence churnEvidence
 
 	failureDebug            failureDebugState
 	noProgress              diskPressureNoProgressState
@@ -124,7 +125,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	go newReplicaLevelPoller(&r.cfg).Run(runCtx)
 
 	if r.cfg.churnEnabled() {
-		load, err := startChurn(runCtx, r.cfg)
+		load, err := startChurn(runCtx, r.cfg, func(op string, n int64, duration time.Duration, attemptErr error) {
+			if err := r.recordChurnAttempt(runCtx, op, n, duration, attemptErr); err != nil {
+				cancelRun(fmt.Errorf("persist churn evidence: %w", err))
+			}
+		})
 		if err != nil {
 			return err
 		}

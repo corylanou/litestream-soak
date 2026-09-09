@@ -83,6 +83,9 @@ func (r *Runner) sendLitestreamMetricsEvent(ctx context.Context, observation lit
 }
 
 func (r *Runner) sendHeartbeat(ctx context.Context) {
+	if err := r.flushChurnEvidence(ctx); err != nil {
+		slog.Warn("Churn evidence delivery pending", "error", err)
+	}
 	if r.reporter == nil || !r.reporter.Enabled() {
 		return
 	}
