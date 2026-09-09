@@ -1,0 +1,80 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"testing"
+	"time"
+)
+
+func TestRecoveryOptionsRejectInvalidControls(t *testing.T) {
+	t.Setenv("ONE_SHOT_PROVIDER_CLASS", "local-emulator")
+	for _, key := range []string{"ONE_SHOT_RECOVERY_PHASE_SECONDS", "ONE_SHOT_RECOVERY_WRITE_RATE", "ONE_SHOT_RECOVERY_PAYLOAD_BYTES", "ONE_SHOT_RECOVERY_WORKERS", "ONE_SHOT_RECOVERY_PIN_HOLD_SECONDS"} {
+		t.Run(key, func(t *testing.T) {
+			t.Setenv(key, "-1")
+			if _, err := readRecoveryOptions(); err == nil {
+				t.Fatalf("accepted %s", key)
+			}
+		})
+	}
+}
+
+func TestRecoveryOptionsReuseOverloadControls(t *testing.T) {
+	t.Setenv("ONE_SHOT_PROVIDER_CLASS", "local-emulator")
+	for _, key := range []string{"ONE_SHOT_RECOVERY_WRITE_RATE", "ONE_SHOT_RECOVERY_WORKERS", "ONE_SHOT_RECOVERY_PAYLOAD_BYTES", "ONE_SHOT_RECOVERY_TRUNCATE_PAGE_N"} {
+		t.Setenv(key, "")
+	}
+	o, err := readRecoveryOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.WriteRate != 600 || o.Workers != 8 || o.PayloadBytes != 2048 || o.TruncatePageN != 0 {
+		t.Fatalf("%+v", o)
+	}
+}
+
+func TestOfflineBacklogCancellationIsAborted(t *testing.T) {
+	t.Setenv("ONE_SHOT_PROVIDER_CLASS", "local-emulator")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := runOfflineBacklog(ctx, config{WorkDir: t.TempDir(), S3Endpoint: "http://127.0.0.1:1"})
+	if err != nil || res.Pass || res.Outcome != "aborted" {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
+func TestOfflineBacklogPinnedFixture(t *testing.T) {
+	t.Setenv("ONE_SHOT_PROVIDER_CLASS", "local-emulator")
+	endpoint := os.Getenv("ONE_SHOT_RECOVERY_TEST_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("opt-in pinned Litestream and object-store fixture")
+	}
+	t.Setenv("ONE_SHOT_RECOVERY_PHASE_SECONDS", "3")
+	t.Setenv("ONE_SHOT_RECOVERY_WRITE_RATE", "60")
+	t.Setenv("ONE_SHOT_RECOVERY_PIN_HOLD_SECONDS", "1")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	res, err := runOfflineBacklog(ctx, config{WorkDir: t.TempDir(), S3Endpoint: endpoint, S3Bucket: os.Getenv("ONE_SHOT_RECOVERY_TEST_BUCKET"), S3Prefix: fmt.Sprintf("issue-223/test-%d", time.Now().UnixNano())})
+	if err != nil || res.Error != "" {
+		t.Fatalf("err=%v result error=%s", err, res.Error)
+	}
+	if res.Stats["recovered"] != true || res.Stats["drained_while_writing"] != true || res.Stats["pinned_reader_engaged"] != true || res.Stats["validated_committed_rows"].(int64) < 100 {
+		t.Fatalf("recovered=%v drained=%v pinned=%v rows=%v faults=%v", res.Stats["recovered"], res.Stats["drained_while_writing"], res.Stats["pinned_reader_engaged"], res.Stats["validated_committed_rows"], res.Stats["faults_engaged"])
+	}
+	for name, engaged := range res.Stats["faults_engaged"].(map[string]bool) {
+		if !engaged {
+			t.Fatalf("%s never engaged", name)
+		}
+	}
+	if res.Stats["operation_failures"].(int) == 0 || res.Outcome != "recovered_with_incidents" || res.Pass {
+		t.Fatalf("lost failures: %+v", res)
+	}
+}
+
+func TestRecoveryOptionsRequireProviderClass(t *testing.T) {
+	t.Setenv("ONE_SHOT_PROVIDER_CLASS", "")
+	if _, err := readRecoveryOptions(); err == nil {
+		t.Fatal("accepted unlabeled provider evidence")
+	}
+}

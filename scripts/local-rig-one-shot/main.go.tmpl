@@ -120,6 +120,8 @@ func main() {
 		res, err = runSnapshotCompactionOverlap(ctx, cfg)
 	case "restore-retention-race":
 		res, err = runRestoreRetentionRace(ctx, cfg)
+	case "offline-backlog":
+		res, err = runOfflineBacklog(ctx, cfg)
 	case "constrained-disk":
 		res, err = runConstrainedDisk(ctx, cfg)
 	default:
@@ -136,6 +138,8 @@ func main() {
 
 func scenarioTimeout(scenario string) time.Duration {
 	switch scenario {
+	case "offline-backlog":
+		return 2 * time.Hour
 	case "uploadpart-retry-quota":
 		return 8 * time.Minute
 	case "snapshot-compaction-overlap":
