@@ -12,12 +12,15 @@ report logic only and are not benchmark evidence.
 ## Prepare immutable inputs
 
 Build the harness from one recorded source revision using Go 1.25.13. Use that
-same harness binary for the entire experiment. Its generator and oracle are
+same harness binary for the entire experiment. Verify `go version -m` reports
+`vcs.revision` and `vcs.modified=false`. If the toolchain does not stamp a linked
+worktree, build the exact revision from a clean standalone clone; do not bypass
+the execution provenance check. Its generator and oracle are
 independent of the candidate Litestream source. Neither uses `litestream-test`
 from a candidate build.
 
 ```sh
-GOTOOLCHAIN=go1.25.13 go build -o bin/soakcompare ./cmd/soakcompare
+GOTOOLCHAIN=go1.25.13 go build -buildvcs=true -o bin/soakcompare ./cmd/soakcompare
 bin/soakcompare -fixture /absolute/path/fixture.db -seed 42 -rows 1000
 ```
 
@@ -255,3 +258,26 @@ Earlier development runs using sync probes are retained as observer-intervention
 evidence and are not natural-replication benchmarks. The configuration digest
 changes with the observation policy; reports using different policies are not
 matched comparisons.
+
+## Retained development validation scope
+
+The committed harness `211975ccffcd5512d64c2df5307df750f77454da` executed a
+32-run main/main file campaign against clean Litestream
+`4ed7a308f6271ebfd2b0a6e4b70b03011a37e4a3`, with a new 1,000-row fixture,
+declared age zero, two pairs per scenario and 1,000 committed operations per run.
+All 32 logical checks passed. One saturation-pressure baseline run logged
+`compaction failed` with `read database page 306: invalid argument`; the report
+retained it and returned `adverse`. Performance remained `inconclusive`.
+The unresolved measured incident is tracked in
+[#255](https://github.com/corylanou/litestream-soak/issues/255); no root cause or
+fix is established. The tenant lifecycle campaign saw a similar error, which is
+a related observation rather than evidence of a common cause.
+This is bounded validation on a shared macOS host, not a candidate performance
+claim or proof of saturation. Requests, observations, profiles, source/restore
+copies and logs remain retained with the campaign.
+
+Earlier Linux/file and macOS/MinIO 32-run test campaigns used placeholder harness
+identities and a synthetic test fixture age. They demonstrate real collector
+execution, including Linux FD samples and S3 attempts/transfer bytes, but do not
+establish immutable harness provenance or measured fixture aging. Earlier failed
+runs and mutating sync-probe runs remain retained with their original outcomes.
