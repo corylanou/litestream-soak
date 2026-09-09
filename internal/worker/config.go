@@ -62,6 +62,12 @@ type Config struct {
 	LoadDuration time.Duration
 
 	// Verification
+	LogicalMaxRows       int64
+	LogicalMaxBytes      int64
+	LogicalMaxObjects    int
+	LogicalMaxValueBytes int
+	LogicalTimeout       time.Duration
+
 	VerifyInterval           time.Duration
 	MonitorInterval          time.Duration
 	ReplicaLevelPollInterval time.Duration // how often replica LTX level counts are listed for metrics; 0 disables
@@ -169,6 +175,12 @@ func DefaultConfig() Config {
 		ReplaySpeed: 10.0,
 		ReplayLoop:  true,
 
+		LogicalMaxRows:       1_000_000_000,
+		LogicalMaxBytes:      1 << 40,
+		LogicalMaxObjects:    4096,
+		LogicalMaxValueBytes: 64 << 20,
+		LogicalTimeout:       30 * time.Minute,
+
 		VerifyInterval:           30 * time.Minute,
 		MonitorInterval:          15 * time.Second,
 		ReplicaLevelPollInterval: 5 * time.Minute,
@@ -270,14 +282,14 @@ func applyProviderRequestCanceledProfile(c *Config) {
 
 func ConfigFromEnv() (Config, error) {
 	c, err := configFromLookup(os.Getenv)
+	if err == nil {
+		err = loadLogicalConfig(&c)
+	}
 	if err == nil && c.ReplicaType == "s3" && c.S3Bucket == "" {
 		return c, fmt.Errorf("S3_BUCKET is required when REPLICA_TYPE=s3")
 	}
 	if err == nil {
 		c.LitestreamSHA = resolveLitestreamSHA()
-		if c.WorkloadSHA == "" {
-			c.WorkloadSHA = c.LitestreamSHA
-		}
 	}
 	return c, err
 }

@@ -61,7 +61,7 @@ func TestDeploymentIdentityRejectsInvalidEnvironment(t *testing.T) {
 	}
 }
 
-func TestLegacyImageReportsSharedGeneratorSource(t *testing.T) {
+func TestMissingGeneratorSourceRemainsUnknown(t *testing.T) {
 	t.Setenv("WORKLOAD_SHA", "")
 	t.Setenv("LITESTREAM_SHA", "shared-source")
 	t.Setenv("REPLICA_TYPE", "file")
@@ -69,7 +69,7 @@ func TestLegacyImageReportsSharedGeneratorSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.WorkloadSHA != cfg.LitestreamSHA {
-		t.Fatalf("legacy generator source = %q, want %q", cfg.WorkloadSHA, cfg.LitestreamSHA)
+	if cfg.WorkloadSHA != "" {
+		t.Fatalf("unknown generator inferred from candidate: %q", cfg.WorkloadSHA)
 	}
 }

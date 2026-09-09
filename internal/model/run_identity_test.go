@@ -144,3 +144,22 @@ func TestDeploymentGeneratorProvenanceIsImmutable(t *testing.T) {
 		t.Fatalf("idempotent provenance = %v, %v", deployments, err)
 	}
 }
+
+func TestMissingTrustedGeneratorCannotEarnDeploymentCredit(t *testing.T) {
+	t.Parallel()
+	db, err := Open(filepath.Join(t.TempDir(), "unknown-build.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	expected := reporting.WorkerIdentity{WorkerID: "worker", DeploymentID: 1, GitSHA: "soak", LitestreamSHA: "candidate", RunID: "run", MachineID: "machine", WorkloadID: "workload", ProfileConfig: "{}", ProfileHash: "44136fa355b3678a", ValidatorID: "soak-verifier:soak"}
+	if err := db.ExpectWorkerRun(expected); err != nil {
+		t.Fatal(err)
+	}
+	report := expected
+	report.WorkloadSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	attributed, quarantined, err := db.ReportAttribution(report)
+	if err != nil || attributed || quarantined {
+		t.Fatalf("unknown trusted generator: attributed=%v quarantined=%v err=%v", attributed, quarantined, err)
+	}
+}

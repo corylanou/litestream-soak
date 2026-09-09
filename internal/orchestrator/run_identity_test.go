@@ -453,3 +453,55 @@ func TestDeploymentReadyRejectsUnpinnedGenerator(t *testing.T) {
 		t.Fatalf("unpinned generator accepted: %d", response.Code)
 	}
 }
+
+func TestLegacyManagedWorkerUpgradeTelemetry(t *testing.T) {
+	for _, field := range []string{"matching", "machine", "build", "litestream", "source", "profile"} {
+		t.Run(field, func(t *testing.T) {
+			db := openTestDB(t)
+			worker := model.Worker{ID: "pr1483", Name: "preserved", AppName: "managed-app", FlyMachineID: "live-machine", GitSHA: "live-soak", LitestreamSHA: "live-ls", Source: "pr", ProfileName: "low-volume", ProfileConfig: "{}", Status: model.WorkerRunning}
+			createTestWorker(t, db, worker)
+			identity := reporting.WorkerIdentity{WorkerID: worker.ID, MachineID: worker.FlyMachineID, GitSHA: worker.GitSHA, LitestreamSHA: worker.LitestreamSHA, Source: worker.Source, ProfileName: worker.ProfileName, ProfileConfig: worker.ProfileConfig}
+			switch field {
+			case "machine":
+				identity.MachineID = "old-machine"
+			case "build":
+				identity.GitSHA = "old-soak"
+			case "litestream":
+				identity.LitestreamSHA = "old-ls"
+			case "source":
+				identity.Source = "main"
+			case "profile":
+				identity.ProfileName = "high-volume"
+			}
+			body, err := json.Marshal(reporting.HeartbeatPayload{WorkerIdentity: identity})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/heartbeat", bytes.NewReader(body))
+			req.SetPathValue("id", worker.ID)
+			response := httptest.NewRecorder()
+			NewAPI(db, nil, nil, nil, nil, nil).handleHeartbeat(response, req)
+			if response.Code != http.StatusAccepted {
+				t.Fatalf("status = %d", response.Code)
+			}
+			stored, err := db.GetWorker(worker.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (stored.LastHeartbeatAt != nil) != (field == "matching") {
+				t.Fatalf("heartbeat update for %s: %+v", field, stored)
+			}
+			if stored.FlyMachineID != worker.FlyMachineID || stored.GitSHA != worker.GitSHA || stored.LitestreamSHA != worker.LitestreamSHA || stored.Source != worker.Source || stored.ProfileName != worker.ProfileName {
+				t.Fatalf("persisted identity changed: %+v", stored)
+			}
+			attributed, _, err := db.ReportAttribution(identity)
+			if err != nil || attributed {
+				t.Fatalf("legacy attributed=%v err=%v", attributed, err)
+			}
+			expected, err := db.ExpectedWorkerRun(worker.ID)
+			if err != nil || expected != nil {
+				t.Fatalf("legacy self-registered: %+v, %v", expected, err)
+			}
+		})
+	}
+}

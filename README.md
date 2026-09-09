@@ -104,6 +104,11 @@ measured directly.
 | L0 retention | 5m (upstream) | 1h |
 | L0 retention check | 15s (upstream) | 2m |
 
+Worker restore checks also compare an independent, consistent source snapshot
+against restored schema and typed row contents. See [logical verification](docs/logical-verification.md)
+for the equality contract, resource budgets, bookkeeping policy, and opt-in real
+restore test.
+
 ## Fleet Sources
 
 The `main` source is the long-running baseline fleet. Failures there are
@@ -211,8 +216,8 @@ The release-quality views require attributed verification evidence within
 post-deployment windows. Each verification retains its deployment ID, run and
 machine IDs, soak and Litestream SHAs, workload generator SHA, effective workload
 configuration and hash, and harness validator identity. `WORKLOAD_SHA` identifies
-the generator source independently of the Litestream candidate; images that build
-both binaries from the same source report the Litestream SHA for both.
+the generator source independently of the Litestream candidate. An absent
+generator source remains unknown rather than being inferred from the candidate.
 
 Authenticated deployment-ready notifications supply the generator `workload_sha`
 from the image build. The notification helper reads the Dockerfile pin by default;
@@ -222,9 +227,11 @@ a custom generator build must supply the matching seventh argument or
 The control plane registers each expected run before machine creation and binds
 its machine ID after creation. Reports must match that run and the effective
 configuration derived from the worker configuration parser. Report ingestion and
-run replacement are serialized per worker. Mismatched reports and unregistered reports targeting an existing managed worker
-retain their historical evidence but cannot update the current worker or earn deployment
-credit. Current runs without a deployment remain operational without earning
+run replacement are serialized per worker. Mismatched reports retain their historical evidence but cannot update the current
+worker or earn deployment credit. During upgrades, legacy managed workers without
+a registered run can continue telemetry only when the reported machine, harness
+build, Litestream build, source, and profile match the persisted worker identity.
+These reports never register a run or earn deployment credit. Current runs without a deployment remain operational without earning
 release credit. Legacy verification rows remain readable with `attributed=false`;
 existing workers need a newly registered run before they can provide attributed
 evidence.
@@ -275,6 +282,27 @@ with `fly.control.toml` and the startup log fields in `cmd/soakctl/main.go`
 `internal/orchestrator/dormancy.go`.
 
 For detailed operator procedures, see `docs/operator-runbook.md`.
+
+## Replay pacing
+
+Each dataset pass anchors its schedule to its first event timestamp. Event
+offsets from that origin are divided by the replay speed, and deadlines are
+clamped to never move backward. Equal timestamps and out-of-order events add
+no extra delay: timestamps `[100, 90, 100, 110]` run at offsets `[0, 0, 0, 10]`
+at speed 1. A new loop pass starts a fresh schedule.
+
+All gaps are preserved, including gaps of ten seconds or more. Insert and retry
+time consume the scheduled interval instead of extending it. Pauses freeze the
+schedule and preserve the remaining gap; waiting is interruptible by pause or
+cancellation. Pause acknowledgment waits for an in-flight insert to finish.
+`REPLAY_SPEED` must be positive and finite. Direct engine callers may use zero
+for speed 1; negative and nonfinite speeds are rejected.
+
+`soak_replay_lag_seconds` measures nonnegative lateness at the start of each
+record attempt against its scheduled deadline, including skipped and failed
+records. `soak_replay_operation_seconds` measures individual insert attempt
+latency, excluding retry backoff, schedule waits, and pauses between attempts.
+The separate error and outcome counters retain failures even after recovery.
 
 ## GH Archive replay writes
 

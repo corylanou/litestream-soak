@@ -1,4 +1,5 @@
 ARG LITESTREAM_SHA=main
+ARG WORKLOAD_SHA=ae88b164dd6304bcbb654a681df767ee59042eed
 
 # Stage 1: Build litestream + litestream-test from source
 FROM golang:1.25.13-bookworm@sha256:e401dae1bf814e29204a8cb7915682e1780951e609ca0dd8865ee1937f510c48 AS litestream-builder
@@ -14,8 +15,16 @@ RUN go build \
     -tags osusergo,netgo,sqlite_omit_load_extension \
     -o /usr/local/bin/litestream ./cmd/litestream
 RUN go version -m /usr/local/bin/litestream >/tmp/litestream.buildinfo && cat /tmp/litestream.buildinfo
+FROM golang:1.25.13-bookworm@sha256:e401dae1bf814e29204a8cb7915682e1780951e609ca0dd8865ee1937f510c48 AS workload-builder
+ENV GOTOOLCHAIN=local
+RUN go version
+ARG WORKLOAD_SHA
+WORKDIR /src/litestream
+RUN git clone https://github.com/benbjohnson/litestream.git . && \
+    git checkout --detach "${WORKLOAD_SHA}" && \
+    test "$(git rev-parse HEAD)" = "${WORKLOAD_SHA}"
 RUN CGO_CFLAGS="-DSQLITE_DEFAULT_WAL_AUTOCHECKPOINT=0" go build \
-    -ldflags "-s -w -X 'main.Version=${LITESTREAM_SHA}'" \
+    -ldflags "-s -w -X 'main.Version=${WORKLOAD_SHA}'" \
     -o /usr/local/bin/litestream-test ./cmd/litestream-test
 RUN go version -m /usr/local/bin/litestream-test >/tmp/litestream-test.buildinfo && cat /tmp/litestream-test.buildinfo
 
@@ -55,15 +64,17 @@ RUN apt-get update && \
     mkdir -p /data && \
     chown soak:soak /data
 COPY --from=litestream-builder /usr/local/bin/litestream /usr/local/bin/litestream
-COPY --from=litestream-builder /usr/local/bin/litestream-test /usr/local/bin/litestream-test
+COPY --from=workload-builder /usr/local/bin/litestream-test /usr/local/bin/litestream-test
 COPY --from=litestream-builder /tmp/litestream.sha /opt/soak/litestream.sha
 COPY --from=soakworker-builder /usr/local/bin/soakworker /usr/local/bin/soakworker
 COPY --from=soakworker-builder /src/soak/datasets /opt/soak/datasets
 COPY --from=litestream-builder /tmp/litestream.buildinfo /opt/soak/litestream.buildinfo
-COPY --from=litestream-builder /tmp/litestream-test.buildinfo /opt/soak/litestream-test.buildinfo
+COPY --from=workload-builder /tmp/litestream-test.buildinfo /opt/soak/litestream-test.buildinfo
 COPY --from=soakworker-builder /tmp/soakworker.buildinfo /opt/soak/soakworker.buildinfo
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 RUN chmod 0755 /usr/local/bin/docker-entrypoint
+ARG WORKLOAD_SHA
+ENV WORKLOAD_SHA=${WORKLOAD_SHA}
 ENV LITESTREAM_SHA_FILE=/opt/soak/litestream.sha
 ENV SOAK_DATA_DB=/data/test.db
 VOLUME /data

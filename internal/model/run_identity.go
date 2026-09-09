@@ -57,7 +57,16 @@ func (d *DB) ReportAttribution(identity reporting.WorkerIdentity) (bool, bool, e
 		if err != nil {
 			return false, false, err
 		}
-		return false, worker.FlyMachineID != "" || worker.AppName != "", nil
+		if worker.FlyMachineID == "" && worker.AppName == "" {
+			return false, false, nil
+		}
+		matches := worker.FlyMachineID != "" && identity.MachineID == worker.FlyMachineID &&
+			worker.GitSHA != "" && identity.GitSHA == worker.GitSHA &&
+			worker.LitestreamSHA != "" && identity.LitestreamSHA == worker.LitestreamSHA &&
+			worker.Source != "" && identity.Source == worker.Source &&
+			worker.ProfileName != "" && identity.ProfileName == worker.ProfileName &&
+			(identity.AppName == "" || identity.AppName == worker.AppName)
+		return false, !matches, nil
 	}
 	profileDigest := sha256.Sum256([]byte(identity.ProfileConfig))
 	matches := identity.RunID != "" && identity.RunID == expected.RunID &&
