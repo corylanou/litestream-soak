@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"debug/buildinfo"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -35,8 +36,19 @@ func TestFTSPinnedRestoreComparison(t *testing.T) {
 				t.Fatal("explicit absolute binary path and immutable 40-character SHA are required")
 			}
 			version, err := exec.Command(binary, "version").CombinedOutput()
-			if err != nil || !strings.Contains(string(version), sha) {
-				t.Fatalf("binary identity mismatch: version=%q expected=%s error=%v", version, sha, err)
+			if err != nil {
+				t.Fatalf("binary version: %q: %v", version, err)
+			}
+			build, err := buildinfo.ReadFile(binary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			settings := make(map[string]string)
+			for _, setting := range build.Settings {
+				settings[setting.Key] = setting.Value
+			}
+			if build.GoVersion != "go1.25.13" || settings["vcs.revision"] != sha || settings["vcs.modified"] != "false" {
+				t.Fatalf("binary identity mismatch: Go=%s revision=%s modified=%s expected=%s", build.GoVersion, settings["vcs.revision"], settings["vcs.modified"], sha)
 			}
 			dir, err := os.MkdirTemp(root, strings.ToLower(role)+"-")
 			if err != nil {
@@ -90,7 +102,8 @@ func TestFTSPinnedRestoreComparison(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			encode(map[string]string{"role": role, "candidate_sha": sha, "version": strings.TrimSpace(string(version)), "workload": "fts-v1", "worker_sha": cfg.GitSHA})
+			defer func() { encode(map[string]bool{"test_passed": !t.Failed()}) }()
+			encode(map[string]string{"role": role, "candidate_sha": sha, "version": strings.TrimSpace(string(version)), "workload": "fts-v1", "worker_sha": cfg.GitSHA, "build": build.String(), "binary_sha256": readProfileBinary(binary).SHA256})
 			v := NewVerifier(cfg)
 			var synced syncResponse
 			if !waitUntil(30*time.Second, 50*time.Millisecond, func() bool {
@@ -109,9 +122,11 @@ func TestFTSPinnedRestoreComparison(t *testing.T) {
 				phase := ftsPhase(step)
 				profiles.captureSet(ctx, "fts-"+phase+"-before")
 				finish := profiles.beginFTSProfile(ctx, phase)
+				started := time.Now()
 				work, err := stepFTS(ctx, db)
+				duration := time.Since(started)
 				finish()
-				encode(map[string]any{"step": step, "work": work, "error": fmt.Sprint(err)})
+				encode(map[string]any{"step": step, "work": work, "duration_seconds": duration.Seconds(), "error": fmt.Sprint(err)})
 				if err != nil {
 					t.Fatal(err)
 				}

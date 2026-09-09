@@ -574,8 +574,9 @@ is activated by this suite.
 `TestFTSPinnedRestoreComparison` requires caller-selected immutable binaries.
 Set `SOAK_FTS_BASELINE_BINARY`, `SOAK_FTS_BASELINE_SHA`,
 `SOAK_FTS_CANDIDATE_BINARY`, and `SOAK_FTS_CANDIDATE_SHA` to absolute executable
-paths and their full commit SHAs. Each executable's `version` output must
-contain its expected SHA. Set `SOAK_FTS_EVIDENCE_DIR` to an absolute local
+paths and their full commit SHAs. Each executable must have clean embedded build metadata matching its expected
+SHA and Go 1.25.13; pseudo-version output is retained without using its
+shortened SHA as identity. Set `SOAK_FTS_EVIDENCE_DIR` to an absolute local
 artifact directory and `SOAK_FTS_WORKER_SHA` to the tested soak revision, then
 run `GOTOOLCHAIN=go1.25.13 go test ./internal/worker -run
 TestFTSPinnedRestoreComparison -count=1 -v`. The test never selects a moving
