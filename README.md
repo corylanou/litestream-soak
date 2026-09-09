@@ -254,16 +254,33 @@ For detailed operator procedures, see `docs/operator-runbook.md`.
 
 ## Development
 
+Maintained builds use Go 1.25.13. Make targets and the one-shot rig select this
+compiler explicitly, including builds in the upstream Litestream module.
+Docker builders pin the Go 1.25.13 Bookworm image by digest and disable automatic
+toolchain switching. The control image rebuilds flyctl v0.4.59 from its pinned
+source commit with Go 1.26.6 because flyctl requires Go 1.26. Binary compiler
+metadata is printed during image builds and retained under `/opt/soak/*.buildinfo`.
+The upstream Litestream SHA resolution and build flags remain unchanged.
+
+The one-shot rig includes the compiler in its cache and result names and writes
+a `.buildinfo` companion to each result. Keep that companion with benchmark
+results; compare baseline and candidate using the same compiler and record both
+source SHAs. Old caches and results remain separate. `make build-deps` builds the
+existing local upstream checkout and prints its SHA; it does not select a new ref.
+
 Common local checks:
 
 ```bash
+export GOTOOLCHAIN=go1.25.13
+go version
 go build ./...
 go test ./...
-golangci-lint run --new-from-rev=origin/main
+golangci-lint run
+govulncheck -show verbose ./...
 ```
 
-Use `golangci-lint` when available. The `--new-from-rev` form keeps local lint
-focused on changes relative to the main branch.
+Use `golangci-lint` when available. Review non-reachable module findings from
+`govulncheck` separately from reachable vulnerabilities; do not suppress them.
 
 Useful Make targets:
 
