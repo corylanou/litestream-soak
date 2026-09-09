@@ -9,20 +9,31 @@ physical file checksums are no longer a correctness gate.
 
 ## Restore boundary
 
-The worker pauses every configured load producer, checkpoints, and waits for
-replication before capturing the source. One read transaction covers schema and
-all tables, including committed WAL frames. Uncommitted transactions are
-excluded. The resulting digests are immutable while restore runs; later source
-commits cannot change the expected result. Writers remain paused until the
-cycle finishes. Writers outside the harness's pause contract must be stopped by
-the caller to establish this boundary.
+The worker pauses configured load producers, checkpoints, and waits for
+replication. After any checkpoint thaw/re-pause, it acquires SQLite's writer
+reservation (`BEGIN IMMEDIATE`) before a second sync and source snapshot.
+An in-flight writer prevents acquisition; sending SIGSTOP alone is not treated
+as proof of quiescence. The reserved sync must report the requested source TXID
+and replication through that TXID. The replica watermark is not used as the
+source boundary. Schema and all tables are read in one consistent transaction
+while the reservation excludes commits, including writers outside the harness.
+The reservation is released before restoring; load producers resume on every
+cycle exit, including cancellation.
 
-The sync TXID is requested from the restore tool. Older workload tools that do
-not accept `-txid` restore the latest replica while load remains paused. Evidence
-explicitly records `restore_boundary=latest-fallback`; the original source
-snapshot is still compared, so an older, missing, or changed application state
-cannot pass by falling back. This fallback does not claim a pinned physical
-restore position.
+Restore invokes `litestream restore -txid` directly, followed by independent
+SQLite integrity and logical/schema comparison. The shipped 4ed7a308 binary
+supports this path even though the independently pinned workload helper does
+not accept `validate -txid`. There is no latest fallback. Missing pin support,
+zero TXIDs, unavailable writer reservations, sync errors, or boundary drift
+produce failed attempts with explicit unavailable evidence and no correctness
+credit. A later cycle acquires a fresh boundary; it does not replace the earlier
+failed attempt. The immutable source digest remains unchanged during restore,
+so a newer replica commit cannot change a successful pinned comparison.
+
+Evidence separates workload/run identity from `boundary_txid`,
+`source_boundary=writer-reserved-sync`, and `restore_boundary=pinned`.
+The historical Amsterdam 126454/126455 mismatch remains a failure with an
+unproven cause; its unpinned restore does not establish Litestream corruption.
 
 Many-database verification applies the same oracle separately to each selected
 database and releases each restored database after comparison. A truncated

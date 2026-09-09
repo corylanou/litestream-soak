@@ -144,7 +144,7 @@ func TestLogicalOraclePinnedLitestream(t *testing.T) {
 	if _, err := os.Stat(validatedPath); err != nil {
 		t.Fatalf("pipeline restored path: %v", err)
 	}
-	for _, want := range []string{"restore_boundary=latest-fallback", "synthetic_workload=litestream:ae88b164dd6304bcbb654a681df767ee59042eed", "logical_match=true"} {
+	for _, want := range []string{"restore_boundary=pinned", "synthetic_workload=litestream:ae88b164dd6304bcbb654a681df767ee59042eed", "logical_match=true"} {
 		if !strings.Contains(v.logicalEvidence, want) {
 			t.Fatalf("missing pipeline evidence %q: %s", want, v.logicalEvidence)
 		}

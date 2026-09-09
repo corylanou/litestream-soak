@@ -556,8 +556,8 @@ func TestVerifierValidatePassesPinnedTXID(t *testing.T) {
 	dir := t.TempDir()
 	argsPath := filepath.Join(dir, "args")
 	restorePath := filepath.Join(dir, "test.db.restored")
-	writeFakeLitestreamTest(t, dir, `
-if [ "$1" = "validate" ]; then
+	writeFakePinnedRestore(t, dir, `
+if [ "$1" = "restore" ]; then
   shift
 fi
 printf '%s\n' "$@" > "$LITESTREAM_TEST_ARGS"
@@ -576,6 +576,7 @@ exit 0
 		t.Fatal(err)
 	}
 
+	startBoundarySyncFixture(t, &cfg, 0x224b6)
 	verifier := NewVerifier(cfg)
 	passed, err := verifier.validate(context.Background(), 0x224b6)
 	if err != nil {
@@ -587,7 +588,7 @@ exit 0
 	args := readLines(t, argsPath)
 	assertContains(t, args, "-txid")
 	assertContains(t, args, "00000000000224b6")
-	assertContains(t, args, "-restored-db")
+	assertContains(t, args, "-o")
 	assertContains(t, args, restorePath)
 }
 
@@ -599,8 +600,8 @@ func TestVerifierValidateManyDBDirUsesPerDBReplicaConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "validate-config-path")
 	configBodyPath := filepath.Join(dir, "validate-config-body")
-	writeFakeLitestreamTest(t, dir, `
-if [ "$1" = "validate" ]; then
+	writeFakePinnedRestore(t, dir, `
+if [ "$1" = "restore" ]; then
   shift
 fi
 while [ "$#" -gt 0 ]; do
@@ -634,8 +635,9 @@ exit 1
 	dbPath := filepath.Join(dir, "dbs", "db-00011.db")
 	logicalTestDB(t, dbPath, "CREATE TABLE t (id INTEGER PRIMARY KEY)")
 	logicalTestDB(t, dbPath+".restored", "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+	startBoundarySyncFixture(t, &cfg, 1)
 	verifier := NewVerifier(cfg)
-	passed, err := verifier.validateDB(context.Background(), dbPath, dbPath+".restored", 0)
+	passed, err := verifier.validateDB(context.Background(), dbPath, dbPath+".restored", 1)
 	if err != nil {
 		t.Fatalf("validateDB() error = %v", err)
 	}
@@ -661,7 +663,7 @@ exit 1
 	}
 }
 
-func TestVerifierValidateRetriesWithoutPinnedTXIDWhenUnsupported(t *testing.T) {
+func TestVerifierValidateRejectsUnsupportedPin(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake binary requires Unix")
 	}
@@ -669,7 +671,7 @@ func TestVerifierValidateRetriesWithoutPinnedTXIDWhenUnsupported(t *testing.T) {
 	dir := t.TempDir()
 	countPath := filepath.Join(dir, "count")
 	argsPath := filepath.Join(dir, "args")
-	writeFakeLitestreamTest(t, dir, `
+	writeFakePinnedRestore(t, dir, `
 count=0
 if [ -f "$LITESTREAM_TEST_COUNT" ]; then
   count=$(cat "$LITESTREAM_TEST_COUNT")
@@ -680,7 +682,7 @@ if [ "$count" = "1" ]; then
   echo "flag provided but not defined: -txid" >&2
   exit 2
 fi
-if [ "$1" = "validate" ]; then
+if [ "$1" = "restore" ]; then
   shift
 fi
 printf '%s\n' "$@" > "$LITESTREAM_TEST_ARGS"
@@ -700,22 +702,17 @@ exit 0
 		t.Fatal(err)
 	}
 
+	startBoundarySyncFixture(t, &cfg, 0x224b6)
 	verifier := NewVerifier(cfg)
 	passed, err := verifier.validate(context.Background(), 0x224b6)
-	if err != nil {
-		t.Fatalf("validate() error = %v", err)
+	if err == nil || passed {
+		t.Fatalf("unsupported pin credited: %v, %v", passed, err)
 	}
-	if !passed {
-		t.Fatal("validate() passed=false")
+	if got := strings.TrimSpace(readFile(t, countPath)); got != "1" {
+		t.Fatalf("unexpected unpinned retry: %s", got)
 	}
-	if got := strings.TrimSpace(readFile(t, countPath)); got != "2" {
-		t.Fatalf("validate executions=%q want 2", got)
-	}
-	args := readLines(t, argsPath)
-	for _, arg := range args {
-		if arg == "-txid" {
-			t.Fatalf("fallback args unexpectedly include -txid: %v", args)
-		}
+	if !strings.Contains(verifier.logicalEvidence, "restore_boundary=unavailable") {
+		t.Fatal(verifier.logicalEvidence)
 	}
 }
 
@@ -726,7 +723,7 @@ func TestVerifierValidateUsesS3ProxyEnv(t *testing.T) {
 
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, "env")
-	writeFakeLitestreamTest(t, dir, `
+	writeFakePinnedRestore(t, dir, `
 	printf 'AWS_ACCESS_KEY_ID=%s\n' "$AWS_ACCESS_KEY_ID" > "$LITESTREAM_TEST_ENV"
 	printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$AWS_SECRET_ACCESS_KEY" >> "$LITESTREAM_TEST_ENV"
 	printf 'AWS_SESSION_TOKEN=%s\n' "$AWS_SESSION_TOKEN" >> "$LITESTREAM_TEST_ENV"
@@ -756,8 +753,9 @@ func TestVerifierValidateUsesS3ProxyEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	startBoundarySyncFixture(t, &cfg, 1)
 	verifier := NewVerifier(cfg)
-	passed, err := verifier.validate(context.Background(), 0)
+	passed, err := verifier.validate(context.Background(), 1)
 	if err != nil {
 		t.Fatalf("validate() error = %v", err)
 	}
