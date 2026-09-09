@@ -729,6 +729,33 @@ func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef 
 	deferredWorkers := make([]string, 0)
 	for _, desired := range spec.Workers {
 		current, ok := byName[desired.Name]
+		var activeAttempt *model.ProvisioningAttempt
+		if ok {
+			var err error
+			activeAttempt, err = m.db.ActiveProvisioning(current.ID)
+			if err != nil {
+				ensureErrors = append(ensureErrors, err)
+				continue
+			}
+		}
+		if ok && (current.Status == model.WorkerPending || activeAttempt != nil) {
+			recoveryImage := imageRef
+			if activeAttempt != nil {
+				recoveryImage = activeAttempt.ImageRef
+			} else if current.GitSHA != desired.GitSHA || current.LitestreamSHA != desired.LitestreamSHA {
+				deployment, err := resolveReadyDeploymentTarget(m.db, current.Source, "", current.GitSHA, current.LitestreamSHA)
+				if err != nil {
+					report := model.ProvisioningAttempt{WorkerID: current.ID, Phase: "legacy_pending"}
+					ensureErrors = append(ensureErrors, m.provisioningUnavailable(current, report, "Original pending deployment image is unavailable", err))
+					continue
+				}
+				recoveryImage = deployment.ImageRef
+			}
+			if err := m.recoverPendingWorker(ctx, current.ID, recoveryImage); err != nil {
+				ensureErrors = append(ensureErrors, fmt.Errorf("%s: %w", desired.Name, err))
+			}
+			continue
+		}
 		if ok && current.Status == model.WorkerDormant {
 			continue
 		}

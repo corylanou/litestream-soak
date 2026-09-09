@@ -290,7 +290,7 @@ func incidentEventClass(kind string) string {
 	case "maintenance_snapshot_completed", "maintenance_compaction_completed", "maintenance_retention_completed":
 		return "maintenance"
 	}
-	for _, part := range []string{"missing", "unavailable", "quarantined", "aborted", "pending"} {
+	for _, part := range []string{"missing", "unavailable", "quarantined", "aborted", "pending", "provisioning_interrupted"} {
 		if strings.Contains(kind, part) {
 			return "unavailable"
 		}

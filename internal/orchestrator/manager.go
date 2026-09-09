@@ -205,71 +205,27 @@ func (m *Manager) createWorker(ctx context.Context, req WorkerRequest) (*model.W
 		return nil, fmt.Errorf("record worker creating event: %w", err)
 	}
 
-	volSize := req.VolumeSizeGB
-	if volSize == 0 {
-		volSize = 10
-	}
-
-	vol, err := m.createWorkerVolume(ctx, *worker, volSize)
+	attempt, err := m.beginWorkerProvisioning(*worker, req.ImageRef, req.VolumeSizeGB)
 	if err != nil {
-		if updateErr := m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error()); updateErr != nil {
-			return nil, fmt.Errorf("create volume: %w", errors.Join(err, fmt.Errorf("mark worker failed: %w", updateErr)))
-		}
-		m.observeWorkerByID(workerID)
-		return nil, fmt.Errorf("create volume: %w", err)
+		return nil, err
 	}
-	worker.FlyVolumeID = vol.ID
-
-	if err := m.clearWorkerReplicaPrefix(ctx, *worker); err != nil {
-		if destroyErr := m.fly.DestroyVolume(ctx, vol.ID); destroyErr != nil && !flyapi.IsNotFound(destroyErr) {
-			slog.Warn("Failed to destroy worker volume after replica prefix clear failure", "worker_id", workerID, "volume_id", vol.ID, "error", destroyErr)
-		}
-		if updateErr := m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error()); updateErr != nil {
-			return nil, fmt.Errorf("clear replica prefix: %w", errors.Join(err, fmt.Errorf("mark worker failed: %w", updateErr)))
-		}
-		m.observeWorkerByID(workerID)
-		return nil, fmt.Errorf("clear replica prefix: %w", err)
-	}
-
-	machine, err := m.createWorkerMachine(ctx, *worker, req.ImageRef, vol.ID, workloadCfg)
-	if err != nil {
-		if destroyErr := m.fly.DestroyVolume(ctx, vol.ID); destroyErr != nil && !flyapi.IsNotFound(destroyErr) {
-			slog.Warn("Failed to destroy worker volume after machine creation failure", "worker_id", workerID, "volume_id", vol.ID, "error", destroyErr)
-		}
-		if updateErr := m.db.UpdateWorkerStatus(workerID, model.WorkerFailed, err.Error()); updateErr != nil {
-			return nil, fmt.Errorf("create machine: %w", errors.Join(err, fmt.Errorf("mark worker failed: %w", updateErr)))
-		}
-		m.observeWorkerByID(workerID)
-		return nil, fmt.Errorf("create machine: %w", err)
-	}
-
-	if err := m.db.UpdateWorkerMachine(workerID, machine.ID, vol.ID); err != nil {
-		if destroyErr := m.fly.DestroyMachine(ctx, machine.ID, true); destroyErr != nil && !flyapi.IsNotFound(destroyErr) {
-			slog.Warn("Failed to destroy worker machine after database update failure", "worker_id", workerID, "machine_id", machine.ID, "error", destroyErr)
-		}
-		if destroyErr := m.fly.DestroyVolume(ctx, vol.ID); destroyErr != nil && !flyapi.IsNotFound(destroyErr) {
-			slog.Warn("Failed to destroy worker volume after database update failure", "worker_id", workerID, "volume_id", vol.ID, "error", destroyErr)
-		}
-		return nil, fmt.Errorf("update worker machine: %w", err)
-	}
-	if err := m.db.UpdateWorkerStatus(workerID, model.WorkerRunning, ""); err != nil {
-		return nil, fmt.Errorf("mark worker running: %w", err)
-	}
-	m.observeWorkerByID(workerID)
-	_ = m.db.RecordEvent(workerID, "worker_started", fmt.Sprintf("Worker %s started (machine %s)", req.Name, machine.ID), "")
-
-	slog.Info("Worker created", "name", req.Name, "machine_id", machine.ID, "volume_id", vol.ID, "profile", req.ProfileName)
-
-	return worker, nil
+	return m.resumeWorkerProvisioning(ctx, *worker, *attempt, workloadCfg, false)
 }
 
 func (m *Manager) createWorkerVolume(ctx context.Context, worker model.Worker, volSize int) (*flyapi.Volume, error) {
+	attempt, err := m.db.ActiveProvisioning(worker.ID)
+	if err != nil {
+		return nil, err
+	}
 	sourceWorker, unlockSource, freshReason, err := m.lockForkSourceForWorker(ctx, worker)
 	if err != nil {
 		return nil, err
 	}
-
 	volumeName := flyVolumeName(worker.Name)
+	if attempt != nil {
+		volumeName = attempt.VolumeName
+	}
+
 	client := m.flyClientForWorker(worker)
 	if sourceWorker != nil {
 		vol, err := func() (*flyapi.Volume, error) {
@@ -279,6 +235,9 @@ func (m *Manager) createWorkerVolume(ctx context.Context, worker model.Worker, v
 		if err == nil {
 			m.recordWorkerVolumeForked(worker, *sourceWorker, vol.ID)
 			return vol, nil
+		}
+		if attempt != nil {
+			return nil, fmt.Errorf("fork outcome unavailable; retained for reconciliation: %w", err)
 		}
 		freshReason = "fork_volume_failed"
 		slog.Warn("Failed to fork worker volume; creating fresh volume", "worker_id", worker.ID, "source_worker_id", sourceWorker.ID, "source_volume_id", sourceWorker.FlyVolumeID, "error", err)
@@ -734,6 +693,13 @@ func (m *Manager) replaceWorker(ctx context.Context, w model.Worker, newImageRef
 }
 
 func (m *Manager) replaceWorkerWithRequest(ctx context.Context, w model.Worker, request WorkerRequest) (*model.Worker, error) {
+	attempt, err := m.db.ActiveProvisioning(w.ID)
+	if err != nil {
+		return nil, err
+	}
+	if attempt != nil || w.Status == model.WorkerPending {
+		return nil, fmt.Errorf("reconcile unresolved provisioning before replacement")
+	}
 	if _, err := marshalWorkloadConfig(normalizeWorkloadConfig(request.Workload)); err != nil {
 		return nil, fmt.Errorf("validate replacement workload: %w", err)
 	}

@@ -275,9 +275,20 @@ func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, 
 	}
 	env := m.workerEnv(worker, workloadCfg)
 	env["SOAK_RUN_ID"] = uuid.NewString()
-	deployment, err := m.db.GetLatestDeployment(worker.Source)
+	provisioning, err := m.db.ActiveProvisioning(worker.ID)
 	if err != nil {
-		return nil, fmt.Errorf("get worker deployment: %w", err)
+		return nil, err
+	}
+	if provisioning != nil {
+		env["SOAK_RUN_ID"] = provisioning.ID
+	}
+
+	var deployment *model.Deployment
+	if provisioning == nil {
+		deployment, err = m.db.GetLatestDeployment(worker.Source)
+		if err != nil {
+			return nil, fmt.Errorf("get worker deployment: %w", err)
+		}
 	}
 	effectiveConfig, err := workerconfig.WorkloadFromEnvironment(env)
 	if err != nil {
@@ -287,6 +298,7 @@ func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, 
 	env["SOAK_WORKLOAD_ID"] = fmt.Sprintf("%x", sha256.Sum256([]byte(expectedProfile)))
 	identity := reporting.WorkerIdentity{
 		ImageRef:      imageRef,
+		VolumeID:      volumeID,
 		ProfileConfig: expectedProfile,
 		WorkloadID:    env["SOAK_WORKLOAD_ID"],
 		WorkerID:      worker.ID,
@@ -296,12 +308,27 @@ func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, 
 		Source:        worker.Source,
 		ProfileName:   worker.ProfileName,
 	}
-	if deployment != nil && workerMatchesDeployment(worker, *deployment) && deployment.ImageRef == imageRef {
+	if provisioning != nil {
+		identity.DeploymentID = provisioning.DeploymentID
+		identity.WorkloadSHA = provisioning.WorkloadSHA
+		if provisioning.DeploymentID > 0 {
+			env["SOAK_DEPLOYMENT_ID"] = fmt.Sprint(provisioning.DeploymentID)
+		}
+		if provisioning.WorkloadSHA != "" {
+			env["WORKLOAD_SHA"] = provisioning.WorkloadSHA
+		}
+	} else if deployment != nil && workerMatchesDeployment(worker, *deployment) && deployment.ImageRef == imageRef {
 		identity.DeploymentID = deployment.ID
 		identity.WorkloadSHA = deployment.WorkloadSHA
 		env["SOAK_DEPLOYMENT_ID"] = fmt.Sprint(deployment.ID)
 	}
-	if err := m.db.ExpectWorkerRun(identity); err != nil {
+	saveIdentity := m.db.ExpectWorkerRun
+	if provisioning != nil {
+		saveIdentity = func(identity reporting.WorkerIdentity) error {
+			return m.db.ExpectProvisioningRun(*provisioning, identity)
+		}
+	}
+	if err := saveIdentity(identity); err != nil {
 		return nil, fmt.Errorf("register worker run: %w", err)
 	}
 
@@ -338,12 +365,12 @@ func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, 
 		machine, err := m.flyClientForWorker(worker).CreateMachine(ctx, request)
 		if err == nil {
 			identity.MachineID = machine.ID
-			if err := m.db.ExpectWorkerRun(identity); err != nil {
+			if err := saveIdentity(identity); err != nil {
 				return nil, fmt.Errorf("bind worker machine: %w", err)
 			}
 			return machine, nil
 		}
-		if !retriableMachineCreateError(err) || attempt == 5 {
+		if provisioning != nil || !retriableMachineCreateError(err) || attempt == 5 {
 			return nil, err
 		}
 

@@ -196,6 +196,10 @@ func Open(path string) (*DB, error) {
 		_ = writer.Close()
 		return nil, fmt.Errorf("ensure alert columns: %w", err)
 	}
+	if _, err := writer.Exec(provisioningSchema); err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("ensure provisioning journal: %w", err)
+	}
 	if err := ensureEvidenceJournal(writer); err != nil {
 		_ = writer.Close()
 		return nil, fmt.Errorf("ensure evidence journal: %w", err)
