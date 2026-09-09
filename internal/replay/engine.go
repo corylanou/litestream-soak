@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -219,6 +220,9 @@ func replayDSN(dbPath string) string {
 }
 
 func (e *Engine) Run(ctx context.Context) error {
+	if e.cfg.SpeedMultiplier < 0 || math.IsNaN(e.cfg.SpeedMultiplier) || math.IsInf(e.cfg.SpeedMultiplier, 0) {
+		return fmt.Errorf("replay speed must be nonnegative and finite")
+	}
 	e.mu.Lock()
 	e.running = true
 	e.mu.Unlock()
@@ -282,8 +286,9 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 	}
 	defer func() { _ = iter.Close() }()
 
-	var prevTS time.Time
-	scheduled := e.scheduleNow()
+	var originTS time.Time
+	passStart := e.scheduleNow()
+	scheduled := passStart
 	first := true
 	var count int64
 	var dropped int64
@@ -297,15 +302,25 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 
 		ts := iter.Timestamp()
 
-		if !first && ts.After(prevTS) {
-			delay := ts.Sub(prevTS)
-			if e.cfg.SpeedMultiplier > 0 {
-				delay = time.Duration(float64(delay) / e.cfg.SpeedMultiplier)
-			}
-			scheduled = scheduled.Add(delay)
+		if first {
+			originTS = ts
+			first = false
 		}
-		first = false
-		prevTS = ts
+		offset := ts.Sub(originTS)
+		if e.cfg.SpeedMultiplier > 0 {
+			scaled := float64(offset) / e.cfg.SpeedMultiplier
+			if scaled >= float64(math.MaxInt64) {
+				offset = time.Duration(math.MaxInt64)
+			} else if scaled <= 0 {
+				offset = 0
+			} else {
+				offset = time.Duration(scaled)
+			}
+		}
+		if deadline := passStart.Add(offset); deadline.After(scheduled) {
+			scheduled = deadline
+		}
+
 		if err := e.waitUntil(ctx, scheduled); err != nil {
 			return err
 		}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
+	"path/filepath"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -194,4 +196,43 @@ func TestEngineScheduleResumesRemainingGap(t *testing.T) {
 			t.Fatalf("lag=%v, want 0", got)
 		}
 	})
+}
+
+func TestEngineScheduleNonmonotonicTimestamps(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		timestamps, want []int64
+	}{
+		{"return to origin", []int64{100, 90, 100}, []int64{0, 0, 0}},
+		{"repeated reversal", []int64{100, 110, 100, 110, 100, 110, 120}, []int64{0, 10, 10, 10, 10, 10, 20}},
+		{"equal", []int64{100, 100, 110, 110}, []int64{0, 0, 10, 10}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				start := time.Now()
+				var timestamps []time.Time
+				for _, ts := range tc.timestamps {
+					timestamps = append(timestamps, time.Unix(ts, 0))
+				}
+				engine := NewEngine(Config{SpeedMultiplier: 2}, scheduledAdapter{timestamps: timestamps, insert: func(i int) error {
+					if got, want := time.Since(start), time.Duration(tc.want[i])*time.Second/2; got != want {
+						t.Errorf("insert %d at %v, want %v", i, got, want)
+					}
+					return nil
+				}})
+				if err := engine.replayOnce(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			})
+		})
+	}
+}
+
+func TestEngineRejectsInvalidSpeed(t *testing.T) {
+	for _, speed := range []float64{-1, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		engine := NewEngine(Config{SpeedMultiplier: speed, DBPath: filepath.Join(t.TempDir(), "replay.db")}, countingAdapter{})
+		if err := engine.Run(context.Background()); err == nil {
+			t.Errorf("speed %v accepted", speed)
+		}
+	}
 }
