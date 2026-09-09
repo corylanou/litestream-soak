@@ -109,6 +109,9 @@ against restored schema and typed row contents. See [logical verification](docs/
 for the equality contract, resource budgets, bookkeeping policy, and opt-in real
 restore test.
 
+See [local persistent upgrade comparisons](docs/persistent-upgrades.md) for the
+opt-in fresh-start and aged replica lifecycle rig.
+
 ## Fleet Sources
 
 The `main` source is the long-running baseline fleet. Failures there are
