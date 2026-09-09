@@ -9,3 +9,5 @@ tmp/
 *.restored
 .env
 .envrc
+
+.local/

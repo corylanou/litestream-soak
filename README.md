@@ -150,7 +150,7 @@ with its full page index resident while the L1 compaction runs, releasing when
 the compaction finishes or on a timeout (which is how a Litestream that
 serializes per-database maintenance shows up, recorded in
 `gate_release_reason`). `runtime.MemStats` is sampled throughout and a heap
-profile is written at each phase's peak under the run's `profiles/` directory. Fixture copies are APFS clones on macOS and the
+profile is sampled after sufficient growth and spacing under the run's `profiles/` directory. This is a sampled growth profile, not an exact peak profile. A separate final heap profile is written even for phases shorter than the sampling interval, including failed phases. Fixture copies are APFS clones on macOS and the
 sequential replica prefix is deleted before the overlap run, so a 16 GiB
 fixture needs roughly one copy's worth of local disk and object storage.
 Pass requires the overlap's heap growth to stay within 1.10x the larger
@@ -305,9 +305,7 @@ rolls the fleet.
 Litestream `main`, skips work if that SHA is already deployed, and otherwise
 builds a new worker image and notifies the main fleet. `.github/workflows/soak-pr.yml`
 builds PR-specific worker images from an upstream Litestream PR SHA and notifies
-the matching `pr-NNN` source. There are no repository `pull_request` workflows
-for this repo; PR verification is local and at ship time unless a workflow is
-manually dispatched.
+the matching `pr-NNN` source. PR CI runs unit/race tests, lint, image security checks, and the bounded real-binary compatibility suite.
 
 Grafana dashboards live in `grafana/`:
 
@@ -375,10 +373,13 @@ Pass logs report attempted, mutated, skipped, and failed record counts.
 Maintained builds use Go 1.25.13. Make targets and the one-shot rig select this
 compiler explicitly, including builds in the upstream Litestream module.
 Docker builders pin the Go 1.25.13 Bookworm image by digest and disable automatic
-toolchain switching. The control image rebuilds flyctl v0.4.59 from its pinned
-source commit with Go 1.26.6 because flyctl requires Go 1.26. Binary compiler
+toolchain switching. The control image and deployment jobs build flyctl v0.4.101 from pinned
+source with an explicit x/crypto v0.56.0 patch, labeled `0.4.101-soak.1`.
+Its dedicated builder uses Go 1.26.6 because flyctl requires Go 1.26. Binary compiler
 metadata is printed during image builds and retained under `/opt/soak/*.buildinfo`.
 The upstream Litestream SHA resolution and build flags remain unchanged.
+See [binary security evidence](docs/binary-security.md) for scan states,
+operational remediation, residual triage, and comparison instructions.
 
 The one-shot rig includes the compiler in its cache and result names and writes
 a `.buildinfo` companion to each result. Keep that companion with benchmark
@@ -484,3 +485,45 @@ when a worker update was requested. Worker acceptance starts an asynchronous
 rollout; neither workflow success nor the checkpoint proves convergence or soak
 verification. Use the actual worker images and subsequent worker reports for
 those outcomes.
+
+## Real Litestream compatibility checks
+
+Run `bash scripts/test-compatibility.sh` locally for the same compatibility check
+used by PR CI. It builds real Litestream at
+`4ed7a308f6271ebfd2b0a6e4b70b03011a37e4a3` and the independent workload validator
+at `ae88b164dd6304bcbb654a681df767ee59042eed` with Go 1.25.13.
+An optional first argument selects another full lowercase 40-character candidate
+commit SHA; the workload stays fixed. Mutable refs are rejected. Network access
+to GitHub and Go module downloads, Git, a C compiler, and Go are required.
+The file-replica fixture needs no containers, cloud credentials, or provider.
+
+The check performs actual replication, IPC sync, TXID restore, and the worker's
+validation pipeline with the shared logical oracle. It changes and deletes a
+committed row independently, requires exactly one affected row, and requires
+oracle rejection. The production profile capturer collects CPU, heap, allocs,
+goroutine text, and memory-stat text; binary profiles must parse with Go pprof.
+Missing endpoints, incompatible versions, failed restores, invalid profiles, and
+unengaged fixtures fail the check instead of earning a compatibility pass.
+The pinned workload lacks TXID validation support; its documented latest-restore
+fallback remains visible and is checked against the quiescent logical source.
+
+Each invocation retains a separate `.local/compatibility/run.*` directory with
+build identity, logs, databases, and profile metadata. CI uploads diagnostic
+artifacts even on failure. There is no retry that can erase a failed run. The
+integration test has a two-minute timeout; CI bounds the build/check step or job
+to fifteen minutes. Direct `go test ./...` skips this opt-in test when binaries
+are absent; that skip is not compatibility evidence. Deployment workflows run
+the suite for the resolved candidate before notifying the fleet, and changes to
+the shared compatibility runner select both deployment components. Component
+mapping is regression-tested against the Linux production dependency graph of
+both commands using package-only changes; new repository dependencies must be
+mapped before CI passes. Worker configuration imports also make worker, replay,
+and churn changes relevant to the control binary. S3 helpers conservatively
+select both components. All five PR checks (test, lint, compatibility, control
+image, and worker image) must be green before integration.
+
+This small deterministic fixture does not calibrate costly fault scenarios,
+prove provider behavior, or establish upstream base/head separation. Block and
+mutex sampling, traces, long soaks, and provider experiments remain separate,
+opt-in checks; their unexecuted state does not count as a pass. No fleet scenario
+is activated by this suite.

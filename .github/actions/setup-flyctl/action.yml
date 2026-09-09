@@ -1,0 +1,14 @@
+name: Build maintained flyctl
+description: Build the explicitly patched operational tool from pinned source
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v6
+      with:
+        go-version: 1.26.6
+        cache: false
+    - shell: bash
+      run: |
+        tool_dir=$(mktemp -d)
+        timeout 900 env GOTOOLCHAIN=go1.26.6 bash "$GITHUB_ACTION_PATH/../../../scripts/build-flyctl.sh" "$tool_dir/source" "$tool_dir/flyctl"
+        echo "$tool_dir" >> "$GITHUB_PATH"

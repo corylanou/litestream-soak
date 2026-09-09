@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/corylanou/litestream-soak/internal/churn"
 	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
@@ -19,6 +20,7 @@ type Config struct {
 	WorkloadSHA   string
 	WorkloadID    string
 	DeploymentID  int
+	Churn         churn.Config
 	WorkerID      string
 	WorkerName    string
 	GitSHA        string
@@ -885,6 +887,9 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 		}
 	}
 
+	if err := loadChurnConfig(&c, getenv); err != nil {
+		return c, err
+	}
 	return c, nil
 }
 
@@ -1058,6 +1063,7 @@ func (c Config) manyDBVerifyChangedLimit() int {
 
 func (c Config) WorkloadConfig() workload.Config {
 	cfg := workload.Config{
+		Churn:                    c.Churn,
 		LoadMode:                 c.LoadMode,
 		WriteRate:                c.WriteRate,
 		Pattern:                  c.Pattern,

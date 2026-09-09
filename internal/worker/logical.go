@@ -312,6 +312,12 @@ func (v *Verifier) compareRestoredLogical(ctx context.Context, source logicalSna
 	if err != nil {
 		return fmt.Errorf("%s: restored comparison: %w", v.logicalEvidence, err)
 	}
+	if v.cfg.churnEnabled() {
+		if err := validateChurnRestore(ctx, v.cfg, restoredPath); err != nil {
+			return err
+		}
+		v.logicalEvidence += " application_invariants=true"
+	}
 	v.logicalEvidence += fmt.Sprintf(" schema_sha256=%x tables=%d logical_match=true", source.schema, len(source.tables))
 	return nil
 }

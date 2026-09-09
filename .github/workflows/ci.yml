@@ -2,6 +2,9 @@ name: ci
 
 on:
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 8 * * 1"
   push:
     branches:
       - main
@@ -40,9 +43,31 @@ jobs:
         with:
           version: v2.12.2
 
+  compatibility:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: bash scripts/test-compatibility.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compatibility-${{ github.sha }}
+          include-hidden-files: true
+          path: |
+            .local/compatibility/**/run.log
+            .local/compatibility/**/*.buildinfo
+            .local/compatibility/**/replication-*/
+          if-no-files-found: error
+
   images:
+    timeout-minutes: 35
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         component: [control, worker]
     steps:
@@ -59,3 +84,43 @@ jobs:
             -t "soak-${COMPONENT}:ci" .
           docker run --rm --entrypoint sh "soak-${COMPONENT}:ci" \
             -c 'cat /opt/soak/*.buildinfo'
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Scan shipped binaries and retain comparison evidence
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          mkdir -p evidence binaries
+          container=$(docker create "soak-${COMPONENT}:ci")
+          docker cp "$container:/opt/soak/." evidence/
+          if [ "$COMPONENT" = control ]; then
+            names="soakctl flyctl"
+          else
+            names="soakworker litestream litestream-test"
+          fi
+          failed=0
+          for name in $names; do
+            docker cp "$container:/usr/local/bin/$name" "binaries/$name"
+            role=operational
+            sha="$GITHUB_SHA"
+            case "$name" in
+              flyctl) sha=203d7369ecb26c9adecadb501cd95682decdb527 ;;
+              litestream) role=candidate; sha=$(cat evidence/litestream.sha) ;;
+              litestream-test) sha=ae88b164dd6304bcbb654a681df767ee59042eed ;;
+            esac
+            bash scripts/scan-binary.sh "$role" "$sha" "binaries/$name" "evidence/scans/$name" || failed=1
+          done
+          exit "$failed"
+
+      - name: Upload security evidence even on scan failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-${{ matrix.component }}-${{ github.sha }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30

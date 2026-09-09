@@ -3,10 +3,12 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1739,5 +1741,278 @@ func TestPendingCoverageDoesNotReusePriorPass(t *testing.T) {
 		if previous.Failed() && (got == nil || !got.Failed()) {
 			t.Fatalf("pending coverage hid failure: %+v", got)
 		}
+	}
+}
+
+type successTeardownGateContext struct {
+	context.Context
+	reached chan struct{}
+	proceed chan struct{}
+	once    sync.Once
+}
+
+func (c *successTeardownGateContext) Done() <-chan struct{} {
+	c.once.Do(func() {
+		close(c.reached)
+		<-c.proceed
+	})
+	return c.Context.Done()
+}
+
+func TestSuccessTeardownWaitsForDeployment(t *testing.T) {
+	db := openTestDB(t)
+	_, worker := createCleanSuccessCandidate(t, db, "pr-209", 209)
+	var destroys atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			destroys.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	manager := NewManager(flyapi.NewClientWithBaseURL("app", "test-token", server.URL), db, nil, nil, "app", ReplicaConfig{}, "", "")
+	unlock, err := manager.lockSource(context.Background(), worker.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &successTeardownGateContext{Context: context.Background(), reached: make(chan struct{}), proceed: make(chan struct{})}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		manager.evaluateSuccessTeardown(ctx, SuccessTeardownPolicy{Threshold: time.Nanosecond})
+	}()
+	select {
+	case <-ctx.reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("teardown did not reach lifecycle lock")
+	}
+	if err := db.UpsertReadyDeployment(&model.Deployment{Source: worker.Source, GitSHA: "replacement", LitestreamSHA: "replacement", ImageRef: "replacement", Status: "ready"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateWorkerMachineVersionAndConfig(worker.ID, "replacement-machine", "replacement", "replacement", worker.ProfileName, worker.ProfileConfig); err != nil {
+		t.Fatal(err)
+	}
+	close(ctx.proceed)
+	unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("teardown did not finish")
+	}
+	current, err := db.GetWorker(worker.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status == model.WorkerStopped || destroys.Load() != 0 {
+		t.Fatalf("replacement destroyed: status=%s deletes=%d", current.Status, destroys.Load())
+	}
+	archives, err := db.ListRunArchives(worker.Source, runArchiveTypeSuccess, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archives) != 0 {
+		t.Fatalf("stale success archives = %d, want 0", len(archives))
+	}
+}
+
+func TestSuccessTeardownRevalidatesAfterWorkerLock(t *testing.T) {
+	for _, change := range []string{"machine", "volume", "deployment", "failure", "pending", "cancellation"} {
+		t.Run(change, func(t *testing.T) {
+			db := openTestDB(t)
+			_, worker := createCleanSuccessCandidate(t, db, "pr-209", 209)
+			manager := NewManager(nil, db, nil, nil, "app", ReplicaConfig{}, "", "")
+			unlockSource, err := manager.lockSource(context.Background(), worker.Source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlockSource()
+			unlockWorker, err := manager.lockWorker(context.Background(), worker.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			base, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ctx := &successTeardownGateContext{Context: base, reached: make(chan struct{}), proceed: make(chan struct{})}
+			done := make(chan error, 1)
+			go func() {
+				done <- manager.evaluateSuccessTeardownLocked(ctx, worker.Source, SuccessTeardownPolicy{Threshold: time.Nanosecond}, time.Now().UTC())
+			}()
+			select {
+			case <-ctx.reached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("teardown did not reach worker lock")
+			}
+			switch change {
+			case "machine":
+				err = db.UpdateWorkerMachine(worker.ID, "replacement-machine", "")
+			case "volume":
+				err = db.UpdateWorkerMachine(worker.ID, "", "replacement-volume")
+			case "deployment":
+				err = db.UpsertReadyDeployment(&model.Deployment{Source: worker.Source, GitSHA: "replacement", LitestreamSHA: "replacement", ImageRef: "replacement", Status: "ready"})
+			case "failure":
+				failedAt := time.Now().UTC().Add(time.Hour)
+				mustRecordAttributedFixture(t, db, &model.Verification{WorkerID: worker.ID, StartedAt: failedAt.Add(-time.Second), CompletedAt: &failedAt, Status: "failed", CheckType: "integrity", ErrorMessage: "checksum mismatch"})
+			case "pending":
+				pendingAt := time.Now().UTC().Add(time.Hour)
+				mustRecordAttributedFixture(t, db, &model.Verification{WorkerID: worker.ID, StartedAt: pendingAt, CompletedAt: &pendingAt, Status: "pending"})
+			case "cancellation":
+				cancel()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			close(ctx.proceed)
+			unlockWorker()
+			select {
+			case err = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("teardown did not finish")
+			}
+			if change == "cancellation" {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("error = %v, want cancellation", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			current, err := db.GetWorker(worker.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.Status != model.WorkerRunning || current.ErrorMessage != "" {
+				t.Fatalf("stale cleanup modified worker: %+v", current)
+			}
+			archives, err := db.ListRunArchives(worker.Source, runArchiveTypeSuccess, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(archives) != 0 {
+				t.Fatalf("stale archives = %d, want 0", len(archives))
+			}
+			unlock, err := manager.lockWorker(context.Background(), worker.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			unlock()
+		})
+	}
+}
+
+func TestSuccessTeardownArchivesBeforeCleanup(t *testing.T) {
+	for _, cleanupFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cleanupFails=%t", cleanupFails), func(t *testing.T) {
+			db := openTestDB(t)
+			_, worker := createCleanSuccessCandidate(t, db, "pr-209", 209)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if cleanupFails {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			manager := NewManager(flyapi.NewClientWithBaseURL("app", "test-token", server.URL), db, nil, nil, "app", ReplicaConfig{}, "", "")
+			unlock, err := manager.lockSource(context.Background(), worker.Source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			err = manager.evaluateSuccessTeardownLocked(context.Background(), worker.Source, SuccessTeardownPolicy{Threshold: time.Nanosecond}, time.Now().UTC())
+			if (err != nil) != cleanupFails {
+				t.Fatalf("cleanup error = %v", err)
+			}
+			current, err := db.GetWorker(worker.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantStatus := model.WorkerStopped
+			if cleanupFails {
+				wantStatus = model.WorkerRunning
+			}
+			if current.Status != wantStatus {
+				t.Fatalf("status = %s, want %s", current.Status, wantStatus)
+			}
+			archives, err := db.ListRunArchives(worker.Source, runArchiveTypeSuccess, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(archives) != 1 {
+				t.Fatalf("archives = %d, want 1", len(archives))
+			}
+			var payload runArchivePayload
+			if err := json.Unmarshal([]byte(archives[0].Payload), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if len(payload.Workers) != 1 || payload.Workers[0].Worker.Status != model.WorkerRunning {
+				t.Fatalf("archive did not retain pre-cleanup evidence")
+			}
+			events, err := db.ListWorkerEvents(worker.ID, 20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			successEvent, failureEvent := false, false
+			for _, event := range events {
+				successEvent = successEvent || event.EventType == "run_success_worker_destroyed"
+				failureEvent = failureEvent || event.EventType == "worker_destroy_failed"
+			}
+			if successEvent == cleanupFails || failureEvent != cleanupFails {
+				t.Fatalf("cleanup events: success=%t failure=%t", successEvent, failureEvent)
+			}
+		})
+	}
+}
+
+func TestSuccessTeardownCancellationStopsRemainingCleanup(t *testing.T) {
+	db := openTestDB(t)
+	_, worker := createCleanSuccessCandidate(t, db, "pr-209", 209)
+	second := worker
+	second.ID += "-second"
+	second.Name += "-second"
+	second.FlyMachineID += "-second"
+	createTestWorker(t, db, second)
+	if err := db.UpdateWorkerHeartbeat(second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateWorkerRuntimeSnapshot(second.ID, reporting.RuntimePayload{SnapshotCollectedAt: time.Now().UTC(), LitestreamSnapshotHealthy: true, DBStatus: "replicating"}); err != nil {
+		t.Fatal(err)
+	}
+	passedAt := time.Now().UTC().Add(time.Minute)
+	mustRecordAttributedFixture(t, db, &model.Verification{WorkerID: second.ID, StartedAt: passedAt.Add(-time.Second), CompletedAt: &passedAt, Status: "passed", CheckType: "integrity", Passed: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var deletes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes.Add(1)
+			cancel()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	manager := NewManager(flyapi.NewClientWithBaseURL("app", "test-token", server.URL), db, nil, nil, "app", ReplicaConfig{}, "", "")
+	unlock, err := manager.lockSource(ctx, worker.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	err = manager.evaluateSuccessTeardownLocked(ctx, worker.Source, SuccessTeardownPolicy{Threshold: time.Nanosecond}, time.Now().UTC())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want cancellation", err)
+	}
+	if deletes.Load() != 1 {
+		t.Fatalf("machine deletes = %d, want 1", deletes.Load())
+	}
+	workers, err := db.ListWorkersForSource(worker.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	untouched := 0
+	for _, current := range workers {
+		if current.Status == model.WorkerRunning && current.ErrorMessage == "" {
+			untouched++
+		}
+	}
+	if untouched != 1 {
+		t.Fatalf("untouched workers = %d, want 1", untouched)
 	}
 }
