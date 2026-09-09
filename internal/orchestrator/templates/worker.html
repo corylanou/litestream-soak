@@ -157,6 +157,7 @@
             <span class="panel-title">Verification Timeline{{template "info" "Full recent check history with raw error output behind each failure. Look for the boundary where passes turned into failures and match it against the event timeline and the deploy time - that boundary is usually the incident start."}}</span>
             <span class="panel-note">{{len .Incident.RecentVerifications}} recent</span>
           </div>
+          {{if .Incident.VerificationActivityUncertain}}<div class="tl-item">Some verification evidence cannot be attributed to the current run. Historical starts remain in the event timeline.</div>{{end}}
           {{if .Incident.ActiveVerification}}
           <div class="tl-item">
             <div class="tl-head">

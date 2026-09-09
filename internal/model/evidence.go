@@ -81,7 +81,7 @@ func ensureEvidenceJournal(db *sql.DB) error {
 		}
 	}
 	slog.Info("Evidence journal indexes started")
-	if _, err := tx.Exec(evidenceWindowIndexes); err != nil {
+	if _, err := tx.Exec(evidenceWindowIndexes + verificationActivityIndexes); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`INSERT OR IGNORE INTO evidence_migrations VALUES (1,datetime('now'))`); err != nil {

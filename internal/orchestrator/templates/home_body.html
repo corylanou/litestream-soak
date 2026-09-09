@@ -194,6 +194,7 @@
             <td data-label="Heartbeat"><span class="{{heartbeatClass .Worker.LastHeartbeatAt}}" data-tip="{{formatTimePtr .Worker.LastHeartbeatAt}}">{{timeAgo .Worker.LastHeartbeatAt}}</span></td>
             <td data-label="Last check">
               {{if .ActiveVerification}}<span class="signal-info" data-tip="{{formatTime .ActiveVerification.StartedAt}}">&#9679; {{if .ActiveVerification.Stale}}stale check{{else}}running{{end}} &middot; {{timeAgoValue .ActiveVerification.StartedAt}}</span>
+              {{else if .VerificationActivityUncertain}}<span class="cell-muted">current activity unknown</span>
               {{else if .LatestVerification}}<span class="cell-muted {{if eq (verificationClass .LatestVerification) "status-bad"}}status-bad{{end}}" data-tip="{{formatTime .LatestVerification.StartedAt}}">{{verificationLabel .LatestVerification}} &middot; {{timeAgoValue .LatestVerification.StartedAt}}</span>
               {{else}}<span class="ticks-none">none</span>{{end}}
             </td>
