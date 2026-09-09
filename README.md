@@ -375,10 +375,13 @@ Pass logs report attempted, mutated, skipped, and failed record counts.
 Maintained builds use Go 1.25.13. Make targets and the one-shot rig select this
 compiler explicitly, including builds in the upstream Litestream module.
 Docker builders pin the Go 1.25.13 Bookworm image by digest and disable automatic
-toolchain switching. The control image rebuilds flyctl v0.4.59 from its pinned
-source commit with Go 1.26.6 because flyctl requires Go 1.26. Binary compiler
+toolchain switching. The control image and deployment jobs build flyctl v0.4.101 from pinned
+source with an explicit x/crypto v0.56.0 patch, labeled `0.4.101-soak.1`.
+Its dedicated builder uses Go 1.26.6 because flyctl requires Go 1.26. Binary compiler
 metadata is printed during image builds and retained under `/opt/soak/*.buildinfo`.
 The upstream Litestream SHA resolution and build flags remain unchanged.
+See [binary security evidence](docs/binary-security.md) for scan states,
+operational remediation, residual triage, and comparison instructions.
 
 The one-shot rig includes the compiler in its cache and result names and writes
 a `.buildinfo` companion to each result. Keep that companion with benchmark

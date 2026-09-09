@@ -48,19 +48,14 @@ func TestSetupGoUsesNode24Action(t *testing.T) {
 func TestFlyctlActionUsesImmutableRef(t *testing.T) {
 	t.Parallel()
 
-	const pinnedRef = "superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1"
-	for _, file := range workflowFiles {
-		t.Run(file, func(t *testing.T) {
-			t.Parallel()
-
-			content := readWorkflow(t, file)
-			if strings.Contains(content, "superfly/flyctl-actions/setup-flyctl@master") {
-				t.Fatalf("%s uses the mutable setup-flyctl master branch", file)
-			}
-			if strings.Contains(content, "superfly/flyctl-actions/setup-flyctl@") && !strings.Contains(content, pinnedRef) {
-				t.Fatalf("%s does not pin setup-flyctl to %s", file, pinnedRef)
-			}
-		})
+	for _, file := range []string{"deploy-main.yml", "soak-pr.yml"} {
+		content := readWorkflow(t, file)
+		if strings.Contains(content, "superfly/flyctl-actions/setup-flyctl@") {
+			t.Fatalf("%s bypasses the maintained operational build", file)
+		}
+		if !strings.Contains(content, "uses: ./.github/actions/setup-flyctl") {
+			t.Fatalf("%s does not use the maintained operational build", file)
+		}
 	}
 }
 
@@ -694,7 +689,7 @@ func TestQueuedPushAndUpstreamSyncRetainBothComponents(t *testing.T) {
 			selected := runDeployBaseline(t, dir, baseline, "HEAD")
 			runDeployDetection(t, dir, lastEvent, selected, "HEAD", true, true)
 			workflow := readWorkflow(t, "deploy-main.yml")
-			if strings.Count(workflow, "ref: ${{ needs.changes.outputs.target_sha }}") != 4 {
+			if strings.Count(workflow, "ref: ${{ needs.changes.outputs.target_sha }}") != 5 {
 				t.Fatal("all verifying, building, and publishing checkouts must use the selected current main revision")
 			}
 			if strings.Contains(workflow, "${GITHUB_SHA}") || strings.Contains(workflow, "${GITHUB_SHA::") {

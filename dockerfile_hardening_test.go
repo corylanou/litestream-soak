@@ -312,13 +312,17 @@ func TestRuntimeStagesPrepareWritableDataDir(t *testing.T) {
 }
 
 func TestControlDockerfileRebuildsPinnedFlyctl(t *testing.T) {
+	build := string(readFile(t, "scripts/build-flyctl.sh"))
+	for _, want := range []string{"source_sha=203d7369ecb26c9adecadb501cd95682decdb527", "version=0.4.101-soak.1", `git -C "$source_dir" checkout --detach "$source_sha"`, "CGO_ENABLED=0 go build", `go version -m "$binary"`, "go mod edit -require=golang.org/x/crypto@v0.56.0"} {
+		if !strings.Contains(build, want) {
+			t.Errorf("maintained tool build missing %q", want)
+		}
+	}
 	content := string(readFile(t, "Dockerfile.control"))
 	for _, want := range []string{
 		"golang:1.26.6-bookworm@sha256:",
-		"ARG FLYCTL_VERSION=0.4.59",
-		"ARG FLYCTL_SHA=d10482182142f259db338dcef34556a67702290c",
-		`git checkout --detach "${FLYCTL_SHA}"`,
-		"CGO_ENABLED=0 go build",
+		"bash /opt/build/build-flyctl.sh /src/flyctl /usr/local/bin/flyctl",
+
 		"go version -m /usr/local/bin/flyctl",
 	} {
 		if !strings.Contains(content, want) {

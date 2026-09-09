@@ -8,3 +8,5 @@ bin/
 .env
 .envrc
 .local-rig/
+
+.local/
