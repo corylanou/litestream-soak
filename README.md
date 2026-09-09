@@ -252,6 +252,27 @@ with `fly.control.toml` and the startup log fields in `cmd/soakctl/main.go`
 
 For detailed operator procedures, see `docs/operator-runbook.md`.
 
+## Replay pacing
+
+Each dataset pass anchors its schedule to its first event timestamp. Event
+offsets from that origin are divided by the replay speed, and deadlines are
+clamped to never move backward. Equal timestamps and out-of-order events add
+no extra delay: timestamps `[100, 90, 100, 110]` run at offsets `[0, 0, 0, 10]`
+at speed 1. A new loop pass starts a fresh schedule.
+
+All gaps are preserved, including gaps of ten seconds or more. Insert and retry
+time consume the scheduled interval instead of extending it. Pauses freeze the
+schedule and preserve the remaining gap; waiting is interruptible by pause or
+cancellation. Pause acknowledgment waits for an in-flight insert to finish.
+`REPLAY_SPEED` must be positive and finite. Direct engine callers may use zero
+for speed 1; negative and nonfinite speeds are rejected.
+
+`soak_replay_lag_seconds` measures nonnegative lateness at the start of each
+record attempt against its scheduled deadline, including skipped and failed
+records. `soak_replay_operation_seconds` measures individual insert attempt
+latency, excluding retry backoff, schedule waits, and pauses between attempts.
+The separate error and outcome counters retain failures even after recovery.
+
 ## GH Archive replay writes
 
 Each GH Archive pass appends events using `<pass UUID>:<archive event ID>` as
