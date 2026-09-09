@@ -50,25 +50,35 @@ func (d *DB) ReportAttribution(identity reporting.WorkerIdentity) (bool, bool, e
 		return false, false, err
 	}
 	if expected == nil {
-		return false, false, nil
+		worker, err := d.GetWorker(identity.WorkerID)
+		if err == sql.ErrNoRows {
+			return false, false, nil
+		}
+		if err != nil {
+			return false, false, err
+		}
+		return false, worker.FlyMachineID != "" || worker.AppName != "", nil
 	}
 	profileDigest := sha256.Sum256([]byte(identity.ProfileConfig))
 	matches := identity.RunID != "" && identity.RunID == expected.RunID &&
 		identity.DeploymentID == expected.DeploymentID &&
 		identity.GitSHA == expected.GitSHA &&
 		identity.LitestreamSHA == expected.LitestreamSHA &&
+		identity.ImageRef == expected.ImageRef &&
 		identity.Source == expected.Source && identity.ProfileName == expected.ProfileName &&
 		identity.WorkloadID != "" && identity.WorkloadID == expected.WorkloadID &&
 		identity.ProfileConfig != "" && identity.ProfileConfig == expected.ProfileConfig &&
 		identity.ProfileHash == fmt.Sprintf("%x", profileDigest[:8]) &&
 		identity.ValidatorID == "soak-verifier:"+expected.GitSHA &&
-		identity.MachineID != "" && identity.MachineID == expected.MachineID
-	return matches && identity.WorkloadSHA != "" && identity.DeploymentID > 0 && identity.GitSHA != "" && identity.LitestreamSHA != "", !matches, nil
+		identity.MachineID != "" && identity.MachineID == expected.MachineID &&
+		(expected.WorkloadSHA == "" || identity.WorkloadSHA == expected.WorkloadSHA)
+	return matches && identity.WorkloadSHA != "" && identity.WorkloadSHA == expected.WorkloadSHA && identity.DeploymentID > 0 && identity.GitSHA != "" && identity.LitestreamSHA != "", !matches, nil
 }
 
 func (v Verification) MatchesDeployment(worker Worker, deployment Deployment) bool {
 	return v.Attributed && v.Run.DeploymentID > 0 && v.Run.DeploymentID == deployment.ID &&
 		v.Run.GitSHA == deployment.GitSHA && v.Run.LitestreamSHA == deployment.LitestreamSHA &&
+		v.Run.WorkloadSHA == deployment.WorkloadSHA &&
 		v.Run.Source == deployment.Source && v.Run.WorkerID == worker.ID &&
 		v.Run.MachineID != "" &&
 		v.Run.RunID != "" && v.Run.ProfileHash != "" && v.Run.ValidatorID != ""

@@ -64,7 +64,7 @@ func TestRunIdentitySurvivesReopenAndReplacement(t *testing.T) {
 	if err != nil || attributed || !quarantined {
 		t.Fatalf("stale attribution = %v, %v, %v", attributed, quarantined, err)
 	}
-	deployment := Deployment{ID: run.DeploymentID, Source: run.Source, GitSHA: run.GitSHA, LitestreamSHA: run.LitestreamSHA}
+	deployment := Deployment{WorkloadSHA: run.WorkloadSHA, ID: run.DeploymentID, Source: run.Source, GitSHA: run.GitSHA, LitestreamSHA: run.LitestreamSHA}
 	worker.FlyMachineID = replacement.MachineID
 	if !history[1].MatchesDeployment(worker, deployment) {
 		t.Fatal("historical attribution depends on current machine")
@@ -106,5 +106,41 @@ func TestReportAttributionLegacyAndDatabaseErrors(t *testing.T) {
 	}
 	if _, _, err := db.ReportAttribution(reporting.WorkerIdentity{WorkerID: "closed"}); err == nil {
 		t.Fatal("closed database accepted attribution")
+	}
+}
+
+func TestDeploymentGeneratorProvenanceIsImmutable(t *testing.T) {
+	t.Parallel()
+	db, err := Open(filepath.Join(t.TempDir(), "deployments.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	first := Deployment{Source: "main", GitSHA: "soak", LitestreamSHA: "candidate", WorkloadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ImageRef: "image", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&first); err != nil {
+		t.Fatal(err)
+	}
+	before, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.WorkloadSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if err := db.UpsertReadyDeployment(&second); err != nil {
+		t.Fatal(err)
+	}
+	after, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ID == after.ID || before.WorkloadSHA != first.WorkloadSHA || after.WorkloadSHA != second.WorkloadSHA {
+		t.Fatalf("generator provenance overwritten: before=%+v after=%+v", before, after)
+	}
+	if err := db.UpsertReadyDeployment(&second); err != nil {
+		t.Fatal(err)
+	}
+	deployments, err := db.ListDeployments("main", 10)
+	if err != nil || len(deployments) != 2 {
+		t.Fatalf("idempotent provenance = %v, %v", deployments, err)
 	}
 }

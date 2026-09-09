@@ -283,6 +283,7 @@ func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, 
 	expectedProfile := effectiveConfig.JSON()
 	env["SOAK_WORKLOAD_ID"] = fmt.Sprintf("%x", sha256.Sum256([]byte(expectedProfile)))
 	identity := reporting.WorkerIdentity{
+		ImageRef:      imageRef,
 		ProfileConfig: expectedProfile,
 		WorkloadID:    env["SOAK_WORKLOAD_ID"],
 		WorkerID:      worker.ID,
@@ -294,6 +295,7 @@ func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, 
 	}
 	if deployment != nil && workerMatchesDeployment(worker, *deployment) && deployment.ImageRef == imageRef {
 		identity.DeploymentID = deployment.ID
+		identity.WorkloadSHA = deployment.WorkloadSHA
 		env["SOAK_DEPLOYMENT_ID"] = fmt.Sprint(deployment.ID)
 	}
 	if err := m.db.ExpectWorkerRun(identity); err != nil {

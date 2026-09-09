@@ -79,6 +79,7 @@ func (v Verification) Succeeded() bool {
 }
 
 type Deployment struct {
+	WorkloadSHA   string     `json:"workload_sha,omitempty"`
 	ID            int        `json:"id"`
 	GitSHA        string     `json:"git_sha"`
 	LitestreamSHA string     `json:"litestream_sha,omitempty"`

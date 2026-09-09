@@ -340,6 +340,7 @@ func ensureVerificationColumns(db *sql.DB) error {
 
 func ensureDeploymentColumns(db *sql.DB) error {
 	statements := []string{
+		`ALTER TABLE deployments ADD COLUMN workload_sha TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE deployments ADD COLUMN litestream_sha TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE deployments ADD COLUMN repository TEXT NOT NULL DEFAULT ''`,
 	}

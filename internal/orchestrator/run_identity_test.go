@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/reporting"
+	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
 func TestDeploymentDoesNotCreditUnattributedLateVerification(t *testing.T) {
@@ -89,7 +91,7 @@ func mustRecordAttributedFixture(t *testing.T, db *model.DB, verification *model
 }
 
 func fixtureRun(worker model.Worker, deployment model.Deployment) reporting.WorkerIdentity {
-	return reporting.WorkerIdentity{WorkloadSHA: "generator-sha", Name: worker.Name, WorkerID: worker.ID, DeploymentID: deployment.ID, GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA, Source: deployment.Source, MachineID: worker.FlyMachineID, RunID: "run-" + worker.ID, ProfileName: worker.ProfileName, ProfileConfig: "{}", ProfileHash: "44136fa355b3678a", WorkloadID: "workload", ValidatorID: "soak-verifier:" + deployment.GitSHA}
+	return reporting.WorkerIdentity{WorkloadSHA: deployment.WorkloadSHA, Name: worker.Name, WorkerID: worker.ID, DeploymentID: deployment.ID, GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA, Source: deployment.Source, MachineID: worker.FlyMachineID, RunID: "run-" + worker.ID, ProfileName: worker.ProfileName, ProfileConfig: "{}", ProfileHash: "44136fa355b3678a", WorkloadID: "workload", ValidatorID: "soak-verifier:" + deployment.GitSHA}
 }
 
 func TestReportIdentityQuarantine(t *testing.T) {
@@ -102,6 +104,8 @@ func TestReportIdentityQuarantine(t *testing.T) {
 		{"old instance", func(r *reporting.WorkerIdentity) { r.MachineID = "old-machine"; r.RunID = "old-run" }, false},
 		{"old run same machine", func(r *reporting.WorkerIdentity) { r.RunID = "old-run" }, false},
 		{"old deployment same builds", func(r *reporting.WorkerIdentity) { r.DeploymentID++ }, false},
+		{"generator mismatch", func(r *reporting.WorkerIdentity) { r.WorkloadSHA = "wrong-generator" }, false},
+		{"image mismatch", func(r *reporting.WorkerIdentity) { r.ImageRef = "wrong-image" }, false},
 		{"soak mismatch", func(r *reporting.WorkerIdentity) { r.GitSHA = "old" }, false},
 		{"litestream mismatch", func(r *reporting.WorkerIdentity) { r.LitestreamSHA = "old" }, false},
 		{"workload mismatch", func(r *reporting.WorkerIdentity) { r.WorkloadID = "other" }, false},
@@ -120,7 +124,7 @@ func TestReportIdentityQuarantine(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			db := openTestDB(t)
-			mustUpsertReadyDeployment(t, db, model.Deployment{GitSHA: "soak", LitestreamSHA: "litestream", Source: "main", ImageRef: "image", Status: "ready"})
+			mustUpsertReadyDeployment(t, db, model.Deployment{WorkloadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", GitSHA: "soak", LitestreamSHA: "litestream", Source: "main", ImageRef: "image", Status: "ready"})
 			deployment := mustLatestDeployment(t, db, "main")
 			worker := model.Worker{ID: "worker", Name: "worker", FlyMachineID: "new-machine", Source: "main", GitSHA: "soak", LitestreamSHA: "litestream", ProfileName: "low-volume", ProfileConfig: "{}", Status: model.WorkerRunning}
 			createTestWorker(t, db, worker)
@@ -366,5 +370,86 @@ func TestCurrentRolloutRejectsEarlierRunOnSameMachine(t *testing.T) {
 	}
 	if len(deploymentVerifications(worker, deployment, evidence)) != 1 {
 		t.Fatal("historical attributed evidence lost")
+	}
+}
+
+func TestUnknownLegacyRunCannotReplaceManagedWorker(t *testing.T) {
+	for _, machineID := range []string{"current-machine", ""} {
+		t.Run(machineID, func(t *testing.T) {
+			t.Parallel()
+			db := openTestDB(t)
+			worker := model.Worker{ID: "managed", Name: "managed", AppName: "managed-app", FlyMachineID: machineID, GitSHA: "current-soak", LitestreamSHA: "current-ls", Source: "main", ProfileName: "low-volume", ProfileConfig: "{}", Status: model.WorkerRunning}
+			createTestWorker(t, db, worker)
+			api := NewAPI(db, nil, nil, nil, nil, nil)
+			payload := reporting.HeartbeatPayload{WorkerIdentity: reporting.WorkerIdentity{WorkerID: worker.ID, MachineID: "old-machine", GitSHA: "old-soak", Source: "main"}}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/heartbeat", bytes.NewReader(body))
+			req.SetPathValue("id", worker.ID)
+			response := httptest.NewRecorder()
+			api.handleHeartbeat(response, req)
+			if response.Code != http.StatusAccepted {
+				t.Fatalf("status = %d", response.Code)
+			}
+			stored, err := db.GetWorker(worker.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.FlyMachineID != worker.FlyMachineID || stored.GitSHA != worker.GitSHA {
+				t.Fatalf("legacy report replaced managed worker: %+v", stored)
+			}
+			events, err := db.ListWorkerEvents(worker.ID, 10)
+			if err != nil || len(events) != 1 {
+				t.Fatalf("legacy evidence lost: %v, %v", events, err)
+			}
+		})
+	}
+}
+
+func TestExpectedRunUsesDeploymentGeneratorProvenance(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	deployment := model.Deployment{Source: "main", GitSHA: "soak", LitestreamSHA: "candidate", WorkloadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ImageRef: "image", Status: "ready"}
+	mustUpsertReadyDeployment(t, db, deployment)
+	deployment = mustLatestDeployment(t, db, "main")
+	fly := newCreateWorkerFlyServer(t)
+	manager := &Manager{db: db, fly: fly.client, appName: "litestream-soak"}
+	worker := model.Worker{ID: "worker", Name: "worker", Source: "main", GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA, ProfileName: "low-volume"}
+	if _, err := manager.createWorkerMachine(context.Background(), worker, deployment.ImageRef, "volume", workload.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := db.ExpectedWorkerRun(worker.ID)
+	if err != nil || expected == nil {
+		t.Fatalf("expected run = %v, %v", expected, err)
+	}
+	if expected.WorkloadSHA != deployment.WorkloadSHA || expected.DeploymentID != deployment.ID || expected.MachineID == "" {
+		t.Fatalf("trusted build provenance missing: %+v", expected)
+	}
+	reported := *expected
+	reported.ValidatorID = "soak-verifier:" + worker.GitSHA
+	digest := sha256.Sum256([]byte(reported.ProfileConfig))
+	reported.ProfileHash = fmt.Sprintf("%x", digest[:8])
+	attributed, quarantined, err := db.ReportAttribution(reported)
+	if err != nil || !attributed || quarantined {
+		t.Fatalf("matching generator = %v, %v, %v", attributed, quarantined, err)
+	}
+	reported.WorkloadSHA = deployment.LitestreamSHA
+	attributed, quarantined, err = db.ReportAttribution(reported)
+	if err != nil || attributed || !quarantined {
+		t.Fatalf("candidate substituted for generator = %v, %v, %v", attributed, quarantined, err)
+	}
+}
+
+func TestDeploymentReadyRejectsUnpinnedGenerator(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	api := NewAPI(db, nil, nil, nil, nil, &Deployer{db: db})
+	req := httptest.NewRequest(http.MethodPost, "/ready?sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&litestream_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&workload_sha=main&image=registry.example/image", nil)
+	response := httptest.NewRecorder()
+	api.handleDeploymentReady(response, req)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unpinned generator accepted: %d", response.Code)
 	}
 }

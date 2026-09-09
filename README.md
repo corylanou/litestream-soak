@@ -214,11 +214,16 @@ configuration and hash, and harness validator identity. `WORKLOAD_SHA` identifie
 the generator source independently of the Litestream candidate; images that build
 both binaries from the same source report the Litestream SHA for both.
 
+Authenticated deployment-ready notifications supply the generator `workload_sha`
+from the image build. The notification helper reads the Dockerfile pin by default;
+a custom generator build must supply the matching seventh argument or
+`WORKLOAD_SHA`. A missing trusted generator SHA disables deployment credit.
+
 The control plane registers each expected run before machine creation and binds
 its machine ID after creation. Reports must match that run and the effective
 configuration derived from the worker configuration parser. Report ingestion and
-run replacement are serialized per worker. Mismatched reports retain their
-historical evidence but cannot update the current worker or earn deployment
+run replacement are serialized per worker. Mismatched reports and unregistered reports targeting an existing managed worker
+retain their historical evidence but cannot update the current worker or earn deployment
 credit. Current runs without a deployment remain operational without earning
 release credit. Legacy verification rows remain readable with `attributed=false`;
 existing workers need a newly registered run before they can provide attributed
