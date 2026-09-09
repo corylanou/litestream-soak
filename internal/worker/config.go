@@ -357,6 +357,9 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 	if v := getenv("PROFILE"); v != "" {
 		c.ProfileName = v
 		switch v {
+		case "fts-maintenance":
+			c.LoadMode = "fts"
+			c.WriteRate = 1
 		case "low-volume":
 			c.WriteRate = 10
 			c.Pattern = "constant"
@@ -871,6 +874,10 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 	}
 	if v := getenv("CONTROL_BASE_URL"); v != "" {
 		c.ControlBaseURL = v
+	}
+
+	if c.LoadMode == "fts" && (c.WriteRate < 1 || c.WriteRate > 1000 || c.ManyDBEnabled()) {
+		return c, fmt.Errorf("FTS requires WRITE_RATE between 1 and 1000 and a single database")
 	}
 
 	if c.WorkerName == "" {

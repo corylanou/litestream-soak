@@ -147,7 +147,7 @@ func TestLogicalSnapshotLimits(t *testing.T) {
 		{"bytes", `CREATE TABLE t(v); INSERT INTO t VALUES('abcdef');`, "byte limit", func(l *logicalLimits) { l.bytes = 2 }},
 		{"objects", `CREATE TABLE t(v); CREATE TABLE u(v);`, "object limit", func(l *logicalLimits) { l.objects = 1 }},
 		{"value", `CREATE TABLE t(v); INSERT INTO t VALUES(zeroblob(2000));`, "too big", func(l *logicalLimits) { l.valueBytes = 1024 }},
-		{"virtual", `CREATE VIRTUAL TABLE t USING fts5(v);`, "unsupported", func(l *logicalLimits) {}},
+		{"virtual", `CREATE VIRTUAL TABLE t USING rtree(id,x1,x2);`, "unsupported", func(l *logicalLimits) {}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
