@@ -234,6 +234,10 @@ A normal scenario deadline may interrupt the last attempt without invalidating
 earlier completed evidence; external cancellation marks the run aborted unless
 a failure was already observed.
 
+The opt-in [local recovery comparison](docs/recovery-rig.md) adds pinned-binary
+process kill/restart, interrupted restore, local-loss, active-write retention,
+point-in-time and follow-resume controls with independent replication boundaries.
+
 The opt-in [offline backlog recovery rig](docs/offline-backlog-recovery.md) adds
 scheduled connectivity faults, constrained resources, and measured catch-up
 under continuing writes while preserving failures and final data boundaries.
