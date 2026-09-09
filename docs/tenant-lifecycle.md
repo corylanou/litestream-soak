@@ -57,7 +57,13 @@ A failing batch stops the scenario and returns nonzero without erasing failures.
 `report.json` and stdout contain the verdict, per-tenant phase results, polling
 attempts including errors, capability/pin identity, and resource frames. Full
 replication and restore output is retained in `process.log`; the report also has
-a small diagnostic tail. Early process errors remain failures even after recovery.
+a small diagnostic tail. WARN, ERROR, retry/recovery messages, and error attributes remain incidents even
+after later success. Per-line evidence records severity, message, raw excerpt,
+and line number; the complete raw log remains authoritative. The `slog-text-v1`
+parser contract is reported separately from the binary SHA. Empty logs, unknown
+formats, malformed lines, scanner errors, or truncated incident summaries prevent
+a clean pass. Summaries retain at most 1000 incidents while exact incident and
+unparsed counts continue to increase; raw output is retained up to its log budget.
 Readiness polling can legitimately record IPC-not-ready errors before the socket
 exists; these are retained as pending attempts, not reclassified as successful
 attempts. Each sync/discovery attempt is tied to its tenant and phase. Recovered

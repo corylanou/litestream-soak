@@ -152,7 +152,7 @@ func TestTenantLifecycleFullLogPreservesEarlyFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := tenantProcessLog{file: file, remaining: 1 << 20}
-	if _, err := log.Write([]byte("level=ERROR early failure\n" + strings.Repeat("level=INFO healthy\n", 200))); err != nil {
+	if _, err := log.Write([]byte("time=2026-09-09T00:00:00Z level=ERROR msg=failed\n" + strings.Repeat("time=2026-09-09T00:00:00Z level=INFO msg=healthy\n", 200))); err != nil {
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {
@@ -264,7 +264,7 @@ func TestTenantLifecycleFailedProcessStillReportsCleanup(t *testing.T) {
 	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	report, err := RunTenantLifecycle(context.Background(), TenantLifecycleOptions{Binary: binary, Root: dir, Mode: "watch", Tenants: 2, SHA: tenantLitestreamSHA, Capabilities: "directory-v1", Timeout: time.Second, SyncTimeout: time.Second})
+	report, err := RunTenantLifecycle(context.Background(), TenantLifecycleOptions{Binary: binary, Root: dir, Mode: "watch", Tenants: 2, SHA: tenantLitestreamSHA, Capabilities: "directory-v1", Timeout: 5 * time.Second, SyncTimeout: time.Second})
 	if err == nil || report.Status != "failed" {
 		t.Fatalf("unexpected success: %+v %v", report, err)
 	}
@@ -273,5 +273,63 @@ func TestTenantLifecycleFailedProcessStillReportsCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(report.RunDirectory, "report.json")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestTenantLifecycleFinalVerdictRetainsLogIncidents(t *testing.T) {
+	for _, line := range []string{
+		`time=2026-09-09T00:00:00Z level=WARN msg="temporary failure"`,
+		`time=2026-09-09T00:00:00Z level=INFO msg="retrying upload"`,
+		`time=2026-09-09T00:00:00Z level=INFO msg="recovered after reconnect"`,
+		`time=2026-09-09T00:00:00Z level=INFO msg="upload" error="temporary failure"`,
+		`unknown candidate log format`,
+		``,
+	} {
+		t.Run(line, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "process.log")
+			file, err := os.Create(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if line != "" {
+				if _, err := io.WriteString(file, line+"\ntime=2026-09-09T00:00:01Z level=INFO msg=success\n"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			report := TenantLifecycleReport{Status: "passed", ProcessLog: path, RunDirectory: dir}
+			r := tenantRunner{report: &report, dir: dir, ledger: newTenantLedger(2), log: newLineBuffer(10), fullLog: &tenantProcessLog{file: file, remaining: 1 << 20}}
+			r.event("restart", tenantID{0, 2}, "passed", "logical_match=true")
+			if err := r.finish(nil); err == nil {
+				t.Fatal("incident or unknown log evidence returned success")
+			}
+			if report.Status == "passed" {
+				t.Fatalf("later success overrode log incident: %+v", report)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "report.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved TenantLifecycleReport
+			if err := json.Unmarshal(data, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved.Status == "passed" || len(saved.Failures) == 0 {
+				t.Fatalf("persisted false clean verdict: %s", data)
+			}
+		})
+	}
+}
+
+func TestTenantLifecycleLogEvidenceBound(t *testing.T) {
+	evidence, err := readTenantLogEvidence(strings.NewReader(strings.Repeat("time=2026-09-09T00:00:00Z level=WARN msg=retrying\n", 1002)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.IncidentCount != 1002 || len(evidence.Incidents) != 1000 || !evidence.DetailsTruncated || evidence.Status != "partial" {
+		t.Fatalf("unbounded or incomplete accounting: %+v", evidence)
+	}
+	if evidence.Incidents[0].Line != 1 || evidence.Incidents[999].Line != 1000 {
+		t.Fatal("lost line identities")
 	}
 }

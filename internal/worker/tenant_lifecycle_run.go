@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -34,6 +33,7 @@ type TenantResourceFrame struct {
 }
 
 type TenantLifecycleReport struct {
+	LogEvidence      TenantLogEvidence      `json:"log_evidence"`
 	StartedAt        time.Time              `json:"started_at"`
 	FinishedAt       time.Time              `json:"finished_at"`
 	OperationTimeout string                 `json:"operation_timeout"`
@@ -126,41 +126,7 @@ func RunTenantLifecycle(ctx context.Context, options TenantLifecycleOptions) (re
 		return report, err
 	}
 	r.fullLog = &tenantProcessLog{file: logFile, remaining: 64 << 20}
-	defer func() {
-		hadProcess := r.process != nil
-		stopErr := r.stop()
-		if stopErr != nil {
-			r.event("cleanup", tenantID{}, "failed", stopErr.Error())
-			retErr = errors.Join(retErr, stopErr)
-		}
-		if hadProcess {
-			if stopErr == nil {
-				r.event("cleanup", tenantID{}, "passed", "replication process exited and was reaped after scenario")
-			}
-			r.frame("cleanup")
-		}
-		report.Failures = append(report.Failures, r.ledger.failures...)
-		report.LogTail = r.log.Lines()
-		retErr = errors.Join(retErr, r.fullLog.file.Close(), r.fullLog.err)
-		if logErr := r.reviewLog(); logErr != nil {
-			retErr = errors.Join(retErr, logErr)
-		}
-		if retErr != nil || len(report.Failures) > 0 {
-			report.Status = "failed"
-		}
-		if retErr != nil {
-			report.Error = retErr.Error()
-		}
-		report.FinishedAt = time.Now().UTC()
-		data, encodeErr := json.MarshalIndent(report, "", "  ")
-		if encodeErr == nil {
-			encodeErr = os.WriteFile(filepath.Join(dir, "report.json"), data, 0o600)
-		}
-		retErr = errors.Join(retErr, encodeErr)
-		if retErr != nil {
-			report.Status = "failed"
-		}
-	}()
+	defer func() { retErr = r.finish(retErr) }()
 	if err := os.Mkdir(filepath.Join(dir, "dbs"), 0o700); err != nil {
 		return report, err
 	}
@@ -546,29 +512,6 @@ func (r *tenantRunner) run(ctx context.Context) error {
 	}
 	r.event("cleanup", tenantID{}, "passed", "replication process exited and was reaped; run artifacts retained")
 	r.frame("cleanup")
-	return nil
-}
-
-func (r *tenantRunner) reviewLog() error {
-	file, err := os.Open(r.report.ProcessLog)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = file.Close() }()
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 4096), 1<<20)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.Contains(line, "level=ERROR") || strings.HasPrefix(line, "Error:") {
-			r.event("process-log", tenantID{}, "failed", sanitizeLine(line))
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	if len(r.report.Failures) > 0 {
-		return fmt.Errorf("lifecycle failures retained; see report and process log")
-	}
 	return nil
 }
 
