@@ -27,7 +27,11 @@ jobs:
           go-version-file: go.mod
 
       - run: go version
+      - name: Install actual profile upload CLI
+        run: sudo apt-get update && sudo apt-get install -y s3cmd
       - run: go test -race ./...
+        env:
+          SOAK_TEST_S3CMD: "1"
       - run: go build ./...
 
   lint:

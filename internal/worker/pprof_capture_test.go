@@ -2,14 +2,17 @@ package worker
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -769,5 +772,142 @@ func TestPprofRunnerKeepsProcessAliveForFinalCapture(t *testing.T) {
 	files, _ := filepath.Glob(filepath.Join(cfg.DataDir, "profiles", "*_final_heap.pprof"))
 	if len(files) != 1 {
 		t.Fatal("process was killed before final capture")
+	}
+}
+
+func TestPprofActualCLI(t *testing.T) {
+	if os.Getenv("SOAK_TEST_S3CMD") != "1" {
+		t.Skip("set SOAK_TEST_S3CMD=1 to require installed s3cmd")
+	}
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.ReplicaType = "s3"
+	cfg.S3Bucket, cfg.S3Path, cfg.S3Region = "bucket", "run", "us-east-1"
+	cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3SessionToken = "example-access", "example-secret", "example-token"
+	var requests atomic.Int32
+	var denied atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method != http.MethodPut || !strings.HasPrefix(r.URL.Path, "/bucket/run/profiles/") {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if !strings.Contains(r.Header.Get("Authorization"), "Credential="+cfg.S3AccessKey+"/") || r.Header.Get("X-Amz-Security-Token") != cfg.S3SessionToken {
+			t.Error("missing signed request or session token")
+		}
+		body, _ := io.ReadAll(r.Body)
+		if denied.Load() {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, "<Error><Code>AccessDenied</Code><Message>Denied by test</Message></Error>")
+			return
+		}
+		w.Header().Set("ETag", fmt.Sprintf("\"%x\"", md5.Sum(body)))
+	}))
+	defer server.Close()
+	t.Setenv("AWS_ACCESS_KEY", "stale-access")
+	t.Setenv("AWS_SECRET_KEY", "stale-secret")
+	cfg.S3Endpoint = server.URL
+	artifact := filepath.Join(cfg.DataDir, "sample.pprof")
+	if err := os.WriteFile(artifact, []byte("profile evidence"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := newPprofCapturer(&cfg).upload(context.Background(), artifact, "sample.pprof"); err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("requests = %d", requests.Load())
+	}
+	denied.Store(true)
+	err := newPprofCapturer(&cfg).upload(context.Background(), artifact, "sample.pprof")
+	if err == nil || !strings.Contains(err.Error(), "AccessDenied") {
+		t.Fatalf("missing actual CLI failure: %v", err)
+	}
+}
+
+func TestPprofUploadFailureDetails(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.ReplicaType = "s3"
+	cfg.S3Bucket, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3SessionToken = "bucket", "example-access", "example-secret", "example-token"
+	dir := t.TempDir()
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	executable := filepath.Join(dir, "s3cmd")
+	script := "#!/bin/sh\nprintf 'ERROR: InitialAccessDenied %s %s %s\\n' \"$AWS_ACCESS_KEY_ID\" \"$AWS_SECRET_ACCESS_KEY\" \"$AWS_SESSION_TOKEN\" >&2\nexit 1\n"
+	if err := os.WriteFile(executable, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	c := newPprofCapturer(&cfg)
+	profiles := filepath.Join(cfg.DataDir, "profiles")
+	if err := os.MkdirAll(profiles, 0700); err != nil {
+		t.Fatal(err)
+	}
+	filename := filepath.Join(profiles, "sample.pprof.json")
+	c.saveRecord(context.Background(), filename, &profileRecord{Upload: "pending", Status: "unavailable"})
+	c.retryPending(context.Background(), profiles)
+	if err := os.WriteFile(executable, []byte(strings.ReplaceAll(script, "InitialAccessDenied", "LaterAccessDenied")), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for range 19 {
+		c.retryPending(context.Background(), profiles)
+	}
+	body, _ := os.ReadFile(filename)
+	if !strings.Contains(string(body), "AccessDenied") {
+		t.Fatalf("missing diagnostic: %s", body)
+	}
+	for _, secret := range []string{cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3SessionToken} {
+		if strings.Contains(string(body), secret) {
+			t.Fatal("credential leaked")
+		}
+	}
+	remote := filepath.Join(dir, "remote.json")
+	t.Setenv("PROFILE_REMOTE_METADATA", remote)
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nfor arg in \"$@\"; do previous=$last; last=$arg; done\ncp \"$previous\" \"$PROFILE_REMOTE_METADATA\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	c.retryPending(context.Background(), profiles)
+	body, _ = os.ReadFile(filename)
+	var record map[string]any
+	if err := json.Unmarshal(body, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["upload"] != "uploaded" || record["upload_error"] != nil {
+		t.Fatalf("retry state: %s", body)
+	}
+	history, ok := record["upload_failures"].([]any)
+	if !ok || len(history) != 16 || !strings.Contains(fmt.Sprint(history[0]), "InitialAccessDenied") {
+		t.Fatalf("recovery lost failure history: %s", body)
+	}
+	remoteBody, err := os.ReadFile(remote)
+	if err != nil || !strings.Contains(string(remoteBody), "InitialAccessDenied") || !strings.Contains(string(remoteBody), `"upload":"uploaded"`) {
+		t.Fatalf("remote metadata lost recovery history: %s, %v", remoteBody, err)
+	}
+	failure := history[0].(map[string]any)
+	if failure["attempt"] != float64(1) || failure["at"] == "" || failure["stage"] != "manifest" || record["upload_attempts"] != float64(21) || record["upload_failure_count"] != float64(20) || record["upload_failures_dropped"] != float64(4) || record["upload_history_incomplete"] != true {
+		t.Fatalf("missing failure attribution: %s", body)
+	}
+
+}
+
+func TestPprofUploadDiagnosticBound(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.S3SecretKey = "example-secret"
+	d := &profileUploadDiagnostic{}
+	input := strings.Repeat("x", 4090) + cfg.S3SecretKey + strings.Repeat("y", 10000)
+	if n, err := d.Write([]byte(input)); err != nil || n != len(input) {
+		t.Fatalf("write = %d, %v", n, err)
+	}
+	got := d.sanitized(&cfg)
+	if len(d.body) > 4096 || strings.Contains(got, "exampl") {
+		t.Fatal("diagnostic is unbounded or contains truncated credential")
+	}
+}
+
+func TestPprofUploadHistoryBound(t *testing.T) {
+	var record profileRecord
+	for range 20 {
+		record.UploadAttempts++
+		record.addUploadFailure("artifact", fmt.Errorf("bounded failure"))
+	}
+	if len(record.UploadFailures) != 16 || record.UploadFailures[0].Attempt != 1 || record.UploadFailures[15].Attempt != 20 {
+		t.Fatalf("history did not retain latest attempts: %+v", record.UploadFailures)
 	}
 }
