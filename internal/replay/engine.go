@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -16,14 +17,26 @@ import (
 )
 
 var (
+	ErrRowSkipped = errors.New("replay row skipped")
+
+	replayAttemptsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_replay_attempts_total",
+		Help: "Total replay records attempted, excluding retries.",
+	}, []string{"dataset", "worker_id", "profile", "source"})
+
+	replaySkippedRowsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_replay_skipped_rows_total",
+		Help: "Total replay records skipped without mutations because they are duplicates.",
+	}, []string{"dataset", "worker_id", "profile", "source"})
+
 	replayRowsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "soak_replay_rows_total",
-		Help: "Total rows replayed by dataset.",
+		Help: "Total replay records that committed mutations, excluding skipped records.",
 	}, []string{"dataset", "worker_id", "profile", "source"})
 
 	replayErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "soak_replay_errors_total",
-		Help: "Total replay errors by dataset.",
+		Help: "Total replay insert errors, including transient failures before successful retries.",
 	}, []string{"dataset", "worker_id", "profile", "source"})
 
 	replayDroppedRowsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -217,6 +230,8 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 	var prevTS time.Time
 	var count int64
 	var dropped int64
+	var attempted int64
+	var skipped int64
 
 	for iter.Next() {
 		if err := e.waitIfPaused(ctx); err != nil {
@@ -245,11 +260,23 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 		}
 
 		start := time.Now()
-		if err := e.insertWithRetry(ctx, func() error { return iter.Insert(e.db) }); err != nil {
+		attempted++
+		replayAttemptsTotal.WithLabelValues(labels...).Inc()
+		if err := e.insertWithRetry(ctx, func() error {
+			err := iter.Insert(e.db)
+			if err != nil && !errors.Is(err, ErrRowSkipped) {
+				replayErrorsTotal.WithLabelValues(labels...).Inc()
+			}
+			return err
+		}); err != nil {
+			if errors.Is(err, ErrRowSkipped) {
+				replaySkippedRowsTotal.WithLabelValues(labels...).Inc()
+				skipped++
+				continue
+			}
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			replayErrorsTotal.WithLabelValues(labels...).Inc()
 			replayDroppedRowsTotal.WithLabelValues(labels...).Inc()
 			dropped++
 			slog.Error("Replay insert failed, row dropped", "dataset", name, "error", err, "dropped_total", dropped)
@@ -261,7 +288,7 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 		count++
 
 		if count%10000 == 0 {
-			slog.Info("Replay progress", "dataset", name, "rows", count)
+			slog.Info("Replay progress", "dataset", name, "mutated_records", count)
 		}
 	}
 
@@ -269,7 +296,7 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 		return fmt.Errorf("iterator error: %w", err)
 	}
 
-	slog.Info("Replay pass complete", "dataset", name, "total_rows", count)
+	slog.Info("Replay pass complete", "dataset", name, "attempted_records", attempted, "mutated_records", count, "skipped_records", skipped, "failed_records", dropped)
 	return nil
 }
 

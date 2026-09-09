@@ -276,3 +276,49 @@ func TestEngineCancellationNotCountedAsDrop(t *testing.T) {
 		t.Fatalf("dropped rows %v -> %v, want unchanged when canceled mid-retry", before, after)
 	}
 }
+
+type recoveringInsertAdapter struct{ singleRowAdapter }
+
+func (recoveringInsertAdapter) Rows() (RowIterator, error) {
+	return &recoveringInsertIterator{singleRowIterator: singleRowIterator{rows: []singleReplayRow{{ts: time.Unix(0, 0), value: "recovered"}}}}, nil
+}
+
+type recoveringInsertIterator struct {
+	singleRowIterator
+	failed bool
+}
+
+func (it *recoveringInsertIterator) Insert(db *sql.DB) error {
+	if !it.failed {
+		it.failed = true
+		return errors.New("database is locked")
+	}
+	return it.singleRowIterator.Insert(db)
+}
+
+func TestEnginePreservesRecoveredInsertErrors(t *testing.T) {
+	t.Parallel()
+	cfg := Config{DBPath: filepath.Join(t.TempDir(), "replay.db"), WorkerID: t.Name()}
+	engine := NewEngine(cfg, recoveringInsertAdapter{})
+	labels := engine.metricLabels("single")
+	beforeErrors := testutil.ToFloat64(replayErrorsTotal.WithLabelValues(labels...))
+	beforeRows := testutil.ToFloat64(replayRowsTotal.WithLabelValues(labels...))
+	beforeAttempts := testutil.ToFloat64(replayAttemptsTotal.WithLabelValues(labels...))
+	beforeDropped := testutil.ToFloat64(replayDroppedRowsTotal.WithLabelValues(labels...))
+	if err := engine.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		got, want float64
+	}{
+		{"errors", testutil.ToFloat64(replayErrorsTotal.WithLabelValues(labels...)) - beforeErrors, 1},
+		{"mutated", testutil.ToFloat64(replayRowsTotal.WithLabelValues(labels...)) - beforeRows, 1},
+		{"attempted", testutil.ToFloat64(replayAttemptsTotal.WithLabelValues(labels...)) - beforeAttempts, 1},
+		{"failed", testutil.ToFloat64(replayDroppedRowsTotal.WithLabelValues(labels...)) - beforeDropped, 0},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s=%v, want %v", tc.name, tc.got, tc.want)
+		}
+	}
+}
