@@ -49,6 +49,11 @@ var (
 		Help: "Delay between scheduled and actual insert time.",
 	}, []string{"dataset", "worker_id", "profile", "source"})
 
+	replayOperationSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "soak_replay_operation_seconds",
+		Help: "Duration of each insert attempt, excluding retry backoff and schedule waits.",
+	}, []string{"dataset", "worker_id", "profile", "source"})
+
 	replayActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "soak_replay_active",
 		Help: "Whether a replay dataset is currently running (1=yes).",
@@ -85,16 +90,19 @@ type Engine struct {
 	adapter Adapter
 	db      *sql.DB
 
-	mu        sync.Mutex
-	running   bool
-	paused    bool
-	resumeCh  chan struct{}
-	ackCh     chan struct{}
-	ackClosed bool
+	mu             sync.Mutex
+	running        bool
+	paused         bool
+	resumeCh       chan struct{}
+	ackCh          chan struct{}
+	ackClosed      bool
+	pauseCh        chan struct{}
+	pauseStart     time.Time
+	pausedDuration time.Duration
 }
 
 func NewEngine(cfg Config, adapter Adapter) *Engine {
-	return &Engine{cfg: cfg, adapter: adapter}
+	return &Engine{cfg: cfg, adapter: adapter, pauseCh: make(chan struct{})}
 }
 
 // Pause blocks new inserts and waits until the engine is quiesced
@@ -103,6 +111,8 @@ func (e *Engine) Pause(ctx context.Context) error {
 	e.mu.Lock()
 	if !e.paused {
 		e.paused = true
+		e.pauseStart = time.Now()
+		close(e.pauseCh)
 		e.resumeCh = make(chan struct{})
 		e.ackCh = make(chan struct{})
 		e.ackClosed = false
@@ -128,7 +138,9 @@ func (e *Engine) Resume() {
 	if !e.paused {
 		return
 	}
+	e.pausedDuration += time.Since(e.pauseStart)
 	e.paused = false
+	e.pauseCh = make(chan struct{})
 	close(e.resumeCh)
 	e.resumeCh = nil
 	e.ackCh = nil
@@ -157,6 +169,49 @@ func (e *Engine) waitIfPaused(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 	return ctx.Err()
+}
+
+func (e *Engine) scheduleNowLocked() time.Time {
+	now := time.Now()
+	paused := e.pausedDuration
+	if e.paused {
+		paused += now.Sub(e.pauseStart)
+	}
+	return now.Add(-paused)
+}
+
+func (e *Engine) scheduleNow() time.Time {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.scheduleNowLocked()
+}
+
+func (e *Engine) waitUntil(ctx context.Context, scheduled time.Time) error {
+	for {
+		if err := e.waitIfPaused(ctx); err != nil {
+			return err
+		}
+		e.mu.Lock()
+		delay := scheduled.Sub(e.scheduleNowLocked())
+		pause := e.pauseCh
+		paused := e.paused
+		e.mu.Unlock()
+		if paused {
+			continue
+		}
+		if delay <= 0 {
+			return ctx.Err()
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-pause:
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
 }
 
 func replayDSN(dbPath string) string {
@@ -228,6 +283,8 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 	defer func() { _ = iter.Close() }()
 
 	var prevTS time.Time
+	scheduled := e.scheduleNow()
+	first := true
 	var count int64
 	var dropped int64
 	var attempted int64
@@ -240,30 +297,26 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 
 		ts := iter.Timestamp()
 
-		if !prevTS.IsZero() && ts.After(prevTS) {
+		if !first && ts.After(prevTS) {
 			delay := ts.Sub(prevTS)
 			if e.cfg.SpeedMultiplier > 0 {
 				delay = time.Duration(float64(delay) / e.cfg.SpeedMultiplier)
 			}
-			if delay > 0 && delay < 10*time.Second {
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(delay):
-				}
-			}
+			scheduled = scheduled.Add(delay)
 		}
+		first = false
 		prevTS = ts
-
-		if err := e.waitIfPaused(ctx); err != nil {
+		if err := e.waitUntil(ctx, scheduled); err != nil {
 			return err
 		}
+		replayLagSeconds.WithLabelValues(labels...).Set(max(0, e.scheduleNow().Sub(scheduled).Seconds()))
 
-		start := time.Now()
 		attempted++
 		replayAttemptsTotal.WithLabelValues(labels...).Inc()
 		if err := e.insertWithRetry(ctx, func() error {
+			start := time.Now()
 			err := iter.Insert(e.db)
+			replayOperationSeconds.WithLabelValues(labels...).Observe(time.Since(start).Seconds())
 			if err != nil && !errors.Is(err, ErrRowSkipped) {
 				replayErrorsTotal.WithLabelValues(labels...).Inc()
 			}
@@ -284,7 +337,6 @@ func (e *Engine) replayOnce(ctx context.Context) error {
 		}
 
 		replayRowsTotal.WithLabelValues(labels...).Inc()
-		replayLagSeconds.WithLabelValues(labels...).Set(time.Since(start).Seconds())
 		count++
 
 		if count%10000 == 0 {
