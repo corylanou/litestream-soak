@@ -712,6 +712,10 @@ func workerPassedSuccessWindow(db *model.DB, worker model.Worker, deployment mod
 	if err != nil {
 		return false, err
 	}
+	verifications, err = currentDeploymentVerifications(db, worker, deployment, verifications)
+	if err != nil {
+		return false, err
+	}
 	var latestPassAt time.Time
 	environmental := environmentalVerificationIDs(verifications, currentEnvironmentalFailurePolicy())
 	for _, verification := range verifications {

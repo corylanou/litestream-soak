@@ -104,6 +104,11 @@ measured directly.
 | L0 retention | 5m (upstream) | 1h |
 | L0 retention check | 15s (upstream) | 2m |
 
+Worker restore checks also compare an independent, consistent source snapshot
+against restored schema and typed row contents. See [logical verification](docs/logical-verification.md)
+for the equality contract, resource budgets, bookkeeping policy, and opt-in real
+restore test.
+
 ## Fleet Sources
 
 The `main` source is the long-running baseline fleet. Failures there are
@@ -207,10 +212,36 @@ fleet, performs a rolling update, and resumes dormant workers for probing.
 Before each rollout step, the control plane checks whether a newer ready
 deployment superseded the current one; superseded rollouts are skipped.
 
-The release-quality views build rollout progress and scorecards from
-post-deployment verification windows. They report updated workers, workers still
-awaiting a fresh verification, failed workers, failure signatures, pass rate,
-and source-to-source or previous-rollout comparisons.
+The release-quality views require attributed verification evidence within
+post-deployment windows. Each verification retains its deployment ID, run and
+machine IDs, soak and Litestream SHAs, workload generator SHA, effective workload
+configuration and hash, and harness validator identity. `WORKLOAD_SHA` identifies
+the generator source independently of the Litestream candidate. An absent
+generator source remains unknown rather than being inferred from the candidate.
+
+Authenticated deployment-ready notifications supply the generator `workload_sha`
+from the image build. The notification helper reads the Dockerfile pin by default;
+a custom generator build must supply the matching seventh argument or
+`WORKLOAD_SHA`. A missing trusted generator SHA disables deployment credit.
+
+The control plane registers each expected run before machine creation and binds
+its machine ID after creation. Reports must match that run and the effective
+configuration derived from the worker configuration parser. Report ingestion and
+run replacement are serialized per worker. Mismatched reports retain their historical evidence but cannot update the current
+worker or earn deployment credit. During upgrades, legacy managed workers without
+a registered run can continue telemetry only when the reported machine, harness
+build, Litestream build, source, and profile match the persisted worker identity.
+These reports never register a run or earn deployment credit. Current runs without a deployment remain operational without earning
+release credit. Legacy verification rows remain readable with `attributed=false`;
+existing workers need a newly registered run before they can provide attributed
+evidence.
+
+Historical deployment scorecards retain attributed results after worker
+replacement. Live rollout and success teardown checks additionally require the
+current machine and run. The views report updated workers, workers still awaiting
+a fresh verification, failed workers, failure signatures, pass rate, and
+source-to-source or previous-rollout comparisons. Identified incident reports,
+including recovery reports, are retained individually.
 
 ## Operations And Usage
 
@@ -251,6 +282,27 @@ with `fly.control.toml` and the startup log fields in `cmd/soakctl/main.go`
 `internal/orchestrator/dormancy.go`.
 
 For detailed operator procedures, see `docs/operator-runbook.md`.
+
+## Replay pacing
+
+Each dataset pass anchors its schedule to its first event timestamp. Event
+offsets from that origin are divided by the replay speed, and deadlines are
+clamped to never move backward. Equal timestamps and out-of-order events add
+no extra delay: timestamps `[100, 90, 100, 110]` run at offsets `[0, 0, 0, 10]`
+at speed 1. A new loop pass starts a fresh schedule.
+
+All gaps are preserved, including gaps of ten seconds or more. Insert and retry
+time consume the scheduled interval instead of extending it. Pauses freeze the
+schedule and preserve the remaining gap; waiting is interruptible by pause or
+cancellation. Pause acknowledgment waits for an in-flight insert to finish.
+`REPLAY_SPEED` must be positive and finite. Direct engine callers may use zero
+for speed 1; negative and nonfinite speeds are rejected.
+
+`soak_replay_lag_seconds` measures nonnegative lateness at the start of each
+record attempt against its scheduled deadline, including skipped and failed
+records. `soak_replay_operation_seconds` measures individual insert attempt
+latency, excluding retry backoff, schedule waits, and pauses between attempts.
+The separate error and outcome counters retain failures even after recovery.
 
 ## GH Archive replay writes
 
@@ -348,3 +400,46 @@ Repository layout:
 `Dockerfile.control` builds `soakctl` and includes `flyctl` for platform-log and
 deployment support. Both runtime images use `docker-entrypoint.sh` to ensure
 `/data` ownership and then drop privileges to the `soak` user with `setpriv`.
+
+## Deployment recovery and evidence
+
+All main component deployments, including upstream worker sync requests, run
+through the `deploy-main` concurrency group. Running deployments are not
+cancelled by new requests, so a remote Fly deployment can finish before another
+starts. GitHub may replace a pending run; the surviving run checks out current
+main after acquiring the group, rather than deploying an older event revision.
+
+Component selection compares that checkout with the latest successful ancestor
+checkpoint from `deploy-main`, not the preceding push. Only runs with a
+`main-deployment-checkpoint-v1-<revision>` artifact qualify. Legacy successful
+runs without this evidence are not trusted: the first deployment bootstraps both
+components. Cancelled, failed, partially successful, or replaced queued runs do
+not advance the baseline. The next run includes all relevant changes since that
+baseline. A component that succeeded in a partial run may be redeployed.
+Recovery occurs on the next triggered run; a failed final run still requires a
+retry or manual dispatch. Operators should avoid cancelling a running Fly
+deployment; if one is manually cancelled, confirm the remote operation has
+finished before retrying.
+
+Manual dispatch selects both components and always deploys current main.
+Missing or expired checkpoints, API lookup failure, or no usable ancestor among
+the latest 100 successful main runs also selects both. Upstream sync retains its
+upstream-change check, then dispatches `deploy-main` with `upstream_sync=true`.
+That queued deployment resolves and pins current upstream main when building the
+worker. The sync workflow's success means only that it queued the request; the
+result and evidence belong to the resulting `deploy-main` run. A pending sync
+request replaced by a push will be retried by a later scheduled sync if upstream
+still differs. Sync-triggered manual dispatch also reconciles both components,
+so replacing a queued push cannot lose its control update.
+
+Control deployment and worker acceptance have separate Actions job summaries.
+The final checkpoint publishes a Fly Machines snapshot with actual image
+references, machine states, and health-check statuses for both apps. It filters
+out machine configuration environment variables and credentials. The checkpoint
+revision is the revision reconciled by component selection, not a claim that
+both components use that revision: skipped components retain their prior images.
+The snapshot includes the accepted worker image and pinned Litestream revision
+when a worker update was requested. Worker acceptance starts an asynchronous
+rollout; neither workflow success nor the checkpoint proves convergence or soak
+verification. Use the actual worker images and subsequent worker reports for
+those outcomes.

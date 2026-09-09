@@ -314,7 +314,13 @@ func TestHeartbeatPreservesResourceObservationMetadata(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
-	cfg := Config{ControlBaseURL: server.URL, WorkerID: "resource-heartbeat"}
+	cfg := Config{
+		ControlBaseURL: server.URL, WorkerID: "resource-heartbeat",
+		DeploymentID: 7, RunID: "run-resource", MachineID: "machine-resource",
+		WorkloadID: "workload-resource", WorkloadSHA: strings.Repeat("a", 40),
+		GitSHA: strings.Repeat("b", 40), LitestreamSHA: strings.Repeat("c", 40),
+		ImageRef: "image-resource", Source: "main", ProfileName: "low-volume",
+	}
 	runner := NewRunner(cfg)
 	runner.reporter = NewReporter(cfg)
 	at := time.Now().UTC().Truncate(time.Second)
@@ -324,6 +330,9 @@ func TestHeartbeatPreservesResourceObservationMetadata(t *testing.T) {
 	runner.snapshot.LitestreamRSSBytes = 4096
 	runner.sendHeartbeat(context.Background())
 	payload := <-received
+	if payload.DeploymentID != cfg.DeploymentID || payload.RunID != cfg.RunID || payload.MachineID != cfg.MachineID || payload.WorkloadID != cfg.WorkloadID || payload.WorkloadSHA != cfg.WorkloadSHA || payload.ValidatorID != "soak-verifier:"+cfg.GitSHA || payload.ProfileHash == "" || payload.ProfileConfig == "" {
+		t.Fatalf("run identity lost in heartbeat transport: %+v", payload.WorkerIdentity)
+	}
 	if payload.LitestreamProcess != runner.snapshot.LitestreamProcess || payload.WorkerProcess.Status != "unsupported" || payload.LocalStateStatus != "unavailable" || payload.LitestreamRSSBytes != 4096 {
 		t.Fatalf("resource metadata lost: %+v", payload)
 	}

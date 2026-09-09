@@ -69,7 +69,7 @@ func TestBuildDeploymentRollout(t *testing.T) {
 	})
 
 	passedAt := deployment.StartedAt.Add(1 * time.Minute).UTC()
-	if err := db.RecordVerification(&model.Verification{
+	if err := recordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-running",
 		StartedAt:   passedAt.Add(-15 * time.Second),
 		CompletedAt: &passedAt,
@@ -82,7 +82,7 @@ func TestBuildDeploymentRollout(t *testing.T) {
 	}
 
 	failedAt := deployment.StartedAt.Add(-2 * time.Minute).UTC()
-	if err := db.RecordVerification(&model.Verification{
+	if err := recordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     "worker-main-probing",
 		StartedAt:    failedAt.Add(-15 * time.Second),
 		CompletedAt:  &failedAt,
@@ -191,7 +191,7 @@ func TestBuildDeploymentRolloutCountsRuntimeUnhealthy(t *testing.T) {
 		t.Fatalf("UpdateWorkerRuntimeSnapshot() error = %v", err)
 	}
 	passedAt := deployment.StartedAt.Add(3 * time.Minute).UTC()
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-pr-1228-gharchive",
 		StartedAt:   passedAt.Add(-15 * time.Second),
 		CompletedAt: &passedAt,
@@ -320,7 +320,7 @@ func TestHandleGetLatestDeploymentPromptUsesHealthyModeForStableRollout(t *testi
 		t.Fatalf("UpdateWorkerRuntimeSnapshot() error = %v", err)
 	}
 	passedAt := deployment.StartedAt.Add(25 * time.Hour).UTC()
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-pr-1228-low",
 		StartedAt:   passedAt.Add(-15 * time.Second),
 		CompletedAt: &passedAt,
@@ -499,7 +499,7 @@ func TestBuildLatestDeploymentComparison(t *testing.T) {
 	headPassAt := head.StartedAt.Add(200 * time.Millisecond).UTC()
 	headFailAt := head.StartedAt.Add(400 * time.Millisecond).UTC()
 
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-one",
 		StartedAt:   basePassAt.Add(-15 * time.Second),
 		CompletedAt: &basePassAt,
@@ -508,7 +508,7 @@ func TestBuildLatestDeploymentComparison(t *testing.T) {
 		Passed:      true,
 		DurationMS:  15000,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     "worker-main-two",
 		StartedAt:    baseFailAt.Add(-15 * time.Second),
 		CompletedAt:  &baseFailAt,
@@ -518,7 +518,7 @@ func TestBuildLatestDeploymentComparison(t *testing.T) {
 		DurationMS:   15000,
 		ErrorMessage: `wrong # of entries in index idx_load_test_timestamp`,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-three",
 		StartedAt:   basePassAt.Add(-30 * time.Second),
 		CompletedAt: &basePassAt,
@@ -527,7 +527,7 @@ func TestBuildLatestDeploymentComparison(t *testing.T) {
 		Passed:      true,
 		DurationMS:  15000,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-one",
 		StartedAt:   headPassAt.Add(-15 * time.Second),
 		CompletedAt: &headPassAt,
@@ -536,7 +536,7 @@ func TestBuildLatestDeploymentComparison(t *testing.T) {
 		Passed:      true,
 		DurationMS:  15000,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-two",
 		StartedAt:   headPassAt.Add(-30 * time.Second),
 		CompletedAt: &headPassAt,
@@ -545,7 +545,7 @@ func TestBuildLatestDeploymentComparison(t *testing.T) {
 		Passed:      true,
 		DurationMS:  15000,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     "worker-main-three",
 		StartedAt:    headFailAt.Add(-15 * time.Second),
 		CompletedAt:  &headFailAt,
@@ -794,7 +794,7 @@ func TestBuildRequestedDeploymentComparisonCrossSource(t *testing.T) {
 	mainFailAt := mainDeployment.StartedAt.Add(400 * time.Millisecond).UTC()
 	prPassAt := prDeployment.StartedAt.Add(200 * time.Millisecond).UTC()
 
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-low",
 		StartedAt:   mainPassAt.Add(-15 * time.Second),
 		CompletedAt: &mainPassAt,
@@ -803,7 +803,7 @@ func TestBuildRequestedDeploymentComparisonCrossSource(t *testing.T) {
 		Passed:      true,
 		DurationMS:  15000,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     "worker-main-high",
 		StartedAt:    mainFailAt.Add(-15 * time.Second),
 		CompletedAt:  &mainFailAt,
@@ -813,7 +813,7 @@ func TestBuildRequestedDeploymentComparisonCrossSource(t *testing.T) {
 		DurationMS:   15000,
 		ErrorMessage: `wrong # of entries in index idx_load_test_timestamp`,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-pr-1228-low",
 		StartedAt:   prPassAt.Add(-15 * time.Second),
 		CompletedAt: &prPassAt,
@@ -822,7 +822,7 @@ func TestBuildRequestedDeploymentComparisonCrossSource(t *testing.T) {
 		Passed:      true,
 		DurationMS:  15000,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-pr-1228-high",
 		StartedAt:   prPassAt.Add(-30 * time.Second),
 		CompletedAt: &prPassAt,
@@ -933,7 +933,7 @@ func TestBuildRequestedDeploymentComparisonCompletedSuccessHeadPassed(t *testing
 
 	mainPassAt := mainDeployment.StartedAt.Add(200 * time.Millisecond).UTC()
 	mainFailAt := mainDeployment.StartedAt.Add(400 * time.Millisecond).UTC()
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-low",
 		StartedAt:   mainPassAt.Add(-15 * time.Second),
 		CompletedAt: &mainPassAt,
@@ -942,7 +942,7 @@ func TestBuildRequestedDeploymentComparisonCompletedSuccessHeadPassed(t *testing
 		Passed:      true,
 		DurationMS:  15000,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     "worker-main-high",
 		StartedAt:    mainFailAt.Add(-15 * time.Second),
 		CompletedAt:  &mainFailAt,
@@ -1045,7 +1045,7 @@ func TestBuildRequestedDeploymentComparisonNoArchiveStaysInsufficient(t *testing
 	})
 
 	mainPassAt := mainDeployment.StartedAt.Add(200 * time.Millisecond).UTC()
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-low",
 		StartedAt:   mainPassAt.Add(-15 * time.Second),
 		CompletedAt: &mainPassAt,
@@ -1125,7 +1125,7 @@ func TestBuildRequestedDeploymentComparisonSuccessArchiveDoesNotHideActiveWorse(
 
 	mainPassAt := mainDeployment.StartedAt.Add(200 * time.Millisecond).UTC()
 	prFailAt := prDeployment.StartedAt.Add(200 * time.Millisecond).UTC()
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-low",
 		StartedAt:   mainPassAt.Add(-15 * time.Second),
 		CompletedAt: &mainPassAt,
@@ -1134,7 +1134,7 @@ func TestBuildRequestedDeploymentComparisonSuccessArchiveDoesNotHideActiveWorse(
 		Passed:      true,
 		DurationMS:  15000,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     "worker-pr-1314-low",
 		StartedAt:    prFailAt.Add(-15 * time.Second),
 		CompletedAt:  &prFailAt,
@@ -1234,7 +1234,7 @@ func TestBuildRequestedDeploymentComparisonExcludesRampUpFailuresFromVerdict(t *
 		t.Fatalf("GetWorker(pr) error = %v", err)
 	}
 	prFailAt := prWorker.CreatedAt.Add(30 * time.Minute).UTC()
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-low",
 		StartedAt:   mainPassAt.Add(-15 * time.Second),
 		CompletedAt: &mainPassAt,
@@ -1243,7 +1243,7 @@ func TestBuildRequestedDeploymentComparisonExcludesRampUpFailuresFromVerdict(t *
 		Passed:      true,
 		DurationMS:  15000,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     "worker-pr-1305-low",
 		StartedAt:    prFailAt.Add(-15 * time.Second),
 		CompletedAt:  &prFailAt,

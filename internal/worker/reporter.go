@@ -43,6 +43,10 @@ func NewReporter(cfg Config) *Reporter {
 		},
 		identity: reporting.WorkerIdentity{
 			WorkerID:      cfg.WorkerID,
+			DeploymentID:  cfg.DeploymentID,
+			WorkloadID:    cfg.WorkloadID,
+			WorkloadSHA:   cfg.WorkloadSHA,
+			ValidatorID:   "soak-verifier:" + cfg.GitSHA,
 			Name:          cfg.WorkerName,
 			Source:        cfg.Source,
 			GitSHA:        cfg.GitSHA,

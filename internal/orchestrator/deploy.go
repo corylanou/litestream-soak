@@ -54,7 +54,7 @@ func (d *Deployer) DeployNewSHA(sha string) error {
 	existing, err := d.db.GetDeploymentByVersion("main", sha, litestreamSHA)
 	if err == nil && existing.Status == "ready" {
 		slog.Info("Deployment already exists for SHA, triggering rolling update", "sha", sha, "image", existing.ImageRef)
-		_, err := d.NotifyDeploymentReady(context.Background(), "main", sha, litestreamSHA, existing.ImageRef, "github_webhook_ready", "")
+		_, err := d.NotifyDeploymentReady(context.Background(), "main", sha, litestreamSHA, existing.ImageRef, "github_webhook_ready", "", existing.WorkloadSHA)
 		return err
 	}
 
@@ -91,11 +91,11 @@ func (d *Deployer) DeployNewSHA(sha string) error {
 	if err := d.db.UpdateDeployment(depID, "ready", imageRef, ""); err != nil {
 		return fmt.Errorf("mark deployment ready: %w", err)
 	}
-	_, err = d.NotifyDeploymentReady(context.Background(), "main", sha, litestreamSHA, imageRef, "github_webhook_build", "")
+	_, err = d.NotifyDeploymentReady(context.Background(), "main", sha, litestreamSHA, imageRef, "github_webhook_build", "", "")
 	return err
 }
 
-func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, litestreamSHA, imageRef, trigger, repository string) (string, error) {
+func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, litestreamSHA, imageRef, trigger, repository, workloadSHA string) (string, error) {
 	source = strings.TrimSpace(source)
 	if source == "" {
 		source = "main"
@@ -120,7 +120,12 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 	if imageRef == "" {
 		return "", fmt.Errorf("deployment image ref is required")
 	}
+	workloadSHA = strings.ToLower(strings.TrimSpace(workloadSHA))
+	if workloadSHA != "" && (len(workloadSHA) != 40 || !validSHARe.MatchString(workloadSHA)) {
+		return "", fmt.Errorf("workload sha must be a full 40-character commit SHA")
+	}
 	target := model.Deployment{
+		WorkloadSHA:   workloadSHA,
 		GitSHA:        sha,
 		LitestreamSHA: litestreamSHA,
 		ImageRef:      imageRef,

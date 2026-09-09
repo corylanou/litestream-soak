@@ -16,6 +16,9 @@ import (
 )
 
 type Config struct {
+	WorkloadSHA   string
+	WorkloadID    string
+	DeploymentID  int
 	WorkerID      string
 	WorkerName    string
 	GitSHA        string
@@ -59,6 +62,12 @@ type Config struct {
 	LoadDuration time.Duration
 
 	// Verification
+	LogicalMaxRows       int64
+	LogicalMaxBytes      int64
+	LogicalMaxObjects    int
+	LogicalMaxValueBytes int
+	LogicalTimeout       time.Duration
+
 	VerifyInterval           time.Duration
 	MonitorInterval          time.Duration
 	ReplicaLevelPollInterval time.Duration // how often replica LTX level counts are listed for metrics; 0 disables
@@ -166,6 +175,12 @@ func DefaultConfig() Config {
 		ReplaySpeed: 10.0,
 		ReplayLoop:  true,
 
+		LogicalMaxRows:       1_000_000_000,
+		LogicalMaxBytes:      1 << 40,
+		LogicalMaxObjects:    4096,
+		LogicalMaxValueBytes: 64 << 20,
+		LogicalTimeout:       30 * time.Minute,
+
 		VerifyInterval:           30 * time.Minute,
 		MonitorInterval:          15 * time.Second,
 		ReplicaLevelPollInterval: 5 * time.Minute,
@@ -266,50 +281,78 @@ func applyProviderRequestCanceledProfile(c *Config) {
 }
 
 func ConfigFromEnv() (Config, error) {
+	c, err := configFromLookup(os.Getenv)
+	if err == nil {
+		err = loadLogicalConfig(&c)
+	}
+	if err == nil && c.ReplicaType == "s3" && c.S3Bucket == "" {
+		return c, fmt.Errorf("S3_BUCKET is required when REPLICA_TYPE=s3")
+	}
+	if err == nil {
+		c.LitestreamSHA = resolveLitestreamSHA()
+	}
+	return c, err
+}
+
+func WorkloadFromEnvironment(env map[string]string) (workload.Config, error) {
+	c, err := configFromLookup(func(key string) string { return env[key] })
+	return c.WorkloadConfig(), err
+}
+
+func configFromLookup(getenv func(string) string) (Config, error) {
 	c := DefaultConfig()
 
-	if v := os.Getenv("WORKER_ID"); v != "" {
+	if v := getenv("WORKER_ID"); v != "" {
 		c.WorkerID = v
 	}
-	if v := os.Getenv("WORKER_NAME"); v != "" {
+	if v := getenv("WORKER_NAME"); v != "" {
 		c.WorkerName = v
 	}
-	if v := os.Getenv("GIT_SHA"); v != "" {
+	if v := getenv("GIT_SHA"); v != "" {
 		c.GitSHA = v
 	}
-	c.LitestreamSHA = resolveLitestreamSHA()
-	if v := os.Getenv("SOAK_RUN_ID"); v != "" {
+	if v := getenv("SOAK_DEPLOYMENT_ID"); v != "" {
+		id, err := strconv.Atoi(v)
+		if err != nil || id <= 0 {
+			return c, fmt.Errorf("invalid SOAK_DEPLOYMENT_ID: %q", v)
+		}
+		c.DeploymentID = id
+	}
+	c.WorkloadID = getenv("SOAK_WORKLOAD_ID")
+	c.WorkloadSHA = getenv("WORKLOAD_SHA")
+	c.LitestreamSHA = getenv("LITESTREAM_SHA")
+	if v := getenv("SOAK_RUN_ID"); v != "" {
 		c.RunID = v
 	}
-	if v := os.Getenv("SOAK_IMAGE_REF"); v != "" {
+	if v := getenv("SOAK_IMAGE_REF"); v != "" {
 		c.ImageRef = v
 	}
-	if v := os.Getenv("SOAK_VOLUME_ID"); v != "" {
+	if v := getenv("SOAK_VOLUME_ID"); v != "" {
 		c.VolumeID = v
 	}
-	if v := os.Getenv("SOAK_VOLUME_SIZE_GB"); v != "" {
+	if v := getenv("SOAK_VOLUME_SIZE_GB"); v != "" {
 		c.VolumeSizeGB = v
 	}
-	if v := os.Getenv("SOURCE"); v != "" {
+	if v := getenv("SOURCE"); v != "" {
 		c.Source = v
 	}
-	if v := os.Getenv("FLY_APP_NAME"); v != "" {
+	if v := getenv("FLY_APP_NAME"); v != "" {
 		c.AppName = v
 	}
-	if v := os.Getenv("FLY_MACHINE_ID"); v != "" {
+	if v := getenv("FLY_MACHINE_ID"); v != "" {
 		c.MachineID = v
 	}
-	if v := os.Getenv("FLY_REGION"); v != "" {
+	if v := getenv("FLY_REGION"); v != "" {
 		c.Region = v
 	}
-	if v := os.Getenv("DATA_DIR"); v != "" {
+	if v := getenv("DATA_DIR"); v != "" {
 		c.DataDir = v
 		c.DBPath = v + "/test.db"
 		c.ConfigPath = v + "/litestream.yml"
 		c.SocketPath = v + "/litestream.sock"
 	}
 
-	if v := os.Getenv("PROFILE"); v != "" {
+	if v := getenv("PROFILE"); v != "" {
 		c.ProfileName = v
 		switch v {
 		case "low-volume":
@@ -386,7 +429,7 @@ func ConfigFromEnv() (Config, error) {
 		}
 	}
 
-	if v := os.Getenv("WRITE_RATE"); v != "" {
+	if v := getenv("WRITE_RATE"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid WRITE_RATE: %w", err)
@@ -396,10 +439,10 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.WriteRate = n
 	}
-	if v := os.Getenv("PATTERN"); v != "" {
+	if v := getenv("PATTERN"); v != "" {
 		c.Pattern = v
 	}
-	if v := os.Getenv("PAYLOAD_SIZE"); v != "" {
+	if v := getenv("PAYLOAD_SIZE"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid PAYLOAD_SIZE: %w", err)
@@ -409,7 +452,7 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.PayloadSize = n
 	}
-	if v := os.Getenv("READ_RATIO"); v != "" {
+	if v := getenv("READ_RATIO"); v != "" {
 		n, err := strconv.ParseFloat(v, 64)
 		if err != nil {
 			return c, fmt.Errorf("invalid READ_RATIO: %w", err)
@@ -419,7 +462,7 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.ReadRatio = n
 	}
-	if v := os.Getenv("LOAD_WORKERS"); v != "" {
+	if v := getenv("LOAD_WORKERS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid LOAD_WORKERS: %w", err)
@@ -429,10 +472,10 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.Workers = n
 	}
-	if v := os.Getenv("INITIAL_SIZE"); v != "" {
+	if v := getenv("INITIAL_SIZE"); v != "" {
 		c.InitialSize = v
 	}
-	if v := os.Getenv("NUM_DATABASES"); v != "" {
+	if v := getenv("NUM_DATABASES"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid NUM_DATABASES: %w", err)
@@ -442,7 +485,7 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid NUM_DATABASES: must be non-negative")
 		}
 	}
-	if v := os.Getenv("MAX_ROWS_PER_DATABASE"); v != "" {
+	if v := getenv("MAX_ROWS_PER_DATABASE"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid MAX_ROWS_PER_DATABASE: %w", err)
@@ -452,7 +495,7 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.MaxRowsPerDatabase = n
 	}
-	if v := os.Getenv("ACTIVE_PERCENT"); v != "" {
+	if v := getenv("ACTIVE_PERCENT"); v != "" {
 		n, err := strconv.ParseFloat(v, 64)
 		if err != nil {
 			return c, fmt.Errorf("invalid ACTIVE_PERCENT: %w", err)
@@ -462,7 +505,7 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid ACTIVE_PERCENT: must be between 0 and 100")
 		}
 	}
-	if v := os.Getenv("ACTIVE_ROTATE_INTERVAL"); v != "" {
+	if v := getenv("ACTIVE_ROTATE_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid ACTIVE_ROTATE_INTERVAL: %w", err)
@@ -472,17 +515,17 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.ActiveRotateInterval = d
 	}
-	if v := strings.TrimSpace(os.Getenv("ACTIVE_SET_SEED")); v != "" {
+	if v := strings.TrimSpace(getenv("ACTIVE_SET_SEED")); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
 			return c, fmt.Errorf("invalid ACTIVE_SET_SEED: %w", err)
 		}
 		c.ActiveSetSeed = n
 	}
-	if v := strings.TrimSpace(os.Getenv("CONFIG_MODE")); v != "" {
+	if v := strings.TrimSpace(getenv("CONFIG_MODE")); v != "" {
 		c.ConfigMode = v
 	}
-	if v := os.Getenv("VERIFY_SAMPLE_SIZE"); v != "" {
+	if v := getenv("VERIFY_SAMPLE_SIZE"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid VERIFY_SAMPLE_SIZE: %w", err)
@@ -492,7 +535,7 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid VERIFY_SAMPLE_SIZE: must be positive")
 		}
 	}
-	if v := os.Getenv("VERIFY_CHANGED_LIMIT"); v != "" {
+	if v := getenv("VERIFY_CHANGED_LIMIT"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid VERIFY_CHANGED_LIMIT: %w", err)
@@ -502,7 +545,7 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.VerifyChangedLimit = n
 	}
-	if v := os.Getenv("REPLICATION_LAG_THRESHOLD"); v != "" {
+	if v := getenv("REPLICATION_LAG_THRESHOLD"); v != "" {
 		n, err := strconv.ParseUint(v, 10, 64)
 		if err != nil {
 			return c, fmt.Errorf("invalid REPLICATION_LAG_THRESHOLD: %w", err)
@@ -510,7 +553,7 @@ func ConfigFromEnv() (Config, error) {
 		c.ReplicationLagThreshold = n
 	}
 
-	if v := os.Getenv("VERIFY_INTERVAL"); v != "" {
+	if v := getenv("VERIFY_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid VERIFY_INTERVAL: %w", err)
@@ -520,7 +563,7 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.VerifyInterval = d
 	}
-	if v := os.Getenv("MONITOR_INTERVAL"); v != "" {
+	if v := getenv("MONITOR_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid MONITOR_INTERVAL: %w", err)
@@ -530,7 +573,7 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.MonitorInterval = d
 	}
-	if v := os.Getenv("REPLICA_LEVEL_POLL_INTERVAL"); v != "" {
+	if v := getenv("REPLICA_LEVEL_POLL_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid REPLICA_LEVEL_POLL_INTERVAL: %w", err)
@@ -540,31 +583,31 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.ReplicaLevelPollInterval = d
 	}
-	if v := os.Getenv("VERIFY_TYPE"); v != "" {
+	if v := getenv("VERIFY_TYPE"); v != "" {
 		c.VerifyType = v
 	}
-	if v := os.Getenv("VERIFY_SYNC_DEGRADED_AFTER"); v != "" {
+	if v := getenv("VERIFY_SYNC_DEGRADED_AFTER"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid VERIFY_SYNC_DEGRADED_AFTER: %w", err)
 		}
 		c.VerifySyncDegradedAfter = d
 	}
-	if v := os.Getenv("VERIFY_SYNC_TIMEOUT"); v != "" {
+	if v := getenv("VERIFY_SYNC_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid VERIFY_SYNC_TIMEOUT: %w", err)
 		}
 		c.VerifySyncTimeout = d
 	}
-	if v := os.Getenv("DISK_FULL_NO_PROGRESS_WINDOW"); v != "" {
+	if v := getenv("DISK_FULL_NO_PROGRESS_WINDOW"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid DISK_FULL_NO_PROGRESS_WINDOW: %w", err)
 		}
 		c.DiskFullNoProgressWindow = d
 	}
-	if v := os.Getenv("DISK_FULL_RECOVERY_RESERVE_BYTES"); v != "" {
+	if v := getenv("DISK_FULL_RECOVERY_RESERVE_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
 			return c, fmt.Errorf("invalid DISK_FULL_RECOVERY_RESERVE_BYTES: %w", err)
@@ -574,7 +617,7 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.DiskFullRecoveryReserve = n
 	}
-	if v := os.Getenv("DISK_FULL_RECOVERY_TIMEOUT"); v != "" {
+	if v := getenv("DISK_FULL_RECOVERY_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid DISK_FULL_RECOVERY_TIMEOUT: %w", err)
@@ -582,37 +625,37 @@ func ConfigFromEnv() (Config, error) {
 		c.DiskFullRecoveryTimeout = d
 	}
 
-	if v := os.Getenv("REPLICA_TYPE"); v != "" {
+	if v := getenv("REPLICA_TYPE"); v != "" {
 		c.ReplicaType = v
 	}
-	if v := os.Getenv("REPLICA_PATH"); v != "" {
+	if v := getenv("REPLICA_PATH"); v != "" {
 		c.ReplicaPath = v
 	}
-	if v := os.Getenv("S3_BUCKET"); v != "" {
+	if v := getenv("S3_BUCKET"); v != "" {
 		c.S3Bucket = v
 	}
-	if v := os.Getenv("S3_ENDPOINT"); v != "" {
+	if v := getenv("S3_ENDPOINT"); v != "" {
 		c.S3Endpoint = v
 	}
-	if v := os.Getenv("AWS_ACCESS_KEY_ID"); v != "" {
+	if v := getenv("AWS_ACCESS_KEY_ID"); v != "" {
 		c.S3AccessKey = v
 	}
-	if v := os.Getenv("AWS_SECRET_ACCESS_KEY"); v != "" {
+	if v := getenv("AWS_SECRET_ACCESS_KEY"); v != "" {
 		c.S3SecretKey = v
 	}
-	if v := os.Getenv("AWS_SESSION_TOKEN"); v != "" {
+	if v := getenv("AWS_SESSION_TOKEN"); v != "" {
 		c.S3SessionToken = v
 	}
-	if v := firstNonEmpty(os.Getenv("AWS_REGION"), os.Getenv("AWS_DEFAULT_REGION")); v != "" {
+	if v := firstNonEmpty(getenv("AWS_REGION"), getenv("AWS_DEFAULT_REGION")); v != "" {
 		c.S3Region = v
 	}
-	if v := os.Getenv("S3_PATH"); v != "" {
+	if v := getenv("S3_PATH"); v != "" {
 		c.S3Path = v
 	}
-	if v := strings.TrimSpace(os.Getenv("LITESTREAM_S3_PART_SIZE")); v != "" {
+	if v := strings.TrimSpace(getenv("LITESTREAM_S3_PART_SIZE")); v != "" {
 		c.S3PartSize = v
 	}
-	if v := os.Getenv("LITESTREAM_S3_CONCURRENCY"); v != "" {
+	if v := getenv("LITESTREAM_S3_CONCURRENCY"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid LITESTREAM_S3_CONCURRENCY: %w", err)
@@ -622,23 +665,23 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.S3Concurrency = n
 	}
-	if parseBoolEnv(os.Getenv("S3_FAULT_PROXY_ENABLED")) {
+	if parseBoolEnv(getenv("S3_FAULT_PROXY_ENABLED")) {
 		c.S3FaultProxyEnabled = true
 	}
-	if parseBoolEnv(os.Getenv("S3_OBSERVE_PROXY_ENABLED")) {
+	if parseBoolEnv(getenv("S3_OBSERVE_PROXY_ENABLED")) {
 		c.S3FaultProxyEnabled = true
 		c.S3FaultProxyMode = "observe"
 	}
-	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_TARGET_ENDPOINT")); v != "" {
+	if v := strings.TrimSpace(getenv("S3_FAULT_PROXY_TARGET_ENDPOINT")); v != "" {
 		c.S3FaultProxyTargetEndpoint = v
 	}
-	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_MODE")); v != "" {
+	if v := strings.TrimSpace(getenv("S3_FAULT_PROXY_MODE")); v != "" {
 		c.S3FaultProxyMode = v
 	}
-	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_LISTEN_ADDR")); v != "" {
+	if v := strings.TrimSpace(getenv("S3_FAULT_PROXY_LISTEN_ADDR")); v != "" {
 		c.S3FaultProxyListenAddr = v
 	}
-	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_MIN_CONTENT_LENGTH")); v != "" {
+	if v := strings.TrimSpace(getenv("S3_FAULT_PROXY_MIN_CONTENT_LENGTH")); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
 			return c, fmt.Errorf("invalid S3_FAULT_PROXY_MIN_CONTENT_LENGTH: %w", err)
@@ -648,7 +691,7 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.S3FaultProxyMinContentLength = n
 	}
-	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_RESET_AFTER_BYTES")); v != "" {
+	if v := strings.TrimSpace(getenv("S3_FAULT_PROXY_RESET_AFTER_BYTES")); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
 			return c, fmt.Errorf("invalid S3_FAULT_PROXY_RESET_AFTER_BYTES: %w", err)
@@ -658,7 +701,7 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.S3FaultProxyResetAfterBytes = n
 	}
-	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_FAIL_FIRST_ATTEMPTS")); v != "" {
+	if v := strings.TrimSpace(getenv("S3_FAULT_PROXY_FAIL_FIRST_ATTEMPTS")); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid S3_FAULT_PROXY_FAIL_FIRST_ATTEMPTS: %w", err)
@@ -668,7 +711,7 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.S3FaultProxyFailFirstAttempts = n
 	}
-	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_MAX_FAILURES")); v != "" {
+	if v := strings.TrimSpace(getenv("S3_FAULT_PROXY_MAX_FAILURES")); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid S3_FAULT_PROXY_MAX_FAILURES: %w", err)
@@ -678,13 +721,13 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.S3FaultProxyMaxFailures = n
 	}
-	if v := strings.TrimSpace(os.Getenv("S3_FAULT_PROXY_SOURCE_LEVEL")); v != "" {
+	if v := strings.TrimSpace(getenv("S3_FAULT_PROXY_SOURCE_LEVEL")); v != "" {
 		c.S3FaultProxySourceLevel = v
 	}
-	if parseBoolEnv(os.Getenv("S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_GET")) {
+	if parseBoolEnv(getenv("S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_GET")) {
 		c.S3FaultProxyRequireObservedSourceGet = true
 	}
-	if parseBoolEnv(os.Getenv("S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_RANGE_GET")) {
+	if parseBoolEnv(getenv("S3_FAULT_PROXY_REQUIRE_OBSERVED_SOURCE_RANGE_GET")) {
 		c.S3FaultProxyRequireObservedSourceRangeGet = true
 	}
 	if c.S3FaultProxyEnabled && c.s3FaultProxyObserveMode() {
@@ -693,14 +736,14 @@ func ConfigFromEnv() (Config, error) {
 		c.S3FaultProxyRequireObservedSourceGet = false
 		c.S3FaultProxyRequireObservedSourceRangeGet = false
 	}
-	if parseBoolEnv(os.Getenv("REPLICA_LEVEL_REPORTING")) {
+	if parseBoolEnv(getenv("REPLICA_LEVEL_REPORTING")) {
 		c.ReplicaLevelReporting = true
 	}
-	if v := os.Getenv("SOAK_PPROF_CAPTURE"); v != "" {
+	if v := getenv("SOAK_PPROF_CAPTURE"); v != "" {
 		c.PprofCaptureEnabled = parseBoolEnv(v)
 	}
 
-	if v := os.Getenv("SNAPSHOT_INTERVAL"); v != "" {
+	if v := getenv("SNAPSHOT_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid SNAPSHOT_INTERVAL: %w", err)
@@ -710,7 +753,7 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.SnapshotInterval = d
 	}
-	if v := os.Getenv("SYNC_INTERVAL"); v != "" {
+	if v := getenv("SYNC_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid SYNC_INTERVAL: %w", err)
@@ -720,42 +763,42 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.SyncInterval = d
 	}
-	if v := os.Getenv("L1_COMPACTION_INTERVAL"); v != "" {
+	if v := getenv("L1_COMPACTION_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid L1_COMPACTION_INTERVAL: %w", err)
 		}
 		c.L1CompactionInterval = d
 	}
-	if v := os.Getenv("L2_COMPACTION_INTERVAL"); v != "" {
+	if v := getenv("L2_COMPACTION_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid L2_COMPACTION_INTERVAL: %w", err)
 		}
 		c.L2CompactionInterval = d
 	}
-	if v := os.Getenv("L3_COMPACTION_INTERVAL"); v != "" {
+	if v := getenv("L3_COMPACTION_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid L3_COMPACTION_INTERVAL: %w", err)
 		}
 		c.L3CompactionInterval = d
 	}
-	if v := os.Getenv("L0_RETENTION"); v != "" {
+	if v := getenv("L0_RETENTION"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid L0_RETENTION: %w", err)
 		}
 		c.L0Retention = d
 	}
-	if v := os.Getenv("L0_RETENTION_CHECK_INTERVAL"); v != "" {
+	if v := getenv("L0_RETENTION_CHECK_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid L0_RETENTION_CHECK_INTERVAL: %w", err)
 		}
 		c.L0RetentionCheckInterval = d
 	}
-	if v := strings.TrimSpace(os.Getenv("TRUNCATE_PAGE_N")); v != "" {
+	if v := strings.TrimSpace(getenv("TRUNCATE_PAGE_N")); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid TRUNCATE_PAGE_N: %w", err)
@@ -765,7 +808,7 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.TruncatePageN = &n
 	}
-	if v := os.Getenv("PINNED_READER_HOLD"); v != "" {
+	if v := getenv("PINNED_READER_HOLD"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid PINNED_READER_HOLD: %w", err)
@@ -775,7 +818,7 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.PinnedReaderHold = d
 	}
-	if v := os.Getenv("PINNED_READER_PAUSE"); v != "" {
+	if v := getenv("PINNED_READER_PAUSE"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return c, fmt.Errorf("invalid PINNED_READER_PAUSE: %w", err)
@@ -795,19 +838,19 @@ func ConfigFromEnv() (Config, error) {
 		return c, fmt.Errorf("L1_COMPACTION_INTERVAL, L2_COMPACTION_INTERVAL, and L3_COMPACTION_INTERVAL must be set together")
 	}
 
-	if v := os.Getenv("LOAD_MODE"); v != "" {
+	if v := getenv("LOAD_MODE"); v != "" {
 		c.LoadMode = v
 	}
-	if v := os.Getenv("REPLAY_DATASET"); v != "" {
+	if v := getenv("REPLAY_DATASET"); v != "" {
 		c.ReplayDataset = v
 	}
-	if v := os.Getenv("REPLAY_DATA_PATH"); v != "" {
+	if v := getenv("REPLAY_DATA_PATH"); v != "" {
 		c.ReplayDataPath = v
 	}
-	if v := os.Getenv("REPLAY_DATA_URL"); v != "" {
+	if v := getenv("REPLAY_DATA_URL"); v != "" {
 		c.ReplayDataURL = v
 	}
-	if v := os.Getenv("REPLAY_SPEED"); v != "" {
+	if v := getenv("REPLAY_SPEED"); v != "" {
 		n, err := strconv.ParseFloat(v, 64)
 		if err != nil {
 			return c, fmt.Errorf("invalid REPLAY_SPEED: %w", err)
@@ -817,14 +860,14 @@ func ConfigFromEnv() (Config, error) {
 		}
 		c.ReplaySpeed = n
 	}
-	if v := os.Getenv("REPLAY_LOOP"); v == "false" || v == "0" {
+	if v := getenv("REPLAY_LOOP"); v == "false" || v == "0" {
 		c.ReplayLoop = false
 	}
 
-	if v := os.Getenv("METRICS_ADDR"); v != "" {
+	if v := getenv("METRICS_ADDR"); v != "" {
 		c.MetricsAddr = v
 	}
-	if v := os.Getenv("CONTROL_BASE_URL"); v != "" {
+	if v := getenv("CONTROL_BASE_URL"); v != "" {
 		c.ControlBaseURL = v
 	}
 
@@ -840,10 +883,6 @@ func ConfigFromEnv() (Config, error) {
 		default:
 			return c, fmt.Errorf("invalid CONFIG_MODE: must be list or dir")
 		}
-	}
-
-	if c.ReplicaType == "s3" && c.S3Bucket == "" {
-		return c, fmt.Errorf("S3_BUCKET is required when REPLICA_TYPE=s3")
 	}
 
 	return c, nil
