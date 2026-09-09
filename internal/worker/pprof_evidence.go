@@ -27,7 +27,21 @@ type profileBinary struct {
 	Error     string `json:"error,omitempty"`
 }
 
+type profileUploadFailure struct {
+	At      time.Time `json:"at"`
+	Attempt uint64    `json:"attempt"`
+	Stage   string    `json:"stage"`
+	Error   string    `json:"error"`
+}
+
 type profileRecord struct {
+	UploadFailureCount      uint64 `json:"upload_failure_count"`
+	UploadFailuresDropped   uint64 `json:"upload_failures_dropped"`
+	UploadHistoryIncomplete bool   `json:"upload_history_incomplete"`
+
+	UploadAttempts uint64                 `json:"upload_attempts"`
+	UploadFailures []profileUploadFailure `json:"upload_failures,omitempty"`
+
 	DeploymentID      int                      `json:"deployment_id"`
 	MachineID         string                   `json:"machine_id"`
 	WorkerID          string                   `json:"worker_id"`
@@ -43,6 +57,7 @@ type profileRecord struct {
 	Artifact          string                   `json:"artifact"`
 	Status            string                   `json:"status"`
 	Error             string                   `json:"error,omitempty"`
+	UploadError       string                   `json:"upload_error,omitempty"`
 	Upload            string                   `json:"upload"`
 	CapturedAt        time.Time                `json:"captured_at"`
 	RunID             string                   `json:"run_id"`
@@ -172,18 +187,30 @@ func (c *pprofCapturer) retryPendingPhase(ctx context.Context, dir, phase string
 		if err != nil || json.Unmarshal(body, &record) != nil || record.Upload != "pending" || (phase != "" && record.Phase != phase) {
 			continue
 		}
+		var history struct {
+			Attempts *uint64 `json:"upload_attempts"`
+		}
+		if json.Unmarshal(body, &history) == nil && history.Attempts == nil {
+			record.UploadHistoryIncomplete = true
+		}
+		record.UploadAttempts++
 		if record.Status == "available" {
 			artifact := strings.TrimSuffix(filename, ".json")
 			if err := c.upload(ctx, artifact, filepath.Base(artifact)); err != nil {
+				record.addUploadFailure("artifact", err)
+				c.saveRecord(ctx, filename, &record)
 				c.recordStatus(record.Phase, "upload-failed")
 				continue
 			}
 		}
 		if err := c.uploadRecord(ctx, filename, &record); err != nil {
+			record.addUploadFailure("manifest", err)
+			c.saveRecord(ctx, filename, &record)
 			c.recordStatus(record.Phase, "upload-failed")
 			continue
 		}
 		record.Upload = "uploaded"
+		record.UploadError = ""
 		c.saveRecord(ctx, filename, &record)
 	}
 }
@@ -299,6 +326,7 @@ func (c *pprofCapturer) runUploads(ctx context.Context) {
 func (c *pprofCapturer) uploadRecord(ctx context.Context, filename string, record *profileRecord) error {
 	delivery := *record
 	delivery.Upload = "uploaded"
+	delivery.UploadError = ""
 	body, err := json.Marshal(delivery)
 	if err != nil {
 		return err
@@ -320,4 +348,15 @@ func (c *pprofCapturer) uploadRecord(ctx context.Context, filename string, recor
 		return err
 	}
 	return c.upload(ctx, f.Name(), filepath.Base(filename))
+}
+
+func (r *profileRecord) addUploadFailure(stage string, err error) {
+	r.UploadError = err.Error()
+	r.UploadFailureCount++
+	r.UploadFailures = append(r.UploadFailures, profileUploadFailure{At: time.Now().UTC(), Attempt: r.UploadAttempts, Stage: stage, Error: r.UploadError})
+	if len(r.UploadFailures) > 16 {
+		r.UploadFailures = append(r.UploadFailures[:1], r.UploadFailures[len(r.UploadFailures)-15:]...)
+		r.UploadFailuresDropped++
+		r.UploadHistoryIncomplete = true
+	}
 }

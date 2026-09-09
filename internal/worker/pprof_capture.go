@@ -299,7 +299,7 @@ func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) e
 		return fmt.Errorf("invalid profile upload endpoint")
 	}
 	target := "s3://" + c.cfg.S3Bucket + "/" + path.Join(strings.Trim(c.cfg.S3Path, "/"), "profiles", filename)
-	args := []string{"--host=" + endpoint.Host, "--host-bucket=" + endpoint.Host, "--max-retries=0"}
+	args := []string{"--host=" + endpoint.Host, "--host-bucket=" + endpoint.Host, "--config=/dev/null", "--no-progress"}
 	if endpoint.Scheme == "http" {
 		args = append(args, "--no-ssl")
 	} else {
@@ -313,9 +313,51 @@ func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) e
 	defer cancel()
 	cmd := exec.CommandContext(uploadCtx, "s3cmd", args...)
 	cmd.WaitDelay = time.Second
-	cmd.Env = append(os.Environ(), "AWS_ACCESS_KEY_ID="+c.cfg.S3AccessKey, "AWS_SECRET_ACCESS_KEY="+c.cfg.S3SecretKey, "AWS_SESSION_TOKEN="+c.cfg.S3SessionToken)
+	diagnostic := &profileUploadDiagnostic{}
+	cmd.Stderr = diagnostic
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "AWS_") {
+			cmd.Env = append(cmd.Env, value)
+		}
+	}
+	cmd.Env = append(cmd.Env, "AWS_ACCESS_KEY_ID="+c.cfg.S3AccessKey, "AWS_SECRET_ACCESS_KEY="+c.cfg.S3SecretKey, "AWS_SESSION_TOKEN="+c.cfg.S3SessionToken)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("upload profile: %w", err)
+		return fmt.Errorf("upload profile: %w: %s", err, diagnostic.sanitized(c.cfg))
 	}
 	return nil
+}
+
+type profileUploadDiagnostic struct {
+	body []byte
+}
+
+func (d *profileUploadDiagnostic) Write(p []byte) (int, error) {
+	n := len(p)
+	if remaining := 4096 - len(d.body); remaining > 0 {
+		d.body = append(d.body, p[:min(remaining, n)]...)
+	}
+	return n, nil
+}
+
+func (d *profileUploadDiagnostic) sanitized(cfg *Config) string {
+	text := string(d.body)
+	for _, secret := range []string{cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3SessionToken} {
+		if secret == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, secret, "[redacted]")
+		for n := min(len(secret)-1, len(text)); n > 0; n-- {
+			if strings.HasSuffix(text, secret[:n]) {
+				text = strings.TrimSuffix(text, secret[:n]) + "[redacted]"
+				break
+			}
+		}
+	}
+	text = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return ' '
+		}
+		return r
+	}, text)
+	return strings.TrimSpace(text[:min(len(text), 4096)])
 }

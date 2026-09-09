@@ -27,7 +27,14 @@ jobs:
           go-version-file: go.mod
 
       - run: go version
+      - name: Install actual profile upload CLI
+        run: |
+          python3 -m venv "$RUNNER_TEMP/s3cmd"
+          "$RUNNER_TEMP/s3cmd/bin/pip" install s3cmd==2.3.0
+          echo "$RUNNER_TEMP/s3cmd/bin" >> "$GITHUB_PATH"
       - run: go test -race ./...
+        env:
+          SOAK_TEST_S3CMD: "1"
       - run: go build ./...
 
   lint:
