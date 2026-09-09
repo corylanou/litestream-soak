@@ -581,13 +581,14 @@
       "id": 37,
       "targets": [
         {
-          "expr": "max(soak_control_worker_litestream_local_ltx_bytes{worker_id=\"$worker\"}) or max(soak_litestream_local_ltx_bytes{worker_id=\"$worker\"}) or on() vector(0)",
+          "expr": "max(soak_control_worker_litestream_local_ltx_bytes{worker_id=\"$worker\"}) or max(soak_litestream_local_ltx_bytes{worker_id=\"$worker\"})",
           "legendFormat": "local ltx"
         }
       ],
       "title": "Local LTX State",
       "type": "stat",
-      "options": {}
+      "options": {},
+      "description": " Non-fresh observations are gaps, not zero usage. Consult Resource Observation Status and Age. Historical maxima summarize observed samples only."
     },
     {
       "fieldConfig": {
@@ -1047,7 +1048,8 @@
         }
       ],
       "title": "Storage Trend",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": " Non-fresh observations are gaps, not zero usage. Consult Resource Observation Status and Age. Historical maxima summarize observed samples only."
     },
     {
       "fieldConfig": {
@@ -1740,6 +1742,110 @@
       ],
       "title": "Replica Level Max TXID",
       "type": "bargauge"
+    },
+    {
+      "id": 40,
+      "title": "Resource Observation Status",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 83
+      },
+      "description": "Unavailable/unknown, fresh, stale, or unsupported. Age is time since the last complete observation. Local-state scans resume in bounded slices and are not atomic filesystem snapshots.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "soak_control_worker_resource_observation_status{worker_id=\"$worker\"}",
+          "instant": true,
+          "legendFormat": "{{worker_id}} {{resource}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "Unavailable",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Unavailable",
+                  "color": "gray"
+                },
+                "1": {
+                  "text": "Fresh",
+                  "color": "green"
+                },
+                "2": {
+                  "text": "Stale",
+                  "color": "orange"
+                },
+                "3": {
+                  "text": "Unsupported",
+                  "color": "gray"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 41,
+      "title": "Resource Observation Age",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 83
+      },
+      "description": "Unavailable/unknown, fresh, stale, or unsupported. Age is time since the last complete observation. Local-state scans resume in bounded slices and are not atomic filesystem snapshots.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - soak_control_worker_resource_observation_unixtime{worker_id=\"$worker\"}",
+          "instant": true,
+          "legendFormat": "{{worker_id}} {{resource}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "Unavailable",
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
     }
   ],
   "refresh": "30s",

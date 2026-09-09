@@ -536,20 +536,15 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 		controlWorkerReplicationLagP95.WithLabelValues(labels...).Set(float64(runtime.ReplicationLagP95))
 		controlWorkerReplicationLagMax.WithLabelValues(labels...).Set(float64(runtime.ReplicationLagMax))
 		controlWorkerReplicationLagOverThreshold.WithLabelValues(labels...).Set(float64(runtime.ReplicationLagOverThreshold))
-		controlWorkerLitestreamRSSBytes.WithLabelValues(labels...).Set(float64(runtime.LitestreamRSSBytes))
-		controlWorkerLitestreamCPUSeconds.WithLabelValues(labels...).Set(runtime.LitestreamCPUSecondsTotal)
 		controlWorkerLitestreamGoroutines.WithLabelValues(labels...).Set(float64(runtime.LitestreamGoroutines))
-		controlWorkerLitestreamFDs.WithLabelValues(labels...).Set(float64(runtime.LitestreamFDs))
 		controlWorkerS3ListRequestsTotal.WithLabelValues(labels...).Set(float64(runtime.S3ListRequestsTotal))
 		controlWorkerLitestreamHeapInuseBytes.WithLabelValues(labels...).Set(float64(runtime.LitestreamHeapInuseBytes))
 		controlWorkerLitestreamStackInuseBytes.WithLabelValues(labels...).Set(float64(runtime.LitestreamStackInuseBytes))
 		controlWorkerLitestreamAllocBytesTotal.WithLabelValues(labels...).Set(runtime.LitestreamAllocBytesTotal)
 		controlWorkerLitestreamAllocRateBytesPerSecond.WithLabelValues(labels...).Set(runtime.LitestreamAllocRateBytesPerSec)
-		controlWorkerRSSBytes.WithLabelValues(labels...).Set(float64(runtime.WorkerRSSBytes))
-		controlWorkerFDs.WithLabelValues(labels...).Set(float64(runtime.WorkerFDs))
-		controlWorkerLitestreamLocalStateSize.WithLabelValues(labels...).Set(float64(runtime.LitestreamDirSizeBytes))
-		controlWorkerLitestreamLocalLTXSize.WithLabelValues(labels...).Set(float64(runtime.LitestreamLTXSizeBytes))
 	}
+
+	publishControlResourceMetrics(labels, reportedRuntime)
 
 	if previousStatus != "" && previousStatus != string(worker.Status) {
 		controlWorkerStatus.WithLabelValues(append(labels, previousStatus)...).Set(0)

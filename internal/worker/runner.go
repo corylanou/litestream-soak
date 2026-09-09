@@ -57,6 +57,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	defer r.stopS3FaultProxy()
 
 	go func() {
+		defer func() {
+			if r.localStateScan != nil {
+				r.localStateScan.close()
+			}
+		}()
 		ticker := time.NewTicker(r.cfg.monitorInterval())
 		defer ticker.Stop()
 		lastHeartbeat := time.Time{}

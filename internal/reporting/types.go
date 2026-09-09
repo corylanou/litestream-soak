@@ -53,7 +53,19 @@ type WorkerIdentity struct {
 	Region        string `json:"region,omitempty"`
 }
 
+type ProcessObservation struct {
+	Status      string    `json:"status"`
+	PID         int       `json:"pid"`
+	StartTicks  string    `json:"start_ticks,omitempty"`
+	CollectedAt time.Time `json:"collected_at"`
+}
+
 type RuntimePayload struct {
+	LitestreamProcess     ProcessObservation `json:"litestream_process"`
+	WorkerProcess         ProcessObservation `json:"worker_process"`
+	LocalStateStatus      string             `json:"local_state_status,omitempty"`
+	LocalStateCollectedAt time.Time          `json:"local_state_collected_at,omitempty"`
+
 	UptimeSeconds                              float64   `json:"uptime_seconds,omitempty"`
 	DataDiskTotalBytes                         uint64    `json:"data_disk_total_bytes,omitempty"`
 	DataDiskUsedBytes                          uint64    `json:"data_disk_used_bytes,omitempty"`

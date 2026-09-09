@@ -304,6 +304,7 @@ func TestControlMetricsObserveWorkerZeroesStaleStatusAndRuntimeSeries(t *testing
 		DataDiskUsedPercent:            50,
 		DBSizeBytes:                    2048,
 		WALSizeBytes:                   256,
+		LocalStateStatus:               "fresh",
 		LitestreamDirSizeBytes:         512,
 		LitestreamLTXSizeBytes:         128,
 		S3ListRequestsTotal:            9210,
