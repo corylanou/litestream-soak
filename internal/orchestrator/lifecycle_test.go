@@ -1670,3 +1670,74 @@ func TestFailedSourcePauseCandidateIgnoresDormantWorkersWithoutFailures(t *testi
 		t.Fatal("two dormant workers with passing verifications must not mark a release known-bad")
 	}
 }
+
+func TestFailedSourcePauseCandidateSurvivesPendingStarvedHistory(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{
+		GitSHA: "soak-sha", LitestreamSHA: "litestream-sha",
+		ImageRef: "registry.fly.io/litestream-soak:soak-sha", Source: "main", Status: "ready",
+	}); err != nil {
+		t.Fatalf("UpsertReadyDeployment() error = %v", err)
+	}
+	deployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatalf("GetLatestDeployment() error = %v", err)
+	}
+	createTestWorker(t, db, model.Worker{
+		ID: "worker-main-low-vol", Name: "worker-main-low-vol", Status: model.WorkerDegraded,
+		Source: "main", GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA,
+		ProfileName: "low-volume", ProfileConfig: "{}",
+	})
+
+	now := time.Now().UTC().Add(time.Minute)
+	record := func(age time.Duration, status, msg string) {
+		t.Helper()
+		done := now.Add(-age).Add(time.Second)
+		mustRecordVerification(t, db, &model.Verification{
+			WorkerID: "worker-main-low-vol", StartedAt: now.Add(-age), CompletedAt: &done,
+			Status: status, CheckType: "integrity", Passed: false, ErrorMessage: msg,
+		})
+	}
+	record(50*time.Second, "failed", "validation failed (exit 1): integrity check mismatch")
+	for i := 0; i < 30; i++ {
+		record(time.Duration(45-i)*time.Second, "pending", "")
+	}
+	record(2*time.Second, "failed", "validation failed (exit 1): integrity check mismatch")
+
+	_, ok, err := failedSourcePauseCandidate(db, *deployment, FailedSourcePausePolicy{})
+	if err != nil {
+		t.Fatalf("failedSourcePauseCandidate() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("30 interleaved pending checks must not hide the earlier hard failure from corroboration")
+	}
+}
+
+func TestSuccessTeardownWaitsForPendingCoverage(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	deployment, worker := createCleanSuccessCandidate(t, db, "pr-1228", 1228)
+	pendingAt := worker.CreatedAt.Add(29 * time.Hour)
+	mustRecordVerification(t, db, &model.Verification{WorkerID: worker.ID, StartedAt: pendingAt, CompletedAt: &pendingAt, Status: "pending"})
+	_, ok, err := successTeardownCandidate(db, deployment, SuccessTeardownPolicy{HeartbeatStaleAfter: 48 * time.Hour}, worker.CreatedAt.Add(30*time.Hour))
+	if err != nil || ok {
+		t.Fatalf("pending teardown=%v, %v", ok, err)
+	}
+}
+
+func TestPendingCoverageDoesNotReusePriorPass(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	for _, previous := range []model.Verification{{Status: "passed", Passed: true}, {Status: "failed"}} {
+		previous.StartedAt = now.Add(-time.Minute)
+		got := latestVerificationInWindow([]model.Verification{{Status: "pending", StartedAt: now}, previous}, now.Add(-time.Hour), nil)
+		if previous.Succeeded() && got != nil {
+			t.Fatalf("pending coverage reused prior pass: %+v", got)
+		}
+		if previous.Failed() && (got == nil || !got.Failed()) {
+			t.Fatalf("pending coverage hid failure: %+v", got)
+		}
+	}
+}

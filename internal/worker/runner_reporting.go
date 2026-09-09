@@ -135,7 +135,7 @@ func (r *Runner) sendVerification(ctx context.Context, result VerificationResult
 	snapshot := r.currentSnapshot()
 	var failureDebug *reporting.FailureDebugSnapshot
 	switch {
-	case result.Status == "aborted":
+	case (result.Status == "aborted" || result.Status == "pending"):
 	case !result.Passed:
 		failureDebug = r.captureFailureDebugSnapshotIfDue(result)
 	default:
@@ -176,7 +176,7 @@ func (r *Runner) replicaLevelReport(result VerificationResult) *reporting.Replic
 }
 
 func (r *Runner) failureClassification(result VerificationResult) *reporting.FailureClassification {
-	if result.Passed || result.Status == "aborted" {
+	if result.Passed || (result.Status == "aborted" || result.Status == "pending") {
 		return nil
 	}
 	snapshot := r.currentSnapshot()

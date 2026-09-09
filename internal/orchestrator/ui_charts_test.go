@@ -26,6 +26,7 @@ func TestBuildChartSeriesBucketsHourly(t *testing.T) {
 		chartStat(from.Add(20*time.Minute), true, "completed", 300),
 		chartStat(from.Add(30*time.Minute), false, "failed", 900),
 		chartStat(from.Add(40*time.Minute), false, "aborted", 50),
+		chartStat(from.Add(45*time.Minute), false, "pending", 50),
 		chartStat(from.Add(2*time.Hour+5*time.Minute), true, "completed", 200),
 	}
 
@@ -75,6 +76,7 @@ func TestPassRateSummaryExcludesAborted(t *testing.T) {
 		chartStat(now, true, "completed", 100),
 		chartStat(now, false, "failed", 100),
 		chartStat(now, false, "aborted", 100),
+		chartStat(now, false, "pending", 100),
 	}
 
 	rate, total := passRateSummary(stats)

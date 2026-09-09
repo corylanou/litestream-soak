@@ -713,6 +713,7 @@ func workerPassedSuccessWindow(db *model.DB, worker model.Worker, deployment mod
 		return false, err
 	}
 	var latestPassAt time.Time
+	var latestPendingAt time.Time
 	environmental := environmentalVerificationIDs(verifications, currentEnvironmentalFailurePolicy())
 	for _, verification := range verifications {
 		observedAt, ok := verificationObservedAt(verification)
@@ -728,12 +729,15 @@ func workerPassedSuccessWindow(db *model.DB, worker model.Worker, deployment mod
 			}
 			return false, nil
 		}
+		if verification.Pending() && observedAt.After(latestPendingAt) {
+			latestPendingAt = observedAt
+		}
 		if verification.Succeeded() && observedAt.After(latestPassAt) {
 			latestPassAt = observedAt
 		}
 	}
 
-	if latestPassAt.IsZero() {
+	if latestPassAt.IsZero() || !latestPendingAt.Before(latestPassAt) {
 		return false, nil
 	}
 	return !latestPassAt.Before(deployment.StartedAt.UTC().Add(policy.Threshold)), nil
@@ -1272,7 +1276,7 @@ func pauseEvidenceHistory(db *model.DB, workerID string, deployment model.Deploy
 			return verifications, nil
 		}
 		for _, verification := range verifications {
-			if verificationStatusAborted(verification.Status) {
+			if verification.Inconclusive() {
 				continue
 			}
 			return verifications, nil
@@ -1309,7 +1313,7 @@ func releaseQualityActionableAttentionFailures(
 			if verification.StartedAt.Before(deployment.StartedAt.UTC()) {
 				break
 			}
-			if verificationStatusAborted(verification.Status) {
+			if verification.Inconclusive() {
 				continue
 			}
 			if verification.Failed() && !environmental[verification.ID] {
@@ -1416,7 +1420,7 @@ func walkConsecutiveActionable(verifications []model.Verification, deployment mo
 		if verification.StartedAt.Before(deployment.StartedAt.UTC()) {
 			return false, true
 		}
-		if verificationStatusAborted(verification.Status) {
+		if verification.Inconclusive() {
 			continue
 		}
 		if !verification.Failed() || environmental[verification.ID] {

@@ -111,7 +111,7 @@ func escalatedEnvironmentalStatIDs(stats []model.VerificationStat, policy Enviro
 		var streak environmentalStreak
 		for _, stat := range workerStats {
 			verification := verificationFromStat(stat)
-			if verificationStatusAborted(stat.Status) {
+			if verification.Inconclusive() {
 				// Aborted checks are inconclusive: they must neither extend a
 				// streak nor count as recovery, or interleaved aborts could
 				// keep a genuinely missing bucket from ever escalating.
@@ -141,7 +141,7 @@ func escalatedEnvironmentalStatIDs(stats []model.VerificationStat, policy Enviro
 func environmentalStreakEscalated(previous []model.Verification, policy EnvironmentalFailurePolicy) bool {
 	streak := environmentalStreak{count: 1}
 	for _, verification := range previous {
-		if verificationStatusAborted(verification.Status) {
+		if verification.Inconclusive() {
 			continue
 		}
 		if !verification.Failed() {
@@ -193,7 +193,7 @@ func environmentalVerificationIDs(verifications []model.Verification, policy Env
 	var streak environmentalStreak
 	for i := range ordered {
 		verification := ordered[i]
-		if verificationStatusAborted(verification.Status) {
+		if verification.Inconclusive() {
 			continue
 		}
 		if !verification.Failed() {

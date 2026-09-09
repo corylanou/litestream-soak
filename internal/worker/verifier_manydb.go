@@ -37,11 +37,26 @@ func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResul
 		})
 	}()
 
-	time.Sleep(2 * time.Second)
+	select {
+	case <-ctx.Done():
+		v.failResult(ctx, &result, ctx.Err().Error())
+		return result, ctx.Err()
+	case <-time.After(2 * time.Second):
+	}
 
 	var changed []string
+	generations := make(map[string]manyDBChange)
 	if v.manyDBChanges != nil {
-		changed = v.manyDBChanges.manyDBChangedPathsAndReset()
+		for _, change := range v.manyDBChanges.pendingManyDBChanges() {
+			changed = append(changed, change.path)
+			generations[change.path] = change
+		}
+		defer func() {
+			count, age := v.manyDBChanges.manyDBPendingCoverage()
+			_ = recordVerificationStep(&result, "pending_coverage", func() error { return nil })
+			result.Steps[len(result.Steps)-1].OutputTail = fmt.Sprintf("pending_databases=%d oldest_pending_age_seconds=%.3f", count, age)
+			slog.Info("Many database pending coverage", "pending_databases", count, "oldest_pending_age_seconds", age)
+		}()
 	}
 	targets, totalChanged := selectManyDBVerificationTargets(v.cfg, changed)
 	if len(targets) == 0 {
@@ -58,6 +73,9 @@ func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResul
 	}
 
 	for _, dbPath := range targets {
+		if v.manyDBChanges != nil {
+			v.manyDBChanges.attemptManyDBChange(manyDBChange{path: dbPath})
+		}
 		name := filepath.Base(dbPath)
 		restoredPath := dbPath + ".restored"
 		if err := recordVerificationStep(&result, "clean_restored "+name, func() error {
@@ -115,12 +133,18 @@ func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResul
 			v.logResult(start, false, result.ErrorMessage)
 			return result, err
 		}
+		if change, ok := generations[dbPath]; ok {
+			v.manyDBChanges.acknowledgeManyDBChange(change)
+		}
 	}
-	if totalChanged > len(targets) {
-		err := fmt.Errorf("logical verification incomplete: verified %d of %d changed databases; increase VERIFY_CHANGED_LIMIT", len(targets), totalChanged)
-		v.failResult(ctx, &result, err.Error())
-		v.logResult(start, false, result.ErrorMessage)
-		return result, err
+
+	if v.manyDBChanges != nil {
+		if count, age := v.manyDBChanges.manyDBPendingCoverage(); count > 0 {
+			result.Status = "pending"
+			result.Summary = fmt.Sprintf("verified batch of %d databases; coverage pending for %d databases (oldest %.3fs)", len(targets), count, age)
+			v.finalizeResult(&result)
+			return result, nil
+		}
 	}
 
 	result.Status = "passed"

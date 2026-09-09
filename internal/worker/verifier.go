@@ -67,7 +67,10 @@ type loadPauser interface {
 }
 
 type manyDBChangeTracker interface {
-	manyDBChangedPathsAndReset() []string
+	pendingManyDBChanges() []manyDBChange
+	attemptManyDBChange(manyDBChange)
+	acknowledgeManyDBChange(manyDBChange)
+	manyDBPendingCoverage() (int, float64)
 }
 
 type Verifier struct {
@@ -117,6 +120,9 @@ func NewVerifier(cfg Config, pausers ...loadPauser) *Verifier {
 			verifier.manyDBChanges = changes
 			break
 		}
+	}
+	if cfg.ManyDBEnabled() && verifier.manyDBChanges == nil {
+		verifier.manyDBChanges = newManyDBLoad(&cfg)
 	}
 	return verifier
 }

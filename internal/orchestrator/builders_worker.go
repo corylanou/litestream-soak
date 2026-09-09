@@ -329,6 +329,7 @@ func failureRecovery(verifications []model.Verification, latestFailure model.Ver
 }
 
 func latestVerificationInWindow(verifications []model.Verification, since time.Time, until *time.Time) *model.Verification {
+	pending := false
 	for i := range verifications {
 		if verifications[i].Aborted() {
 			continue
@@ -342,6 +343,13 @@ func latestVerificationInWindow(verifications []model.Verification, since time.T
 		}
 		if until != nil && !until.IsZero() && !observedAt.Before(*until) {
 			continue
+		}
+		if verifications[i].Pending() {
+			pending = true
+			continue
+		}
+		if pending && verifications[i].Succeeded() {
+			return nil
 		}
 		verification := verifications[i]
 		return &verification

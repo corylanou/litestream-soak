@@ -395,7 +395,7 @@ func verificationClass(value any) string {
 	if verification == nil {
 		return "status-neutral"
 	}
-	if verification.Aborted() {
+	if verification.Inconclusive() {
 		return "status-neutral"
 	}
 	if verification.Succeeded() {
@@ -408,6 +408,9 @@ func verificationLabel(value any) string {
 	verification := coerceVerification(value)
 	if verification == nil {
 		return "no data"
+	}
+	if verification.Pending() {
+		return "pending"
 	}
 	if verification.Aborted() {
 		return "aborted"

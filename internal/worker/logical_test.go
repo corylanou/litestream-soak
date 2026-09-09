@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -247,7 +248,7 @@ func TestManyDBLogicalVerification(t *testing.T) {
 	}{
 		{"equal", false, 2, ""},
 		{"missing committed row", true, 2, "source_rows=2 restored_rows=1"},
-		{"truncated targets", false, 1, "verification incomplete"},
+		{"truncated targets", false, 1, "pending"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -290,7 +291,11 @@ cp "$LOGICAL_FIXTURES/$(basename "$source")" "$restored"
 			}))
 			pauser := &fakePauser{}
 			result, err := NewVerifier(cfg, pauser).RunCycle(context.Background())
-			if tt.want == "" {
+			if tt.want == "pending" {
+				if err != nil || result.Passed || result.Status != "pending" {
+					t.Fatalf("cycle=%+v, %v", result, err)
+				}
+			} else if tt.want == "" {
 				if err != nil || !result.Passed {
 					t.Fatalf("cycle=%+v, %v", result, err)
 				}
@@ -309,7 +314,7 @@ cp "$LOGICAL_FIXTURES/$(basename "$source")" "$restored"
 			if !found {
 				t.Fatal("missing independent validator/workload evidence")
 			}
-			if tt.want != "" && !strings.Contains(readFile(t, filepath.Join(dir, "verification.log")), "FAIL") {
+			if tt.want != "" && tt.want != "pending" && !strings.Contains(readFile(t, filepath.Join(dir, "verification.log")), "FAIL") {
 				t.Fatal("failure not retained")
 			}
 		})
@@ -433,5 +438,111 @@ func TestLogicalSchemaMetadata(t *testing.T) {
 				t.Fatal("schema/metadata discrepancy passed")
 			}
 		})
+	}
+}
+
+func TestManyDBPendingCyclesRetainFailuresAndNewWrites(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.NumDatabases = 3
+	cfg.ActivePercent = 100
+	cfg.VerifyChangedLimit = 2
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("pending-%d.sock", time.Now().UnixNano()))
+	paths := cfg.ManyDBPaths()
+	fixtures := filepath.Join(dir, "fixtures")
+	const schema = "CREATE TABLE t(id INTEGER PRIMARY KEY); INSERT INTO t VALUES(1),(2);"
+	var damaged *sql.DB
+	for i, path := range paths {
+		logicalTestDB(t, path, schema)
+		restored := logicalTestDB(t, filepath.Join(fixtures, filepath.Base(path)), schema)
+		if i == 0 {
+			damaged = restored
+			if _, err := damaged.Exec("DELETE FROM t WHERE id=2"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	writeFakeLitestreamTest(t, dir, `
+while [ "$#" -gt 0 ]; do
+ case "$1" in
+ -source-db) source="$2"; shift ;;
+ -restored-db) restored="$2"; shift ;;
+ esac
+ shift
+done
+cp "$LOGICAL_FIXTURES/$(basename "$source")" "$restored"
+`)
+	t.Setenv("LOGICAL_FIXTURES", fixtures)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	load := newManyDBLoad(&cfg)
+	var mode atomic.Int32
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sync" {
+			switch mode.Load() {
+			case 1:
+				cancel()
+			case 2:
+				load.markChanged(paths[0])
+			}
+			_, _ = w.Write([]byte(`{"status":"ok","txid":42,"replicated_txid":42}`))
+		} else {
+			_, _ = w.Write([]byte(`{"active":false}`))
+		}
+	}))
+	verifier := NewVerifier(cfg, load)
+	first, err := verifier.RunCycle(context.Background())
+	if err == nil || first.Status != "failed" {
+		t.Fatalf("first failure=%+v, %v", first, err)
+	}
+	if count, _ := load.manyDBPendingCoverage(); count != 3 {
+		t.Fatalf("first failure lost work: %d", count)
+	}
+	second, err := verifier.RunCycle(context.Background())
+	if err != nil || second.Status != "pending" || second.Passed {
+		t.Fatalf("later paths=%+v, %v", second, err)
+	}
+	if changes := load.pendingManyDBChanges(); len(changes) != 1 || changes[0].path != paths[0] {
+		t.Fatalf("pending=%+v", changes)
+	}
+	load.markChanged(paths[1])
+	load.markChanged(paths[2])
+	mode.Store(1)
+	canceled, err := verifier.RunCycle(cancelCtx)
+	if err == nil || canceled.Status != "aborted" {
+		t.Fatalf("cancel=%+v, %v", canceled, err)
+	}
+	if count, _ := load.manyDBPendingCoverage(); count != 3 {
+		t.Fatalf("cancellation lost work: %d", count)
+	}
+	if _, err := damaged.Exec("INSERT INTO t VALUES(2)"); err != nil {
+		t.Fatal(err)
+	}
+	mode.Store(0)
+	later, err := verifier.RunCycle(context.Background())
+	if err != nil || later.Status != "pending" {
+		t.Fatalf("progress after cancellation=%+v, %v", later, err)
+	}
+	if changes := load.pendingManyDBChanges(); len(changes) != 1 || changes[0].path != paths[0] {
+		t.Fatalf("canceled path lost: %+v", changes)
+	}
+	mode.Store(2)
+	newer, err := verifier.RunCycle(context.Background())
+	if err != nil || newer.Status != "pending" || newer.Passed {
+		t.Fatalf("new generation=%+v, %v", newer, err)
+	}
+	mode.Store(0)
+	recovered, err := verifier.RunCycle(context.Background())
+	if err != nil || !recovered.Passed {
+		t.Fatalf("recovered=%+v, %v", recovered, err)
+	}
+	if count, age := load.manyDBPendingCoverage(); count != 0 || age != 0 {
+		t.Fatalf("coverage=%d, %f", count, age)
+	}
+	if !strings.Contains(readFile(t, filepath.Join(dir, "verification.log")), "FAIL") {
+		t.Fatal("failure evidence lost after recovery")
 	}
 }
