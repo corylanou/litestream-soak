@@ -68,12 +68,20 @@ unique per process, including restarts that reuse a machine/run ID. The retained
 run-evidence consumer groups by immutable identity and epoch and uses cumulative
 maxima, so retrying delivery cannot double-count failures.
 
-Before sending an error event, the worker atomically writes and fsyncs a local
-outbox record under DATA_DIR/churn-outbox. Pending records coalesce to the latest
-cumulative totals per epoch, preserving every error count and the latest error
-message. Successful delivery removes the pending record; failed sends retry on
-heartbeats, including after restart, with the original worker/run identity.
-Outbox replay is at least once. Evidence persistence failure stops the workload.
+Each failed attempt receives an immutable workload_event_id (epoch:attempt),
+operation, mode, error kind, latency, original error message, and cumulative
+counters. Before delivery, the worker atomically writes and fsyncs that event
+under DATA_DIR/churn-outbox. No pending event is overwritten. The outbox holds at
+most 1024 files or 16 MiB; reaching either limit or failing persistence stops the
+workload and marks evidence unavailable rather than dropping old failures.
+
+A separate uploader retries pending events on notification and every ten seconds,
+including after restart, with the original worker/run identity and exact event
+ID. Successful delivery removes only the acknowledged record. Delivery is at
+least once: consumers deduplicate event IDs and take cumulative maxima per epoch.
+Network delivery never holds the counter/snapshot lock and does not block
+heartbeat collection. Local persistence can slow failed workload attempts.
+
 The control-plane retention/comparison consumer is delivered by issue #211.
 Retained volumes preserve unsent evidence; destroying a volume before delivery
 cannot preserve its unreported tail, so missing epochs/coverage must remain

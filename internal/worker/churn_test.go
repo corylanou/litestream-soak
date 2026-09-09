@@ -65,6 +65,8 @@ func TestChurnMetricsRetainBusyError(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.LoadMode = "queue"
 	cfg.WorkerID = t.Name()
+	cfg.DataDir = t.TempDir()
+	runner := NewRunner(cfg)
 	db, err := churn.Open(ctx, filepath.Join(t.TempDir(), "busy.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +85,9 @@ func TestChurnMetricsRetainBusyError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected busy error")
 	}
-	recordChurn(cfg, "enqueue", n, time.Since(started), err)
+	if recordErr := runner.recordChurnAttempt(ctx, "enqueue", n, time.Since(started), err); recordErr != nil {
+		t.Fatal(recordErr)
+	}
 	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +95,13 @@ func TestChurnMetricsRetainBusyError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recordChurn(cfg, "enqueue", n, time.Millisecond, nil)
+	if err := runner.recordChurnAttempt(ctx, "enqueue", n, time.Millisecond, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := runner.currentSnapshot()
+	if snapshot.WorkloadBusyTotal != 1 || snapshot.WorkloadErrorsTotal != 1 || snapshot.WorkloadMutationsTotal != 1 || snapshot.WorkloadAttemptsTotal != 2 {
+		t.Fatalf("lost retained busy counters: %+v", snapshot.WorkloadCounters)
+	}
 	labels := []string{"queue", "enqueue", cfg.WorkerID, cfg.ProfileName, cfg.Source}
 	if got := testutil.ToFloat64(churnMutations.WithLabelValues(labels...)); got != 1 {
 		t.Fatalf("mutations=%v", got)

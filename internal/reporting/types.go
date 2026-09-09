@@ -208,6 +208,7 @@ type VerificationPayload struct {
 }
 
 type WorkerEventPayload struct {
+	WorkloadEvent
 	WorkerIdentity
 	EventType          string                `json:"event_type"`
 	Message            string                `json:"message,omitempty"`

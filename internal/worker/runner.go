@@ -54,6 +54,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	SetWorkerInfo(r.cfg)
 	startTime := time.Now()
 	r.reporter = NewReporter(r.cfg)
+	stopChurnUploader := r.startChurnUploader(runCtx)
+	defer stopChurnUploader()
 
 	if err := r.startS3FaultProxy(runCtx); err != nil {
 		return fmt.Errorf("start s3 fault proxy: %w", err)

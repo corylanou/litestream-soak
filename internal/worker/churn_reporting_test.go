@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,24 +85,32 @@ func TestChurnFailedDeliveryRemainsPending(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := r.flushChurnEvidence(context.Background()); err == nil {
+		t.Fatal("failed delivery hidden")
+	}
 	files, err := filepath.Glob(filepath.Join(cfg.DataDir, "churn-outbox", "*.json"))
-	if err != nil || len(files) != 1 {
+	if err != nil || len(files) != 2 {
 		t.Fatalf("pending files=%v err=%v", files, err)
 	}
-	body, err := os.ReadFile(files[0])
-	if err != nil {
-		t.Fatal(err)
+	var maxErrors uint64
+	for _, path := range files {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var event reporting.WorkerEventPayload
+		if err := json.Unmarshal(body, &event); err != nil {
+			t.Fatal(err)
+		}
+		maxErrors = max(maxErrors, event.WorkloadErrorsTotal)
+		if event.WorkloadCounterEpoch == "" || NewRunner(cfg).currentSnapshot().WorkloadCounterEpoch == event.WorkloadCounterEpoch {
+			t.Fatal("missing or reused counter epoch")
+		}
 	}
-	var event reporting.WorkerEventPayload
-	if err := json.Unmarshal(body, &event); err != nil {
-		t.Fatal(err)
+	if maxErrors != 2 {
+		t.Fatal("pending totals lost")
 	}
-	if event.WorkloadErrorsTotal != 2 || event.WorkloadAttemptsTotal != 2 || event.WorkloadCounterEpoch == "" {
-		t.Fatalf("pending totals lost: %+v", event.WorkloadCounters)
-	}
-	if NewRunner(cfg).currentSnapshot().WorkloadCounterEpoch == event.WorkloadCounterEpoch {
-		t.Fatal("restart reused counter epoch")
-	}
+
 }
 
 func TestChurnPersistenceFailureIsFatal(t *testing.T) {
@@ -137,5 +148,190 @@ func TestChurnHeartbeatIncludesCounters(t *testing.T) {
 	r.sendHeartbeat(context.Background())
 	if heartbeat.RunID != cfg.RunID || heartbeat.WorkloadAttemptsTotal != 1 || heartbeat.WorkloadMutationsTotal != 1 || !heartbeat.WorkloadCountersPresent {
 		t.Fatalf("heartbeat lost counters: %+v", heartbeat)
+	}
+}
+
+func TestChurnOutboxPreservesEveryFailure(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.LoadMode = "queue"
+	cfg.DataDir = t.TempDir()
+	r := NewRunner(cfg)
+	for _, message := range []string{"first failure", "second failure"} {
+		if err := r.recordChurnAttempt(context.Background(), "claim", 0, time.Millisecond, errors.New(message)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, err := filepath.Glob(filepath.Join(cfg.DataDir, "churn-outbox", "*.json"))
+	if err != nil || len(files) != 2 {
+		t.Fatalf("failure details overwritten: files=%v err=%v", files, err)
+	}
+	ids := map[string]bool{}
+	for _, path := range files {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(body, &fields); err != nil {
+			t.Fatal(err)
+		}
+		id, _ := fields["workload_event_id"].(string)
+		if id == "" || ids[id] {
+			t.Fatalf("missing/duplicate event ID %q", id)
+		}
+		ids[id] = true
+	}
+}
+
+func TestChurnBlockedDeliveryDoesNotBlockRecording(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasSuffix(req.URL.Path, "/events") {
+			close(entered)
+			<-release
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	cfg := DefaultConfig()
+	cfg.LoadMode = "queue"
+	cfg.DataDir = t.TempDir()
+	cfg.ControlBaseURL = server.URL
+	r := NewRunner(cfg)
+	if err := r.recordChurnAttempt(context.Background(), "claim", 0, time.Millisecond, errors.New("failure")); err != nil {
+		t.Fatal(err)
+	}
+	r.reporter = NewReporter(cfg)
+	uploadDone := make(chan error, 1)
+	go func() { uploadDone <- r.flushChurnEvidence(context.Background()) }()
+	<-entered
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := r.recordChurnAttempt(context.Background(), "enqueue", 1, time.Millisecond, nil); err != nil {
+			t.Error(err)
+		}
+		r.sendHeartbeat(context.Background())
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		close(release)
+		<-uploadDone
+		t.Fatal("HTTP delivery blocked counter update or heartbeat")
+	}
+	close(release)
+	if err := <-uploadDone; err != nil {
+		t.Fatal(err)
+	}
+	if r.currentSnapshot().WorkloadAttemptsTotal != 2 {
+		t.Fatal("lost concurrent attempt")
+	}
+}
+
+func TestChurnRetryPreservesExactEvent(t *testing.T) {
+	var received []reporting.WorkerEventPayload
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var event reporting.WorkerEventPayload
+		if err := json.NewDecoder(req.Body).Decode(&event); err != nil {
+			t.Error(err)
+		}
+		received = append(received, event)
+		if len(received) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	cfg := DefaultConfig()
+	cfg.LoadMode = "queue"
+	cfg.DataDir = t.TempDir()
+	cfg.ControlBaseURL = server.URL
+	r := NewRunner(cfg)
+	r.reporter = NewReporter(cfg)
+	if err := r.recordChurnAttempt(context.Background(), "claim", 0, 2*time.Millisecond, errors.New("original failure")); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.flushChurnEvidence(context.Background()); err == nil {
+		t.Fatal("expected failed send")
+	}
+	if err := r.flushChurnEvidence(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(received) != 2 || received[0].WorkloadEventID == "" || !reflect.DeepEqual(received[0], received[1]) {
+		t.Fatalf("retry changed event: %+v", received)
+	}
+	if received[0].WorkloadOperation != "claim" || received[0].WorkloadErrorKind != "other" || received[0].WorkloadLatencySeconds != .002 {
+		t.Fatal("lost error metadata")
+	}
+}
+
+func TestChurnOutboxCapacityFailsClosed(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.LoadMode = "queue"
+	cfg.DataDir = t.TempDir()
+	dir := filepath.Join(cfg.DataDir, "churn-outbox")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < churnOutboxMaxEvents; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%d.json", i)), []byte("{}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := NewRunner(cfg)
+	if err := r.recordChurnAttempt(context.Background(), "claim", 0, time.Millisecond, errors.New("overflow")); err == nil || !strings.Contains(err.Error(), "capacity exceeded") {
+		t.Fatalf("capacity not enforced: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != churnOutboxMaxEvents {
+		t.Fatalf("existing evidence changed: %d %v", len(entries), err)
+	}
+}
+
+func TestChurnUploaderDeliversAndStops(t *testing.T) {
+	received := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK); received <- struct{}{} }))
+	defer server.Close()
+	cfg := DefaultConfig()
+	cfg.LoadMode = "queue"
+	cfg.DataDir = t.TempDir()
+	cfg.ControlBaseURL = server.URL
+	r := NewRunner(cfg)
+	r.reporter = NewReporter(cfg)
+	stop := r.startChurnUploader(context.Background())
+	defer stop()
+	if err := r.recordChurnAttempt(context.Background(), "claim", 0, time.Millisecond, errors.New("failure")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-received:
+	case <-time.After(time.Second):
+		t.Fatal("uploader did not deliver")
+	}
+}
+
+func TestChurnOutboxByteLimitFailsClosed(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.LoadMode = "queue"
+	cfg.DataDir = t.TempDir()
+	dir := filepath.Join(cfg.DataDir, "churn-outbox")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(filepath.Join(dir, "pending.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(churnOutboxMaxBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewRunner(cfg).recordChurnAttempt(context.Background(), "claim", 0, time.Millisecond, errors.New("overflow")); err == nil || !strings.Contains(err.Error(), "capacity exceeded") {
+		t.Fatalf("byte capacity not enforced: %v", err)
 	}
 }

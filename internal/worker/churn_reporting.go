@@ -19,8 +19,11 @@ import (
 )
 
 type churnEvidence struct {
-	mu       sync.Mutex
-	counters reporting.WorkloadCounters
+	mu        sync.Mutex
+	persistMu sync.Mutex
+	uploadMu  sync.Mutex
+	notify    chan struct{}
+	counters  reporting.WorkloadCounters
 }
 
 func (r *Runner) currentSnapshot() runtimeSnapshot {
@@ -41,7 +44,7 @@ func (r *Runner) initializeChurnCounters() {
 	}
 }
 
-func (r *Runner) recordChurnAttempt(ctx context.Context, op string, n int64, d time.Duration, attemptErr error) error {
+func (r *Runner) recordChurnAttempt(_ context.Context, op string, n int64, d time.Duration, attemptErr error) error {
 	recordChurn(r.cfg, op, n, d, attemptErr)
 	r.churnEvidence.mu.Lock()
 	r.initializeChurnCounters()
@@ -53,26 +56,32 @@ func (r *Runner) recordChurnAttempt(ctx context.Context, op string, n int64, d t
 		return nil
 	}
 	counters.WorkloadErrorsTotal++
+	kind := "other"
 	var sqliteErr *sqlite.Error
 	if errors.As(attemptErr, &sqliteErr) && (sqliteErr.Code()&255 == 5 || sqliteErr.Code()&255 == 6) {
 		counters.WorkloadBusyTotal++
+		kind = "busy"
 	}
 	event := reporting.WorkerEventPayload{
 		WorkerIdentity: workerIdentity(r.cfg), EventType: "workload_error", Message: fmt.Sprintf("%s %s failed: %v", r.cfg.LoadMode, op, attemptErr), SentAt: time.Now().UTC(),
 		RuntimePayload: reporting.RuntimePayload{WorkloadCounters: *counters},
+		WorkloadEvent:  reporting.WorkloadEvent{WorkloadEventID: fmt.Sprintf("%s:%d", counters.WorkloadCounterEpoch, counters.WorkloadAttemptsTotal), WorkloadMode: r.cfg.LoadMode, WorkloadOperation: op, WorkloadErrorKind: kind, WorkloadLatencySeconds: d.Seconds()},
 	}
-	err := r.persistChurnEvidence(event)
 	r.churnEvidence.mu.Unlock()
+	err := r.persistChurnEvidence(event)
 	if err != nil {
 		return err
 	}
-	if err := r.flushChurnEvidence(ctx); err != nil {
-		slog.Warn("Churn error retained for delivery", "error", err)
-	}
+	r.requestChurnFlush()
 	return nil
 }
 
+const churnOutboxMaxEvents = 1024
+const churnOutboxMaxBytes = 16 << 20
+
 func (r *Runner) persistChurnEvidence(event reporting.WorkerEventPayload) error {
+	r.churnEvidence.persistMu.Lock()
+	defer r.churnEvidence.persistMu.Unlock()
 	dir := filepath.Join(r.cfg.DataDir, "churn-outbox")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
@@ -81,9 +90,24 @@ func (r *Runner) persistChurnEvidence(event reporting.WorkerEventPayload) error 
 	if err != nil {
 		return err
 	}
-	name := fmt.Sprintf("%x.json", sha256.Sum256([]byte(event.WorkerID+"\x00"+event.RunID+"\x00"+event.WorkloadCounterEpoch)))
+	name := fmt.Sprintf("%x.json", sha256.Sum256([]byte(event.WorkerID+"\x00"+event.RunID+"\x00"+event.WorkloadEventID)))
 	path := filepath.Join(dir, name)
-	file, err := os.OpenFile(path+".tmp", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var used int64
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		used += info.Size()
+	}
+	if len(entries) >= churnOutboxMaxEvents || used+int64(len(body)) > churnOutboxMaxBytes {
+		return fmt.Errorf("churn evidence unavailable: outbox capacity exceeded (%d events, %d bytes)", len(entries), used)
+	}
+	file, err := os.OpenFile(path+".tmp", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}
@@ -111,8 +135,10 @@ func (r *Runner) flushChurnEvidence(ctx context.Context) error {
 	if r.reporter == nil || !r.reporter.Enabled() {
 		return nil
 	}
-	r.churnEvidence.mu.Lock()
-	defer r.churnEvidence.mu.Unlock()
+	if !r.churnEvidence.uploadMu.TryLock() {
+		return nil
+	}
+	defer r.churnEvidence.uploadMu.Unlock()
 	dir := filepath.Join(r.cfg.DataDir, "churn-outbox")
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -139,12 +165,55 @@ func (r *Runner) flushChurnEvidence(ctx context.Context) error {
 		if err := r.reporter.postJSON(ctx, "/api/workers/"+url.PathEscape(event.WorkerID)+"/events", event); err != nil {
 			return err
 		}
-		if err := os.Remove(path); err != nil {
-			return err
-		}
-		if err := syncChurnDirectory(dir); err != nil {
+		r.churnEvidence.persistMu.Lock()
+		removeErr := os.Remove(path)
+		syncErr := syncChurnDirectory(dir)
+		r.churnEvidence.persistMu.Unlock()
+		if err := errors.Join(removeErr, syncErr); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (r *Runner) requestChurnFlush() {
+	r.churnEvidence.mu.Lock()
+	if r.churnEvidence.notify == nil {
+		r.churnEvidence.notify = make(chan struct{}, 1)
+	}
+	notify := r.churnEvidence.notify
+	r.churnEvidence.mu.Unlock()
+	select {
+	case notify <- struct{}{}:
+	default:
+	}
+}
+
+func (r *Runner) startChurnUploader(ctx context.Context) func() {
+	if r.reporter == nil || !r.reporter.Enabled() {
+		return func() {}
+	}
+	r.requestChurnFlush()
+	r.churnEvidence.mu.Lock()
+	notify := r.churnEvidence.notify
+	r.churnEvidence.mu.Unlock()
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-notify:
+			case <-ticker.C:
+			}
+			if err := r.flushChurnEvidence(ctx); err != nil && ctx.Err() == nil {
+				slog.Warn("Churn evidence delivery pending", "error", err)
+			}
+		}
+	}()
+	return func() { cancel(); <-done }
 }
