@@ -369,6 +369,7 @@ func workerIncludedInReleaseQuality(worker model.Worker) bool {
 }
 
 func scoreDeploymentWorker(worker model.Worker, deployment model.Deployment, verifications []model.Verification, windowEnd *time.Time) (DeploymentWorkerOutcome, bool) {
+	verifications = deploymentVerifications(worker, deployment, verifications)
 	verification := latestVerificationInWindow(verifications, deployment.StartedAt, windowEnd)
 	if verification == nil {
 		return DeploymentWorkerOutcome{}, false
@@ -377,7 +378,7 @@ func scoreDeploymentWorker(worker model.Worker, deployment model.Deployment, ver
 	outcome := DeploymentWorkerOutcome{
 		WorkerID: worker.ID,
 		Name:     worker.Name,
-		Profile:  worker.ProfileName,
+		Profile:  verification.Run.ProfileName,
 		Passed:   verification.Succeeded(),
 	}
 	if observedAt, ok := verificationObservedAt(*verification); ok {
@@ -536,7 +537,11 @@ func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (Deployme
 				progress.LastVerificationAt = &observedAt
 			}
 			latestConclusive := latestVerificationInWindow(verifications, worker.CreatedAt.UTC(), nil)
-			deploymentVerification := latestVerificationInWindow(verifications, deployment.StartedAt, nil)
+			current, err := currentDeploymentVerifications(db, worker, deployment, verifications)
+			if err != nil {
+				return DeploymentRolloutResponse{}, err
+			}
+			deploymentVerification := latestVerificationInWindow(current, deployment.StartedAt, nil)
 			progress.VerifiedSinceDeploy = progress.Updated && workerNeedsPostDeployVerification(worker.Status) && !deployment.StartedAt.IsZero() && deploymentVerification != nil
 			if activeFailure(latestConclusive) {
 				vf := classifyVerification(latestConclusive)

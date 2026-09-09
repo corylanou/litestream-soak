@@ -50,6 +50,8 @@ type Worker struct {
 }
 
 type Verification struct {
+	Run                   reporting.WorkerIdentity         `json:"run"`
+	Attributed            bool                             `json:"attributed"`
 	ID                    int                              `json:"id"`
 	WorkerID              string                           `json:"worker_id"`
 	StartedAt             time.Time                        `json:"started_at"`
@@ -85,6 +87,7 @@ func (v Verification) Succeeded() bool {
 }
 
 type Deployment struct {
+	WorkloadSHA   string     `json:"workload_sha,omitempty"`
 	ID            int        `json:"id"`
 	GitSHA        string     `json:"git_sha"`
 	LitestreamSHA string     `json:"litestream_sha,omitempty"`

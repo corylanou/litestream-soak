@@ -20,12 +20,31 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusBadRequest, nil, "invalid payload")
 		return
 	}
+	unlockReports := a.db.LockWorkerReports(workerID)
+	defer unlockReports()
 	payload.WorkerID = workerID
 	if payload.Name == "" {
 		payload.Name = workerID
 	}
 	payload.RuntimePayload = payload.Normalize(payload.SentAt)
 
+	_, quarantined, err := a.db.ReportAttribution(payload.WorkerIdentity)
+	if err != nil {
+		respondError(w, r, http.StatusInternalServerError, err, "failed to check report identity")
+		return
+	}
+	if quarantined {
+		details, err := json.Marshal(payload)
+		if err == nil {
+			err = a.db.RecordEvent(workerID, "quarantined_report", "Report does not match the expected worker run", string(details))
+		}
+		if err != nil {
+			respondError(w, r, http.StatusInternalServerError, err, "failed to preserve report")
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to record worker")
 		return
@@ -51,6 +70,16 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusBadRequest, nil, "invalid payload")
 		return
 	}
+	if a.manager != nil {
+		unlockWorker, err := a.manager.lockWorker(r.Context(), workerID)
+		if err != nil {
+			respondError(w, r, http.StatusInternalServerError, err, "failed to lock worker")
+			return
+		}
+		defer unlockWorker()
+	}
+	unlockReports := a.db.LockWorkerReports(workerID)
+	defer unlockReports()
 	payload.WorkerID = workerID
 	if payload.Name == "" {
 		payload.Name = workerID
@@ -95,20 +124,28 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		payload.FailureDebug.FailureClassification = &classification
 	}
 
-	if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
-		respondError(w, r, http.StatusInternalServerError, err, "failed to record worker")
+	attributed, quarantined, err := a.db.ReportAttribution(payload.WorkerIdentity)
+	if err != nil {
+		respondError(w, r, http.StatusInternalServerError, err, "failed to check report identity")
 		return
 	}
-	if err := a.db.UpdateWorkerRuntimeSnapshot(workerID, payload.RuntimePayload); err != nil {
-		respondError(w, r, http.StatusInternalServerError, err, "failed to record runtime snapshot")
-		return
+	if !quarantined {
+		if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
+			respondError(w, r, http.StatusInternalServerError, err, "failed to record worker")
+			return
+		}
+		if err := a.db.UpdateWorkerRuntimeSnapshot(workerID, payload.RuntimePayload); err != nil {
+			respondError(w, r, http.StatusInternalServerError, err, "failed to record runtime snapshot")
+			return
+		}
 	}
-
 	workerBeforeUpdate, _ := a.db.GetWorker(workerID)
 
 	completedAt := payload.CompletedAt
 	verification := &model.Verification{
 		WorkerID:              workerID,
+		Run:                   payload.WorkerIdentity,
+		Attributed:            attributed,
 		StartedAt:             payload.StartedAt,
 		Status:                payload.Status,
 		CheckType:             payload.CheckType,
@@ -125,7 +162,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to record verification")
 		return
 	}
-	if !aborted && !pending && !environmental {
+	if !quarantined && !aborted && !pending && !environmental {
 		if err := a.db.UpdateWorkerVerificationState(workerID, payload.Passed, payload.Summary); err != nil {
 			respondError(w, r, http.StatusInternalServerError, err, "failed to update worker state")
 			return
@@ -169,6 +206,10 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to record event")
 		return
 	}
+	if quarantined {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	if failed && !environmental && workerBeforeUpdate != nil && workerBeforeUpdate.Status != model.WorkerDegraded && workerBeforeUpdate.Status != model.WorkerDormant {
 		_ = a.db.RecordEvent(workerID, "first_failure", "Worker transitioned from healthy to failing", string(details))
 	}
@@ -181,7 +222,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		} else if failed && a.manager != nil {
 			signature := vf.Signature
 			reason := fmt.Sprintf("worker probe failed with %s; returning to dormant state", signature)
-			if err := a.manager.DormantWorker(r.Context(), workerID, reason, signature, "probe_failed"); err != nil {
+			if err := a.manager.dormantWorkerLocked(r.Context(), workerID, reason, signature, "probe_failed"); err != nil {
 				respondError(w, r, http.StatusInternalServerError, err, "failed to update worker state")
 				return
 			}
@@ -215,6 +256,8 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusBadRequest, nil, "invalid payload")
 		return
 	}
+	unlockReports := a.db.LockWorkerReports(workerID)
+	defer unlockReports()
 	payload.WorkerID = workerID
 	if payload.Name == "" {
 		payload.Name = workerID
@@ -229,6 +272,23 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	payload.RuntimePayload = payload.Normalize(observedAt)
 
+	_, quarantined, err := a.db.ReportAttribution(payload.WorkerIdentity)
+	if err != nil {
+		respondError(w, r, http.StatusInternalServerError, err, "failed to check report identity")
+		return
+	}
+	if quarantined {
+		details, err := json.Marshal(payload)
+		if err == nil {
+			err = a.db.RecordEvent(workerID, "quarantined_report", "Report does not match the expected worker run", string(details))
+		}
+		if err != nil {
+			respondError(w, r, http.StatusInternalServerError, err, "failed to preserve report")
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to record worker")
 		return
@@ -250,7 +310,11 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 	var recordErr error
 	switch strings.TrimSpace(payload.EventType) {
 	case reporting.WorkerEventLitestreamMetricsScrapeFailed, reporting.WorkerEventLitestreamMetricsMissing:
-		_, recordErr = a.db.RecordWindowedEventAt(workerID, payload.EventType, message, string(details), observedAt, litestreamMetricsEventWindow)
+		if payload.RunID != "" {
+			recordErr = a.db.RecordEvent(workerID, payload.EventType, message, string(details))
+		} else {
+			_, recordErr = a.db.RecordWindowedEventAt(workerID, payload.EventType, message, string(details), observedAt, litestreamMetricsEventWindow)
+		}
 	default:
 		recordErr = a.db.RecordEvent(workerID, payload.EventType, message, string(details))
 	}

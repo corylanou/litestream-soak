@@ -36,6 +36,10 @@ const (
 )
 
 type WorkerIdentity struct {
+	WorkloadSHA   string `json:"workload_sha,omitempty"`
+	WorkloadID    string `json:"workload_id,omitempty"`
+	DeploymentID  int    `json:"deployment_id,omitempty"`
+	ValidatorID   string `json:"validator_id,omitempty"`
 	WorkerID      string `json:"worker_id"`
 	Name          string `json:"name"`
 	Source        string `json:"source"`

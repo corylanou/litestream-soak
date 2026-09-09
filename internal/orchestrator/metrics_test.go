@@ -80,7 +80,7 @@ func TestControlMetricsExposeLatestDeploymentComparison(t *testing.T) {
 	headPassAt := head.StartedAt.Add(200 * time.Millisecond).UTC()
 	headFailAt := head.StartedAt.Add(400 * time.Millisecond).UTC()
 
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-metrics-one",
 		StartedAt:   basePassAt.Add(-15 * time.Second),
 		CompletedAt: &basePassAt,
@@ -89,7 +89,7 @@ func TestControlMetricsExposeLatestDeploymentComparison(t *testing.T) {
 		Passed:      true,
 		DurationMS:  15000,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     "worker-main-metrics-two",
 		StartedAt:    baseFailAt.Add(-15 * time.Second),
 		CompletedAt:  &baseFailAt,
@@ -99,7 +99,7 @@ func TestControlMetricsExposeLatestDeploymentComparison(t *testing.T) {
 		DurationMS:   15000,
 		ErrorMessage: `wrong # of entries in index idx_load_test_timestamp`,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-metrics-three",
 		StartedAt:   basePassAt.Add(-30 * time.Second),
 		CompletedAt: &basePassAt,
@@ -108,7 +108,7 @@ func TestControlMetricsExposeLatestDeploymentComparison(t *testing.T) {
 		Passed:      true,
 		DurationMS:  15000,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-metrics-one",
 		StartedAt:   headPassAt.Add(-15 * time.Second),
 		CompletedAt: &headPassAt,
@@ -117,7 +117,7 @@ func TestControlMetricsExposeLatestDeploymentComparison(t *testing.T) {
 		Passed:      true,
 		DurationMS:  15000,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-main-metrics-two",
 		StartedAt:   headPassAt.Add(-30 * time.Second),
 		CompletedAt: &headPassAt,
@@ -126,7 +126,7 @@ func TestControlMetricsExposeLatestDeploymentComparison(t *testing.T) {
 		Passed:      true,
 		DurationMS:  15000,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     "worker-main-metrics-three",
 		StartedAt:    headFailAt.Add(-15 * time.Second),
 		CompletedAt:  &headFailAt,
@@ -416,7 +416,7 @@ func TestControlMetricsObserveLatestDeploymentEmitsRolloutAndZeroesPreviousDeplo
 		ProfileConfig: "{}",
 	})
 	verifiedAt := time.Now().UTC().Add(time.Second)
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-rollout-metrics",
 		StartedAt:   verifiedAt.Add(-time.Second),
 		CompletedAt: &verifiedAt,
@@ -500,7 +500,7 @@ func TestControlMetricsObserveSourceComparisonsEmitsMetricsAndZeroesRemovedSourc
 	baseFailedAt := time.Now().UTC().Add(3 * time.Second)
 	basePassedAt := baseFailedAt.Add(-1500 * time.Millisecond)
 	headPassedAt := baseFailedAt.Add(time.Second)
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-source-main",
 		StartedAt:   basePassedAt.Add(-100 * time.Millisecond),
 		CompletedAt: &basePassedAt,
@@ -509,7 +509,7 @@ func TestControlMetricsObserveSourceComparisonsEmitsMetricsAndZeroesRemovedSourc
 		Passed:      true,
 		DurationMS:  100,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:     "worker-source-main",
 		StartedAt:    baseFailedAt.Add(-time.Second),
 		CompletedAt:  &baseFailedAt,
@@ -519,7 +519,7 @@ func TestControlMetricsObserveSourceComparisonsEmitsMetricsAndZeroesRemovedSourc
 		DurationMS:   1000,
 		ErrorMessage: `wrong # of entries in index idx_load_test_timestamp`,
 	})
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-source-pr",
 		StartedAt:   headPassedAt.Add(-time.Second),
 		CompletedAt: &headPassedAt,
@@ -848,7 +848,7 @@ func TestControlMetricsObserveLatestDeploymentIgnoresSupersededSnapshot(t *testi
 		ProfileConfig: "{}",
 	})
 	verifiedAt := time.Now().UTC().Add(time.Second)
-	mustRecordVerification(t, db, &model.Verification{
+	mustRecordAttributedFixture(t, db, &model.Verification{
 		WorkerID:    "worker-superseded-metrics",
 		StartedAt:   verifiedAt.Add(-time.Second),
 		CompletedAt: &verifiedAt,
