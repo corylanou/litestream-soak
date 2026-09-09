@@ -72,6 +72,89 @@ Grafana:
 - import `grafana/soak-source-compare-dashboard.json`
 - import `grafana/soak-drilldown-dashboard.json`
 
+## Machine diagnostic credential exposure
+
+Issue #260 records a confirmed exposure on control image
+`193dc9f2dd63600af2246e00e089683adeb87220`: authenticated incident output
+included storage credentials and the worker reporting token in machine
+configuration. The same representation reached worker details, generated
+prompts, and the worker UI. A diagnostic capture was accidentally printed;
+coordinator captures were redacted. No credential values belong in issues,
+PRs, logs, prompts, screenshots, or this runbook.
+
+Machine diagnostics now use an explicit metadata allowlist: machine and
+instance identity, name, state, region, image reference, resource allocation,
+volume mounts, timestamps, and platform events. Environment variables,
+services, and metrics configuration are omitted. Provider error bodies are
+also omitted from error strings and JSON because they can echo configuration
+and otherwise persist in worker status, events, and archives. Internal retry
+classification can still inspect the private provider body. Operational Fly requests
+retain their configuration internally. This does not erase older captures or
+sanitize arbitrary application log messages.
+
+Preserve failure evidence using redacted copies with the machine environment
+removed, retaining timestamps, run/build identity, volume identity, and
+verification details. Restrict access to existing originals under the incident
+owner's evidence policy; do not print them to perform redaction. Review prior
+exports, prompts, logs, and screenshots for exposure without copying secret
+values into tracking systems.
+
+### Coordinated rotation procedure
+
+The incident owner coordinates this procedure separately from the diagnostic
+fix. Shipping this fix does not rotate credentials or restart workers.
+
+**Blocked prerequisite:** implement and review a non-destructive credential
+migration path before changing credentials. Existing targeted/fleet rollout is
+not that path: replacement can clear replica prefixes and replace volumes.
+Do not use existing rollout while assuming it preserves evidence or volume
+identity. The migration must prove that it updates worker environments without
+clearing replica objects, replacing/destroying volumes, or losing run evidence,
+and must provide a reviewed rollback procedure. Track that lifecycle work
+separately from this diagnostic fix. Steps involving worker changes below are
+conditional on this prerequisite being met.
+
+1. Inventory affected storage access keys and reporting-token consumers by
+   credential identifier only. Record worker, run, image, and volume identities
+   and preserve redacted failure evidence before any replacement.
+2. Create replacement storage credentials with the required replica/profile
+   permissions through the approved secret-management channel. Keep the old
+   storage credentials available during the migration until replacement
+   replication and restore have been verified.
+3. Prepare new storage credentials and a fresh reporting token for the control
+   plane and worker configuration without putting values in command
+   history or diagnostic output. Plan the reviewed credential migration: the
+   reporting endpoint accepts one token, with no overlap/grace mechanism, so
+   switching the control token temporarily rejects old-worker telemetry.
+4. Once the prerequisite is met, use only the reviewed migration path to update
+   control secrets and worker environments. Do not substitute targeted/fleet
+   rollout. A simple machine restart retains its old environment. Coordinate legacy-fleet coexistence and
+   prevent expected temporary telemetry loss from triggering unintended fleet
+   actions. Do not clear replica prefixes, destroy volumes, or overwrite retained
+   run evidence.
+5. Confirm each migrated worker's machine/run/build and volume identity, accepted
+   heartbeats, replication, restore verification, and profile upload where
+   applicable. Inspect deployed diagnostic responses through a secret-safe
+   assertion that reports only pass/fail and safe metadata; never print raw
+   machine/configuration or incident objects.
+6. Revoke old storage credentials after all consumers have migrated, confirm
+   the old reporting token is rejected, and record revocation identifiers and
+   verification results without values.
+
+If validation fails, pause further migration and retain the diagnostic fix,
+volume mappings, and evidence. Keep both storage keys valid until the incident
+owner selects containment or rollback. An approved storage rollback restores the
+previous secret reference only while that key remains valid through the reviewed
+non-destructive migration path, then rechecks replication and restore. An
+approved reporting token rollback must update the control token and the
+environments of already-migrated workers through that same path; switching only
+the control plane strands those
+workers. Confirm accepted heartbeats for both groups before resuming the rollout.
+Reusing an exposed credential extends the exposure and requires the incident
+owner's explicit decision. Once old credentials are revoked, issue fresh
+credentials and roll forward instead of attempting to reactivate them. Never
+roll back to credential-bearing diagnostic output or delete failure evidence.
+
 ## What To Look At First
 
 ### Control Plane Home

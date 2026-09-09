@@ -41,7 +41,7 @@ type WorkerDetailResponse struct {
 	TriageCommands          []string                         `json:"triage_commands,omitempty"`
 	RecentVerifications     []model.Verification             `json:"recent_verifications"`
 	RecentEvents            []model.Event                    `json:"recent_events"`
-	Machine                 *flyapi.Machine                  `json:"machine,omitempty"`
+	Machine                 *flyapi.DiagnosticMachine        `json:"machine,omitempty"`
 	MachineError            string                           `json:"machine_error,omitempty"`
 }
 
@@ -223,7 +223,7 @@ type IncidentBundle struct {
 	PromptModes             []promptModeInfo                 `json:"prompt_modes,omitempty"`
 	RecentVerifications     []model.Verification             `json:"recent_verifications"`
 	RecentEvents            []model.Event                    `json:"recent_events"`
-	Machine                 *flyapi.Machine                  `json:"machine,omitempty"`
+	Machine                 *flyapi.DiagnosticMachine        `json:"machine,omitempty"`
 	MachineError            string                           `json:"machine_error,omitempty"`
 	TriageCommands          []string                         `json:"triage_commands,omitempty"`
 	Prompt                  string                           `json:"prompt"`

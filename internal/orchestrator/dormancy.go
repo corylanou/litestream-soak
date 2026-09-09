@@ -362,6 +362,10 @@ func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, 
 
 func retriableMachineCreateError(err error) bool {
 	message := strings.ToLower(err.Error())
+	var apiErr *flyapi.APIError
+	if errors.As(err, &apiErr) {
+		message = strings.ToLower(apiErr.Body)
+	}
 	return strings.Contains(message, "failed to get manifest") ||
 		strings.Contains(message, "manifest unknown") ||
 		strings.Contains(message, "http 404")
