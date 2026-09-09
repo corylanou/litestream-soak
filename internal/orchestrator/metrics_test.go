@@ -145,7 +145,7 @@ func TestControlMetricsExposeLatestDeploymentComparison(t *testing.T) {
 		"head_litestream_sha": "litestream-head-metrics",
 		"base_git_sha":        "sha-base-metrics",
 		"base_litestream_sha": "litestream-base-metrics",
-		"verdict":             "mixed",
+		"verdict":             "worse",
 	}, 1)
 	assertGatheredGaugeValue(t, "soak_control_latest_deployment_comparison_workers", map[string]string{
 		"source":          "main",
@@ -168,7 +168,7 @@ func TestControlMetricsExposeLatestDeploymentComparison(t *testing.T) {
 		"base_git_sha":        "sha-base-metrics",
 		"base_litestream_sha": "litestream-base-metrics",
 		"delta_type":          "improved_workers",
-		"verdict":             "mixed",
+		"verdict":             "worse",
 	}, 1)
 	assertGatheredGaugeValue(t, "soak_control_latest_deployment_comparison_delta", map[string]string{
 		"source":              "main",
@@ -177,7 +177,7 @@ func TestControlMetricsExposeLatestDeploymentComparison(t *testing.T) {
 		"base_git_sha":        "sha-base-metrics",
 		"base_litestream_sha": "litestream-base-metrics",
 		"delta_type":          "regressed_workers",
-		"verdict":             "mixed",
+		"verdict":             "worse",
 	}, 1)
 	assertGatheredGaugeValue(t, "soak_control_latest_deployment_comparison_failure", map[string]string{
 		"source":            "main",
@@ -531,12 +531,12 @@ func TestControlMetricsObserveSourceComparisonsEmitsMetricsAndZeroesRemovedSourc
 	})
 	metrics.observeSourceComparisons(db)
 
-	infoLabels := []string{"main", "pr-45-source", "sha-source-pr", "litestream-source-pr", "sha-source-main", "litestream-source-main", "better"}
+	infoLabels := []string{"main", "pr-45-source", "sha-source-pr", "litestream-source-pr", "sha-source-main", "litestream-source-main", "insufficient_data"}
 	headPassedLabels := []string{"main", "pr-45-source", "head", "sha-source-pr", "litestream-source-pr", "passed"}
 	baseFailedLabels := []string{"main", "pr-45-source", "base", "sha-source-main", "litestream-source-main", "failed"}
-	passDeltaLabels := []string{"main", "pr-45-source", "sha-source-pr", "litestream-source-pr", "sha-source-main", "litestream-source-main", "pass_delta", "better"}
-	failDeltaLabels := []string{"main", "pr-45-source", "sha-source-pr", "litestream-source-pr", "sha-source-main", "litestream-source-main", "fail_delta", "better"}
-	improvedLabels := []string{"main", "pr-45-source", "sha-source-pr", "litestream-source-pr", "sha-source-main", "litestream-source-main", "improved_workers", "better"}
+	passDeltaLabels := []string{"main", "pr-45-source", "sha-source-pr", "litestream-source-pr", "sha-source-main", "litestream-source-main", "pass_delta", "insufficient_data"}
+	failDeltaLabels := []string{"main", "pr-45-source", "sha-source-pr", "litestream-source-pr", "sha-source-main", "litestream-source-main", "fail_delta", "insufficient_data"}
+	improvedLabels := []string{"main", "pr-45-source", "sha-source-pr", "litestream-source-pr", "sha-source-main", "litestream-source-main", "improved_workers", "insufficient_data"}
 	resolvedFailureLabels := []string{"main", "pr-45-source", "resolved", "sha-source-main", "litestream-source-main", "integrity_check", "sqlite_index_mismatch"}
 
 	assertGaugeVecValue(t, controlSourceComparisonInfo, infoLabels, 1)

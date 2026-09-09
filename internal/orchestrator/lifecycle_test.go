@@ -33,7 +33,7 @@ func TestSuccessTeardownCandidateRequiresAllowedSource(t *testing.T) {
 	}
 }
 
-func TestSuccessTeardownCandidateRequiresCleanWindow(t *testing.T) {
+func TestSuccessTeardownCandidateRejectsUnmeasuredWindow(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
@@ -46,8 +46,8 @@ func TestSuccessTeardownCandidateRequiresCleanWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("successTeardownCandidate() error = %v", err)
 	}
-	if !ok {
-		t.Fatal("successTeardownCandidate() = false, want true")
+	if ok {
+		t.Fatal("successTeardownCandidate() = true without measured coverage")
 	}
 }
 

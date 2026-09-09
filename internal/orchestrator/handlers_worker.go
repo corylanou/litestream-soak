@@ -28,9 +28,13 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	payload.RuntimePayload = payload.Normalize(payload.SentAt)
 
-	_, quarantined, err := a.db.ReportAttribution(payload.WorkerIdentity)
+	attributed, quarantined, err := a.db.ReportAttribution(payload.WorkerIdentity)
 	if err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to check report identity")
+		return
+	}
+	if err := recordRuntimeEvidence(a.db, payload.WorkerIdentity, payload.RuntimePayload, attributed); err != nil {
+		respondError(w, r, http.StatusInternalServerError, err, "failed to preserve runtime evidence")
 		return
 	}
 	if quarantined {
@@ -127,6 +131,10 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	attributed, quarantined, err := a.db.ReportAttribution(payload.WorkerIdentity)
 	if err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to check report identity")
+		return
+	}
+	if err := recordRuntimeEvidence(a.db, payload.WorkerIdentity, payload.RuntimePayload, attributed); err != nil {
+		respondError(w, r, http.StatusInternalServerError, err, "failed to preserve runtime evidence")
 		return
 	}
 	if !quarantined {
@@ -272,9 +280,13 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	payload.RuntimePayload = payload.Normalize(observedAt)
 
-	_, quarantined, err := a.db.ReportAttribution(payload.WorkerIdentity)
+	attributed, quarantined, err := a.db.ReportAttribution(payload.WorkerIdentity)
 	if err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to check report identity")
+		return
+	}
+	if err := recordRuntimeEvidence(a.db, payload.WorkerIdentity, payload.RuntimePayload, attributed); err != nil {
+		respondError(w, r, http.StatusInternalServerError, err, "failed to preserve runtime evidence")
 		return
 	}
 	if quarantined {
@@ -298,7 +310,10 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	details, err := json.Marshal(payload)
+	details, err := json.Marshal(struct {
+		reporting.WorkerEventPayload
+		Attributed bool `json:"attributed"`
+	}{payload, attributed})
 	if err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to encode event details")
 		return
