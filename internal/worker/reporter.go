@@ -34,34 +34,38 @@ func NewReporter(cfg Config) *Reporter {
 		slog.Warn("SOAK_WORKER_TOKEN is not set; the control plane will reject reports")
 	}
 
-	profileConfig := cfg.WorkloadConfig().JSON()
 	return &Reporter{
 		baseURL: baseURL,
 		token:   token,
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},
-		identity: reporting.WorkerIdentity{
-			WorkerID:      cfg.WorkerID,
-			DeploymentID:  cfg.DeploymentID,
-			WorkloadID:    cfg.WorkloadID,
-			WorkloadSHA:   cfg.WorkloadSHA,
-			ValidatorID:   "soak-verifier:" + cfg.GitSHA,
-			Name:          cfg.WorkerName,
-			Source:        cfg.Source,
-			GitSHA:        cfg.GitSHA,
-			LitestreamSHA: cfg.LitestreamSHA,
-			RunID:         cfg.RunID,
-			ImageRef:      cfg.ImageRef,
-			VolumeID:      cfg.VolumeID,
-			VolumeSizeGB:  cfg.VolumeSizeGB,
-			ProfileName:   cfg.ProfileName,
-			ProfileConfig: profileConfig,
-			ProfileHash:   profileHash(profileConfig),
-			AppName:       cfg.AppName,
-			MachineID:     cfg.MachineID,
-			Region:        cfg.Region,
-		},
+		identity: workerIdentity(cfg),
+	}
+}
+
+func workerIdentity(cfg Config) reporting.WorkerIdentity {
+	profileConfig := cfg.WorkloadConfig().JSON()
+	return reporting.WorkerIdentity{
+		WorkerID:      cfg.WorkerID,
+		DeploymentID:  cfg.DeploymentID,
+		WorkloadID:    cfg.WorkloadID,
+		WorkloadSHA:   cfg.WorkloadSHA,
+		ValidatorID:   "soak-verifier:" + cfg.GitSHA,
+		Name:          cfg.WorkerName,
+		Source:        cfg.Source,
+		GitSHA:        cfg.GitSHA,
+		LitestreamSHA: cfg.LitestreamSHA,
+		RunID:         cfg.RunID,
+		ImageRef:      cfg.ImageRef,
+		VolumeID:      cfg.VolumeID,
+		VolumeSizeGB:  cfg.VolumeSizeGB,
+		ProfileName:   cfg.ProfileName,
+		ProfileConfig: profileConfig,
+		ProfileHash:   profileHash(profileConfig),
+		AppName:       cfg.AppName,
+		MachineID:     cfg.MachineID,
+		Region:        cfg.Region,
 	}
 }
 

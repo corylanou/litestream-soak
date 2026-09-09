@@ -65,6 +65,7 @@ type ProcessObservation struct {
 }
 
 type RuntimePayload struct {
+	WorkloadCounters
 	LitestreamProcess     ProcessObservation `json:"litestream_process"`
 	WorkerProcess         ProcessObservation `json:"worker_process"`
 	LocalStateStatus      string             `json:"local_state_status,omitempty"`
@@ -207,6 +208,7 @@ type VerificationPayload struct {
 }
 
 type WorkerEventPayload struct {
+	WorkloadEvent
 	WorkerIdentity
 	EventType          string                `json:"event_type"`
 	Message            string                `json:"message,omitempty"`

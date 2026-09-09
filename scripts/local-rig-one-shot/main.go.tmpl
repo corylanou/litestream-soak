@@ -679,17 +679,20 @@ const (
 )
 
 type memPhase struct {
-	Name          string  `json:"name"`
-	DurationMS    int64   `json:"duration_ms"`
-	Samples       int     `json:"samples"`
-	BaselineHeap  uint64  `json:"baseline_heap_inuse_bytes"`
-	PeakHeapInuse uint64  `json:"peak_heap_inuse_bytes"`
-	PeakHeapAlloc uint64  `json:"peak_heap_alloc_bytes"`
-	PeakSys       uint64  `json:"peak_sys_bytes"`
-	HeapGrowth    uint64  `json:"heap_growth_bytes"`
-	BytesPerPage  float64 `json:"heap_growth_bytes_per_page"`
-	PeakProfile   string  `json:"peak_profile,omitempty"`
-	Error         string  `json:"error,omitempty"`
+	FinalProfile     string  `json:"final_profile,omitempty"`
+	ProfileSemantics string  `json:"profile_semantics"`
+	ProfileError     string  `json:"profile_error,omitempty"`
+	Name             string  `json:"name"`
+	DurationMS       int64   `json:"duration_ms"`
+	Samples          int     `json:"samples"`
+	BaselineHeap     uint64  `json:"baseline_heap_inuse_bytes"`
+	PeakHeapInuse    uint64  `json:"peak_heap_inuse_bytes"`
+	PeakHeapAlloc    uint64  `json:"peak_heap_alloc_bytes"`
+	PeakSys          uint64  `json:"peak_sys_bytes"`
+	HeapGrowth       uint64  `json:"heap_growth_bytes"`
+	BytesPerPage     float64 `json:"heap_growth_bytes_per_page"`
+	PeakProfile      string  `json:"peak_profile,omitempty"`
+	Error            string  `json:"error,omitempty"`
 }
 
 type memSampler struct {
@@ -1111,13 +1114,14 @@ func (s *memSampler) Measure(name string, fn func() error) memPhase {
 	var base runtime.MemStats
 	runtime.ReadMemStats(&base)
 	phase := memPhase{
-		Name:          name,
-		BaselineHeap:  base.HeapInuse,
-		PeakHeapInuse: base.HeapInuse,
-		PeakHeapAlloc: base.HeapAlloc,
-		PeakSys:       base.Sys,
+		Name:             name,
+		ProfileSemantics: "heap profile sampled after growth threshold and minimum spacing; not exact peak",
+		BaselineHeap:     base.HeapInuse,
+		PeakHeapInuse:    base.HeapInuse,
+		PeakHeapAlloc:    base.HeapAlloc,
+		PeakSys:          base.Sys,
 	}
-	profilePath := filepath.Join(s.profileDir, name+"-peak.pprof")
+	profilePath := filepath.Join(s.profileDir, name+"-sampled-growth.pprof")
 
 	done := make(chan struct{})
 	var wg sync.WaitGroup
@@ -1145,6 +1149,7 @@ func (s *memSampler) Measure(name string, fn func() error) memPhase {
 				continue
 			}
 			if err := writeHeapProfile(profilePath); err != nil {
+				phase.ProfileError = err.Error()
 				slog.Warn("write heap profile", "phase", name, "error", err)
 				continue
 			}
@@ -1159,6 +1164,18 @@ func (s *memSampler) Measure(name string, fn func() error) memPhase {
 	phase.DurationMS = time.Since(start).Milliseconds()
 	close(done)
 	wg.Wait()
+	var final runtime.MemStats
+	runtime.ReadMemStats(&final)
+	phase.Samples++
+	phase.PeakHeapInuse = max(phase.PeakHeapInuse, final.HeapInuse)
+	phase.PeakHeapAlloc = max(phase.PeakHeapAlloc, final.HeapAlloc)
+	phase.PeakSys = max(phase.PeakSys, final.Sys)
+	finalPath := filepath.Join(s.profileDir, name+"-final.pprof")
+	if profileErr := writeHeapProfile(finalPath); profileErr != nil {
+		phase.ProfileError = profileErr.Error()
+	} else {
+		phase.FinalProfile = finalPath
+	}
 
 	if err != nil {
 		phase.Error = err.Error()

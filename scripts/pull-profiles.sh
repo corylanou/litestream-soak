@@ -20,6 +20,10 @@ if [ -z "$source_name" ] || [ -z "$profile_name" ]; then
   printf 'usage: %s <source> <profile> [count]\n' "$0" >&2
   exit 2
 fi
+if ! [[ "$source_name" =~ ^[A-Za-z0-9_-]+$ && "$profile_name" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  echo "source and profile must contain only letters, digits, underscores, or hyphens" >&2
+  exit 2
+fi
 if ! [[ "$count" =~ ^[0-9]+$ ]] || [ "$count" -lt 1 ]; then
   printf 'count must be a positive integer, got %q\n' "$count" >&2
   exit 2
@@ -76,18 +80,33 @@ mkdir -p "$dest"
 
 # Newest <count> of each capture kind (heap, allocs, cpu), by name (timestamp-prefixed).
 files="$(fly ssh console -a "$app" --machine "$machine" -C "sh -c 'ls /data/profiles'" 2>/dev/null \
-  | tr -d '\r' | grep -E '^[0-9]{8}T[0-9]{6}Z_' || true)"
+  | tr -d '\r' | awk '/^([0-9]{8}T[0-9]{6}(\.[0-9]+)?Z_[A-Za-z0-9_.-]+|status\.json)$/' || true)"
 if [ -z "$files" ]; then
   printf 'no captures under /data/profiles on %s (%s)\n' "$worker" "$machine" >&2
   exit 1
 fi
 
+all_files="$files"
+if [ -n "${SOAK_PROFILE_MATCH:-}" ]; then
+  files="$(printf '%s\n' "$files" | awk -v text="$SOAK_PROFILE_MATCH" 'index($0, text)' || true)"
+fi
 selected=""
-for kind in _heap.pprof _allocs.pprof _cpu_profile.pprof; do
-  picked="$(printf '%s\n' "$files" | grep -F -- "$kind" | sort | tail -n "$count" || true)"
+if printf '%s\n' "$all_files" | awk '$0 == "status.json" { found=1 } END { exit !found }'; then selected="status.json"; fi
+for kind in _heap.pprof _allocs.pprof _cpu_profile.pprof _goroutine.txt _memstats.txt _block.pprof _mutex.pprof _trace.pprof .json; do
+  if [ "$kind" = ".json" ]; then
+    picked="$(printf '%s\n' "$files" | awk '/\.json$/' | sort | tail -n "$count" || true)"
+  else
+    picked="$(printf '%s\n' "$files" | awk -v suffix="$kind" 'length($0) >= length(suffix) && substr($0, length($0)-length(suffix)+1) == suffix' | sort | tail -n "$count" || true)"
+  fi
   selected="$(printf '%s\n%s' "$selected" "$picked")"
 done
 selected="$(printf '%s\n' "$selected" | sed '/^$/d')"
+for file in $selected; do
+  if printf '%s\n' "$files" | awk -v name="$file.json" '$0 == name { found=1 } END { exit !found }'; then
+    selected="$(printf '%s\n%s' "$selected" "$file.json")"
+  fi
+done
+selected="$(printf '%s\n' "$selected" | sort -u)"
 if [ -z "$selected" ]; then
   printf 'no heap/allocs/cpu captures on %s yet (found: %s)\n' "$worker" "$(printf '%s' "$files" | tr '\n' ' ')" >&2
   exit 1
@@ -96,7 +115,7 @@ fi
 printf 'worker %s machine %s -> %s\n' "$worker" "$machine" "$dest"
 while IFS= read -r file; do
   [ -z "$file" ] && continue
-  if [ -s "$dest/$file" ]; then
+  if [ "$file" != "status.json" ] && [ -s "$dest/$file" ]; then
     printf '  have %s\n' "$file"
     continue
   fi

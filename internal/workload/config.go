@@ -4,9 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/corylanou/litestream-soak/internal/churn"
 )
 
 type Config struct {
+	Churn churn.Config `json:"churn,omitzero"`
+
 	LoadMode                                  string  `json:"load_mode,omitempty"`
 	WriteRate                                 int     `json:"write_rate,omitempty"`
 	Pattern                                   string  `json:"pattern,omitempty"`
