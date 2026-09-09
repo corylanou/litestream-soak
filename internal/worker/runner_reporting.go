@@ -83,6 +83,7 @@ func (r *Runner) sendLitestreamMetricsEvent(ctx context.Context, observation lit
 }
 
 func (r *Runner) sendHeartbeat(ctx context.Context) {
+	r.requestChurnFlush()
 	if r.reporter == nil || !r.reporter.Enabled() {
 		return
 	}

@@ -100,6 +100,9 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 		"AWS_ENDPOINT_URL_S3": m.replica.Endpoint,
 		"CONTROL_BASE_URL":    m.controlBaseURL,
 	}
+	if workloadCfg.LoadMode == "queue" || workloadCfg.LoadMode == "cache" {
+		env["CHURN_CONFIG"] = workloadCfg.Churn.JSON()
+	}
 	if token := strings.TrimSpace(os.Getenv("SOAK_WORKER_TOKEN")); token != "" {
 		env["SOAK_WORKER_TOKEN"] = token
 	}
