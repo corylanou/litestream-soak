@@ -1601,8 +1601,11 @@ environment dumps or unsanitized artifact bundles as documentation evidence.
 A pending worker's stored target does not prove that its machine exists. Fleet
 reconciliation inventories actual machines and volumes, including resources
 created before a controller lost the response or restarted. New provisioning
-records a durable attempt ID and unique volume name before sending creation
-requests. A matching resource is adopted only after checking its attempt, image,
+records a durable attempt ID, original deployment identity, and unique volume
+name before sending creation requests. Resuming an older attempt keeps its original
+image, deployment ID, and workload SHA even after a newer deployment is ready.
+Late recovery events remain attached to that original deployment; unknown legacy
+attribution is never inferred from the newest deployment. A matching resource is adopted only after checking its attempt, image,
 workload identity, region, and volume ownership. A machine still being created
 remains pending; a heartbeat arriving first does not prevent later completion of
 the attempt.

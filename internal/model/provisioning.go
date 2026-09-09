@@ -2,10 +2,15 @@ package model
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 type ProvisioningAttempt struct {
+	DeploymentID  int    `json:"deployment_id"`
+	WorkloadSHA   string `json:"workload_sha"`
 	VolumeSizeGB  int    `json:"volume_size_gb"`
 	ID            string `json:"attempt_id"`
 	WorkerID      string `json:"worker_id"`
@@ -20,13 +25,13 @@ type ProvisioningAttempt struct {
 
 const provisioningSchema = `CREATE TABLE IF NOT EXISTS worker_provisioning (
  id TEXT PRIMARY KEY, worker_id TEXT NOT NULL, image_ref TEXT NOT NULL, git_sha TEXT NOT NULL, litestream_sha TEXT NOT NULL,
- phase TEXT NOT NULL, volume_size_gb INTEGER NOT NULL, volume_name TEXT NOT NULL, volume_id TEXT NOT NULL DEFAULT '', machine_id TEXT NOT NULL DEFAULT '', started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+ deployment_id INTEGER NOT NULL DEFAULT 0, workload_sha TEXT NOT NULL DEFAULT '', phase TEXT NOT NULL, volume_size_gb INTEGER NOT NULL, volume_name TEXT NOT NULL, volume_id TEXT NOT NULL DEFAULT '', machine_id TEXT NOT NULL DEFAULT '', started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS worker_provisioning_active ON worker_provisioning(worker_id) WHERE phase!='complete';`
 
 func (d *DB) ActiveProvisioning(workerID string) (*ProvisioningAttempt, error) {
 	var a ProvisioningAttempt
-	err := d.queryRow(`SELECT id,worker_id,image_ref,git_sha,litestream_sha,phase,volume_name,volume_id,machine_id,volume_size_gb FROM worker_provisioning WHERE worker_id=? AND phase!='complete'`, workerID).Scan(&a.ID, &a.WorkerID, &a.ImageRef, &a.GitSHA, &a.LitestreamSHA, &a.Phase, &a.VolumeName, &a.VolumeID, &a.MachineID, &a.VolumeSizeGB)
+	err := d.queryRow(`SELECT id,worker_id,image_ref,git_sha,litestream_sha,phase,volume_name,volume_id,machine_id,volume_size_gb,deployment_id,workload_sha FROM worker_provisioning WHERE worker_id=? AND phase!='complete'`, workerID).Scan(&a.ID, &a.WorkerID, &a.ImageRef, &a.GitSHA, &a.LitestreamSHA, &a.Phase, &a.VolumeName, &a.VolumeID, &a.MachineID, &a.VolumeSizeGB, &a.DeploymentID, &a.WorkloadSHA)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -37,7 +42,7 @@ func (d *DB) ActiveProvisioning(workerID string) (*ProvisioningAttempt, error) {
 }
 
 func (d *DB) BeginProvisioning(a ProvisioningAttempt) (*ProvisioningAttempt, error) {
-	if _, err := d.exec(`INSERT OR IGNORE INTO worker_provisioning(id,worker_id,image_ref,git_sha,litestream_sha,phase,volume_name,volume_size_gb) SELECT ?,?,?,?,?,'planned',?,? FROM workers WHERE id=? AND status='pending' AND git_sha=? AND litestream_sha=?`, a.ID, a.WorkerID, a.ImageRef, a.GitSHA, a.LitestreamSHA, a.VolumeName, a.VolumeSizeGB, a.WorkerID, a.GitSHA, a.LitestreamSHA); err != nil {
+	if _, err := d.exec(`INSERT OR IGNORE INTO worker_provisioning(id,worker_id,image_ref,git_sha,litestream_sha,phase,volume_name,volume_size_gb,deployment_id,workload_sha) SELECT ?,?,?,?,?,'planned',?,?,?,? FROM workers WHERE id=? AND status='pending' AND git_sha=? AND litestream_sha=?`, a.ID, a.WorkerID, a.ImageRef, a.GitSHA, a.LitestreamSHA, a.VolumeName, a.VolumeSizeGB, a.DeploymentID, a.WorkloadSHA, a.WorkerID, a.GitSHA, a.LitestreamSHA); err != nil {
 		return nil, err
 	}
 	current, err := d.ActiveProvisioning(a.WorkerID)
@@ -113,6 +118,30 @@ func (d *DB) BindProvisioningMachine(a ProvisioningAttempt) error {
 	}
 	if n != 1 {
 		return fmt.Errorf("provisioning binding lost its state claim")
+	}
+	return nil
+}
+
+func (d *DB) ExpectProvisioningRun(a ProvisioningAttempt, identity reporting.WorkerIdentity) error {
+	if identity.WorkerID != a.WorkerID || identity.RunID != a.ID || identity.DeploymentID != a.DeploymentID || identity.WorkloadSHA != a.WorkloadSHA || identity.GitSHA != a.GitSHA || identity.LitestreamSHA != a.LitestreamSHA || identity.ImageRef != a.ImageRef {
+		return fmt.Errorf("provisioning run identity mismatch")
+	}
+	unlock := d.LockWorkerReports(a.WorkerID)
+	defer unlock()
+	body, err := json.Marshal(identity)
+	if err != nil {
+		return err
+	}
+	result, err := d.exec(`INSERT INTO expected_worker_runs(worker_id,identity_json) SELECT ?,? WHERE EXISTS (SELECT 1 FROM worker_provisioning p JOIN workers w ON w.id=p.worker_id WHERE p.id=? AND p.phase=? AND p.phase!='complete' AND w.id=? AND w.git_sha=? AND w.litestream_sha=? AND w.status IN ('pending','running','starting','probing')) ON CONFLICT(worker_id) DO UPDATE SET identity_json=excluded.identity_json`, a.WorkerID, string(body), a.ID, a.Phase, a.WorkerID, a.GitSHA, a.LitestreamSHA)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("provisioning identity lost its state claim")
 	}
 	return nil
 }

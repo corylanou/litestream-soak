@@ -445,3 +445,113 @@ func TestPendingAttemptCompletesBeforeNewDeployment(t *testing.T) {
 		t.Fatal("recovery replaced existing resources")
 	}
 }
+
+func TestResumedProvisioningRetainsOriginalDeployment(t *testing.T) {
+	for _, phase := range []string{"volume_requested", "volume_ready"} {
+		t.Run(phase, func(t *testing.T) {
+			fake := &provisioningFly{loseVolume: true}
+			db, manager, desired, request := provisioningFixture(t, fake)
+			old := model.Deployment{Source: "main", GitSHA: request.GitSHA, LitestreamSHA: request.LitestreamSHA, ImageRef: request.ImageRef, WorkloadSHA: "original-workload", Status: "ready"}
+			oldID, err := db.CreateDeployment(&old)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.CreateWorker(context.Background(), request); err == nil {
+				t.Fatal("expected volume response loss")
+			}
+			if phase == "volume_ready" {
+				attempt, err := db.ActiveProvisioning(request.WorkerID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				changed, err := db.AdvanceProvisioning(*attempt, "volume_ready", fake.volumes[0].ID, "")
+				if err != nil || !changed {
+					t.Fatal("failed to persist confirmed volume")
+				}
+			}
+			newer := old
+			newer.GitSHA = "next"
+			newer.ImageRef = "next-image"
+			newer.WorkloadSHA = "next-workload"
+			newID, err := db.CreateDeployment(&newer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fake.loseVolume = false
+			desired.GitSHA = newer.GitSHA
+			if err := manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, newer.ImageRef); err != nil {
+				t.Fatal(err)
+			}
+			expected, err := db.ExpectedWorkerRun(request.WorkerID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if expected.DeploymentID != int(oldID) || expected.WorkloadSHA != old.WorkloadSHA {
+				t.Fatalf("resumed identity deployment=%d workload=%s", expected.DeploymentID, expected.WorkloadSHA)
+			}
+			if fake.machines[0].Config.Env["SOAK_DEPLOYMENT_ID"] != fmt.Sprint(oldID) {
+				t.Fatal("machine lost original deployment identity")
+			}
+			end := time.Now().Add(-time.Hour)
+			window := model.EvidenceWindow{DeploymentID: int(oldID), Start: end.Add(-time.Hour), End: &end}
+			events, err := db.ListEvidenceEvents("main", window)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var interrupted, recovered bool
+			for _, event := range events {
+				interrupted = interrupted || event.EventType == "worker_provisioning_interrupted"
+				recovered = recovered || event.EventType == "worker_provisioning_recovered"
+			}
+			if !interrupted || !recovered {
+				t.Fatal("late old-attempt evidence disappeared from original deployment")
+			}
+			newerEvents, err := db.ListEvidenceEvents("main", model.EvidenceWindow{DeploymentID: int(newID), Start: time.Now().Add(-time.Hour)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range newerEvents {
+				if strings.HasPrefix(event.EventType, "worker_provisioning_") {
+					t.Fatal("old attempt attributed to newer deployment")
+				}
+			}
+			worker := mustWorker(t, db, request.WorkerID)
+			worker.GitSHA = newer.GitSHA
+			worker.Status = model.WorkerPending
+			if err := db.CreateWorker(worker); err != nil {
+				t.Fatal(err)
+			}
+			next, err := manager.beginWorkerProvisioning(*worker, newer.ImageRef)
+			if err != nil || next.DeploymentID != int(newID) {
+				t.Fatalf("next deployment attempt did not advance: %v", err)
+			}
+		})
+	}
+}
+
+func TestProvisioningAdoptionRejectsKnownRevisionDrift(t *testing.T) {
+	for _, field := range []string{"SOAK_DEPLOYMENT_ID", "WORKLOAD_SHA"} {
+		t.Run(field, func(t *testing.T) {
+			fake := &provisioningFly{loseMachine: true}
+			db, manager, desired, request := provisioningFixture(t, fake)
+			deployment := model.Deployment{Source: request.Source, GitSHA: request.GitSHA, LitestreamSHA: request.LitestreamSHA, ImageRef: request.ImageRef, WorkloadSHA: "original-workload", Status: "ready"}
+			if _, err := db.CreateDeployment(&deployment); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.CreateWorker(context.Background(), request); err == nil {
+				t.Fatal("expected lost machine response")
+			}
+			fake.loseMachine = false
+			fake.machines[0].Config.Env[field] = "999"
+			if err := manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, request.ImageRef); err == nil {
+				t.Fatal("known revision drift was adopted")
+			}
+			if mustWorker(t, db, request.WorkerID).Status != model.WorkerPending {
+				t.Fatal("mismatched resource activated worker")
+			}
+			if fake.machinePosts != 1 || fake.volumePosts != 1 || fake.deletes != 0 {
+				t.Fatal("revision drift caused resource mutation")
+			}
+		})
+	}
+}

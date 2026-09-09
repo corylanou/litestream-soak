@@ -1,6 +1,10 @@
 package model
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
+)
 
 func TestProvisioningCompletionIsAtomicWithEvidence(t *testing.T) {
 	db := seriesTestDB(t)
@@ -53,5 +57,25 @@ func TestProvisioningCompletionIsAtomicWithEvidence(t *testing.T) {
 	}
 	if _, err := db.BeginProvisioning(ProvisioningAttempt{ID: "stale-controller", WorkerID: worker.ID, ImageRef: "image", GitSHA: "sha", LitestreamSHA: "ls", VolumeName: "other", VolumeSizeGB: 10}); err == nil {
 		t.Fatal("stale controller started duplicate provisioning after worker became running")
+	}
+}
+
+func TestStaleProvisioningCannotReplaceRunIdentity(t *testing.T) {
+	db := seriesTestDB(t)
+	worker := Worker{ID: "worker", Name: "worker", Status: WorkerPending, Source: "main", GitSHA: "sha", LitestreamSHA: "ls", ProfileConfig: "{}"}
+	if err := db.CreateWorker(&worker); err != nil {
+		t.Fatal(err)
+	}
+	current := reporting.WorkerIdentity{WorkerID: worker.ID, RunID: "current", MachineID: "current-machine"}
+	if err := db.ExpectWorkerRun(current); err != nil {
+		t.Fatal(err)
+	}
+	stale := reporting.WorkerIdentity{WorkerID: worker.ID, RunID: "stale", MachineID: "stale-machine", GitSHA: "sha", LitestreamSHA: "ls"}
+	if err := db.ExpectProvisioningRun(ProvisioningAttempt{ID: "stale", WorkerID: worker.ID, Phase: "machine_ready", GitSHA: "sha", LitestreamSHA: "ls"}, stale); err == nil {
+		t.Fatal("stale provisioning replaced run identity")
+	}
+	stored, err := db.ExpectedWorkerRun(worker.ID)
+	if err != nil || stored.RunID != current.RunID {
+		t.Fatal("authoritative run identity changed")
 	}
 }

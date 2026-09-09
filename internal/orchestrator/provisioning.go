@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,8 +27,18 @@ func (m *Manager) beginWorkerProvisioning(worker model.Worker, image string, siz
 	if size <= 0 {
 		size = 10
 	}
+	deploymentID := 0
+	workloadSHA := ""
+	deployment, err := m.db.GetDeploymentByVersion(worker.Source, worker.GitSHA, worker.LitestreamSHA)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if err == nil && deployment.ImageRef == image {
+		deploymentID = deployment.ID
+		workloadSHA = deployment.WorkloadSHA
+	}
 	id := uuid.NewString()
-	attempt, err := m.db.BeginProvisioning(model.ProvisioningAttempt{VolumeSizeGB: size, ID: id, WorkerID: worker.ID, ImageRef: image, GitSHA: worker.GitSHA, LitestreamSHA: worker.LitestreamSHA, VolumeName: "soak_" + strings.ReplaceAll(id, "-", "")[:24]})
+	attempt, err := m.db.BeginProvisioning(model.ProvisioningAttempt{DeploymentID: deploymentID, WorkloadSHA: workloadSHA, VolumeSizeGB: size, ID: id, WorkerID: worker.ID, ImageRef: image, GitSHA: worker.GitSHA, LitestreamSHA: worker.LitestreamSHA, VolumeName: "soak_" + strings.ReplaceAll(id, "-", "")[:24]})
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +57,7 @@ func provisioningEvent(worker model.Worker, a model.ProvisioningAttempt, kind, m
 		Phase     string `json:"phase"`
 		VolumeID  string `json:"provisioning_volume_id"`
 		MachineID string `json:"provisioning_machine_id"`
-	}{WorkerIdentity: reporting.WorkerIdentity{WorkerID: worker.ID, Source: worker.Source, GitSHA: worker.GitSHA, LitestreamSHA: worker.LitestreamSHA, ProfileName: worker.ProfileName, Region: worker.Region, RunID: a.ID, MachineID: worker.FlyMachineID}, AttemptID: a.ID, Phase: a.Phase, VolumeID: a.VolumeID, MachineID: a.MachineID})
+	}{WorkerIdentity: reporting.WorkerIdentity{DeploymentID: a.DeploymentID, WorkloadSHA: a.WorkloadSHA, ImageRef: a.ImageRef, WorkerID: worker.ID, Source: worker.Source, GitSHA: worker.GitSHA, LitestreamSHA: worker.LitestreamSHA, ProfileName: worker.ProfileName, Region: worker.Region, RunID: a.ID, MachineID: worker.FlyMachineID}, AttemptID: a.ID, Phase: a.Phase, VolumeID: a.VolumeID, MachineID: a.MachineID})
 	if err != nil {
 		return model.Event{}, err
 	}
@@ -257,7 +268,7 @@ func (m *Manager) recoverPendingWorker(ctx context.Context, workerID, image stri
 			if !ok || volume.Region != worker.Region || volume.SizeGB < max(10, resolveWorkerVolumeSize(*worker, resolveWorkerWorkload(*worker))) {
 				return m.provisioningUnavailable(*worker, report, "Existing machine volume ownership is unconfirmed")
 			}
-			attempt, err := m.db.BeginProvisioning(model.ProvisioningAttempt{ID: expected.RunID, WorkerID: workerID, ImageRef: image, GitSHA: worker.GitSHA, LitestreamSHA: worker.LitestreamSHA, VolumeName: volume.Name, VolumeSizeGB: volume.SizeGB})
+			attempt, err := m.db.BeginProvisioning(model.ProvisioningAttempt{DeploymentID: expected.DeploymentID, WorkloadSHA: expected.WorkloadSHA, ID: expected.RunID, WorkerID: workerID, ImageRef: image, GitSHA: worker.GitSHA, LitestreamSHA: worker.LitestreamSHA, VolumeName: volume.Name, VolumeSizeGB: volume.SizeGB})
 			if err != nil {
 				return err
 			}
@@ -269,7 +280,7 @@ func (m *Manager) recoverPendingWorker(ctx context.Context, workerID, image stri
 			attempt.MachineID = machine.ID
 			expected.MachineID = machine.ID
 			expected.VolumeID = volume.ID
-			if err := m.db.ExpectWorkerRun(*expected); err != nil {
+			if err := m.db.ExpectProvisioningRun(*attempt, *expected); err != nil {
 				return err
 			}
 			_, err = m.finishWorkerProvisioning(*worker, *attempt, machine, true)
@@ -350,7 +361,7 @@ func (m *Manager) recoverPendingWorker(ctx context.Context, workerID, image stri
 		}
 		expected.MachineID = machine.ID
 		expected.VolumeID = volume.ID
-		if err := m.db.ExpectWorkerRun(*expected); err != nil {
+		if err := m.db.ExpectProvisioningRun(*a, *expected); err != nil {
 			return err
 		}
 		if err := m.advanceProvisioning(*a, "machine_ready", volume.ID, machine.ID); err != nil {
@@ -391,6 +402,12 @@ func mountedProvisioningVolume(machine flyapi.Machine, volumes []flyapi.Volume) 
 
 func provisioningExpectedMachineMatches(machine flyapi.Machine, expected *reporting.WorkerIdentity) bool {
 	if expected == nil || expected.WorkloadID == "" || machine.Config.Env["SOAK_WORKLOAD_ID"] != expected.WorkloadID {
+		return false
+	}
+	if expected.DeploymentID > 0 && machine.Config.Env["SOAK_DEPLOYMENT_ID"] != fmt.Sprint(expected.DeploymentID) {
+		return false
+	}
+	if expected.WorkloadSHA != "" && machine.Config.Env["WORKLOAD_SHA"] != expected.WorkloadSHA {
 		return false
 	}
 	cfg, err := workerconfig.WorkloadFromEnvironment(machine.Config.Env)
