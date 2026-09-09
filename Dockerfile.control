@@ -10,8 +10,7 @@ RUN go version -m /usr/local/bin/soakctl >/tmp/soakctl.buildinfo && cat /tmp/soa
 
 FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS flyctl
 ENV GOTOOLCHAIN=local
-RUN apt-get update && apt-get install -y --no-install-recommends ripgrep jq
-COPY scripts/build-flyctl.sh scripts/scan-binary.sh /opt/build/
+COPY scripts/build-flyctl.sh /opt/build/
 RUN bash /opt/build/build-flyctl.sh /src/flyctl /usr/local/bin/flyctl
 RUN go version -m /usr/local/bin/flyctl && mkdir -p /tmp/security/flyctl && \
     cp /usr/local/bin/flyctl.* /tmp/security/flyctl/

@@ -23,8 +23,8 @@ CGO_ENABLED=0 go build -mod=readonly -tags production \
     -o "$binary" .
 go version -m "$binary" >"${binary}.buildinfo"
 "$binary" version
-"$binary" logs --help | rg -- '--no-tail'
-"$binary" deploy --help | rg -- '--remote-only'
-"$binary" deploy --help | rg -- '--build-only'
-"$binary" deploy --help | rg -- '--image-label'
-"$binary" machine list --help | rg -- '--json'
+"$binary" logs --help | awk '/--no-tail/ {found=1; print} END {exit !found}'
+"$binary" deploy --help | awk '/--remote-only/ {found=1; print} END {exit !found}'
+"$binary" deploy --help | awk '/--build-only/ {found=1; print} END {exit !found}'
+"$binary" deploy --help | awk '/--image-label/ {found=1; print} END {exit !found}'
+"$binary" machine list --help | awk '/--json/ {found=1; print} END {exit !found}'

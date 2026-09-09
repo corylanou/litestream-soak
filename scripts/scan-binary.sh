@@ -17,7 +17,7 @@ timeout 300 govulncheck -json -mode=binary "$binary" >"$output/binary.json" 2>"$
 status=supported
 if [[ "$scan_exit" != 0 ]]; then
     status=error
-    if rg -qi 'binary format is not supported|unsupported binary|unrecognized binary format' "$output/binary.stderr"; then
+    if awk 'tolower($0) ~ /binary format is not supported|unsupported binary|unrecognized binary format/ {found=1} END {exit !found}' "$output/binary.stderr"; then
         status=unsupported
     fi
 elif ! jq -se 'length > 0 and any(.[]; has("config"))' "$output/binary.json" >/dev/null 2>&1; then
@@ -40,13 +40,13 @@ if [[ -n "$source_dir" ]]; then
         source_status=error
     fi
 fi
-findings='[]'
+printf '[]\n' >"$output/findings.json"
 if [[ "$status" = supported ]]; then
-    findings=$(jq -s '[.[] | select(.finding) | .finding | {id: .osv, fixed_version, trace, reachability: (if .trace[0].function then "binary-symbol" elif .trace[0].package then "package" else "module" end)}]' "$output/binary.json")
+    jq -s '[.[] | select(.finding) | .finding | {id: .osv, fixed_version, trace, reachability: (if .trace[0].function then "binary-symbol" elif .trace[0].package then "package" else "module" end)}]' "$output/binary.json" >"$output/findings.json"
 fi
-jq -n --arg role "$role" --arg sha "$source_sha" --arg status "$status" --arg source_status "$source_status" --arg metadata_status "$metadata_status" --argjson exit_code "$scan_exit" --argjson findings "$findings" \
-    '{role:$role,source_sha:$sha,status:$status,metadata_status:$metadata_status,source_status:$source_status,scanner_exit:$exit_code,findings:$findings}' >"$output/summary.json"
-cat "$output/summary.json"
+jq -n --arg role "$role" --arg sha "$source_sha" --arg status "$status" --arg source_status "$source_status" --arg metadata_status "$metadata_status" --argjson exit_code "$scan_exit" --slurpfile findings "$output/findings.json" \
+    '{role:$role,source_sha:$sha,status:$status,metadata_status:$metadata_status,source_status:$source_status,scanner_exit:$exit_code,findings:$findings[0]}' >"$output/summary.json"
+jq '{role,source_sha,status,source_status,scanner_exit,advisories: [.findings[] | {id,reachability}] | unique}' "$output/summary.json"
 [[ "$status" != error && "$source_status" != error ]] || exit 1
 if [[ "$role" = operational ]]; then
     [[ "$status" = supported ]] || exit 1

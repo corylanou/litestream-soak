@@ -15,7 +15,9 @@ func TestBinarySecurityEvidence(t *testing.T) {
 		exit                               int
 		wantFailure                        bool
 		metadataFailure                    bool
+		expectedFindings                   int
 	}{
+		{name: "large scanner output", role: "candidate", output: "{\"config\":{}}\n" + strings.Repeat("{\"finding\":{\"osv\":\"GO-EXAMPLE\",\"trace\":[{\"module\":\"example.org/module\"}]}}\n", 20000), status: "supported", expectedFindings: 20000},
 		{name: "clean", role: "operational", output: `{"config":{"scanner_version":"v1.7.0"}}`, status: "supported"},
 		{name: "candidate findings", role: "candidate", output: `{"config":{}}
 {"finding":{"osv":"GO-EXAMPLE","trace":[{"module":"example.org/module","package":"example.org/module/pkg","function":"Run"}]}}`, status: "supported"},
@@ -39,7 +41,7 @@ func TestBinarySecurityEvidence(t *testing.T) {
 			for name, body := range map[string]string{
 				"go":          "#!/bin/sh\necho 'build metadata'\nexit \"$GO_EXIT\"\n",
 				"timeout":     "#!/bin/sh\nshift\nexec \"$@\"\n",
-				"govulncheck": "#!/bin/sh\nprintf '%s\\n' \"$SCAN_OUTPUT\"\nprintf '%s\\n' \"$SCAN_STDERR\" >&2\nexit \"$SCAN_EXIT\"\n",
+				"govulncheck": "#!/bin/sh\ncat \"$SCAN_FILE\"\nprintf '%s\\n' \"$SCAN_STDERR\" >&2\nexit \"$SCAN_EXIT\"\n",
 			} {
 				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0700); err != nil {
 					t.Fatal(err)
@@ -49,13 +51,17 @@ func TestBinarySecurityEvidence(t *testing.T) {
 			if err := os.WriteFile(binary, []byte("binary"), 0600); err != nil {
 				t.Fatal(err)
 			}
+			input := filepath.Join(dir, "input.json")
+			if err := os.WriteFile(input, []byte(tc.output), 0600); err != nil {
+				t.Fatal(err)
+			}
 			out := filepath.Join(dir, "evidence")
 			cmd := exec.Command("bash", "../../scripts/scan-binary.sh", tc.role, "203d7369ecb26c9adecadb501cd95682decdb527", binary, out)
 			goExit := "0"
 			if tc.metadataFailure {
 				goExit = "1"
 			}
-			cmd.Env = append(os.Environ(), "GO_EXIT="+goExit, "PATH="+dir+":"+os.Getenv("PATH"), "SCAN_OUTPUT="+tc.output, "SCAN_STDERR="+tc.stderr, "SCAN_EXIT="+string(rune('0'+tc.exit)))
+			cmd.Env = append(os.Environ(), "GO_EXIT="+goExit, "PATH="+dir+":"+os.Getenv("PATH"), "SCAN_FILE="+input, "SCAN_STDERR="+tc.stderr, "SCAN_EXIT="+string(rune('0'+tc.exit)))
 			output, err := cmd.CombinedOutput()
 			if (err != nil) != tc.wantFailure {
 				t.Fatalf("failure=%v want %v: %s", err, tc.wantFailure, output)
@@ -65,15 +71,19 @@ func TestBinarySecurityEvidence(t *testing.T) {
 				t.Fatal(err)
 			}
 			var summary struct {
-				Status    string `json:"status"`
-				SourceSHA string `json:"source_sha"`
-				Role      string `json:"role"`
+				Status    string            `json:"status"`
+				SourceSHA string            `json:"source_sha"`
+				Role      string            `json:"role"`
+				Findings  []json.RawMessage `json:"findings"`
 			}
 			if err := json.Unmarshal(data, &summary); err != nil {
 				t.Fatal(err)
 			}
 			if summary.Status != tc.status || summary.Role != tc.role || summary.SourceSHA != "203d7369ecb26c9adecadb501cd95682decdb527" {
 				t.Fatalf("unexpected summary: %s", data)
+			}
+			if tc.expectedFindings > 0 && len(summary.Findings) != tc.expectedFindings {
+				t.Fatalf("got %d findings, want %d", len(summary.Findings), tc.expectedFindings)
 			}
 			for _, name := range []string{"binary.json", "binary.stderr", "buildinfo.txt", "sha256.txt"} {
 				if _, err := os.Stat(filepath.Join(out, name)); err != nil {

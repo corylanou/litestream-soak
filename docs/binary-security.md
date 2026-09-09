@@ -60,8 +60,11 @@ HTTP polling path, not the NATS/WireGuard tailing path, and emits JSON log entri
 with level, instance, message, region, timestamp and metadata. Deployments use
 remote-only builds, build-only/image-label output, and machine-list JSON. The
 build checks required command flags; harness tests verify platform JSON decoding,
-event classification, image-reference parsing and deployment snapshots. These
-checks do not perform a live deployment; the coordinator owns that validation.
+event classification, image-reference parsing and deployment snapshots. The
+coordinator also verified the patched macOS binary against live Fly APIs:
+machine-list JSON identified the started control machine, and buffered JSON logs
+exited successfully. No credentials were copied. These checks do not perform a
+live deployment; the coordinator owns that validation.
 
 ## Reviewed residuals
 

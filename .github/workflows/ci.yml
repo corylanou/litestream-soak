@@ -47,6 +47,7 @@ jobs:
     timeout-minutes: 35
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         component: [control, worker]
     steps:
