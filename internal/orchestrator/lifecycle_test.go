@@ -1762,6 +1762,7 @@ func (c *successTeardownGateContext) Done() <-chan struct{} {
 func TestSuccessTeardownWaitsForDeployment(t *testing.T) {
 	db := openTestDB(t)
 	_, worker := createCleanSuccessCandidate(t, db, "pr-209", 209)
+	addMeasuredSuccessEvidence(t, db, worker.ID)
 	var destroys atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
@@ -1820,6 +1821,7 @@ func TestSuccessTeardownRevalidatesAfterWorkerLock(t *testing.T) {
 		t.Run(change, func(t *testing.T) {
 			db := openTestDB(t)
 			_, worker := createCleanSuccessCandidate(t, db, "pr-209", 209)
+			addMeasuredSuccessEvidence(t, db, worker.ID)
 			manager := NewManager(nil, db, nil, nil, "app", ReplicaConfig{}, "", "")
 			unlockSource, err := manager.lockSource(context.Background(), worker.Source)
 			if err != nil {
@@ -1903,6 +1905,7 @@ func TestSuccessTeardownArchivesBeforeCleanup(t *testing.T) {
 		t.Run(fmt.Sprintf("cleanupFails=%t", cleanupFails), func(t *testing.T) {
 			db := openTestDB(t)
 			_, worker := createCleanSuccessCandidate(t, db, "pr-209", 209)
+			addMeasuredSuccessEvidence(t, db, worker.ID)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if cleanupFails {
 					w.WriteHeader(http.StatusBadRequest)
@@ -1965,6 +1968,7 @@ func TestSuccessTeardownArchivesBeforeCleanup(t *testing.T) {
 func TestSuccessTeardownCancellationStopsRemainingCleanup(t *testing.T) {
 	db := openTestDB(t)
 	_, worker := createCleanSuccessCandidate(t, db, "pr-209", 209)
+	addMeasuredSuccessEvidence(t, db, worker.ID)
 	second := worker
 	second.ID += "-second"
 	second.Name += "-second"
@@ -1978,6 +1982,7 @@ func TestSuccessTeardownCancellationStopsRemainingCleanup(t *testing.T) {
 	}
 	passedAt := time.Now().UTC().Add(time.Minute)
 	mustRecordAttributedFixture(t, db, &model.Verification{WorkerID: second.ID, StartedAt: passedAt.Add(-time.Second), CompletedAt: &passedAt, Status: "passed", CheckType: "integrity", Passed: true})
+	addMeasuredSuccessEvidence(t, db, second.ID)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var deletes atomic.Int32

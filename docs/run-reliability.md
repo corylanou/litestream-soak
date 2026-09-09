@@ -38,19 +38,27 @@ when `workload_counters_present` is true. Errors include busy errors; the busy
 counter is a subset. Repeated cumulative samples contribute only their increases within each immutable
 run identity and `workload_counter_epoch`. Epoch maxima prevent at-least-once
 outbox replay from inflating totals. Missing epochs leave coverage unknown.
-Run replacement, decreasing counters, and missing churn observations make
-coverage unknown; neither a reset nor a new zero counter clears old errors.
-Detailed error events and counter observations can describe the same underlying
-failure, so incident counts are evidence observations, not deduplicated root
-causes. Workload error totals come from cumulative counters independently.
+Forward-time heartbeats detect process replacement and genuine counter resets;
+late immutable events contribute epoch maxima without moving current health or
+liveness backward. Exact event IDs deduplicate delivery retries. Queue/cache
+requirements come from the workload configuration's load mode.
 
-Maintenance credit requires an attributed completion event named
-`maintenance_snapshot_completed`, `maintenance_compaction_completed`, or
-`maintenance_retention_completed`. Existing fleet reporters do not yet emit
-these events. Their maintenance exposure therefore remains unobserved and they
-cannot automatically qualify for clean-soak teardown. Configured intervals and
-object counts are not treated as proof that maintenance executed. No fleet,
-scenario activation, timeout, or deployment setting is changed here.
+Maintenance exposure comes from observed successful Litestream INFO logs:
+positive-size snapshot and compaction completions, and retention completions
+with a positive deletion count. All three kinds are required. Configured
+intervals, startup messages, attempts, and zero-deletion retention earn no
+credit. Missing or incomplete observation leaves eligibility unknown.
+
+Individual WARN/ERROR and retry/failure logs, including INFO reports, are redacted and persisted before notification to the
+shared background evidence uploader. Each carries original run identity and a
+unique observer-epoch/sequence ID. Unknown log formats invalidate observation
+completeness; valid routine DEBUG records are neutral. Process exit flushes any
+unterminated final line after the writers finish and before final delivery. The bounded outbox uses durable file and
+directory synchronization; failed persistence or exhausted capacity cancels the
+workload. Network delivery never runs in the log writer. Restart replays pending
+incidents without replacing their identity. Cumulative log counters preserve
+failure totals while exact events retain each original diagnostic; delivery
+retries and counter/event overlap do not inflate totals.
 
 Comparison findings are fixed, improved, unchanged, new, regressed, or
 inconclusive. Credited findings require complete comparable coverage, matching
@@ -59,8 +67,10 @@ within one minute. Missing profiles, ambiguous duplicate profile/region pairs,
 and incomplete coverage are inconclusive. A regression is not canceled by an
 improvement in another profile. Already observed worse results remain worse.
 
-The control plane can preserve only reports it receives. It does not implement a
-worker-side delivery outbox. Abrupt/unobserved endings remain unknown. Evidence
+The control plane can preserve only reports it receives. The worker outbox
+survives process restart on retained storage, but cannot recover a destroyed
+volume or an incident that could not be persisted. Abrupt/unobserved endings
+remain unknown. Evidence
 journals intentionally have no destructive retention policy; disk growth and
 long-lived history query costs need operational monitoring. Data deleted before
 this migration cannot be reconstructed and is never inferred from worker age.

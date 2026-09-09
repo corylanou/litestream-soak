@@ -25,7 +25,8 @@ type runtimeSnapshot struct {
 }
 
 type statsPoller struct {
-	cfg *Config
+	maintenanceEvidence func() reporting.MaintenanceEvidence
+	cfg                 *Config
 
 	snapshotMu                           sync.Mutex
 	snapshot                             runtimeSnapshot
@@ -473,8 +474,12 @@ func (p *statsPoller) aggregateManyDBRuntime(databases []litestreamListDatabase,
 
 func (p *statsPoller) currentSnapshot() runtimeSnapshot {
 	p.snapshotMu.Lock()
-	defer p.snapshotMu.Unlock()
-	return p.snapshot
+	snapshot := p.snapshot
+	p.snapshotMu.Unlock()
+	if p.maintenanceEvidence != nil {
+		snapshot.MaintenanceEvidence = p.maintenanceEvidence()
+	}
+	return snapshot
 }
 
 func (p *statsPoller) setUptime(seconds float64) {

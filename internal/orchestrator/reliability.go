@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"math"
 	"sort"
 	"strings"
@@ -12,15 +14,19 @@ import (
 )
 
 type RunIncident struct {
-	RuntimeID      int                      `json:"runtime_id,omitempty"`
-	VerificationID int                      `json:"verification_id,omitempty"`
-	EventID        int                      `json:"event_id,omitempty"`
-	Run            reporting.WorkerIdentity `json:"run"`
-	At             time.Time                `json:"at"`
-	Kind           string                   `json:"kind"`
-	Classification string                   `json:"classification"`
-	Message        string                   `json:"message"`
-	Attributed     bool                     `json:"attributed"`
+	IncidentEventID string                   `json:"incident_event_id,omitempty"`
+	WorkloadEventID string                   `json:"workload_event_id,omitempty"`
+	Operation       string                   `json:"workload_operation,omitempty"`
+	ErrorKind       string                   `json:"workload_error_kind,omitempty"`
+	RuntimeID       int                      `json:"runtime_id,omitempty"`
+	VerificationID  int                      `json:"verification_id,omitempty"`
+	EventID         int                      `json:"event_id,omitempty"`
+	Run             reporting.WorkerIdentity `json:"run"`
+	At              time.Time                `json:"at"`
+	Kind            string                   `json:"kind"`
+	Classification  string                   `json:"classification"`
+	Message         string                   `json:"message"`
+	Attributed      bool                     `json:"attributed"`
 }
 
 type WorkerRunEvidence struct {
@@ -41,6 +47,9 @@ type WorkerRunEvidence struct {
 	WorkloadBusy              uint64        `json:"workload_busy"`
 	WorkloadErrors            uint64        `json:"workload_errors"`
 	WorkloadProgress          uint64        `json:"workload_progress"`
+	MaintenanceSnapshots      uint64        `json:"maintenance_snapshots"`
+	MaintenanceCompactions    uint64        `json:"maintenance_compactions"`
+	MaintenanceRetentions     uint64        `json:"maintenance_retentions"`
 	MaintenanceObservations   int           `json:"maintenance_observations"`
 	FirstVerification         *time.Time    `json:"first_verification,omitempty"`
 	LastVerification          *time.Time    `json:"last_verification,omitempty"`
@@ -111,7 +120,7 @@ func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Ti
 		if v.CompletedAt != nil {
 			at = *v.CompletedAt
 		}
-		if at.Before(deployment.StartedAt) || (end != nil && at.After(*end)) {
+		if v.Run.DeploymentID == 0 && (at.Before(deployment.StartedAt) || (end != nil && at.After(*end))) {
 			continue
 		}
 		e := ensure(v.WorkerID, v.Run.ProfileName, v.Run.Region)
@@ -181,8 +190,9 @@ func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Ti
 	if err != nil {
 		return nil, err
 	}
+	seenEvents := make(map[string]bool)
 	for _, event := range events {
-		if event.CreatedAt.Before(deployment.StartedAt) || (end != nil && event.CreatedAt.After(*end)) || strings.HasPrefix(event.EventType, "verification_") {
+		if strings.HasPrefix(event.EventType, "verification_") {
 			continue
 		}
 		kind := incidentEventClass(event.EventType)
@@ -190,16 +200,31 @@ func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Ti
 			continue
 		}
 		var payload struct {
+			WorkloadEventID string `json:"workload_event_id"`
+			IncidentEventID string `json:"incident_event_id"`
+			Operation       string `json:"workload_operation"`
+			ErrorKind       string `json:"workload_error_kind"`
 			reporting.WorkerEventPayload
 			Attributed bool `json:"attributed"`
 		}
 		_ = json.Unmarshal([]byte(event.Details), &payload)
+		if payload.DeploymentID == 0 && (event.CreatedAt.Before(deployment.StartedAt) || (end != nil && event.CreatedAt.After(*end))) {
+			continue
+		}
+		eventID := firstNonEmpty(payload.WorkloadEventID, payload.IncidentEventID)
+		if eventID != "" {
+			key := event.WorkerID + "\x00" + payload.RunID + "\x00" + eventID
+			if seenEvents[key] {
+				continue
+			}
+			seenEvents[key] = true
+		}
 		if payload.DeploymentID != 0 && payload.DeploymentID != deployment.ID {
 			continue
 		}
 		e := ensure(event.WorkerID, payload.ProfileName, payload.Region)
 		attributed := payload.Attributed && (model.Verification{Attributed: true, Run: payload.WorkerIdentity}).MatchesDeployment(model.Worker{ID: event.WorkerID}, deployment)
-		e.Incidents = append(e.Incidents, RunIncident{EventID: event.ID, Run: payload.WorkerIdentity, At: event.CreatedAt, Kind: event.EventType, Classification: kind, Message: event.Message, Attributed: attributed})
+		e.Incidents = append(e.Incidents, RunIncident{IncidentEventID: payload.IncidentEventID, WorkloadEventID: payload.WorkloadEventID, Operation: payload.Operation, ErrorKind: payload.ErrorKind, EventID: event.ID, Run: payload.WorkerIdentity, At: event.CreatedAt, Kind: event.EventType, Classification: kind, Message: event.Message, Attributed: attributed})
 		if !attributed {
 			e.UnattributedObservations++
 			continue
@@ -209,18 +234,31 @@ func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Ti
 			e.ExpectedInjections++
 		case "maintenance":
 			e.MaintenanceObservations++
+			switch event.EventType {
+			case "maintenance_snapshot_completed":
+				e.MaintenanceSnapshots++
+			case "maintenance_compaction_completed":
+				e.MaintenanceCompactions++
+			case "maintenance_retention_completed":
+				e.MaintenanceRetentions++
+			}
 		case "unavailable":
 			e.IncompleteObservations++
 		default:
 			var counters workloadEvidenceCounters
 			_ = json.Unmarshal([]byte(event.Details), &counters)
-			if event.EventType != "workload_error" || !counters.Present {
+			countedWorkload := event.EventType == "workload_error" && counters.Present
+			countedLog := event.EventType == "litestream_log_error" && payload.Epoch != "" && payload.Errors > 0
+			if !countedWorkload && !countedLog {
 				e.UnexpectedFailures++
 			}
 		}
 	}
 	result := make([]WorkerRunEvidence, 0, len(byWorker))
 	for _, e := range byWorker {
+		if e.FirstVerification == nil {
+			e.HistoryComplete = false
+		}
 		if e.FirstVerification != nil && e.LastVerification != nil {
 			e.VerifiedSpanSeconds = e.LastVerification.Sub(*e.FirstVerification).Seconds()
 		}
@@ -276,8 +314,8 @@ func evaluateRunEligibility(e *WorkerRunEvidence, start time.Time, end *time.Tim
 	if e.WorkloadProgress == 0 && e.WorkloadMutations == 0 {
 		e.EligibilityReasons = append(e.EligibilityReasons, "workload progress unproven")
 	}
-	if e.MaintenanceObservations == 0 {
-		e.EligibilityReasons = append(e.EligibilityReasons, "maintenance exposure unobserved")
+	if e.MaintenanceSnapshots == 0 || e.MaintenanceCompactions == 0 || e.MaintenanceRetentions == 0 {
+		e.EligibilityReasons = append(e.EligibilityReasons, "snapshot, compaction, or positive retention exposure unobserved")
 	}
 	if e.CurrentHealth == "pending" {
 		e.EligibilityReasons = append(e.EligibilityReasons, "latest verification is pending")
@@ -380,10 +418,26 @@ func applyReliabilityVerdict(comparison *DeploymentComparisonResponse) {
 	}
 }
 
-func recordRuntimeEvidence(db *model.DB, identity reporting.WorkerIdentity, runtime reporting.RuntimePayload, attributed bool) error {
-	body, err := json.Marshal(runtime)
-	if err != nil {
-		return err
+func decodeEvidenceReport(body io.Reader, payload any) (json.RawMessage, error) {
+	var raw json.RawMessage
+	if err := json.NewDecoder(body).Decode(&raw); err != nil {
+		return nil, err
 	}
-	return db.RecordRuntimeEvidence(identity, body, attributed)
+	if trimmed := strings.TrimSpace(string(raw)); len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, fmt.Errorf("evidence report must be a JSON object")
+	}
+	if err := json.Unmarshal(raw, payload); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+func attributedReportJSON(raw json.RawMessage, workerID string, attributed bool) ([]byte, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	fields["worker_id"], _ = json.Marshal(workerID)
+	fields["attributed"], _ = json.Marshal(attributed)
+	return json.Marshal(fields)
 }

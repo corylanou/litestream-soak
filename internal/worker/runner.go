@@ -36,6 +36,7 @@ func NewRunner(cfg Config) *Runner {
 	runner.profiles = newPprofCapturer(&runner.cfg)
 	runner.litestreamManager = newLitestreamManager(&runner.cfg)
 	runner.statsPoller = newStatsPoller(&runner.cfg)
+	runner.maintenanceEvidence = runner.litestreamLog.MaintenanceEvidence
 	runner.statsPoller.litestreamPID = runner.litestreamManager.litestreamPID
 	runner.s3ListRequests = func() int64 {
 		if runner.s3FaultProxy == nil {
@@ -54,8 +55,14 @@ func (r *Runner) Run(ctx context.Context) error {
 	SetWorkerInfo(r.cfg)
 	startTime := time.Now()
 	r.reporter = NewReporter(r.cfg)
+	r.observeLogIncidents(cancelRun)
 	stopChurnUploader := r.startChurnUploader(runCtx)
-	defer stopChurnUploader()
+	defer func() {
+		stopChurnUploader()
+		if err := r.flushChurnEvidence(context.WithoutCancel(runCtx)); err != nil {
+			slog.Warn("Final evidence delivery pending", "error", err)
+		}
+	}()
 
 	if err := r.startS3FaultProxy(runCtx); err != nil {
 		return fmt.Errorf("start s3 fault proxy: %w", err)

@@ -5,10 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/corylanou/litestream-soak/internal/reporting"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 func TestEvidenceSurvivesRetentionDeletionAndReopen(t *testing.T) {
@@ -150,5 +151,31 @@ func TestRuntimeEvidenceSurvivesWorkerRecreation(t *testing.T) {
 	}
 	if err := db.RecordRuntimeEvidence(identity, json.RawMessage(`invalid`), true); err == nil {
 		t.Fatal("invalid JSON accepted")
+	}
+}
+
+func TestEvidenceEventUsesOriginalSourceAfterRecreation(t *testing.T) {
+	db := seriesTestDB(t)
+	worker := Worker{ID: "worker", Name: "worker", Source: "new-source", ProfileName: "low-volume", ProfileConfig: "{}"}
+	if err := db.CreateWorker(&worker); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordEvent(worker.ID, "litestream_log_error", "original error", `{"source":"old-source","run_id":"original"}`); err != nil {
+		t.Fatal(err)
+	}
+	events, err := db.ListEvidenceEvents("old-source")
+	if err != nil || len(events) != 1 {
+		t.Fatalf("original evidence missing: %v %v", events, err)
+	}
+}
+
+func TestEvidenceWithUnknownSourceRemainsVisible(t *testing.T) {
+	db := seriesTestDB(t)
+	if err := db.RecordRuntimeEvidence(reporting.WorkerIdentity{WorkerID: "orphan"}, json.RawMessage(`{"message":"legacy failure"}`), false, "event"); err != nil {
+		t.Fatal(err)
+	}
+	records, err := db.ListRuntimeEvidence("main", 1)
+	if err != nil || len(records) != 1 || records[0].Attributed {
+		t.Fatalf("unknown evidence lost or credited: %+v %v", records, err)
 	}
 }
