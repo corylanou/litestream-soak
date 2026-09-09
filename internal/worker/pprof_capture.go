@@ -244,7 +244,7 @@ func (c *pprofCapturer) pruneLocalProfiles(dir string, keep int) {
 	// accumulate baselines without bound.
 	var files, baselines []pprofProfileFile
 	for _, entry := range entries {
-		if entry.IsDir() || strings.HasSuffix(entry.Name(), ".json") {
+		if entry.IsDir() || (!strings.HasSuffix(entry.Name(), ".pprof") && !strings.HasSuffix(entry.Name(), ".txt")) {
 			continue
 		}
 		if c.pending(filepath.Join(dir, entry.Name())) {

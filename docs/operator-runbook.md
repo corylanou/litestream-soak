@@ -838,10 +838,11 @@ seconds for the control socket, and takes baseline heap, allocs, goroutine,
 and text MemStats evidence plus a five-second startup CPU sample taken first.
 Hourly capture continues. Verification failures, sync degradation/recovery,
 and disk/metrics condition changes queue incident captures, including
-recovered conditions; existing failure reports remain independent. Shutdown
-cancels and joins the collector before a final non-CPU capture with a
-five-second deadline while Litestream is still running. A crashed process may
-only produce unavailable manifests.
+recovered conditions; existing failure reports remain independent. Shutdown has a ten-second total budget: cancel and join collection, allow up
+to five seconds for final non-CPU capture while Litestream remains running,
+then use a three-second upload batch bounded by the remaining deadline. Final
+artifacts are uploaded newest first, ahead of older pending captures. A
+crashed process may only produce unavailable manifests.
 
 Capture sets are serialized and bounded to 45 seconds. CPU sampling is limited
 to once per minute; rate limiting, cancellations, a full 16-event queue, and
@@ -856,6 +857,12 @@ capture and every 30 seconds, including after restart. There is no automatic
 expiry of failed uploads. This bounds disk use without deleting unuploaded
 evidence. Capture itself is best effort; logs report failures and
 queue/storage limits rather than treating missing evidence as success.
+
+A delivered remote manifest reports `upload=uploaded`; the local manifest
+stays pending until both artifact (when available) and manifest delivery
+succeed. Failed final uploads remain local and cannot survive destruction of
+the volume. Retain and retrieve the volume when shutdown reports upload
+failure.
 
 JSON sidecars include shared run/deployment/workload identities, independent
 candidate/workload/worker SHA, effective workload hash/configuration,

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -142,6 +143,10 @@ func (c *pprofCapturer) pending(filename string) bool {
 }
 
 func (c *pprofCapturer) retryPending(ctx context.Context, dir string) {
+	c.retryPendingPhase(ctx, dir, "")
+}
+
+func (c *pprofCapturer) retryPendingPhase(ctx context.Context, dir, phase string) {
 	if c.cfg.ReplicaType != "s3" {
 		return
 	}
@@ -150,6 +155,9 @@ func (c *pprofCapturer) retryPending(ctx context.Context, dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
+	}
+	if phase != "" {
+		slices.Reverse(entries)
 	}
 	for _, entry := range entries {
 		if ctx.Err() != nil {
@@ -161,7 +169,7 @@ func (c *pprofCapturer) retryPending(ctx context.Context, dir string) {
 		filename := filepath.Join(dir, entry.Name())
 		body, err := os.ReadFile(filename)
 		var record profileRecord
-		if err != nil || json.Unmarshal(body, &record) != nil || record.Upload != "pending" {
+		if err != nil || json.Unmarshal(body, &record) != nil || record.Upload != "pending" || (phase != "" && record.Phase != phase) {
 			continue
 		}
 		if record.Status == "available" {
@@ -171,7 +179,7 @@ func (c *pprofCapturer) retryPending(ctx context.Context, dir string) {
 				continue
 			}
 		}
-		if err := c.upload(ctx, filename, filepath.Base(filename)); err != nil {
+		if err := c.uploadRecord(ctx, filename, &record); err != nil {
 			c.recordStatus(record.Phase, "upload-failed")
 			continue
 		}
@@ -197,14 +205,22 @@ func (r *Runner) startProfileCapture(ctx context.Context) func() {
 	done := make(chan struct{})
 	go func() { defer close(done); r.profiles.Run(captureCtx) }()
 	return func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
 		cancel()
-		<-done
+		select {
+		case <-done:
+		case <-shutdownCtx.Done():
+			r.profiles.recordStatus("final", "cancelled-waiting")
+			return
+		}
 		if !r.cfg.PprofCaptureEnabled {
 			return
 		}
-		finalCtx, finalCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer finalCancel()
+		finalCtx, finalCancel := context.WithTimeout(shutdownCtx, 5*time.Second)
 		r.profiles.captureSet(finalCtx, "final")
+		finalCancel()
+		r.profiles.retryPendingPhase(shutdownCtx, filepath.Join(r.cfg.DataDir, "profiles"), "final")
 	}
 }
 
@@ -278,4 +294,30 @@ func (c *pprofCapturer) runUploads(ctx context.Context) {
 		}
 		c.retryPending(ctx, filepath.Join(c.cfg.DataDir, "profiles"))
 	}
+}
+
+func (c *pprofCapturer) uploadRecord(ctx context.Context, filename string, record *profileRecord) error {
+	delivery := *record
+	delivery.Upload = "uploaded"
+	body, err := json.Marshal(delivery)
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(filename), ".upload-")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := os.Remove(f.Name()); err != nil {
+			slog.Warn("Remove upload staging metadata", "error", err)
+		}
+	}()
+	if _, err := f.Write(body); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return c.upload(ctx, f.Name(), filepath.Base(filename))
 }

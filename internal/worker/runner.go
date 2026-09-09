@@ -106,10 +106,13 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("write litestream config: %w", err)
 	}
 
-	if err := r.startLitestream(runCtx); err != nil {
+	litestreamCtx, cancelLitestream := context.WithCancel(context.WithoutCancel(runCtx))
+	if err := r.startLitestream(litestreamCtx); err != nil {
+		cancelLitestream()
 		return fmt.Errorf("start litestream: %w", err)
 	}
 	defer r.stopLitestream()
+	defer cancelLitestream()
 	r.monitorLitestream(runCtx, cancelRun)
 	stopProfiles := r.startProfileCapture(runCtx)
 	defer stopProfiles()

@@ -634,3 +634,140 @@ func TestPprofSyncRecoveryRetainsIncidentTriggers(t *testing.T) {
 		t.Fatalf("lost recovered incident: %v", incidents)
 	}
 }
+
+func TestPprofShutdownDeliversFinalArtifacts(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.ReplicaType = "s3"
+	cfg.S3Bucket, cfg.S3AccessKey, cfg.S3SecretKey = "bucket", "key", "secret"
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("pprof-%d.sock", time.Now().UnixNano()))
+	startTestUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "evidence") }))
+	dir := t.TempDir()
+	remote := t.TempDir()
+	t.Setenv("PROFILE_REMOTE", remote)
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	script := "#!/bin/sh\nprevious=\nlast=\nfor arg in \"$@\"; do previous=\"$last\"; last=\"$arg\"; done\ncp \"$previous\" \"$PROFILE_REMOTE/$(basename \"$last\")\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "s3cmd"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(cfg)
+	stop := runner.startProfileCapture(context.Background())
+	stop()
+	for _, kind := range []string{"heap.pprof", "allocs.pprof", "goroutine.txt", "memstats.txt"} {
+		files, _ := filepath.Glob(filepath.Join(remote, "*_final_"+kind))
+		if len(files) != 1 {
+			t.Errorf("final object missing for %s: %v", kind, files)
+			continue
+		}
+		body, err := os.ReadFile(files[0] + ".json")
+		if err != nil {
+			t.Error(err)
+			continue
+		}
+		var record profileRecord
+		if err := json.Unmarshal(body, &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.Upload != "uploaded" {
+			t.Errorf("remote metadata claims %s", record.Upload)
+		}
+	}
+}
+
+func TestPprofShutdownBoundsSlowUpload(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.ReplicaType = "s3"
+	cfg.S3Bucket, cfg.S3AccessKey, cfg.S3SecretKey = "bucket", "key", "secret"
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("pprof-%d.sock", time.Now().UnixNano()))
+	startTestUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "evidence") }))
+	dir := t.TempDir()
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(dir, "s3cmd"), []byte("#!/bin/sh\nexec sleep 30\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(cfg)
+	stop := runner.startProfileCapture(context.Background())
+	started := time.Now()
+	stop()
+	if time.Since(started) > 10*time.Second {
+		t.Fatal("shutdown exceeded total budget")
+	}
+	files, _ := filepath.Glob(filepath.Join(cfg.DataDir, "profiles", "*_final_heap.pprof"))
+	if len(files) != 1 || !runner.profiles.pending(files[0]) {
+		t.Fatalf("failed final upload not retained: %v", files)
+	}
+	status, err := os.ReadFile(filepath.Join(cfg.DataDir, "profiles", "status.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(status), "upload-failed") {
+		t.Fatal("final upload not attempted")
+	}
+}
+
+func TestPprofRunnerKeepsProcessAliveForFinalCapture(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.ReplicaPath = filepath.Join(cfg.DataDir, "replicas")
+	cfg.DBPath = filepath.Join(cfg.DataDir, "test.db")
+	cfg.ConfigPath = filepath.Join(cfg.DataDir, "litestream.yml")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("pprof-%d.sock", time.Now().UnixNano()))
+	cfg.LoadMode = "none"
+	logicalTestDB(t, cfg.DBPath, "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+	dir := t.TempDir()
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(dir, "litestream"), []byte("#!/bin/sh\nexec sleep 60\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan struct{}, 1)
+	startTestUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sync" {
+			select {
+			case ready <- struct{}{}:
+			default:
+			}
+			_, _ = io.WriteString(w, `{"txid":1,"replicated_txid":1}`)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/debug/pprof/") {
+			select {
+			case ready <- struct{}{}:
+			default:
+			}
+			if ctx.Err() != nil {
+				select {
+				case <-runner.litestreamDoneChan():
+					http.Error(w, "process exited", http.StatusServiceUnavailable)
+					return
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
+			_, _ = io.WriteString(w, "evidence")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("runner stopped before sync: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner never synced")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(12 * time.Second):
+		t.Fatal("runner did not stop")
+	}
+	files, _ := filepath.Glob(filepath.Join(cfg.DataDir, "profiles", "*_final_heap.pprof"))
+	if len(files) != 1 {
+		t.Fatal("process was killed before final capture")
+	}
+}
