@@ -52,6 +52,24 @@ func TestDeploymentComparisonServesStaleWhileRefreshing(t *testing.T) {
 	if entry.cached != nil {
 		t.Fatalf("fast refresh should drop the cache, got %+v", entry.cached)
 	}
+	if _, ok := api.comparisons.entries[key]; ok {
+		t.Fatal("uncached entry was not evicted")
+	}
+}
+
+func TestDeploymentComparisonDropsResultsPastMaxStale(t *testing.T) {
+	api := NewAPI(openTestDB(t), nil, nil, nil, nil, nil)
+	expired := &DeploymentComparisonResponse{HeadSource: "expired"}
+	key := comparisonCacheKey{source: "main"}
+	api.comparisons.entries = map[comparisonCacheKey]*comparisonCacheEntry{key: {cached: expired, cachedAt: time.Now().Add(-2 * comparisonCacheMaxStale)}}
+
+	got, err := api.deploymentComparison(context.Background(), "main", "", "")
+	if err != nil {
+		t.Fatalf("deploymentComparison() error = %v", err)
+	}
+	if got == expired {
+		t.Fatal("deploymentComparison() served a result past the max stale age")
+	}
 }
 
 func TestDeploymentComparisonWithoutCacheReturnsBuiltResult(t *testing.T) {
@@ -67,5 +85,10 @@ func TestDeploymentComparisonWithoutCacheReturnsBuiltResult(t *testing.T) {
 	}
 	if (got == nil) != (want == nil) {
 		t.Fatalf("deploymentComparison() = %+v, want %+v", got, want)
+	}
+	api.comparisons.mu.Lock()
+	defer api.comparisons.mu.Unlock()
+	if len(api.comparisons.entries) != 0 {
+		t.Fatalf("uncached comparisons retained %d entries", len(api.comparisons.entries))
 	}
 }

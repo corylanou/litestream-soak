@@ -7,8 +7,10 @@ import (
 )
 
 const (
-	comparisonCacheTTL     = 2 * time.Minute
-	comparisonCacheMinCost = time.Second
+	comparisonCacheTTL      = 2 * time.Minute
+	comparisonCacheMaxStale = 15 * time.Minute
+	comparisonCacheMinCost  = time.Second
+	comparisonBuildTimeout  = 5 * time.Minute
 )
 
 type comparisonCache struct {
@@ -45,6 +47,9 @@ func (a *API) deploymentComparison(ctx context.Context, source, baseSource, head
 		e = &comparisonCacheEntry{}
 		c.entries[key] = e
 	}
+	if e.cached != nil && time.Since(e.cachedAt) >= comparisonCacheMaxStale {
+		e.cached = nil
+	}
 	if e.cached != nil && time.Since(e.cachedAt) < comparisonCacheTTL {
 		cached := e.cached
 		c.mu.Unlock()
@@ -72,21 +77,24 @@ func (a *API) deploymentComparison(ctx context.Context, source, baseSource, head
 }
 
 func (a *API) runComparisonFlight(e *comparisonCacheEntry, f *comparisonFlight, key comparisonCacheKey) {
-	ctx := a.backgroundContext
-	if ctx == nil {
-		ctx = context.Background()
+	parent := a.backgroundContext
+	if parent == nil {
+		parent = context.Background()
 	}
+	ctx, cancel := context.WithTimeout(parent, comparisonBuildTimeout)
+	defer cancel()
 	start := time.Now()
 	value, err := buildRequestedDeploymentComparison(a.db.WithReadContext(ctx), key.source, key.baseSource, key.headSource)
 
 	a.comparisons.mu.Lock()
 	e.flight = nil
-	switch {
-	case err != nil:
-	case time.Since(start) >= comparisonCacheMinCost:
+	if err == nil && value != nil && time.Since(start) >= comparisonCacheMinCost {
 		e.cached, e.cachedAt = value, time.Now()
-	default:
+	} else {
 		e.cached = nil
+	}
+	if e.cached == nil && a.comparisons.entries[key] == e {
+		delete(a.comparisons.entries, key)
 	}
 	a.comparisons.mu.Unlock()
 
