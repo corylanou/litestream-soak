@@ -25,6 +25,7 @@ type API struct {
 	alerts                 *AlertDispatcher
 	manager                *Manager
 	deployer               *Deployer
+	comparisons            comparisonCache
 }
 
 type WorkerDetailResponse struct {

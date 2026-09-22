@@ -21,10 +21,6 @@ type workloadEvidenceCounters struct {
 }
 
 func applyRuntimeEvidence(db *model.DB, deployment model.Deployment, end *time.Time, ensure func(string, string, string) *WorkerRunEvidence) error {
-	records, err := db.ListRuntimeEvidence(deploymentScorecardSource(deployment), deployment.ID, model.EvidenceWindow{DeploymentID: deployment.ID, Start: deployment.StartedAt, End: end})
-	if err != nil {
-		return err
-	}
 	previous := make(map[string]workloadEvidenceCounters)
 	lastRun := make(map[string]string)
 	lastHeartbeatAt := make(map[string]time.Time)
@@ -32,9 +28,10 @@ func applyRuntimeEvidence(db *model.DB, deployment model.Deployment, end *time.T
 	heartbeatMaintenance := make(map[string]reporting.MaintenanceEvidence)
 	seenEvents := make(map[string]bool)
 	maintenance := make(map[string]reporting.MaintenanceEvidence)
-	for _, record := range records {
+	windows := []model.EvidenceWindow{{DeploymentID: deployment.ID, Start: deployment.StartedAt, End: end}}
+	return db.EachRuntimeEvidence(deploymentScorecardSource(deployment), deployment.ID, windows, func(record model.RuntimeEvidence) error {
 		if record.Run.DeploymentID == 0 && (record.ReceivedAt.Before(deployment.StartedAt) || (end != nil && record.ReceivedAt.After(*end))) {
-			continue
+			return nil
 		}
 		var eventIdentity struct {
 			ID         string `json:"workload_event_id"`
@@ -49,7 +46,7 @@ func applyRuntimeEvidence(db *model.DB, deployment model.Deployment, end *time.T
 		if record.Kind == "event" && eventIdentity.ID != "" {
 			key := record.Run.WorkerID + "\x00" + record.Run.RunID + "\x00" + eventIdentity.ID
 			if seenEvents[key] {
-				continue
+				return nil
 			}
 			seenEvents[key] = true
 		}
@@ -70,7 +67,7 @@ func applyRuntimeEvidence(db *model.DB, deployment model.Deployment, end *time.T
 				message += ": " + original.EventType + ": " + original.Message
 			}
 			incident("runtime_attribution_unproven", "unavailable", message)
-			continue
+			return nil
 		}
 		var runtime reporting.RuntimePayload
 		if err := json.Unmarshal(record.RuntimeJSON, &runtime); err != nil {
@@ -99,7 +96,7 @@ func applyRuntimeEvidence(db *model.DB, deployment model.Deployment, end *time.T
 				e.IncompleteObservations++
 				incident("workload_counters_missing", "unavailable", "Churn workload counters are unavailable")
 			}
-			continue
+			return nil
 		}
 		if counters.Epoch == "" {
 			e.IncompleteObservations++
@@ -134,8 +131,8 @@ func applyRuntimeEvidence(db *model.DB, deployment model.Deployment, end *time.T
 		e.WorkloadBusy += max(counters.Busy, prior.Busy) - prior.Busy
 		e.WorkloadErrors += max(counters.Errors, prior.Errors) - prior.Errors
 		previous[runKey] = workloadEvidenceCounters{Present: true, Attempts: max(counters.Attempts, prior.Attempts), Mutations: max(counters.Mutations, prior.Mutations), Busy: max(counters.Busy, prior.Busy), Errors: max(counters.Errors, prior.Errors)}
-	}
-	return nil
+		return nil
+	})
 }
 
 func churnEvidenceRequired(config string) bool {

@@ -91,7 +91,7 @@ func (a *API) handleGetLatestDeploymentPrompt(w http.ResponseWriter, r *http.Req
 }
 
 func (a *API) handleGetLatestDeploymentComparison(w http.ResponseWriter, r *http.Request) {
-	comparison, err := buildRequestedDeploymentComparison(a.db.WithReadContext(r.Context()),
+	comparison, err := a.deploymentComparison(r.Context(),
 		strings.TrimSpace(r.URL.Query().Get("source")),
 		strings.TrimSpace(r.URL.Query().Get("base_source")),
 		strings.TrimSpace(r.URL.Query().Get("head_source")),
@@ -109,7 +109,7 @@ func (a *API) handleGetLatestDeploymentComparison(w http.ResponseWriter, r *http
 }
 
 func (a *API) handleGetLatestDeploymentComparisonPrompt(w http.ResponseWriter, r *http.Request) {
-	comparison, err := buildRequestedDeploymentComparison(a.db.WithReadContext(r.Context()),
+	comparison, err := a.deploymentComparison(r.Context(),
 		strings.TrimSpace(r.URL.Query().Get("source")),
 		strings.TrimSpace(r.URL.Query().Get("base_source")),
 		strings.TrimSpace(r.URL.Query().Get("head_source")),

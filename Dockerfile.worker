@@ -2,7 +2,7 @@ ARG LITESTREAM_SHA=main
 ARG WORKLOAD_SHA=ae88b164dd6304bcbb654a681df767ee59042eed
 
 # Stage 1: Build litestream + litestream-test from source
-FROM golang:1.25.13-bookworm@sha256:e401dae1bf814e29204a8cb7915682e1780951e609ca0dd8865ee1937f510c48 AS litestream-builder
+FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS litestream-builder
 ENV GOTOOLCHAIN=local
 RUN go version
 ARG LITESTREAM_SHA
