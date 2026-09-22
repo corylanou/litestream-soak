@@ -15,8 +15,9 @@ const (
 )
 
 type comparisonCache struct {
-	mu      sync.Mutex
-	entries map[comparisonCacheKey]*comparisonCacheEntry
+	mu         sync.Mutex
+	entries    map[comparisonCacheKey]*comparisonCacheEntry
+	generation uint64
 }
 
 type comparisonCacheKey struct {
@@ -30,9 +31,10 @@ type comparisonCacheEntry struct {
 }
 
 type comparisonFlight struct {
-	done  chan struct{}
-	value *DeploymentComparisonResponse
-	err   error
+	done       chan struct{}
+	generation uint64
+	value      *DeploymentComparisonResponse
+	err        error
 }
 
 func (a *API) deploymentComparison(ctx context.Context, source, baseSource, headSource string) (*DeploymentComparisonResponse, error) {
@@ -56,7 +58,7 @@ func (a *API) deploymentComparison(ctx context.Context, source, baseSource, head
 	}
 	f := e.flight
 	if f == nil {
-		f = &comparisonFlight{done: make(chan struct{})}
+		f = &comparisonFlight{done: make(chan struct{}), generation: c.generation}
 		e.flight = f
 		go a.runComparisonFlight(e, f, key)
 	}
@@ -89,6 +91,8 @@ func (a *API) runComparisonFlight(e *comparisonCacheEntry, f *comparisonFlight, 
 	e.flight = nil
 	switch {
 	case err != nil:
+	case f.generation != a.comparisons.generation:
+		e.cached = nil
 	case value != nil && time.Since(start) >= comparisonCacheMinCost:
 		e.cached, e.cachedAt = value, time.Now()
 	default:
@@ -101,6 +105,18 @@ func (a *API) runComparisonFlight(e *comparisonCacheEntry, f *comparisonFlight, 
 
 	f.value, f.err = value, err
 	close(f.done)
+}
+
+func (c *comparisonCache) invalidate() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.generation++
+	for key, e := range c.entries {
+		e.cached = nil
+		if e.flight == nil {
+			delete(c.entries, key)
+		}
+	}
 }
 
 func (c *comparisonCache) evictExpiredLocked() {

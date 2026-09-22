@@ -153,3 +153,22 @@ func TestComparisonCacheEvictsExpiredEntries(t *testing.T) {
 		t.Fatalf("entries = %d, want fresh and in-flight retained", len(c.entries))
 	}
 }
+
+func TestComparisonCacheInvalidateDropsResultsAndInFlightWrites(t *testing.T) {
+	api := NewAPI(openTestDB(t), nil, nil, nil, nil, nil)
+	key := comparisonCacheKey{source: "main"}
+	entry := &comparisonCacheEntry{cached: &DeploymentComparisonResponse{}, cachedAt: time.Now()}
+	api.comparisons.entries = map[comparisonCacheKey]*comparisonCacheEntry{key: entry}
+	flight := &comparisonFlight{done: make(chan struct{}), generation: api.comparisons.generation}
+	busy := &comparisonCacheEntry{flight: flight}
+	api.comparisons.entries[comparisonCacheKey{source: "pr-1"}] = busy
+
+	api.comparisons.invalidate()
+
+	if _, ok := api.comparisons.entries[key]; ok {
+		t.Fatal("invalidate kept an idle entry")
+	}
+	if flight.generation == api.comparisons.generation {
+		t.Fatal("invalidate did not advance the generation")
+	}
+}
