@@ -4,12 +4,14 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/model"
 )
 
 func TestDeploymentComparisonServesFreshCache(t *testing.T) {
 	api := NewAPI(openTestDB(t), nil, nil, nil, nil, nil)
 	want := &DeploymentComparisonResponse{HeadSource: "cached"}
-	key := comparisonCacheKey{source: "main"}
+	key := comparisonCacheKey{source: "main", deployments: "main=none"}
 	api.comparisons.entries = map[comparisonCacheKey]*comparisonCacheEntry{key: {cached: want, cachedAt: time.Now()}}
 
 	got, err := api.deploymentComparison(context.Background(), "main", "", "")
@@ -24,7 +26,7 @@ func TestDeploymentComparisonServesFreshCache(t *testing.T) {
 func TestDeploymentComparisonServesStaleWhileRefreshing(t *testing.T) {
 	api := NewAPI(openTestDB(t), nil, nil, nil, nil, nil)
 	stale := &DeploymentComparisonResponse{HeadSource: "stale"}
-	key := comparisonCacheKey{source: "main"}
+	key := comparisonCacheKey{source: "main", deployments: "main=none"}
 	entry := &comparisonCacheEntry{cached: stale, cachedAt: time.Now().Add(-2 * comparisonCacheTTL)}
 	api.comparisons.entries = map[comparisonCacheKey]*comparisonCacheEntry{key: entry}
 
@@ -60,7 +62,7 @@ func TestDeploymentComparisonServesStaleWhileRefreshing(t *testing.T) {
 func TestDeploymentComparisonDropsResultsPastMaxStale(t *testing.T) {
 	api := NewAPI(openTestDB(t), nil, nil, nil, nil, nil)
 	expired := &DeploymentComparisonResponse{HeadSource: "expired"}
-	key := comparisonCacheKey{source: "main"}
+	key := comparisonCacheKey{source: "main", deployments: "main=none"}
 	api.comparisons.entries = map[comparisonCacheKey]*comparisonCacheEntry{key: {cached: expired, cachedAt: time.Now().Add(-2 * comparisonCacheMaxStale)}}
 
 	got, err := api.deploymentComparison(context.Background(), "main", "", "")
@@ -98,7 +100,7 @@ func TestDeploymentComparisonKeepsStaleAfterFailedRefresh(t *testing.T) {
 	cancel()
 	api := NewAPIWithContext(ctx, openTestDB(t), nil, nil, nil, nil, nil)
 	stale := &DeploymentComparisonResponse{HeadSource: "stale"}
-	key := comparisonCacheKey{source: "main"}
+	key := comparisonCacheKey{source: "main", deployments: "main=none"}
 	entry := &comparisonCacheEntry{cached: stale, cachedAt: time.Now().Add(-2 * comparisonCacheTTL)}
 	api.comparisons.entries = map[comparisonCacheKey]*comparisonCacheEntry{key: entry}
 
@@ -154,21 +156,20 @@ func TestComparisonCacheEvictsExpiredEntries(t *testing.T) {
 	}
 }
 
-func TestComparisonCacheInvalidateDropsResultsAndInFlightWrites(t *testing.T) {
+func TestDeploymentComparisonKeyTracksLatestDeployment(t *testing.T) {
 	api := NewAPI(openTestDB(t), nil, nil, nil, nil, nil)
-	key := comparisonCacheKey{source: "main"}
-	entry := &comparisonCacheEntry{cached: &DeploymentComparisonResponse{}, cachedAt: time.Now()}
-	api.comparisons.entries = map[comparisonCacheKey]*comparisonCacheEntry{key: entry}
-	flight := &comparisonFlight{done: make(chan struct{}), generation: api.comparisons.generation}
-	busy := &comparisonCacheEntry{flight: flight}
-	api.comparisons.entries[comparisonCacheKey{source: "pr-1"}] = busy
-
-	api.comparisons.invalidate()
-
-	if _, ok := api.comparisons.entries[key]; ok {
-		t.Fatal("invalidate kept an idle entry")
+	before, err := api.comparisonDeploymentFingerprint(context.Background(), comparisonCacheKey{source: "main"})
+	if err != nil {
+		t.Fatalf("fingerprint error = %v", err)
 	}
-	if flight.generation == api.comparisons.generation {
-		t.Fatal("invalidate did not advance the generation")
+	if _, err := api.db.CreateDeployment(&model.Deployment{GitSHA: "soak-sha", LitestreamSHA: "litestream-sha", Source: "main", Status: "building"}); err != nil {
+		t.Fatalf("CreateDeployment() error = %v", err)
+	}
+	after, err := api.comparisonDeploymentFingerprint(context.Background(), comparisonCacheKey{source: "main"})
+	if err != nil {
+		t.Fatalf("fingerprint error = %v", err)
+	}
+	if before == after {
+		t.Fatalf("fingerprint %q did not change after a new deployment", after)
 	}
 }
