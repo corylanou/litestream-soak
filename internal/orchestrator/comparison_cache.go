@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 )
@@ -35,20 +36,18 @@ type comparisonFlight struct {
 }
 
 func (a *API) deploymentComparison(ctx context.Context, source, baseSource, headSource string) (*DeploymentComparisonResponse, error) {
-	key := comparisonCacheKey{source: source, baseSource: baseSource, headSource: headSource}
+	key := canonicalComparisonKey(source, baseSource, headSource)
 	c := &a.comparisons
 
 	c.mu.Lock()
 	if c.entries == nil {
 		c.entries = make(map[comparisonCacheKey]*comparisonCacheEntry)
 	}
+	c.evictExpiredLocked()
 	e := c.entries[key]
 	if e == nil {
 		e = &comparisonCacheEntry{}
 		c.entries[key] = e
-	}
-	if e.cached != nil && time.Since(e.cachedAt) >= comparisonCacheMaxStale {
-		e.cached = nil
 	}
 	if e.cached != nil && time.Since(e.cachedAt) < comparisonCacheTTL {
 		cached := e.cached
@@ -88,9 +87,11 @@ func (a *API) runComparisonFlight(e *comparisonCacheEntry, f *comparisonFlight, 
 
 	a.comparisons.mu.Lock()
 	e.flight = nil
-	if err == nil && value != nil && time.Since(start) >= comparisonCacheMinCost {
+	switch {
+	case err != nil:
+	case value != nil && time.Since(start) >= comparisonCacheMinCost:
 		e.cached, e.cachedAt = value, time.Now()
-	} else {
+	default:
 		e.cached = nil
 	}
 	if e.cached == nil && a.comparisons.entries[key] == e {
@@ -100,4 +101,30 @@ func (a *API) runComparisonFlight(e *comparisonCacheEntry, f *comparisonFlight, 
 
 	f.value, f.err = value, err
 	close(f.done)
+}
+
+func (c *comparisonCache) evictExpiredLocked() {
+	for key, e := range c.entries {
+		if e.cached != nil && time.Since(e.cachedAt) >= comparisonCacheMaxStale {
+			e.cached = nil
+		}
+		if e.cached == nil && e.flight == nil {
+			delete(c.entries, key)
+		}
+	}
+}
+
+func canonicalComparisonKey(source, baseSource, headSource string) comparisonCacheKey {
+	source = firstNonEmpty(strings.TrimSpace(source), "main")
+	baseSource = strings.TrimSpace(baseSource)
+	headSource = strings.TrimSpace(headSource)
+	if baseSource == "" && headSource == "" {
+		return comparisonCacheKey{source: source}
+	}
+	headSource = firstNonEmpty(headSource, source)
+	baseSource = firstNonEmpty(baseSource, "main")
+	if headSource == baseSource {
+		return comparisonCacheKey{source: headSource}
+	}
+	return comparisonCacheKey{baseSource: baseSource, headSource: headSource}
 }
