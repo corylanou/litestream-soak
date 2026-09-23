@@ -36,6 +36,12 @@ func ensureEvidenceJournal(db *sql.DB) error {
 	_, err = tx.Exec(fmt.Sprintf(`
  CREATE TABLE IF NOT EXISTS evidence_runtime (id INTEGER PRIMARY KEY, source TEXT NOT NULL, deployment_id INTEGER NOT NULL, identity_json TEXT NOT NULL, runtime_json TEXT NOT NULL, attributed BOOLEAN NOT NULL, received_at DATETIME NOT NULL, kind TEXT NOT NULL);
  CREATE INDEX IF NOT EXISTS evidence_runtime_deployment ON evidence_runtime(source,deployment_id);
+ CREATE TABLE IF NOT EXISTS evidence_profile_incidents (source TEXT NOT NULL, deployment_id INTEGER NOT NULL, worker_id TEXT NOT NULL, run_id TEXT NOT NULL, identity_digest TEXT NOT NULL, attributed BOOLEAN NOT NULL, incident_id TEXT NOT NULL, runtime_id INTEGER NOT NULL, ordinal INTEGER NOT NULL, incident_json TEXT NOT NULL, PRIMARY KEY(source,deployment_id,worker_id,run_id,identity_digest,attributed,incident_id));
+ CREATE INDEX IF NOT EXISTS evidence_profile_incidents_runtime ON evidence_profile_incidents(runtime_id,ordinal);
+ CREATE TABLE IF NOT EXISTS evidence_profile_records (id INTEGER PRIMARY KEY, digest TEXT NOT NULL UNIQUE, record_json TEXT NOT NULL, uses INTEGER NOT NULL);
+ CREATE INDEX IF NOT EXISTS evidence_profile_records_unused ON evidence_profile_records(uses) WHERE uses<=0;
+ CREATE TABLE IF NOT EXISTS evidence_compaction_progress (id INTEGER PRIMARY KEY CHECK(id=1), last_runtime_id INTEGER NOT NULL);
+ INSERT OR IGNORE INTO evidence_compaction_progress VALUES (1,0);
  CREATE TABLE IF NOT EXISTS evidence_metadata (id INTEGER PRIMARY KEY, started_at DATETIME NOT NULL);
  INSERT OR IGNORE INTO evidence_metadata VALUES (1, datetime('now'));
  CREATE TABLE IF NOT EXISTS evidence_verifications (
@@ -98,7 +104,8 @@ const verificationDeployment = "COALESCE(CASE WHEN json_valid(run_identity_json)
 const eventDeployment = "COALESCE(CASE WHEN json_valid(details) THEN json_extract(details,'$.deployment_id') END,0)"
 const evidenceWindowIndexes = `CREATE INDEX IF NOT EXISTS evidence_verification_window ON evidence_verifications(evidence_source,` + verificationDeployment + `,julianday(COALESCE(completed_at,started_at)));
 CREATE INDEX IF NOT EXISTS evidence_event_window ON evidence_events(evidence_source,` + eventDeployment + `,julianday(created_at));
-CREATE INDEX IF NOT EXISTS evidence_runtime_window ON evidence_runtime(source,deployment_id,julianday(received_at));`
+CREATE INDEX IF NOT EXISTS evidence_runtime_window ON evidence_runtime(source,deployment_id,julianday(received_at));
+CREATE INDEX IF NOT EXISTS evidence_runtime_retention ON evidence_runtime(deployment_id,julianday(received_at));`
 
 type EvidenceWindow struct {
 	DeploymentID int
@@ -181,12 +188,16 @@ func (d *DB) ListEvidenceEvents(source string, windows ...EvidenceWindow) ([]Eve
 }
 
 type RuntimeEvidence struct {
-	Kind        string                   `json:"kind"`
-	ID          int                      `json:"id"`
-	Run         reporting.WorkerIdentity `json:"run"`
-	RuntimeJSON json.RawMessage          `json:"runtime"`
-	Attributed  bool                     `json:"attributed"`
-	ReceivedAt  time.Time                `json:"received_at"`
+	Kind                     string                            `json:"kind"`
+	ID                       int                               `json:"id"`
+	Run                      reporting.WorkerIdentity          `json:"run"`
+	RuntimeJSON              json.RawMessage                   `json:"runtime"`
+	Attributed               bool                              `json:"attributed"`
+	ReceivedAt               time.Time                         `json:"received_at"`
+	ProfileRecords           []reporting.ProfileRecordEvidence `json:"-"`
+	ProfileIncidents         []reporting.ProfileIncident       `json:"-"`
+	ProfileRecordsExternal   bool                              `json:"-"`
+	ProfileIncidentsExternal bool                              `json:"-"`
 }
 
 func (d *DB) RecordRuntimeEvidence(identity reporting.WorkerIdentity, runtimeJSON json.RawMessage, attributed bool, kinds ...string) error {
@@ -201,8 +212,38 @@ func (d *DB) RecordRuntimeEvidence(identity reporting.WorkerIdentity, runtimeJSO
 	if err != nil {
 		return err
 	}
-	_, err = d.exec(`INSERT INTO evidence_runtime (source,deployment_id,identity_json,runtime_json,attributed,received_at,kind) VALUES (?,?,?,?,?,?,?)`, identity.Source, identity.DeploymentID, string(body), string(runtimeJSON), attributed, time.Now().UTC(), kind)
-	return err
+	var profile struct {
+		Incidents json.RawMessage `json:"profile_incidents"`
+		Records   json.RawMessage `json:"profile_records"`
+	}
+	canNormalize := json.Unmarshal(runtimeJSON, &profile) == nil && (len(profile.Incidents) > 0 || len(profile.Records) > 0)
+	stored := runtimeJSON
+	if canNormalize {
+		stored = json.RawMessage(`{}`)
+	}
+	tx, err := d.writer.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.Exec(`INSERT INTO evidence_runtime (source,deployment_id,identity_json,runtime_json,attributed,received_at,kind) VALUES (?,?,?,?,?,?,?)`, identity.Source, identity.DeploymentID, string(body), string(stored), attributed, time.Now().UTC(), kind)
+	if err != nil {
+		return err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+	if canNormalize {
+		compact, err := normalizeRuntimeEvidence(tx, int(id), identity, attributed, runtimeJSON, nil, nil, nil)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE evidence_runtime SET runtime_json=? WHERE id=?`, string(compact), id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (d *DB) ListRuntimeEvidence(source string, deploymentID int, windows ...EvidenceWindow) ([]RuntimeEvidence, error) {
@@ -215,32 +256,78 @@ func (d *DB) ListRuntimeEvidence(source string, deploymentID int, windows ...Evi
 }
 
 func (d *DB) EachRuntimeEvidence(source string, deploymentID int, windows []EvidenceWindow, fn func(RuntimeEvidence) error) error {
-	query := `SELECT id,identity_json,runtime_json,attributed,received_at,kind FROM evidence_runtime WHERE (source=? OR source='') AND deployment_id IN (?,0) ORDER BY id`
+	return d.eachRuntimeEvidence(source, deploymentID, windows, true, fn)
+}
+
+func (d *DB) EachRuntimeEvidenceCompact(source string, deploymentID int, windows []EvidenceWindow, fn func(RuntimeEvidence) error) error {
+	return d.eachRuntimeEvidence(source, deploymentID, windows, false, fn)
+}
+
+func (d *DB) eachRuntimeEvidence(source string, deploymentID int, windows []EvidenceWindow, expand bool, fn func(RuntimeEvidence) error) error {
+	query := `SELECT id,identity_json,runtime_json,attributed,received_at,kind FROM evidence_runtime WHERE (source=? OR source='') AND deployment_id IN (?,0)`
 	args := []any{source, deploymentID}
 	if len(windows) > 0 {
 		ids, idArgs := evidenceWindowQuery("evidence_runtime", "id", "deployment_id", "received_at", "id", source, windows)
-		query = "SELECT id,identity_json,runtime_json,attributed,received_at,kind FROM evidence_runtime WHERE id IN (" + strings.ReplaceAll(ids, "evidence_source", "source") + ") ORDER BY id"
+		query = "SELECT id,identity_json,runtime_json,attributed,received_at,kind FROM evidence_runtime WHERE id IN (" + strings.ReplaceAll(ids, "evidence_source", "source") + ")"
 		args = idArgs
 	}
-	rows, err := d.query(query, args...)
-	if err != nil {
+	var maxID int
+	if err := d.queryRow(`SELECT coalesce(max(id),0) FROM evidence_runtime`).Scan(&maxID); err != nil {
 		return err
 	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var e RuntimeEvidence
-		var identity string
-		var runtime []byte
-		if err := rows.Scan(&e.ID, &identity, &runtime, &e.Attributed, &e.ReceivedAt, &e.Kind); err != nil {
+	query += " AND id>? AND id<=? ORDER BY id LIMIT 64"
+	cache := make(map[int64]json.RawMessage)
+	decoded := make(map[int64]reporting.ProfileRecordEvidence)
+	arrays := &profileRecordArrayCache{}
+	cursor := 0
+	for {
+		pageArgs := append(append([]any(nil), args...), cursor, maxID)
+		rows, err := d.query(query, pageArgs...)
+		if err != nil {
 			return err
 		}
-		if err := json.Unmarshal([]byte(identity), &e.Run); err != nil {
+		type runtimeRow struct {
+			e        RuntimeEvidence
+			identity string
+			runtime  []byte
+		}
+		page := make([]runtimeRow, 0, 64)
+		for rows.Next() {
+			var row runtimeRow
+			if err := rows.Scan(&row.e.ID, &row.identity, &row.runtime, &row.e.Attributed, &row.e.ReceivedAt, &row.e.Kind); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			page = append(page, row)
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
 			return err
 		}
-		e.RuntimeJSON = json.RawMessage(runtime)
-		if err := fn(e); err != nil {
-			return err
+		for _, row := range page {
+			e := row.e
+			if err := json.Unmarshal([]byte(row.identity), &e.Run); err != nil {
+				return err
+			}
+			if expand {
+				e.RuntimeJSON, err = d.expandRuntimeEvidence(e.ID, row.runtime, cache)
+				if err != nil {
+					return err
+				}
+			} else {
+				e.RuntimeJSON = json.RawMessage(row.runtime)
+				if err := d.attachRuntimeProfileEvidence(&e, decoded, arrays); err != nil {
+					return err
+				}
+			}
+			if err := fn(e); err != nil {
+				return err
+			}
 		}
+		if len(page) < 64 {
+			return nil
+		}
+		cursor = page[len(page)-1].e.ID
 	}
-	return rows.Err()
 }

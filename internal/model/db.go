@@ -175,6 +175,17 @@ func Open(path string) (*DB, error) {
 	}
 	writer.SetMaxOpenConns(1)
 	writer.SetMaxIdleConns(1)
+	var existingTables int
+	if err := writer.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&existingTables); err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("check existing schema: %w", err)
+	}
+	if existingTables == 0 {
+		if _, err := writer.Exec(`PRAGMA auto_vacuum=INCREMENTAL; VACUUM`); err != nil {
+			_ = writer.Close()
+			return nil, fmt.Errorf("configure incremental vacuum: %w", err)
+		}
+	}
 
 	if _, err := writer.Exec(migrationSQL); err != nil {
 		_ = writer.Close()

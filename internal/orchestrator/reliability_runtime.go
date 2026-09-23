@@ -29,7 +29,7 @@ func applyRuntimeEvidence(db *model.DB, deployment model.Deployment, end *time.T
 	seenEvents := make(map[string]bool)
 	maintenance := make(map[string]reporting.MaintenanceEvidence)
 	windows := []model.EvidenceWindow{{DeploymentID: deployment.ID, Start: deployment.StartedAt, End: end}}
-	return db.EachRuntimeEvidence(deploymentScorecardSource(deployment), deployment.ID, windows, func(record model.RuntimeEvidence) error {
+	return db.EachRuntimeEvidenceCompact(deploymentScorecardSource(deployment), deployment.ID, windows, func(record model.RuntimeEvidence) error {
 		if record.Run.DeploymentID == 0 && (record.ReceivedAt.Before(deployment.StartedAt) || (end != nil && record.ReceivedAt.After(*end))) {
 			return nil
 		}
@@ -72,6 +72,12 @@ func applyRuntimeEvidence(db *model.DB, deployment model.Deployment, end *time.T
 		var runtime reporting.RuntimePayload
 		if err := json.Unmarshal(record.RuntimeJSON, &runtime); err != nil {
 			return err
+		}
+		if record.ProfileRecordsExternal {
+			runtime.ProfileRecords = record.ProfileRecords
+		}
+		if record.ProfileIncidentsExternal {
+			runtime.ProfileIncidents = record.ProfileIncidents
 		}
 		observeProfilingEvidence(e, record, runtime.ProfilingEvidence)
 		if record.Kind != "event" && reporting.SnapshotStatus(&runtime) != reporting.RuntimeSnapshotStatusHealthy {
