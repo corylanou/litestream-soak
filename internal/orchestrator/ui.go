@@ -319,7 +319,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		rollout = &progress
 	}
 
-	releaseComparison, err := buildRequestedDeploymentComparison(a.db.WithReadContext(r.Context()), requestedSource, baseSource, headSource)
+	releaseComparison, err := a.deploymentComparison(r.Context(), requestedSource, baseSource, headSource)
 	if err != nil {
 		return homePageData{}, err
 	}

@@ -206,29 +206,41 @@ func (d *DB) RecordRuntimeEvidence(identity reporting.WorkerIdentity, runtimeJSO
 }
 
 func (d *DB) ListRuntimeEvidence(source string, deploymentID int, windows ...EvidenceWindow) ([]RuntimeEvidence, error) {
+	var records []RuntimeEvidence
+	err := d.EachRuntimeEvidence(source, deploymentID, windows, func(e RuntimeEvidence) error {
+		records = append(records, e)
+		return nil
+	})
+	return records, err
+}
+
+func (d *DB) EachRuntimeEvidence(source string, deploymentID int, windows []EvidenceWindow, fn func(RuntimeEvidence) error) error {
 	query := `SELECT id,identity_json,runtime_json,attributed,received_at,kind FROM evidence_runtime WHERE (source=? OR source='') AND deployment_id IN (?,0) ORDER BY id`
 	args := []any{source, deploymentID}
 	if len(windows) > 0 {
-		query, args = evidenceWindowQuery("evidence_runtime", "id,identity_json,runtime_json,attributed,received_at,kind", "deployment_id", "received_at", "id", source, windows)
-		query = strings.ReplaceAll(query, "evidence_source", "source")
+		ids, idArgs := evidenceWindowQuery("evidence_runtime", "id", "deployment_id", "received_at", "id", source, windows)
+		query = "SELECT id,identity_json,runtime_json,attributed,received_at,kind FROM evidence_runtime WHERE id IN (" + strings.ReplaceAll(ids, "evidence_source", "source") + ") ORDER BY id"
+		args = idArgs
 	}
 	rows, err := d.query(query, args...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = rows.Close() }()
-	var records []RuntimeEvidence
 	for rows.Next() {
 		var e RuntimeEvidence
-		var identity, runtime string
+		var identity string
+		var runtime []byte
 		if err := rows.Scan(&e.ID, &identity, &runtime, &e.Attributed, &e.ReceivedAt, &e.Kind); err != nil {
-			return nil, err
+			return err
 		}
 		if err := json.Unmarshal([]byte(identity), &e.Run); err != nil {
-			return nil, err
+			return err
 		}
 		e.RuntimeJSON = json.RawMessage(runtime)
-		records = append(records, e)
+		if err := fn(e); err != nil {
+			return err
+		}
 	}
-	return records, rows.Err()
+	return rows.Err()
 }
