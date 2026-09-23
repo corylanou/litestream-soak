@@ -26,6 +26,10 @@ func TestVerificationBoundaryPinnedBinary(t *testing.T) {
 	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(candidate) {
 		t.Fatal("unsupported: candidate must be immutable")
 	}
+	goVersion := os.Getenv("SOAK_COMPATIBILITY_GO_VERSION")
+	if goVersion == "" {
+		goVersion = "go1.25.13"
+	}
 	build, err := buildinfo.ReadFile(binary)
 	if err != nil {
 		t.Fatal(err)
@@ -34,7 +38,7 @@ func TestVerificationBoundaryPinnedBinary(t *testing.T) {
 	for _, setting := range build.Settings {
 		settings[setting.Key] = setting.Value
 	}
-	if build.GoVersion != "go1.25.13" || settings["vcs.revision"] != candidate || settings["vcs.modified"] != "false" {
+	if build.GoVersion != goVersion || settings["vcs.revision"] != candidate || settings["vcs.modified"] != "false" {
 		t.Fatalf("binary identity mismatch: %s", build.String())
 	}
 	t.Logf("immutable build: %s", build.String())

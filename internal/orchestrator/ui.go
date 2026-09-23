@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -23,6 +25,7 @@ type homePageData struct {
 	Coverage                 coverageSnapshot
 	LatestDeployment         *DeploymentRolloutResponse
 	ReleaseComparison        *DeploymentComparisonResponse
+	ComparisonPending        bool
 	ActiveSources            []homeSourceCard
 	LatestRolloutURL         string
 	LatestRolloutPromptURL   string
@@ -319,7 +322,13 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		rollout = &progress
 	}
 
-	releaseComparison, err := a.deploymentComparison(r.Context(), requestedSource, baseSource, headSource)
+	comparisonCtx, cancelComparison := context.WithTimeout(r.Context(), homeComparisonWait)
+	releaseComparison, err := a.deploymentComparison(comparisonCtx, requestedSource, baseSource, headSource)
+	cancelComparison()
+	comparisonPending := false
+	if errors.Is(err, context.DeadlineExceeded) && r.Context().Err() == nil {
+		releaseComparison, err, comparisonPending = nil, nil, true
+	}
 	if err != nil {
 		return homePageData{}, err
 	}
@@ -352,6 +361,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		Coverage:                 buildCoverageSnapshot(summaries),
 		LatestDeployment:         rollout,
 		ReleaseComparison:        releaseComparison,
+		ComparisonPending:        comparisonPending,
 		ActiveSources:            activeSources,
 		LatestRolloutURL:         latestRolloutURL,
 		LatestRolloutPromptURL:   latestRolloutPromptURL,

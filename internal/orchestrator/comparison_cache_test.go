@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -171,5 +173,19 @@ func TestDeploymentComparisonKeyTracksLatestDeployment(t *testing.T) {
 	}
 	if before == after {
 		t.Fatalf("fingerprint %q did not change after a new deployment", after)
+	}
+}
+
+func TestHomePageRendersWhileComparisonBuilds(t *testing.T) {
+	api := NewAPI(openTestDB(t), nil, nil, nil, nil, nil)
+	key := comparisonCacheKey{source: "main", deployments: "main=none"}
+	api.comparisons.entries = map[comparisonCacheKey]*comparisonCacheEntry{key: {flight: &comparisonFlight{done: make(chan struct{})}}}
+
+	data, err := api.buildHomePageData(httptest.NewRequest(http.MethodGet, "/ui", nil))
+	if err != nil {
+		t.Fatalf("buildHomePageData() error = %v", err)
+	}
+	if !data.ComparisonPending || data.ReleaseComparison != nil {
+		t.Fatalf("ComparisonPending = %v, ReleaseComparison = %+v; want pending without comparison", data.ComparisonPending, data.ReleaseComparison)
 	}
 }

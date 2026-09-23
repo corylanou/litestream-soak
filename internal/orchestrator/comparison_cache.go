@@ -9,10 +9,11 @@ import (
 )
 
 const (
-	comparisonCacheTTL      = 2 * time.Minute
-	comparisonCacheMaxStale = 15 * time.Minute
+	comparisonCacheTTL      = 10 * time.Minute
+	comparisonCacheMaxStale = time.Hour
 	comparisonCacheMinCost  = time.Second
-	comparisonBuildTimeout  = 5 * time.Minute
+	comparisonBuildTimeout  = 20 * time.Minute
+	homeComparisonWait      = 3 * time.Second
 )
 
 type comparisonCache struct {
