@@ -31,6 +31,13 @@ func TestOpenAppliesPragmas(t *testing.T) {
 	if busyTimeout != 30000 {
 		t.Fatalf("busy_timeout = %d, want 30000", busyTimeout)
 	}
+	var autoVacuum int
+	if err := db.writer.QueryRow("PRAGMA auto_vacuum").Scan(&autoVacuum); err != nil {
+		t.Fatalf("PRAGMA auto_vacuum: %v", err)
+	}
+	if autoVacuum != 2 {
+		t.Fatalf("auto_vacuum = %d, want incremental mode 2", autoVacuum)
+	}
 
 	// The reader pool must run with the same WAL pragmas so it sees committed
 	// writes and tolerates checkpoint contention.

@@ -66,7 +66,17 @@ type WALCheckpointResult struct {
 // freed pages are reused by future writes anyway.
 func (d *DB) CheckpointWAL() (WALCheckpointResult, error) {
 	var result WALCheckpointResult
-	err := d.writer.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).
-		Scan(&result.Busy, &result.LogFrames, &result.Checkpointed)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := d.reader.Conn(ctx)
+	if err != nil {
+		return result, err
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=100`); err != nil {
+		return result, err
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), `PRAGMA busy_timeout=30000`) }()
+	err = conn.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&result.Busy, &result.LogFrames, &result.Checkpointed)
 	return result, err
 }

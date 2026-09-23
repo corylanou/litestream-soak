@@ -3,10 +3,13 @@ package orchestrator
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +18,85 @@ import (
 	"github.com/corylanou/litestream-soak/internal/reporting"
 	workerconfig "github.com/corylanou/litestream-soak/internal/worker"
 )
+
+func TestCumulativeProfilingEvidenceScorecardEquivalentAfterCompaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "evidence.db")
+	db, err := model.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	for _, sha := range []string{"base", "head"} {
+		if err := db.UpsertReadyDeployment(&model.Deployment{Source: "main", GitSHA: sha, LitestreamSHA: sha, Status: "ready"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := model.Worker{ID: "profile-worker", Name: "profile-worker", Source: "main", GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA, ProfileName: "low-volume", ProfileConfig: "{}", FlyMachineID: "machine", Status: model.WorkerRunning}
+	createTestWorker(t, db, worker)
+	run := fixtureRun(worker, *deployment)
+	firstRun := run
+	secondRun := run
+	secondRun.RunID = "replacement"
+	first := reporting.ProfileIncident{ID: "incident-1", Kind: "profile_capture_error", Message: "collector failed", At: deployment.StartedAt.Add(time.Second), Run: firstRun}
+	second := reporting.ProfileIncident{ID: "incident-2", Kind: "profile_observation_unavailable", Message: "history lost", At: deployment.StartedAt.Add(2 * time.Second), Run: firstRun}
+	makeRecord := func(run reporting.WorkerIdentity, failures uint64) reporting.ProfileRecordEvidence {
+		return reporting.ProfileRecordEvidence{DeploymentID: run.DeploymentID, WorkerID: run.WorkerID, MachineID: run.MachineID, RunID: run.RunID, Artifact: "cpu.pprof", Status: "captured", UploadFailureCount: failures, CapturedAt: deployment.StartedAt.Add(time.Second)}
+	}
+	connection, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = connection.Close() }()
+	for i, sample := range []struct {
+		run       reporting.WorkerIdentity
+		attempts  uint64
+		failures  uint64
+		incidents []reporting.ProfileIncident
+	}{
+		{firstRun, 10, 1, []reporting.ProfileIncident{first}},
+		{firstRun, 8, 1, []reporting.ProfileIncident{first, second}},
+		{secondRun, 2, 1, []reporting.ProfileIncident{first, second}},
+		{secondRun, 3, 2, []reporting.ProfileIncident{first, second}},
+	} {
+		at := deployment.StartedAt.Add(time.Duration(i+1) * time.Second)
+		payload := reporting.RuntimePayload{
+			ProfilingEvidence:   reporting.ProfilingEvidence{ProfileCapability: "observed", ProfileHistoryComplete: true, ProfileStatusCounts: map[string]uint64{"upload-failed": sample.failures + uint64(i/3)}, ProfileIncidents: sample.incidents, ProfileRecords: []reporting.ProfileRecordEvidence{makeRecord(sample.run, sample.failures)}},
+			WorkloadCounters:    reporting.WorkloadCounters{WorkloadCounterEpoch: "epoch", WorkloadCountersPresent: true, WorkloadAttemptsTotal: sample.attempts, WorkloadMutationsTotal: sample.attempts},
+			SnapshotCollectedAt: at, LitestreamSnapshotHealthy: true,
+		}
+		identity, _ := json.Marshal(sample.run)
+		body, _ := json.Marshal(payload)
+		if _, err := connection.Exec(`INSERT INTO evidence_runtime(source,deployment_id,identity_json,runtime_json,attributed,received_at,kind) VALUES (?,?,?,?,?,?,?)`, "main", deployment.ID, string(identity), string(body), true, at, "heartbeat"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := buildLatestDeploymentComparison(db, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == nil || len(before.Head.Reliability) != 1 || len(before.Head.Reliability[0].Incidents) == 0 || before.Head.Reliability[0].IncompleteObservations == 0 {
+		t.Fatalf("fixture did not exercise profiling verdict: %+v", before)
+	}
+	count, err := db.CompactRuntimeEvidence(context.Background(), 2)
+	if err != nil || count != 4 {
+		t.Fatalf("compaction count=%d error=%v", count, err)
+	}
+	after, err := buildLatestDeploymentComparison(db, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before.Head.Reliability, after.Head.Reliability) || !reflect.DeepEqual(before.Head.Outcomes, after.Head.Outcomes) || before.Verdict != after.Verdict {
+		t.Fatalf("comparison changed after compaction: before=%+v after=%+v", before, after)
+	}
+	count, err = db.CompactRuntimeEvidence(context.Background(), 2)
+	if err != nil || count != 0 {
+		t.Fatalf("repeat compaction count=%d error=%v", count, err)
+	}
+}
 
 func TestReliabilityKeepsRecoveredRegionalFailure(t *testing.T) {
 	db := openTestDB(t)

@@ -72,6 +72,37 @@ Grafana:
 - import `grafana/soak-source-compare-dashboard.json`
 - import `grafana/soak-drilldown-dashboard.json`
 
+## Control evidence database
+
+The control plane compacts cumulative profiling history from `evidence_runtime`
+in eight-row transactions. It records its cursor in
+`evidence_compaction_progress`, so a restart resumes at the next row. Look for
+`Runtime evidence compaction progress` and `Runtime evidence compaction complete`
+in ctl logs. The hourly retention pass deletes evidence from archived
+deployments only after two newer deployments for that source exist and the
+entire runtime window is older than the retention window. It preserves the
+current deployment and the previous deployment used by the latest comparison,
+including main soak history needed by scorecards and lifecycle checks.
+
+Compaction frees SQLite pages for reuse, but an existing database created with
+`auto_vacuum=NONE` does not return those pages to the volume. After compaction
+finishes, inspect `PRAGMA page_count`, `PRAGMA freelist_count`,
+`PRAGMA auto_vacuum`, and `df -h /data`. If `auto_vacuum` is `0`, schedule an
+offline database rebuild with the ctl process stopped and a verified backup
+outside the volume. Confirm that free volume space exceeds the current database
+size plus a safety margin before running:
+
+```bash
+sqlite3 /data/soakctl.db 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA auto_vacuum=INCREMENTAL; VACUUM; PRAGMA auto_vacuum;'
+df -h /data
+```
+
+The rebuild holds an exclusive SQLite write lock, so do not run it while ctl
+accepts worker reports. It is a deliberate one-time step for existing volumes.
+New databases start in incremental vacuum mode. Once an existing database has
+been rebuilt, the retention loop releases up to 128 free pages per pass and
+logs the page count, free-list count, and vacuum mode.
+
 ## Machine diagnostic credential exposure
 
 Issue #260 records a confirmed exposure on control image
