@@ -36,11 +36,18 @@ for role in candidate workload; do
   git -C "$source_dir" fetch --depth=1 https://github.com/benbjohnson/litestream.git "$revision"
   git -C "$source_dir" checkout -q --detach FETCH_HEAD
   test "$(git -C "$source_dir" rev-parse HEAD)" = "$revision"
-  CGO_CFLAGS=-DSQLITE_DEFAULT_WAL_AUTOCHECKPOINT=0 go -C "$source_dir" build \
+  toolchain=go1.25.13
+  required=$(sed -n 's/^go //p' "$source_dir/go.mod")
+  if [ "$role" = candidate ] && [ "$(printf '%s\n' 1.25.13 "$required" | sort -V | tail -n 1)" != 1.25.13 ]; then
+    toolchain=go1.26.6
+  fi
+  if [ "$role" = candidate ]; then candidate_toolchain=$toolchain; fi
+  GOTOOLCHAIN=$toolchain CGO_CFLAGS=-DSQLITE_DEFAULT_WAL_AUTOCHECKPOINT=0 go -C "$source_dir" build \
     -ldflags "-X main.Version=$revision" -o "$evidence/$command_name" "./cmd/$command_name"
-  go version -m "$evidence/$command_name" > "$evidence/$command_name.buildinfo"
+  GOTOOLCHAIN=$toolchain go version -m "$evidence/$command_name" > "$evidence/$command_name.buildinfo"
 done
 SOAK_LOGICAL_LITESTREAM_BINARY="$evidence/litestream" \
 SOAK_LOGICAL_WORKLOAD_BINARY="$evidence/litestream-test" \
 SOAK_COMPATIBILITY_SHA="$candidate" SOAK_COMPATIBILITY_EVIDENCE="$evidence" \
+SOAK_COMPATIBILITY_GO_VERSION="$candidate_toolchain" \
   go -C "$root" test ./internal/worker -run '^Test(LogicalOraclePinnedLitestream|VerificationBoundaryPinnedBinary)$' -count=1 -v -timeout=2m

@@ -148,6 +148,10 @@
         <a class="btn btn-sm" href="{{.ComparisonJSONURL}}">JSON</a>
       </div>
     </div>
+    {{else if .ComparisonPending}}
+    <div class="compare-strip" aria-label="Release comparison">
+      <span class="compare-fact">Release comparison is still being computed; it will appear on a later refresh.</span>
+    </div>
     {{end}}
 
     <div id="fleet" class="section-head">
