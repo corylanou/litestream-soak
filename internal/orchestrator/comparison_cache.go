@@ -97,18 +97,18 @@ func (a *API) runComparisonFlight(e *comparisonCacheEntry, f *comparisonFlight, 
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, comparisonBuildTimeout)
-	defer cancel()
 	var value *DeploymentComparisonResponse
 	var err error
 	start := time.Now()
 	select {
 	case comparisonBuildSlot <- struct{}{}:
+		ctx, cancel := context.WithTimeout(parent, comparisonBuildTimeout)
 		start = time.Now()
 		value, err = buildRequestedDeploymentComparison(a.db.WithReadContext(ctx), key.source, key.baseSource, key.headSource)
+		cancel()
 		<-comparisonBuildSlot
-	case <-ctx.Done():
-		err = ctx.Err()
+	case <-parent.Done():
+		err = parent.Err()
 	}
 
 	var persistAt time.Time
