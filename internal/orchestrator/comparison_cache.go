@@ -18,7 +18,6 @@ const (
 	comparisonCacheMinCost  = time.Second
 	comparisonBuildTimeout  = 20 * time.Minute
 	comparisonQueueTimeout  = 25 * time.Minute
-	archiveComparisonWait   = 5 * time.Minute
 	homeComparisonWait      = 250 * time.Millisecond
 )
 

@@ -1125,7 +1125,9 @@ func (m *Manager) archiveDeploymentRun(archiveType, reason string, deployment mo
 		Rollout:     rollout,
 		Workers:     make([]workerRunEvidence, 0, len(workers)),
 	}
-	payload.Comparison = m.archiveComparison(deployment.Source)
+	if comparison, err := buildLatestCrossSourceDeploymentComparison(m.db, "main", deployment.Source); err == nil {
+		payload.Comparison = comparison
+	}
 
 	for _, worker := range workers {
 		evidence, err := m.workerRunEvidence(worker)
@@ -1509,23 +1511,4 @@ func walkConsecutiveActionable(verifications []model.Verification, deployment mo
 		}
 	}
 	return false, false
-}
-
-func (m *Manager) archiveComparison(source string) *DeploymentComparisonResponse {
-	wait, cancelWait := context.WithTimeout(context.Background(), archiveComparisonWait)
-	defer cancelWait()
-	select {
-	case comparisonBuildSlot <- struct{}{}:
-	case <-wait.Done():
-		slog.Warn("Skipped archive comparison while another comparison build was running", "source", source)
-		return nil
-	}
-	defer func() { <-comparisonBuildSlot }()
-	ctx, cancel := context.WithTimeout(context.Background(), comparisonBuildTimeout)
-	defer cancel()
-	comparison, err := buildLatestCrossSourceDeploymentComparison(m.db.WithReadContext(ctx), "main", source)
-	if err != nil {
-		return nil
-	}
-	return comparison
 }
