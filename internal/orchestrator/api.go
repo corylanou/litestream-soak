@@ -26,6 +26,7 @@ type API struct {
 	manager                *Manager
 	deployer               *Deployer
 	comparisons            comparisonCache
+	home                   homeCache
 }
 
 type WorkerDetailResponse struct {
@@ -246,7 +247,7 @@ func NewAPIWithContext(backgroundContext context.Context, db *model.DB, fly *fly
 	if backgroundContext == nil {
 		backgroundContext = context.Background()
 	}
-	return &API{
+	a := &API{
 		backgroundContext: backgroundContext,
 		db:                db,
 		fly:               fly,
@@ -255,6 +256,8 @@ func NewAPIWithContext(backgroundContext context.Context, db *model.DB, fly *fly
 		manager:           manager,
 		deployer:          deployer,
 	}
+	metrics.comparisons = a.peekDeploymentComparison
+	return a
 }
 
 func (a *API) runRollout(run func(context.Context)) {

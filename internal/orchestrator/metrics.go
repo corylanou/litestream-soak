@@ -17,6 +17,7 @@ import (
 )
 
 type controlMetrics struct {
+	comparisons               func(source, baseSource, headSource string) (*DeploymentComparisonResponse, bool)
 	mu                        sync.Mutex
 	statusByWorker            map[string]string
 	infoByWorker              map[string]workerInfoMetricState
@@ -779,9 +780,12 @@ func (m *controlMetrics) publishDeploymentRollout(rollout DeploymentRolloutRespo
 }
 
 func (m *controlMetrics) prepareLatestDeploymentComparison(db *model.DB) (func(), error) {
-	comparison, err := buildLatestDeploymentComparison(db, "main")
+	comparison, ok, err := m.comparison(db, "main", "")
 	if err != nil {
 		return nil, err
+	}
+	if !ok {
+		return func() {}, nil
 	}
 	if comparison == nil {
 		return func() {}, nil
@@ -1022,9 +1026,12 @@ func (m *controlMetrics) prepareSourceComparisons(db *model.DB) (func(), error) 
 	failureValues := make(map[string]float64)
 
 	for _, headSource := range headSources {
-		comparison, err := buildLatestCrossSourceDeploymentComparison(db, "main", headSource)
+		comparison, ok, err := m.comparison(db, "main", headSource)
 		if err != nil {
 			return nil, err
+		}
+		if !ok {
+			return func() {}, nil
 		}
 		if comparison == nil || comparison.Base == nil {
 			continue
@@ -1346,4 +1353,23 @@ func sameMetricLabels(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+func (m *controlMetrics) comparison(db *model.DB, baseSource, headSource string) (*DeploymentComparisonResponse, bool, error) {
+	if m.comparisons != nil {
+		if headSource == "" {
+			comparison, ok := m.comparisons(baseSource, "", "")
+			return comparison, ok, nil
+		}
+		comparison, ok := m.comparisons("", baseSource, headSource)
+		return comparison, ok, nil
+	}
+	var comparison *DeploymentComparisonResponse
+	var err error
+	if headSource == "" {
+		comparison, err = buildLatestDeploymentComparison(db, baseSource)
+	} else {
+		comparison, err = buildLatestCrossSourceDeploymentComparison(db, baseSource, headSource)
+	}
+	return comparison, err == nil, err
 }

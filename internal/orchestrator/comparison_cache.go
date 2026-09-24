@@ -2,7 +2,9 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -10,10 +12,11 @@ import (
 
 const (
 	comparisonCacheTTL      = 10 * time.Minute
-	comparisonCacheMaxStale = time.Hour
+	comparisonCacheMaxStale = 6 * time.Hour
+	comparisonPeekWait      = 2 * time.Second
 	comparisonCacheMinCost  = time.Second
 	comparisonBuildTimeout  = 20 * time.Minute
-	homeComparisonWait      = 3 * time.Second
+	homeComparisonWait      = 250 * time.Millisecond
 )
 
 type comparisonCache struct {
@@ -56,6 +59,9 @@ func (a *API) deploymentComparison(ctx context.Context, source, baseSource, head
 	if e == nil {
 		e = &comparisonCacheEntry{}
 		c.entries[key] = e
+		if cached, at, ok := a.loadComparisonSnapshot(key); ok {
+			e.cached, e.cachedAt = cached, at
+		}
 	}
 	if e.cached != nil && time.Since(e.cachedAt) < comparisonCacheTTL {
 		cached := e.cached
@@ -99,6 +105,7 @@ func (a *API) runComparisonFlight(e *comparisonCacheEntry, f *comparisonFlight, 
 	case err != nil:
 	case value != nil && time.Since(start) >= comparisonCacheMinCost:
 		e.cached, e.cachedAt = value, time.Now()
+		a.storeComparisonSnapshot(key, value, e.cachedAt)
 	default:
 		e.cached = nil
 	}
@@ -159,4 +166,45 @@ func (a *API) comparisonDeploymentFingerprint(ctx context.Context, key compariso
 		parts = append(parts, fmt.Sprintf("%s=%d/%s/%s", source, deployment.ID, deployment.Status, completed))
 	}
 	return strings.Join(parts, ","), nil
+}
+
+func (k comparisonCacheKey) String() string {
+	return strings.Join([]string{k.source, k.baseSource, k.headSource, k.deployments}, "|")
+}
+
+func (a *API) loadComparisonSnapshot(key comparisonCacheKey) (*DeploymentComparisonResponse, time.Time, bool) {
+	body, at, ok, err := a.db.GetComparisonSnapshot(key.String())
+	if err != nil {
+		slog.Warn("Failed to load comparison snapshot", "key", key.String(), "error", err)
+		return nil, time.Time{}, false
+	}
+	if !ok || time.Since(at) >= comparisonCacheMaxStale {
+		return nil, time.Time{}, false
+	}
+	var comparison DeploymentComparisonResponse
+	if err := json.Unmarshal([]byte(body), &comparison); err != nil {
+		slog.Warn("Failed to decode comparison snapshot", "key", key.String(), "error", err)
+		return nil, time.Time{}, false
+	}
+	return &comparison, at, true
+}
+
+func (a *API) storeComparisonSnapshot(key comparisonCacheKey, comparison *DeploymentComparisonResponse, at time.Time) {
+	body, err := json.Marshal(comparison)
+	if err == nil {
+		err = a.db.PutComparisonSnapshot(key.String(), string(body), at, at.Add(-comparisonCacheMaxStale))
+	}
+	if err != nil {
+		slog.Warn("Failed to store comparison snapshot", "key", key.String(), "error", err)
+	}
+}
+
+func (a *API) peekDeploymentComparison(source, baseSource, headSource string) (*DeploymentComparisonResponse, bool) {
+	ctx, cancel := context.WithTimeout(a.backgroundContext, comparisonPeekWait)
+	defer cancel()
+	comparison, err := a.deploymentComparison(ctx, source, baseSource, headSource)
+	if err != nil {
+		return nil, false
+	}
+	return comparison, true
 }
