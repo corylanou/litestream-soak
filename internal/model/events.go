@@ -6,6 +6,7 @@ import (
 )
 
 func (d *DB) RecordEvent(workerID, eventType, message, details string) error {
+	defer d.blobs.hold()()
 	details, err := d.compactProfileSnapshot(details)
 	if err != nil {
 		return err
@@ -19,6 +20,7 @@ func (d *DB) RecordEvent(workerID, eventType, message, details string) error {
 }
 
 func (d *DB) RecordEventAt(workerID, eventType, message, details string, createdAt time.Time) error {
+	defer d.blobs.hold()()
 	details, err := d.compactProfileSnapshot(details)
 	if err != nil {
 		return err
@@ -77,16 +79,17 @@ func (d *DB) RecordWindowedEventAt(workerID, eventType, message, details string,
 	).Scan(&existingID)
 	switch {
 	case err == nil:
+		release := d.blobs.hold()
 		details, err = d.compactProfileSnapshot(details)
-		if err != nil {
-			return false, err
-		}
-		_, err = d.exec(`
+		if err == nil {
+			_, err = d.exec(`
 			UPDATE events
 			SET details = ?, created_at = ?
 			WHERE id = ?`,
-			details, createdAt, existingID,
-		)
+				details, createdAt, existingID,
+			)
+		}
+		release()
 		if err != nil {
 			return false, err
 		}
@@ -115,10 +118,6 @@ func (d *DB) ListEvents(limit int) ([]Event, error) {
 		if err := rows.Scan(&e.ID, &workerID, &e.EventType, &e.Message, &e.Details, &e.CreatedAt); err != nil {
 			return nil, err
 		}
-		var err error
-		if e.Details, err = d.expandProfileSnapshot(e.Details); err != nil {
-			return nil, err
-		}
 		if workerID.Valid {
 			e.WorkerID = workerID.String
 		}
@@ -127,7 +126,8 @@ func (d *DB) ListEvents(limit int) ([]Event, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return events, nil
+	_ = rows.Close()
+	return d.expandEventDetails(events)
 }
 
 func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
@@ -151,10 +151,6 @@ func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
 		if err := rows.Scan(&e.ID, &eventWorkerID, &e.EventType, &e.Message, &e.Details, &e.CreatedAt); err != nil {
 			return nil, err
 		}
-		var err error
-		if e.Details, err = d.expandProfileSnapshot(e.Details); err != nil {
-			return nil, err
-		}
 		if eventWorkerID.Valid {
 			e.WorkerID = eventWorkerID.String
 		}
@@ -162,6 +158,18 @@ func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	_ = rows.Close()
+	return d.expandEventDetails(events)
+}
+
+func (d *DB) expandEventDetails(events []Event) ([]Event, error) {
+	for i := range events {
+		details, err := d.expandProfileSnapshot(events[i].Details)
+		if err != nil {
+			return nil, err
+		}
+		events[i].Details = details
 	}
 	return events, nil
 }

@@ -258,3 +258,54 @@ func TestCompactProfileSnapshotsBackfillsExistingRows(t *testing.T) {
 		t.Fatalf("second compaction processed %d rows, want 0", again)
 	}
 }
+
+func TestPruneProfileBlobsKeepsOnlyReferencedBlobs(t *testing.T) {
+	db := seriesTestDB(t)
+	worker := Worker{ID: "worker", Name: "worker", Source: "main", GitSHA: "sha", ProfileName: "low-volume", ProfileConfig: "{}"}
+	if err := db.CreateWorker(&worker); err != nil {
+		t.Fatal(err)
+	}
+	orphan, err := json.Marshal(profileSnapshotFixture(10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.compactProfileSnapshot(string(orphan)); err != nil {
+		t.Fatal(err)
+	}
+	kept := profileSnapshotFixture(3)
+	kept.ProfileRecords = nil
+	for i := range kept.ProfileIncidents {
+		kept.ProfileIncidents[i].ID = fmt.Sprintf("kept-%d", i)
+	}
+	if err := db.UpdateWorkerRuntimeSnapshot(worker.ID, kept); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := db.PruneProfileBlobs(context.Background())
+	if err != nil {
+		t.Fatalf("PruneProfileBlobs() error = %v", err)
+	}
+	if deleted != 12 {
+		t.Fatalf("deleted = %d, want the 12 unreferenced blobs", deleted)
+	}
+	loaded, err := db.GetWorker(worker.ID)
+	if err != nil {
+		t.Fatalf("GetWorker() after sweep error = %v", err)
+	}
+	if got := decodeRuntime(t, loaded.LastRuntimeJSON); !reflect.DeepEqual(got.ProfileIncidents, kept.ProfileIncidents) {
+		t.Fatalf("referenced incidents after sweep = %+v", got.ProfileIncidents)
+	}
+	if again, err := db.PruneProfileBlobs(context.Background()); err != nil || again != 0 {
+		t.Fatalf("second sweep inside the interval = %d, %v; want skipped", again, err)
+	}
+	if err := db.UpdateWorkerRuntimeSnapshot(worker.ID, profileSnapshotFixture(10)); err != nil {
+		t.Fatalf("re-storing swept content error = %v", err)
+	}
+	loaded, err = db.GetWorker(worker.ID)
+	if err != nil {
+		t.Fatalf("GetWorker() after re-store error = %v", err)
+	}
+	if len(decodeRuntime(t, loaded.LastRuntimeJSON).ProfileIncidents) != 10 {
+		t.Fatal("re-stored snapshot lost incidents after the sweep cleared the cache")
+	}
+}

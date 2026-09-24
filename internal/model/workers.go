@@ -116,13 +116,16 @@ func (d *DB) queryWorkers(query string, args ...any) ([]Worker, error) {
 		if err := scanWorker(rows, &w); err != nil {
 			return nil, err
 		}
-		if w.LastRuntimeJSON, err = d.expandProfileSnapshot(w.LastRuntimeJSON); err != nil {
-			return nil, err
-		}
 		workers = append(workers, w)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	_ = rows.Close()
+	for i := range workers {
+		if workers[i].LastRuntimeJSON, err = d.expandProfileSnapshot(workers[i].LastRuntimeJSON); err != nil {
+			return nil, err
+		}
 	}
 	return workers, nil
 }
@@ -193,6 +196,7 @@ func (d *DB) UpdateWorkerRuntimeSnapshot(id string, payload reporting.RuntimePay
 	if err != nil {
 		return fmt.Errorf("marshal runtime payload: %w", err)
 	}
+	defer d.blobs.hold()()
 	body, err := d.compactProfileSnapshot(string(encoded))
 	if err != nil {
 		return err

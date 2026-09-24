@@ -139,6 +139,7 @@ func (d *DB) ListEvidenceVerifications(source string, windows ...EvidenceWindow)
 	}
 	defer func() { _ = rows.Close() }()
 	var records []EvidenceVerification
+	var runtimes []string
 	for rows.Next() {
 		var v EvidenceVerification
 		var completed sql.NullTime
@@ -162,18 +163,26 @@ func (d *DB) ListEvidenceVerifications(source string, windows ...EvidenceWindow)
 		if v.Run.ProfileName == "" {
 			v.Run.ProfileName = profile
 		}
-		if runtime != "" {
-			runtime, err = d.expandProfileSnapshot(runtime)
-			if err != nil {
-				return nil, err
-			}
-			if err := json.Unmarshal([]byte(runtime), &v.Runtime); err != nil {
-				return nil, fmt.Errorf("decode evidence runtime: %w", err)
-			}
-		}
 		records = append(records, v)
+		runtimes = append(runtimes, runtime)
 	}
-	return records, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	_ = rows.Close()
+	for i, runtime := range runtimes {
+		if runtime == "" {
+			continue
+		}
+		runtime, err = d.expandProfileSnapshot(runtime)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(runtime), &records[i].Runtime); err != nil {
+			return nil, fmt.Errorf("decode evidence runtime: %w", err)
+		}
+	}
+	return records, nil
 }
 
 func (d *DB) ListEvidenceEvents(source string, windows ...EvidenceWindow) ([]Event, error) {
@@ -189,12 +198,13 @@ func (d *DB) ListEvidenceEvents(source string, windows ...EvidenceWindow) ([]Eve
 		if err := rows.Scan(&e.ID, &e.WorkerID, &e.EventType, &e.Message, &e.Details, &e.CreatedAt); err != nil {
 			return nil, err
 		}
-		if e.Details, err = d.expandProfileSnapshot(e.Details); err != nil {
-			return nil, err
-		}
 		events = append(events, e)
 	}
-	return events, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	_ = rows.Close()
+	return d.expandEventDetails(events)
 }
 
 type RuntimeEvidence struct {
