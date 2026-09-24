@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	homeCacheFresh   = 10 * time.Second
-	homeCacheMaxAge  = 5 * time.Minute
-	homeCacheMinCost = 250 * time.Millisecond
+	homeCacheFresh  = 10 * time.Second
+	homeCacheMaxAge = 5 * time.Minute
 )
+
+var homeCacheMinCost = 250 * time.Millisecond
 
 type homeCache struct {
 	mu      sync.Mutex
@@ -65,6 +66,9 @@ func (a *API) buildAndCacheHomePage(r *http.Request, key string) (homePageData, 
 
 	a.home.mu.Lock()
 	defer a.home.mu.Unlock()
+	if a.home.entries == nil {
+		a.home.entries = make(map[string]*homeCacheEntry)
+	}
 	switch {
 	case err != nil:
 		if e := a.home.entries[key]; e != nil {
