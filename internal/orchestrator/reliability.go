@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -474,8 +475,7 @@ func summarizeRunEvidence(e *WorkerRunEvidence) {
 		}
 	}
 	if len(e.Incidents) > reliabilityIncidentLimit {
-		sort.SliceStable(e.Incidents, func(i, j int) bool { return e.Incidents[i].At.Before(e.Incidents[j].At) })
-		e.Incidents = append([]RunIncident(nil), e.Incidents[len(e.Incidents)-reliabilityIncidentLimit:]...)
+		e.Incidents = selectRepresentativeIncidents(e.Incidents, reliabilityIncidentLimit)
 		e.IncidentsTruncated = true
 	}
 	for i := range e.Incidents {
@@ -489,9 +489,45 @@ func summarizeRunEvidence(e *WorkerRunEvidence) {
 
 func compactIncidentRun(run reporting.WorkerIdentity) reporting.WorkerIdentity {
 	return reporting.WorkerIdentity{
-		DeploymentID: run.DeploymentID,
-		WorkerID:     run.WorkerID,
-		RunID:        run.RunID,
-		MachineID:    run.MachineID,
+		DeploymentID:  run.DeploymentID,
+		WorkerID:      run.WorkerID,
+		Source:        run.Source,
+		GitSHA:        run.GitSHA,
+		LitestreamSHA: run.LitestreamSHA,
+		WorkloadSHA:   run.WorkloadSHA,
+		ProfileHash:   run.ProfileHash,
+		ValidatorID:   run.ValidatorID,
+		RunID:         run.RunID,
+		MachineID:     run.MachineID,
 	}
+}
+
+func selectRepresentativeIncidents(incidents []RunIncident, limit int) []RunIncident {
+	ordered := slices.Clone(incidents)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].At.Before(ordered[j].At) })
+	keep := make(map[int]bool, limit)
+	firstOfKind := make(map[string]bool)
+	for i, incident := range ordered {
+		if len(keep) >= limit {
+			break
+		}
+		if incident.Classification == "unexpected" && !firstOfKind[incident.Kind] {
+			firstOfKind[incident.Kind] = true
+			keep[i] = true
+		}
+	}
+	for _, unexpected := range []bool{true, false} {
+		for i := len(ordered) - 1; i >= 0 && len(keep) < limit; i-- {
+			if (ordered[i].Classification == "unexpected") == unexpected {
+				keep[i] = true
+			}
+		}
+	}
+	selected := make([]RunIncident, 0, limit)
+	for i, incident := range ordered {
+		if keep[i] {
+			selected = append(selected, incident)
+		}
+	}
+	return selected
 }
