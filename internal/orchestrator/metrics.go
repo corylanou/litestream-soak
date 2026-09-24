@@ -1007,7 +1007,7 @@ func (m *controlMetrics) prepareSourceComparisons(db *model.DB) (func(), error) 
 	seen := make(map[string]struct{})
 	for _, worker := range workers {
 		source := strings.TrimSpace(worker.Source)
-		if source == "" || source == "main" {
+		if source == "" || source == "main" || !workerRowActive(worker) {
 			continue
 		}
 		if _, ok := seen[source]; ok {
