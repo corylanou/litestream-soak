@@ -24,12 +24,16 @@ AND json_extract(details,'$.attributed')=1
 ORDER BY ` + activityEventStart + ` DESC,journal_id DESC LIMIT 1`
 
 func (d *DB) LatestRunVerificationStart(identity reporting.WorkerIdentity) (*Event, error) {
+	defer d.blobs.hold()()
 	var event Event
 	err := d.queryRow(latestRunVerificationStartQuery, identity.WorkerID, identity.RunID, identity.MachineID).Scan(&event.ID, &event.WorkerID, &event.EventType, &event.Message, &event.Details, &event.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	if event.Details, err = d.expandProfileSnapshot(event.Details); err != nil {
 		return nil, err
 	}
 	return &event, nil

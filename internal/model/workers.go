@@ -104,6 +104,7 @@ func scanWorker(scanner workerScanner, w *Worker) error {
 }
 
 func (d *DB) queryWorkers(query string, args ...any) ([]Worker, error) {
+	defer d.blobs.hold()()
 	rows, err := d.query(query, args...)
 	if err != nil {
 		return nil, err
@@ -120,6 +121,12 @@ func (d *DB) queryWorkers(query string, args ...any) ([]Worker, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	_ = rows.Close()
+	for i := range workers {
+		if workers[i].LastRuntimeJSON, err = d.expandProfileSnapshot(workers[i].LastRuntimeJSON); err != nil {
+			return nil, err
+		}
 	}
 	return workers, nil
 }
@@ -186,16 +193,21 @@ func (d *DB) UpdateWorkerHeartbeat(id string) error {
 }
 
 func (d *DB) UpdateWorkerRuntimeSnapshot(id string, payload reporting.RuntimePayload) error {
-	body, err := json.Marshal(payload)
+	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal runtime payload: %w", err)
+	}
+	defer d.blobs.hold()()
+	body, err := d.compactProfileSnapshot(string(encoded))
+	if err != nil {
+		return err
 	}
 
 	if !payload.LitestreamSnapshotHealthy {
 		_, err = d.exec(`
 			UPDATE workers SET last_runtime_json = ?, updated_at = datetime('now')
 			WHERE id = ?`,
-			string(body), id,
+			body, id,
 		)
 		return err
 	}
@@ -208,7 +220,7 @@ func (d *DB) UpdateWorkerRuntimeSnapshot(id string, payload reporting.RuntimePay
 	_, err = d.exec(`
 		UPDATE workers SET last_runtime_json = ?, last_runtime_at = ?, updated_at = datetime('now')
 		WHERE id = ?`,
-		string(body), reportedAt.UTC(), id,
+		body, reportedAt.UTC(), id,
 	)
 	return err
 }
@@ -365,12 +377,16 @@ func (d *DB) UpdateWorkerMachineVersionAndConfig(id, machineID, gitSHA, litestre
 }
 
 func (d *DB) GetWorker(id string) (*Worker, error) {
+	defer d.blobs.hold()()
 	var w Worker
 	err := scanWorker(
 		d.queryRow("SELECT "+workerColumns+" FROM workers WHERE id = ?", id),
 		&w,
 	)
 	if err != nil {
+		return nil, err
+	}
+	if w.LastRuntimeJSON, err = d.expandProfileSnapshot(w.LastRuntimeJSON); err != nil {
 		return nil, err
 	}
 	return &w, nil

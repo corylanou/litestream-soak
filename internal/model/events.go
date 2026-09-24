@@ -6,7 +6,12 @@ import (
 )
 
 func (d *DB) RecordEvent(workerID, eventType, message, details string) error {
-	_, err := d.exec(`
+	defer d.blobs.hold()()
+	details, err := d.compactProfileSnapshot(details)
+	if err != nil {
+		return err
+	}
+	_, err = d.exec(`
 		INSERT INTO events (worker_id, event_type, message, details)
 		VALUES (?, ?, ?, ?)`,
 		workerID, eventType, message, details,
@@ -15,7 +20,12 @@ func (d *DB) RecordEvent(workerID, eventType, message, details string) error {
 }
 
 func (d *DB) RecordEventAt(workerID, eventType, message, details string, createdAt time.Time) error {
-	_, err := d.exec(`
+	defer d.blobs.hold()()
+	details, err := d.compactProfileSnapshot(details)
+	if err != nil {
+		return err
+	}
+	_, err = d.exec(`
 		INSERT INTO events (worker_id, event_type, message, details, created_at)
 		VALUES (?, ?, ?, ?, ?)`,
 		workerID, eventType, message, details, createdAt,
@@ -24,13 +34,17 @@ func (d *DB) RecordEventAt(workerID, eventType, message, details string, created
 }
 
 func (d *DB) RecordUniqueEventAt(workerID, eventType, message, details string, createdAt time.Time) (bool, error) {
+	compact, err := d.compactProfileSnapshot(details)
+	if err != nil {
+		return false, err
+	}
 	var id int
-	err := d.queryRow(`
+	err = d.queryRow(`
 		SELECT 1
 		FROM events
-		WHERE worker_id = ? AND event_type = ? AND message = ? AND details = ? AND created_at = ?
+		WHERE worker_id = ? AND event_type = ? AND message = ? AND details IN (?, ?) AND created_at = ?
 		LIMIT 1`,
-		workerID, eventType, message, details, createdAt,
+		workerID, eventType, message, details, compact, createdAt,
 	).Scan(&id)
 	switch {
 	case err == nil:
@@ -65,12 +79,17 @@ func (d *DB) RecordWindowedEventAt(workerID, eventType, message, details string,
 	).Scan(&existingID)
 	switch {
 	case err == nil:
-		_, err = d.exec(`
+		release := d.blobs.hold()
+		details, err = d.compactProfileSnapshot(details)
+		if err == nil {
+			_, err = d.exec(`
 			UPDATE events
 			SET details = ?, created_at = ?
 			WHERE id = ?`,
-			details, createdAt, existingID,
-		)
+				details, createdAt, existingID,
+			)
+		}
+		release()
 		if err != nil {
 			return false, err
 		}
@@ -86,6 +105,7 @@ func (d *DB) RecordWindowedEventAt(workerID, eventType, message, details string,
 }
 
 func (d *DB) ListEvents(limit int) ([]Event, error) {
+	defer d.blobs.hold()()
 	rows, err := d.query(`SELECT id, worker_id, event_type, message, details, created_at FROM events ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -107,10 +127,12 @@ func (d *DB) ListEvents(limit int) ([]Event, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return events, nil
+	_ = rows.Close()
+	return d.expandEventDetails(events)
 }
 
 func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
+	defer d.blobs.hold()()
 	rows, err := d.query(`
 		SELECT id, worker_id, event_type, message, details, created_at
 		FROM events
@@ -138,6 +160,18 @@ func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	_ = rows.Close()
+	return d.expandEventDetails(events)
+}
+
+func (d *DB) expandEventDetails(events []Event) ([]Event, error) {
+	for i := range events {
+		details, err := d.expandProfileSnapshot(events[i].Details)
+		if err != nil {
+			return nil, err
+		}
+		events[i].Details = details
 	}
 	return events, nil
 }

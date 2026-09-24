@@ -86,6 +86,9 @@ func ensureEvidenceJournal(db *sql.DB) error {
 			slog.Info("Evidence journal backfill finished", "journal", step.name, "rows_inserted", rows, "duration", time.Since(stepStart))
 		}
 	}
+	if _, err := tx.Exec(profileBlobSchema); err != nil {
+		return err
+	}
 	slog.Info("Evidence journal indexes started")
 	if _, err := tx.Exec(evidenceWindowIndexes + verificationActivityIndexes); err != nil {
 		return err
@@ -129,6 +132,7 @@ func evidenceWindowQuery(table, columns, deployment, at, order string, source st
 }
 
 func (d *DB) ListEvidenceVerifications(source string, windows ...EvidenceWindow) ([]EvidenceVerification, error) {
+	defer d.blobs.hold()()
 	query, args := evidenceWindowQuery("evidence_verifications", evidenceVerificationColumns+", COALESCE(evidence_region,''), COALESCE(evidence_profile,''), COALESCE(evidence_runtime,''), history_complete", verificationDeployment, "COALESCE(completed_at,started_at)", "COALESCE(completed_at,started_at), id", source, windows)
 	rows, err := d.query(query, args...)
 	if err != nil {
@@ -136,6 +140,7 @@ func (d *DB) ListEvidenceVerifications(source string, windows ...EvidenceWindow)
 	}
 	defer func() { _ = rows.Close() }()
 	var records []EvidenceVerification
+	var runtimes []string
 	for rows.Next() {
 		var v EvidenceVerification
 		var completed sql.NullTime
@@ -159,17 +164,30 @@ func (d *DB) ListEvidenceVerifications(source string, windows ...EvidenceWindow)
 		if v.Run.ProfileName == "" {
 			v.Run.ProfileName = profile
 		}
-		if runtime != "" {
-			if err := json.Unmarshal([]byte(runtime), &v.Runtime); err != nil {
-				return nil, fmt.Errorf("decode evidence runtime: %w", err)
-			}
-		}
 		records = append(records, v)
+		runtimes = append(runtimes, runtime)
 	}
-	return records, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	_ = rows.Close()
+	for i, runtime := range runtimes {
+		if runtime == "" {
+			continue
+		}
+		runtime, err = d.expandProfileSnapshot(runtime)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(runtime), &records[i].Runtime); err != nil {
+			return nil, fmt.Errorf("decode evidence runtime: %w", err)
+		}
+	}
+	return records, nil
 }
 
 func (d *DB) ListEvidenceEvents(source string, windows ...EvidenceWindow) ([]Event, error) {
+	defer d.blobs.hold()()
 	query, args := evidenceWindowQuery("evidence_events", "id, COALESCE(worker_id,''), event_type, message, COALESCE(details,''), created_at", eventDeployment, "created_at", "created_at,id", source, windows)
 	rows, err := d.query(query, args...)
 	if err != nil {
@@ -184,7 +202,11 @@ func (d *DB) ListEvidenceEvents(source string, windows ...EvidenceWindow) ([]Eve
 		}
 		events = append(events, e)
 	}
-	return events, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	_ = rows.Close()
+	return d.expandEventDetails(events)
 }
 
 type RuntimeEvidence struct {

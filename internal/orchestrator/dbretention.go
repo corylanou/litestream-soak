@@ -37,6 +37,15 @@ func (m *Manager) pruneDBOnce(ctx context.Context, retentionDays int) {
 	if err != nil && ctx.Err() == nil {
 		slog.Error("Failed to compact runtime evidence", "rows_processed", compacted, "error", err)
 	}
+	snapshots, err := m.db.CompactProfileSnapshots(ctx, 16)
+	if err != nil && ctx.Err() == nil {
+		slog.Error("Failed to compact profile snapshots", "rows_processed", snapshots, "error", err)
+	}
+	compacted += snapshots
+	blobs, err := m.db.PruneProfileBlobs(ctx)
+	if err != nil && ctx.Err() == nil {
+		slog.Error("Failed to prune profile blobs", "deleted", blobs, "error", err)
+	}
 	if retentionDays <= 0 {
 		space, vacuumed := m.reclaimEvidenceSpace()
 		if compacted > 0 || vacuumed {

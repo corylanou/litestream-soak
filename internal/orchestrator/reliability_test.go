@@ -774,3 +774,58 @@ func TestComparisonHTTPHonorsCancelledRequest(t *testing.T) {
 		t.Fatalf("cancelled request continued: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
+
+func TestRunReliabilityReadsCompactProfileSnapshots(t *testing.T) {
+	db := openTestDB(t)
+	deployment := model.Deployment{GitSHA: "soak", LitestreamSHA: "litestream", WorkloadSHA: "generator", Source: "pr-280", ImageRef: "image", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&deployment); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.GetLatestDeployment(deployment.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment = *stored
+	worker := model.Worker{ID: "profiled", Name: "profiled", Source: deployment.Source, GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA, ProfileName: "low-volume", ProfileConfig: "{}", FlyMachineID: "machine", Status: model.WorkerRunning}
+	createTestWorker(t, db, worker)
+	run := fixtureRun(worker, deployment)
+	var incidents []reporting.ProfileIncident
+	for i := 0; i < 6; i++ {
+		at := deployment.StartedAt.Add(time.Duration(i) * time.Hour)
+		incidents = append(incidents, reporting.ProfileIncident{ID: fmt.Sprintf("incident-%d", i), Kind: "profile_capture_error", Message: "capture failed", At: at, Run: run})
+		runtime := reporting.RuntimePayload{
+			ProfilingEvidence: reporting.ProfilingEvidence{
+				ProfileCapability:      "observed",
+				ProfileHistoryComplete: true,
+				ProfileIncidents:       append([]reporting.ProfileIncident(nil), incidents...),
+				ProfileStatusCounts:    map[string]uint64{"upload-failed": 1},
+				ProfileRecords:         []reporting.ProfileRecordEvidence{{DeploymentID: deployment.ID, WorkerID: worker.ID, RunID: run.RunID, MachineID: run.MachineID, Artifact: "cpu.pprof", UploadFailureCount: 1}},
+			},
+			DBTXID: uint64(i + 1), SnapshotCollectedAt: at, LitestreamSnapshotHealthy: true,
+		}
+		if err := db.UpdateWorkerRuntimeSnapshot(worker.ID, runtime); err != nil {
+			t.Fatal(err)
+		}
+		v := model.Verification{WorkerID: worker.ID, Run: run, Attributed: true, StartedAt: at, CompletedAt: &at, Passed: true, Status: "passed", CheckType: "integrity"}
+		if err := db.RecordVerification(&v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	end := deployment.StartedAt.Add(6 * time.Hour)
+	evidence, err := buildRunReliability(db, deployment, &end)
+	if err != nil || len(evidence) != 1 {
+		t.Fatalf("evidence=%+v err=%v", evidence, err)
+	}
+	var profileIncidents int
+	for _, incident := range evidence[0].Incidents {
+		if strings.HasPrefix(incident.WorkloadEventID, "incident-") {
+			profileIncidents++
+		}
+	}
+	if profileIncidents != 6 || evidence[0].UnexpectedFailures != 6 {
+		t.Fatalf("profile incidents=%d unexpected=%d, want 6 each from compact snapshots; incidents=%+v", profileIncidents, evidence[0].UnexpectedFailures, evidence[0].Incidents)
+	}
+	if evidence[0].ProfileCapability != "observed" || len(evidence[0].ProfileRecords) != 1 {
+		t.Fatalf("profile capability=%q records=%+v", evidence[0].ProfileCapability, evidence[0].ProfileRecords)
+	}
+}
