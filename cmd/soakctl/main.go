@@ -150,6 +150,7 @@ func main() {
 		RateLimitVisibilityThreshold: prStateRateLimitVisibilityThreshold,
 	}, mgr)
 	api := orchestrator.NewAPIWithContext(ctx, db, fly, metrics, alerts, mgr, deployer)
+	go api.WarmDashboard()
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /webhooks/github", webhookHandler)

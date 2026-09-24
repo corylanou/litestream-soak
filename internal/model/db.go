@@ -120,6 +120,12 @@ CREATE TABLE IF NOT EXISTS run_archives (
     archived_at DATETIME NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS comparison_snapshots (
+    cache_key TEXT PRIMARY KEY,
+    computed_at DATETIME NOT NULL,
+    body TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS volume_gc_attempts (
     volume_id TEXT PRIMARY KEY,
     app_name TEXT NOT NULL DEFAULT '',

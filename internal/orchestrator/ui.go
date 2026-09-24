@@ -102,7 +102,7 @@ type helpPageData struct {
 }
 
 func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
-	data, err := a.buildHomePageData(r)
+	data, err := a.homePageData(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -112,7 +112,7 @@ func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleHomePartial(w http.ResponseWriter, r *http.Request) {
-	data, err := a.buildHomePageData(r)
+	data, err := a.homePageData(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

@@ -91,7 +91,7 @@ func (o *deploymentObserver) run() {
 		ctx, cancel := context.WithTimeout(o.ctx, o.budget)
 		err := errors.Join(o.refresh(ctx, sources), ctx.Err())
 		observeDeploymentRefreshResult(err)
-		if err != nil {
+		if err != nil && !onlyComparisonPending(err) {
 			slog.Warn("Deployment gauge refresh incomplete", "error", err)
 		}
 		cancel()
@@ -116,6 +116,9 @@ var deploymentRefreshHealthy = promauto.NewGauge(prometheus.GaugeOpts{Name: "soa
 
 func observeDeploymentRefreshResult(err error) {
 	deploymentRefreshAttempt.SetToCurrentTime()
+	if onlyComparisonPending(err) {
+		return
+	}
 	if err != nil {
 		deploymentRefreshFailures.Inc()
 		deploymentRefreshHealthy.Set(0)
@@ -139,13 +142,13 @@ func (m *controlMetrics) refreshDeploymentMetrics(ctx context.Context, db *model
 		}
 		rollout = &value
 	}
-	comparison, err := m.prepareLatestDeploymentComparison(db)
-	if err != nil {
-		return err
+	comparison, comparisonErr := m.prepareLatestDeploymentComparison(db)
+	if comparisonErr != nil && !onlyComparisonPending(comparisonErr) {
+		return comparisonErr
 	}
-	sources, err := m.prepareSourceComparisons(db)
-	if err != nil {
-		return err
+	sources, sourcesErr := m.prepareSourceComparisons(db)
+	if sourcesErr != nil && !onlyComparisonPending(sourcesErr) {
+		return sourcesErr
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -153,9 +156,13 @@ func (m *controlMetrics) refreshDeploymentMetrics(ctx context.Context, db *model
 	if rollout != nil {
 		m.publishDeploymentRollout(*rollout, sequence)
 	}
-	comparison()
-	sources()
-	return nil
+	if comparison != nil {
+		comparison()
+	}
+	if sources != nil {
+		sources()
+	}
+	return errors.Join(comparisonErr, sourcesErr)
 }
 
 var deploymentAlertRefreshFailures = promauto.NewCounterVec(prometheus.CounterOpts{Name: "soak_control_deployment_alert_refresh_failures_total", Help: "Failed deployment alert reads by source, retained after recovery."}, []string{"source"})
@@ -177,4 +184,24 @@ func (a *API) WaitForBackground(ctx context.Context) error {
 	case <-ctx.Done():
 		return errors.Join(rolloutErr, ctx.Err())
 	}
+}
+
+func onlyComparisonPending(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		pending := false
+		for _, inner := range joined.Unwrap() {
+			if inner == nil {
+				continue
+			}
+			if !onlyComparisonPending(inner) {
+				return false
+			}
+			pending = true
+		}
+		return pending
+	}
+	return errors.Is(err, errComparisonPending)
 }

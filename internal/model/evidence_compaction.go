@@ -133,7 +133,7 @@ func normalizeRuntimeEvidence(tx *sql.Tx, runtimeID int, identity reporting.Work
 	return json.Marshal(fields)
 }
 
-func (d *DB) attachRuntimeProfileEvidence(e *RuntimeEvidence, decoded map[int64]reporting.ProfileRecordEvidence, arrays *profileRecordArrayCache) error {
+func (d *DB) attachRuntimeProfileEvidence(e *RuntimeEvidence, decoded map[int64]reporting.ProfileRecordEvidence, arrays *profileRecordArrayCache, prefetched map[int][]string) error {
 	if !bytes.Contains(e.RuntimeJSON, []byte(profileRecordRefsKey)) && !bytes.Contains(e.RuntimeJSON, []byte(profileIncidentsExternalKey)) {
 		return nil
 	}
@@ -179,6 +179,16 @@ func (d *DB) attachRuntimeProfileEvidence(e *RuntimeEvidence, decoded map[int64]
 	}
 	if _, ok := fields[profileIncidentsExternalKey]; ok {
 		e.ProfileIncidentsExternal = true
+		if prefetched != nil {
+			for _, body := range prefetched[e.ID] {
+				var incident reporting.ProfileIncident
+				if err := json.Unmarshal([]byte(body), &incident); err != nil {
+					return err
+				}
+				e.ProfileIncidents = append(e.ProfileIncidents, incident)
+			}
+			return nil
+		}
 		rows, err := d.query(`SELECT incident_json FROM evidence_profile_incidents WHERE runtime_id=? ORDER BY ordinal`, e.ID)
 		if err != nil {
 			return err

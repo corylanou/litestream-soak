@@ -286,25 +286,26 @@ func (d *DB) EachRuntimeEvidenceCompact(source string, deploymentID int, windows
 }
 
 func (d *DB) eachRuntimeEvidence(source string, deploymentID int, windows []EvidenceWindow, expand bool, fn func(RuntimeEvidence) error) error {
-	query := `SELECT id,identity_json,runtime_json,attributed,received_at,kind FROM evidence_runtime WHERE (source=? OR source='') AND deployment_id IN (?,0)`
-	args := []any{source, deploymentID}
+	idQuery := `SELECT id FROM evidence_runtime WHERE (source=? OR source='') AND deployment_id IN (?,0) ORDER BY id`
+	idArgs := []any{source, deploymentID}
 	if len(windows) > 0 {
-		ids, idArgs := evidenceWindowQuery("evidence_runtime", "id", "deployment_id", "received_at", "id", source, windows)
-		query = "SELECT id,identity_json,runtime_json,attributed,received_at,kind FROM evidence_runtime WHERE id IN (" + strings.ReplaceAll(ids, "evidence_source", "source") + ")"
-		args = idArgs
+		idQuery, idArgs = evidenceWindowQuery("evidence_runtime", "id", "deployment_id", "received_at", "id", source, windows)
+		idQuery = strings.ReplaceAll(idQuery, "evidence_source", "source")
 	}
-	var maxID int
-	if err := d.queryRow(`SELECT coalesce(max(id),0) FROM evidence_runtime`).Scan(&maxID); err != nil {
+	ids, err := d.queryIDs(idQuery, idArgs...)
+	if err != nil {
 		return err
 	}
-	query += " AND id>? AND id<=? ORDER BY id LIMIT 64"
 	cache := make(map[int64]json.RawMessage)
 	decoded := make(map[int64]reporting.ProfileRecordEvidence)
 	arrays := &profileRecordArrayCache{}
-	cursor := 0
-	for {
-		pageArgs := append(append([]any(nil), args...), cursor, maxID)
-		rows, err := d.query(query, pageArgs...)
+	for start := 0; start < len(ids); start += 64 {
+		chunk := ids[start:min(start+64, len(ids))]
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		rows, err := d.query(`SELECT id,identity_json,runtime_json,attributed,received_at,kind FROM evidence_runtime WHERE id IN (?`+strings.Repeat(",?", len(chunk)-1)+`) ORDER BY id`, args...)
 		if err != nil {
 			return err
 		}
@@ -327,6 +328,12 @@ func (d *DB) eachRuntimeEvidence(source string, deploymentID int, windows []Evid
 		if err != nil {
 			return err
 		}
+		var incidents map[int][]string
+		if !expand {
+			if incidents, err = d.profileIncidentsForRuntimes(args); err != nil {
+				return err
+			}
+		}
 		for _, row := range page {
 			e := row.e
 			if err := json.Unmarshal([]byte(row.identity), &e.Run); err != nil {
@@ -339,7 +346,7 @@ func (d *DB) eachRuntimeEvidence(source string, deploymentID int, windows []Evid
 				}
 			} else {
 				e.RuntimeJSON = json.RawMessage(row.runtime)
-				if err := d.attachRuntimeProfileEvidence(&e, decoded, arrays); err != nil {
+				if err := d.attachRuntimeProfileEvidence(&e, decoded, arrays, incidents); err != nil {
 					return err
 				}
 			}
@@ -347,9 +354,44 @@ func (d *DB) eachRuntimeEvidence(source string, deploymentID int, windows []Evid
 				return err
 			}
 		}
-		if len(page) < 64 {
-			return nil
-		}
-		cursor = page[len(page)-1].e.ID
 	}
+	return nil
+}
+
+func (d *DB) queryIDs(query string, args ...any) ([]int64, error) {
+	rows, err := d.query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (d *DB) profileIncidentsForRuntimes(ids []any) (map[int][]string, error) {
+	incidents := make(map[int][]string)
+	if len(ids) == 0 {
+		return incidents, nil
+	}
+	rows, err := d.query(`SELECT runtime_id, incident_json FROM evidence_profile_incidents WHERE runtime_id IN (?`+strings.Repeat(",?", len(ids)-1)+`) ORDER BY runtime_id, ordinal`, ids...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var runtimeID int
+		var body string
+		if err := rows.Scan(&runtimeID, &body); err != nil {
+			return nil, err
+		}
+		incidents[runtimeID] = append(incidents[runtimeID], body)
+	}
+	return incidents, rows.Err()
 }
