@@ -89,6 +89,6 @@ func (a *API) refreshHomePage(key string) {
 }
 
 func (a *API) WarmDashboard() {
-	a.peekDeploymentComparison("main", "", "")
+	_, _, _ = a.peekDeploymentComparison("main", "", "")
 	a.refreshHomePage(homeCacheKey(&http.Request{URL: &url.URL{}}))
 }

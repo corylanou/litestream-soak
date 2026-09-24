@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"errors"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -82,5 +83,23 @@ func TestComparisonSnapshotSurvivesRestart(t *testing.T) {
 	}
 	if _, _, ok := second.loadComparisonSnapshot(comparisonCacheKey{source: "main", deployments: "main=1/ready/"}); ok {
 		t.Fatal("snapshot for a different deployment state was loaded")
+	}
+}
+
+func TestOnlyComparisonPending(t *testing.T) {
+	other := errors.New("alert read failed")
+	for _, tt := range []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		{errComparisonPending, true},
+		{errors.Join(errComparisonPending, nil), true},
+		{errors.Join(errComparisonPending, other), false},
+		{other, false},
+	} {
+		if got := onlyComparisonPending(tt.err); got != tt.want {
+			t.Errorf("onlyComparisonPending(%v) = %v, want %v", tt.err, got, tt.want)
+		}
 	}
 }

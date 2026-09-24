@@ -18,7 +18,7 @@ import (
 )
 
 type controlMetrics struct {
-	comparisons               func(source, baseSource, headSource string) (*DeploymentComparisonResponse, bool)
+	comparisons               func(source, baseSource, headSource string) (*DeploymentComparisonResponse, bool, error)
 	mu                        sync.Mutex
 	statusByWorker            map[string]string
 	infoByWorker              map[string]workerInfoMetricState
@@ -1359,11 +1359,9 @@ func sameMetricLabels(left, right []string) bool {
 func (m *controlMetrics) comparison(db *model.DB, baseSource, headSource string) (*DeploymentComparisonResponse, bool, error) {
 	if m.comparisons != nil {
 		if headSource == "" {
-			comparison, ok := m.comparisons(baseSource, "", "")
-			return comparison, ok, nil
+			return m.comparisons(baseSource, "", "")
 		}
-		comparison, ok := m.comparisons("", baseSource, headSource)
-		return comparison, ok, nil
+		return m.comparisons("", baseSource, headSource)
 	}
 	var comparison *DeploymentComparisonResponse
 	var err error

@@ -91,7 +91,7 @@ func (o *deploymentObserver) run() {
 		ctx, cancel := context.WithTimeout(o.ctx, o.budget)
 		err := errors.Join(o.refresh(ctx, sources), ctx.Err())
 		observeDeploymentRefreshResult(err)
-		if err != nil && !errors.Is(err, errComparisonPending) {
+		if err != nil && !onlyComparisonPending(err) {
 			slog.Warn("Deployment gauge refresh incomplete", "error", err)
 		}
 		cancel()
@@ -116,7 +116,7 @@ var deploymentRefreshHealthy = promauto.NewGauge(prometheus.GaugeOpts{Name: "soa
 
 func observeDeploymentRefreshResult(err error) {
 	deploymentRefreshAttempt.SetToCurrentTime()
-	if errors.Is(err, errComparisonPending) {
+	if onlyComparisonPending(err) {
 		return
 	}
 	if err != nil {
@@ -180,4 +180,24 @@ func (a *API) WaitForBackground(ctx context.Context) error {
 	case <-ctx.Done():
 		return errors.Join(rolloutErr, ctx.Err())
 	}
+}
+
+func onlyComparisonPending(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		pending := false
+		for _, inner := range joined.Unwrap() {
+			if inner == nil {
+				continue
+			}
+			if !onlyComparisonPending(inner) {
+				return false
+			}
+			pending = true
+		}
+		return pending
+	}
+	return errors.Is(err, errComparisonPending)
 }

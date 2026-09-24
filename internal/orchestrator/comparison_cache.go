@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -203,12 +204,15 @@ func (a *API) storeComparisonSnapshot(key comparisonCacheKey, comparison *Deploy
 	}
 }
 
-func (a *API) peekDeploymentComparison(source, baseSource, headSource string) (*DeploymentComparisonResponse, bool) {
+func (a *API) peekDeploymentComparison(source, baseSource, headSource string) (*DeploymentComparisonResponse, bool, error) {
 	ctx, cancel := context.WithTimeout(a.backgroundContext, comparisonPeekWait)
 	defer cancel()
 	comparison, err := a.deploymentComparison(ctx, source, baseSource, headSource)
-	if err != nil {
-		return nil, false
+	if errors.Is(err, context.DeadlineExceeded) && a.backgroundContext.Err() == nil {
+		return nil, false, nil
 	}
-	return comparison, true
+	if err != nil {
+		return nil, false, err
+	}
+	return comparison, true, nil
 }
