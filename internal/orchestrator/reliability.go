@@ -34,37 +34,41 @@ type WorkerRunEvidence struct {
 	ProfileCapability         string                            `json:"profile_capability"`
 	DetectionLimitations      []string                          `json:"detection_limitations"`
 	profileIncidentIDs        map[string]bool
-	WorkerID                  string        `json:"worker_id"`
-	Profile                   string        `json:"profile"`
-	Region                    string        `json:"region"`
-	WorkloadSHA               string        `json:"workload_sha"`
-	ProfileHash               string        `json:"profile_hash"`
-	CurrentHealth             string        `json:"current_health"`
-	VerificationCount         int           `json:"verification_count"`
-	UnexpectedFailures        int           `json:"unexpected_failures"`
-	ExpectedInjections        int           `json:"expected_injections"`
-	UnattributedObservations  int           `json:"unattributed_observations"`
-	PendingObservations       int           `json:"pending_observations"`
-	IncompleteObservations    int           `json:"incomplete_observations"`
-	WorkloadAttempts          uint64        `json:"workload_attempts"`
-	WorkloadMutations         uint64        `json:"workload_mutations"`
-	WorkloadBusy              uint64        `json:"workload_busy"`
-	WorkloadErrors            uint64        `json:"workload_errors"`
-	WorkloadProgress          uint64        `json:"workload_progress"`
-	MaintenanceSnapshots      uint64        `json:"maintenance_snapshots"`
-	MaintenanceCompactions    uint64        `json:"maintenance_compactions"`
-	MaintenanceRetentions     uint64        `json:"maintenance_retentions"`
-	MaintenanceObservations   int           `json:"maintenance_observations"`
-	FirstVerification         *time.Time    `json:"first_verification,omitempty"`
-	LastVerification          *time.Time    `json:"last_verification,omitempty"`
-	VerifiedSpanSeconds       float64       `json:"verified_span_seconds"`
-	MaxVerificationGapSeconds float64       `json:"max_verification_gap_seconds"`
-	HistoryComplete           bool          `json:"history_complete"`
-	CoverageComplete          bool          `json:"coverage_complete"`
-	Eligible                  bool          `json:"eligible"`
-	EligibilityReasons        []string      `json:"eligibility_reasons"`
-	ReleaseScoringReason      string        `json:"release_scoring_reason"`
-	Incidents                 []RunIncident `json:"incidents"`
+	WorkerID                  string         `json:"worker_id"`
+	Profile                   string         `json:"profile"`
+	Region                    string         `json:"region"`
+	WorkloadSHA               string         `json:"workload_sha"`
+	ProfileHash               string         `json:"profile_hash"`
+	CurrentHealth             string         `json:"current_health"`
+	VerificationCount         int            `json:"verification_count"`
+	UnexpectedFailures        int            `json:"unexpected_failures"`
+	ExpectedInjections        int            `json:"expected_injections"`
+	UnattributedObservations  int            `json:"unattributed_observations"`
+	PendingObservations       int            `json:"pending_observations"`
+	IncompleteObservations    int            `json:"incomplete_observations"`
+	WorkloadAttempts          uint64         `json:"workload_attempts"`
+	WorkloadMutations         uint64         `json:"workload_mutations"`
+	WorkloadBusy              uint64         `json:"workload_busy"`
+	WorkloadErrors            uint64         `json:"workload_errors"`
+	WorkloadProgress          uint64         `json:"workload_progress"`
+	MaintenanceSnapshots      uint64         `json:"maintenance_snapshots"`
+	MaintenanceCompactions    uint64         `json:"maintenance_compactions"`
+	MaintenanceRetentions     uint64         `json:"maintenance_retentions"`
+	MaintenanceObservations   int            `json:"maintenance_observations"`
+	FirstVerification         *time.Time     `json:"first_verification,omitempty"`
+	LastVerification          *time.Time     `json:"last_verification,omitempty"`
+	VerifiedSpanSeconds       float64        `json:"verified_span_seconds"`
+	MaxVerificationGapSeconds float64        `json:"max_verification_gap_seconds"`
+	HistoryComplete           bool           `json:"history_complete"`
+	CoverageComplete          bool           `json:"coverage_complete"`
+	Eligible                  bool           `json:"eligible"`
+	EligibilityReasons        []string       `json:"eligibility_reasons"`
+	ReleaseScoringReason      string         `json:"release_scoring_reason"`
+	Incidents                 []RunIncident  `json:"incidents"`
+	IncidentCount             int            `json:"incident_count"`
+	IncidentKinds             map[string]int `json:"incident_kinds,omitempty"`
+	IncidentsTruncated        bool           `json:"incidents_truncated,omitempty"`
+	ProfileRecordCount        int            `json:"profile_record_count,omitempty"`
 	lastRun                   string
 	lastTXID                  uint64
 	lastRuntimeAt             time.Time
@@ -277,6 +281,7 @@ func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Ti
 			e.ReleaseScoringReason = "excluded from legacy release score; retained in reliability (#187, #192)"
 		}
 		evaluateRunEligibility(e, deployment.StartedAt, end, time.Hour, 24*time.Hour)
+		summarizeRunEvidence(e)
 		result = append(result, *e)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].WorkerID < result[j].WorkerID })
@@ -453,4 +458,40 @@ func attributedReportJSON(raw json.RawMessage, workerID string, attributed bool)
 	fields["worker_id"], _ = json.Marshal(workerID)
 	fields["attributed"], _ = json.Marshal(attributed)
 	return json.Marshal(fields)
+}
+
+const (
+	reliabilityIncidentLimit      = 50
+	reliabilityProfileRecordLimit = 20
+)
+
+func summarizeRunEvidence(e *WorkerRunEvidence) {
+	e.IncidentCount = len(e.Incidents)
+	if len(e.Incidents) > 0 {
+		e.IncidentKinds = make(map[string]int)
+		for _, incident := range e.Incidents {
+			e.IncidentKinds[incident.Kind]++
+		}
+	}
+	if len(e.Incidents) > reliabilityIncidentLimit {
+		sort.SliceStable(e.Incidents, func(i, j int) bool { return e.Incidents[i].At.Before(e.Incidents[j].At) })
+		e.Incidents = append([]RunIncident(nil), e.Incidents[len(e.Incidents)-reliabilityIncidentLimit:]...)
+		e.IncidentsTruncated = true
+	}
+	for i := range e.Incidents {
+		e.Incidents[i].Run = compactIncidentRun(e.Incidents[i].Run)
+	}
+	e.ProfileRecordCount = len(e.ProfileRecords)
+	if len(e.ProfileRecords) > reliabilityProfileRecordLimit {
+		e.ProfileRecords = append([]reporting.ProfileRecordEvidence(nil), e.ProfileRecords[len(e.ProfileRecords)-reliabilityProfileRecordLimit:]...)
+	}
+}
+
+func compactIncidentRun(run reporting.WorkerIdentity) reporting.WorkerIdentity {
+	return reporting.WorkerIdentity{
+		DeploymentID: run.DeploymentID,
+		WorkerID:     run.WorkerID,
+		RunID:        run.RunID,
+		MachineID:    run.MachineID,
+	}
 }

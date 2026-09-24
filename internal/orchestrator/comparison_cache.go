@@ -23,6 +23,8 @@ const (
 
 var comparisonBuildSlot = make(chan struct{}, 1)
 
+const comparisonSnapshotVersion = "v2"
+
 type comparisonCache struct {
 	mu      sync.Mutex
 	entries map[comparisonCacheKey]*comparisonCacheEntry
@@ -188,7 +190,7 @@ func (a *API) comparisonDeploymentFingerprint(ctx context.Context, key compariso
 }
 
 func (k comparisonCacheKey) String() string {
-	return strings.Join([]string{k.source, k.baseSource, k.headSource, k.deployments}, "|")
+	return strings.Join([]string{comparisonSnapshotVersion, k.source, k.baseSource, k.headSource, k.deployments}, "|")
 }
 
 func (a *API) loadComparisonSnapshot(key comparisonCacheKey) (*DeploymentComparisonResponse, time.Time, bool) {

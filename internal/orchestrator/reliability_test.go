@@ -829,3 +829,40 @@ func TestRunReliabilityReadsCompactProfileSnapshots(t *testing.T) {
 		t.Fatalf("profile capability=%q records=%+v", evidence[0].ProfileCapability, evidence[0].ProfileRecords)
 	}
 }
+
+func TestSummarizeRunEvidenceBoundsPayload(t *testing.T) {
+	base := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	run := reporting.WorkerIdentity{WorkerID: "worker", RunID: "run", MachineID: "machine", DeploymentID: 7, ProfileConfig: strings.Repeat("x", 700), ImageRef: "registry/image"}
+	e := &WorkerRunEvidence{UnexpectedFailures: 120}
+	for i := 0; i < 120; i++ {
+		kind := "provider_retry"
+		if i%3 == 0 {
+			kind = "profile_capture_error"
+		}
+		e.Incidents = append(e.Incidents, RunIncident{Kind: kind, Run: run, At: base.Add(time.Duration(120-i) * time.Minute)})
+	}
+	for i := 0; i < 30; i++ {
+		e.ProfileRecords = append(e.ProfileRecords, reporting.ProfileRecordEvidence{Artifact: fmt.Sprintf("cpu-%d.pprof", i)})
+	}
+
+	summarizeRunEvidence(e)
+
+	if e.IncidentCount != 120 || !e.IncidentsTruncated || len(e.Incidents) != reliabilityIncidentLimit {
+		t.Fatalf("incident count=%d truncated=%v kept=%d", e.IncidentCount, e.IncidentsTruncated, len(e.Incidents))
+	}
+	if e.IncidentKinds["profile_capture_error"] != 40 || e.IncidentKinds["provider_retry"] != 80 {
+		t.Fatalf("incident kinds = %v", e.IncidentKinds)
+	}
+	if !e.Incidents[len(e.Incidents)-1].At.Equal(base.Add(120*time.Minute)) {
+		t.Fatalf("latest kept incident at %v, want the newest", e.Incidents[len(e.Incidents)-1].At)
+	}
+	if got := e.Incidents[0].Run; got.ProfileConfig != "" || got.ImageRef != "" || got.RunID != "run" || got.MachineID != "machine" || got.DeploymentID != 7 {
+		t.Fatalf("compact run identity = %+v", got)
+	}
+	if e.UnexpectedFailures != 120 {
+		t.Fatalf("UnexpectedFailures = %d, summarization must not change counters", e.UnexpectedFailures)
+	}
+	if e.ProfileRecordCount != 30 || len(e.ProfileRecords) != reliabilityProfileRecordLimit || e.ProfileRecords[len(e.ProfileRecords)-1].Artifact != "cpu-29.pprof" {
+		t.Fatalf("profile records count=%d kept=%d", e.ProfileRecordCount, len(e.ProfileRecords))
+	}
+}
