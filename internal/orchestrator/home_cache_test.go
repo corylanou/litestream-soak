@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -140,5 +141,19 @@ func TestSourceComparisonMetricsSkipRetiredSources(t *testing.T) {
 	}
 	if len(requested) != 1 || requested[0] != "pr-1" {
 		t.Fatalf("requested comparisons = %v, want only the active pr-1 source", requested)
+	}
+}
+
+func TestRecentRunIncidentsCapsDashboardList(t *testing.T) {
+	incidents := make([]RunIncident, 0, 50)
+	for i := 0; i < 50; i++ {
+		incidents = append(incidents, RunIncident{Kind: fmt.Sprintf("incident-%d", i)})
+	}
+	shown := recentRunIncidents(incidents)
+	if len(shown) != dashboardIncidentLimit || shown[len(shown)-1].Kind != "incident-49" || shown[0].Kind != "incident-30" {
+		t.Fatalf("recentRunIncidents() = %d incidents from %q to %q", len(shown), shown[0].Kind, shown[len(shown)-1].Kind)
+	}
+	if few := recentRunIncidents(incidents[:3]); len(few) != 3 {
+		t.Fatalf("recentRunIncidents(3) = %d, want all 3", len(few))
 	}
 }
