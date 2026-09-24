@@ -86,6 +86,9 @@ func ensureEvidenceJournal(db *sql.DB) error {
 			slog.Info("Evidence journal backfill finished", "journal", step.name, "rows_inserted", rows, "duration", time.Since(stepStart))
 		}
 	}
+	if _, err := tx.Exec(profileBlobSchema); err != nil {
+		return err
+	}
 	slog.Info("Evidence journal indexes started")
 	if _, err := tx.Exec(evidenceWindowIndexes + verificationActivityIndexes); err != nil {
 		return err
@@ -160,6 +163,10 @@ func (d *DB) ListEvidenceVerifications(source string, windows ...EvidenceWindow)
 			v.Run.ProfileName = profile
 		}
 		if runtime != "" {
+			runtime, err = d.expandProfileSnapshot(runtime)
+			if err != nil {
+				return nil, err
+			}
 			if err := json.Unmarshal([]byte(runtime), &v.Runtime); err != nil {
 				return nil, fmt.Errorf("decode evidence runtime: %w", err)
 			}
@@ -180,6 +187,9 @@ func (d *DB) ListEvidenceEvents(source string, windows ...EvidenceWindow) ([]Eve
 	for rows.Next() {
 		var e Event
 		if err := rows.Scan(&e.ID, &e.WorkerID, &e.EventType, &e.Message, &e.Details, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		if e.Details, err = d.expandProfileSnapshot(e.Details); err != nil {
 			return nil, err
 		}
 		events = append(events, e)

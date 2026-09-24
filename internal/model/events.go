@@ -6,7 +6,11 @@ import (
 )
 
 func (d *DB) RecordEvent(workerID, eventType, message, details string) error {
-	_, err := d.exec(`
+	details, err := d.compactProfileSnapshot(details)
+	if err != nil {
+		return err
+	}
+	_, err = d.exec(`
 		INSERT INTO events (worker_id, event_type, message, details)
 		VALUES (?, ?, ?, ?)`,
 		workerID, eventType, message, details,
@@ -15,7 +19,11 @@ func (d *DB) RecordEvent(workerID, eventType, message, details string) error {
 }
 
 func (d *DB) RecordEventAt(workerID, eventType, message, details string, createdAt time.Time) error {
-	_, err := d.exec(`
+	details, err := d.compactProfileSnapshot(details)
+	if err != nil {
+		return err
+	}
+	_, err = d.exec(`
 		INSERT INTO events (worker_id, event_type, message, details, created_at)
 		VALUES (?, ?, ?, ?, ?)`,
 		workerID, eventType, message, details, createdAt,
@@ -24,13 +32,17 @@ func (d *DB) RecordEventAt(workerID, eventType, message, details string, created
 }
 
 func (d *DB) RecordUniqueEventAt(workerID, eventType, message, details string, createdAt time.Time) (bool, error) {
+	compact, err := d.compactProfileSnapshot(details)
+	if err != nil {
+		return false, err
+	}
 	var id int
-	err := d.queryRow(`
+	err = d.queryRow(`
 		SELECT 1
 		FROM events
-		WHERE worker_id = ? AND event_type = ? AND message = ? AND details = ? AND created_at = ?
+		WHERE worker_id = ? AND event_type = ? AND message = ? AND details IN (?, ?) AND created_at = ?
 		LIMIT 1`,
-		workerID, eventType, message, details, createdAt,
+		workerID, eventType, message, details, compact, createdAt,
 	).Scan(&id)
 	switch {
 	case err == nil:
@@ -65,6 +77,10 @@ func (d *DB) RecordWindowedEventAt(workerID, eventType, message, details string,
 	).Scan(&existingID)
 	switch {
 	case err == nil:
+		details, err = d.compactProfileSnapshot(details)
+		if err != nil {
+			return false, err
+		}
 		_, err = d.exec(`
 			UPDATE events
 			SET details = ?, created_at = ?
@@ -99,6 +115,10 @@ func (d *DB) ListEvents(limit int) ([]Event, error) {
 		if err := rows.Scan(&e.ID, &workerID, &e.EventType, &e.Message, &e.Details, &e.CreatedAt); err != nil {
 			return nil, err
 		}
+		var err error
+		if e.Details, err = d.expandProfileSnapshot(e.Details); err != nil {
+			return nil, err
+		}
 		if workerID.Valid {
 			e.WorkerID = workerID.String
 		}
@@ -129,6 +149,10 @@ func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
 		var e Event
 		var eventWorkerID sql.NullString
 		if err := rows.Scan(&e.ID, &eventWorkerID, &e.EventType, &e.Message, &e.Details, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		var err error
+		if e.Details, err = d.expandProfileSnapshot(e.Details); err != nil {
 			return nil, err
 		}
 		if eventWorkerID.Valid {

@@ -32,6 +32,9 @@ func (d *DB) LatestRunVerificationStart(identity reporting.WorkerIdentity) (*Eve
 	if err != nil {
 		return nil, err
 	}
+	if event.Details, err = d.expandProfileSnapshot(event.Details); err != nil {
+		return nil, err
+	}
 	return &event, nil
 }
 

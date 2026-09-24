@@ -165,6 +165,7 @@ type DB struct {
 	// head-of-line blocked behind the worker-heartbeat write stream.
 	writer *sql.DB
 	reader *sql.DB
+	blobs  *profileBlobCache
 }
 
 const dsnParams = "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_time_format=sqlite&_timezone=UTC"
@@ -230,7 +231,7 @@ func Open(path string) (*DB, error) {
 	reader.SetMaxOpenConns(readerConns)
 	reader.SetMaxIdleConns(readerConns)
 
-	return &DB{writer: writer, reader: reader}, nil
+	return &DB{writer: writer, reader: reader, blobs: newProfileBlobCache()}, nil
 }
 
 // maxReaderConns sizes the read pool for concurrency while staying bounded on
@@ -244,7 +245,7 @@ func maxReaderConns() int {
 }
 
 func (d *DB) WithReadContext(ctx context.Context) *DB {
-	return &DB{reader: d.reader, readContext: ctx}
+	return &DB{reader: d.reader, readContext: ctx, blobs: d.blobs}
 }
 
 func (d *DB) queryContext() context.Context {
