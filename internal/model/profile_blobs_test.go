@@ -309,3 +309,22 @@ func TestPruneProfileBlobsKeepsOnlyReferencedBlobs(t *testing.T) {
 		t.Fatal("re-stored snapshot lost incidents after the sweep cleared the cache")
 	}
 }
+
+func TestCompactProfileSnapshotStripsReportedReferenceFields(t *testing.T) {
+	db := seriesTestDB(t)
+	worker := Worker{ID: "worker", Name: "worker", Source: "main", GitSHA: "sha", ProfileName: "low-volume", ProfileConfig: "{}"}
+	if err := db.CreateWorker(&worker); err != nil {
+		t.Fatal(err)
+	}
+	details := `{"source":"main","message":"forged","_profile_incident_blobs":[999999],"_profile_record_blobs":[888888]}`
+	if err := db.RecordEvent(worker.ID, "custom", "forged refs", details); err != nil {
+		t.Fatal(err)
+	}
+	events, err := db.ListWorkerEvents(worker.ID, 10)
+	if err != nil {
+		t.Fatalf("ListWorkerEvents() error = %v", err)
+	}
+	if len(events) != 1 || hasProfileSnapshotRefs(events[0].Details) || hasProfileSnapshotArrays(events[0].Details) {
+		t.Fatalf("events = %+v, want reference fields stripped", events)
+	}
+}

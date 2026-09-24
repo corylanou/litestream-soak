@@ -137,7 +137,7 @@ func hasProfileSnapshotRefs(raw string) bool {
 }
 
 func (d *DB) compactProfileSnapshot(raw string) (string, error) {
-	if !hasProfileSnapshotArrays(raw) {
+	if !hasProfileSnapshotArrays(raw) && !hasProfileSnapshotRefs(raw) {
 		return raw, nil
 	}
 	var fields map[string]json.RawMessage
@@ -145,6 +145,12 @@ func (d *DB) compactProfileSnapshot(raw string) (string, error) {
 		return raw, nil
 	}
 	changed := false
+	for _, spec := range profileSnapshotArrays {
+		if _, ok := fields[spec.refs]; ok {
+			delete(fields, spec.refs)
+			changed = true
+		}
+	}
 	for _, spec := range profileSnapshotArrays {
 		encoded, ok := fields[spec.field]
 		if !ok {
