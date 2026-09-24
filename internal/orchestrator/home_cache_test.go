@@ -145,15 +145,17 @@ func TestSourceComparisonMetricsSkipRetiredSources(t *testing.T) {
 }
 
 func TestRecentRunIncidentsCapsDashboardList(t *testing.T) {
-	incidents := make([]RunIncident, 0, 50)
+	base := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	incidents := make([]RunIncident, 0, 51)
 	for i := 0; i < 50; i++ {
-		incidents = append(incidents, RunIncident{Kind: fmt.Sprintf("incident-%d", i)})
+		incidents = append(incidents, RunIncident{Kind: fmt.Sprintf("incident-%d", i), At: base.Add(time.Duration(i) * time.Minute)})
 	}
+	incidents = append([]RunIncident{{Kind: "newest-verification", At: base.Add(time.Hour)}}, incidents...)
 	shown := recentRunIncidents(incidents)
-	if len(shown) != dashboardIncidentLimit || shown[len(shown)-1].Kind != "incident-49" || shown[0].Kind != "incident-30" {
+	if len(shown) != dashboardIncidentLimit || shown[len(shown)-1].Kind != "newest-verification" || shown[0].Kind != "incident-31" {
 		t.Fatalf("recentRunIncidents() = %d incidents from %q to %q", len(shown), shown[0].Kind, shown[len(shown)-1].Kind)
 	}
-	if few := recentRunIncidents(incidents[:3]); len(few) != 3 {
+	if few := recentRunIncidents(incidents[1:4]); len(few) != 3 {
 		t.Fatalf("recentRunIncidents(3) = %d, want all 3", len(few))
 	}
 }
