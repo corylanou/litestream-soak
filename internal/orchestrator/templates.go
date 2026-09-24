@@ -5,7 +5,10 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 //go:embed templates/*.html
@@ -38,6 +41,8 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"heartbeatUnix":           heartbeatUnix,
 	"homeWorkerOutcomeRank":   homeWorkerOutcomeRank,
 	"json":                    mustJSON,
+	"recentIncidents":         recentRunIncidents,
+	"recentProfileRecords":    recentProfileRecords,
 	"jsonCompact":             jsonCompact,
 	"joinList":                strings.Join,
 	"pathEscape":              url.PathEscape,
@@ -70,4 +75,22 @@ func renderHTML(w http.ResponseWriter, name string, data any) {
 	if err := uiTemplates.ExecuteTemplate(w, name, data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+const dashboardIncidentLimit = 20
+
+func recentRunIncidents(incidents []RunIncident) []RunIncident {
+	if len(incidents) <= dashboardIncidentLimit {
+		return incidents
+	}
+	sorted := slices.Clone(incidents)
+	slices.SortStableFunc(sorted, func(a, b RunIncident) int { return a.At.Compare(b.At) })
+	return sorted[len(sorted)-dashboardIncidentLimit:]
+}
+
+func recentProfileRecords(records []reporting.ProfileRecordEvidence) []reporting.ProfileRecordEvidence {
+	if len(records) <= dashboardIncidentLimit {
+		return records
+	}
+	return records[len(records)-dashboardIncidentLimit:]
 }
