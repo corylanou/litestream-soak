@@ -142,13 +142,13 @@ func (m *controlMetrics) refreshDeploymentMetrics(ctx context.Context, db *model
 		}
 		rollout = &value
 	}
-	comparison, err := m.prepareLatestDeploymentComparison(db)
-	if err != nil {
-		return err
+	comparison, comparisonErr := m.prepareLatestDeploymentComparison(db)
+	if comparisonErr != nil && !onlyComparisonPending(comparisonErr) {
+		return comparisonErr
 	}
-	sources, err := m.prepareSourceComparisons(db)
-	if err != nil {
-		return err
+	sources, sourcesErr := m.prepareSourceComparisons(db)
+	if sourcesErr != nil && !onlyComparisonPending(sourcesErr) {
+		return sourcesErr
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -156,9 +156,13 @@ func (m *controlMetrics) refreshDeploymentMetrics(ctx context.Context, db *model
 	if rollout != nil {
 		m.publishDeploymentRollout(*rollout, sequence)
 	}
-	comparison()
-	sources()
-	return nil
+	if comparison != nil {
+		comparison()
+	}
+	if sources != nil {
+		sources()
+	}
+	return errors.Join(comparisonErr, sourcesErr)
 }
 
 var deploymentAlertRefreshFailures = promauto.NewCounterVec(prometheus.CounterOpts{Name: "soak_control_deployment_alert_refresh_failures_total", Help: "Failed deployment alert reads by source, retained after recovery."}, []string{"source"})
