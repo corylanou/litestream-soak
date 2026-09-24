@@ -152,6 +152,7 @@ CREATE INDEX IF NOT EXISTS idx_deployments_source_status_started ON deployments(
 CREATE INDEX IF NOT EXISTS idx_deployments_source_version_started ON deployments(source, git_sha, litestream_sha, started_at DESC, id DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_run_archives_unique ON run_archives(deployment_id, archive_type, worker_id);
 CREATE INDEX IF NOT EXISTS idx_run_archives_source_type_archived ON run_archives(source, archive_type, archived_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_archives_archived ON run_archives(archived_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_volume_gc_attempts_app_retry ON volume_gc_attempts(app_name, next_retry_at);
 `
 

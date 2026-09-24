@@ -58,7 +58,7 @@ primary_region = "ord"
 
 [[vm]]
   memory = "2gb"
-  cpu_kind = "shared"
+  cpu_kind = "performance"
   cpus = 1
 
 [[metrics]]

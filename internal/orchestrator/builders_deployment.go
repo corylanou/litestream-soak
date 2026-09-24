@@ -43,7 +43,7 @@ func buildLatestDeploymentRollout(db *model.DB, source string) (*DeploymentRollo
 }
 
 func listSuccessArchivesBySource(db *model.DB) (map[string]model.RunArchive, error) {
-	archives, err := db.ListRunArchives("", runArchiveTypeSuccess, 10000)
+	archives, err := db.ListRunArchives("", runArchiveTypeSuccess, 10000, false)
 	if err != nil {
 		return nil, err
 	}

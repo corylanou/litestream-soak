@@ -150,6 +150,7 @@ func (a *API) handleListRunArchives(w http.ResponseWriter, r *http.Request) {
 		strings.TrimSpace(r.URL.Query().Get("source")),
 		strings.TrimSpace(r.URL.Query().Get("type")),
 		readLimit(r, 20),
+		strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("payload")), "true"),
 	)
 	if err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to list run archives")

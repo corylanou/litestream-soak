@@ -83,12 +83,16 @@ func (d *DB) RecordRunArchive(archive *RunArchive) (bool, error) {
 	return true, nil
 }
 
-func (d *DB) ListRunArchives(source, archiveType string, limit int) ([]RunArchive, error) {
+func (d *DB) ListRunArchives(source, archiveType string, limit int, includePayload bool) ([]RunArchive, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 
-	query := "SELECT " + runArchiveColumns + " FROM run_archives"
+	columns := runArchiveColumns
+	if !includePayload {
+		columns = strings.Replace(runArchiveColumns, "summary, payload,", "summary, '' AS payload,", 1)
+	}
+	query := "SELECT " + columns + " FROM run_archives"
 	args := make([]any, 0, 3)
 	clauses := make([]string, 0, 2)
 	if strings.TrimSpace(source) != "" {

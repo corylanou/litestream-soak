@@ -3892,7 +3892,7 @@ func TestHandleTeardownSourceArchivesAndDestroysRunningAndDormantWorkers(t *test
 		}
 	}
 
-	archiveRequest := httptest.NewRequest(http.MethodGet, "/api/run-archives?source="+source+"&type="+runArchiveTypeTeardown, nil)
+	archiveRequest := httptest.NewRequest(http.MethodGet, "/api/run-archives?source="+source+"&type="+runArchiveTypeTeardown+"&payload=true", nil)
 	archiveRecorder := httptest.NewRecorder()
 	mux.ServeHTTP(archiveRecorder, archiveRequest)
 	if archiveRecorder.Code != http.StatusOK {
