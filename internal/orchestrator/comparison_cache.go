@@ -20,6 +20,8 @@ const (
 	homeComparisonWait      = 250 * time.Millisecond
 )
 
+var comparisonBuildSlot = make(chan struct{}, 1)
+
 type comparisonCache struct {
 	mu      sync.Mutex
 	entries map[comparisonCacheKey]*comparisonCacheEntry
@@ -97,8 +99,17 @@ func (a *API) runComparisonFlight(e *comparisonCacheEntry, f *comparisonFlight, 
 	}
 	ctx, cancel := context.WithTimeout(parent, comparisonBuildTimeout)
 	defer cancel()
+	var value *DeploymentComparisonResponse
+	var err error
 	start := time.Now()
-	value, err := buildRequestedDeploymentComparison(a.db.WithReadContext(ctx), key.source, key.baseSource, key.headSource)
+	select {
+	case comparisonBuildSlot <- struct{}{}:
+		start = time.Now()
+		value, err = buildRequestedDeploymentComparison(a.db.WithReadContext(ctx), key.source, key.baseSource, key.headSource)
+		<-comparisonBuildSlot
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
 
 	var persistAt time.Time
 	a.comparisons.mu.Lock()
