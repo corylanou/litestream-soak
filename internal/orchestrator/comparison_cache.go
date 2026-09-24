@@ -17,7 +17,7 @@ const (
 	comparisonPeekWait      = 2 * time.Second
 	comparisonCacheMinCost  = time.Second
 	comparisonBuildTimeout  = 20 * time.Minute
-	comparisonQueueTimeout  = 10 * time.Minute
+	comparisonQueueTimeout  = 25 * time.Minute
 	homeComparisonWait      = 250 * time.Millisecond
 )
 

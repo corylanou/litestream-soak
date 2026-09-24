@@ -1125,7 +1125,10 @@ func (m *Manager) archiveDeploymentRun(archiveType, reason string, deployment mo
 		Rollout:     rollout,
 		Workers:     make([]workerRunEvidence, 0, len(workers)),
 	}
-	if comparison, err := buildLatestCrossSourceDeploymentComparison(m.db, "main", deployment.Source); err == nil {
+	comparisonBuildSlot <- struct{}{}
+	comparison, err := buildLatestCrossSourceDeploymentComparison(m.db, "main", deployment.Source)
+	<-comparisonBuildSlot
+	if err == nil {
 		payload.Comparison = comparison
 	}
 
