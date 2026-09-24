@@ -91,7 +91,7 @@ func (o *deploymentObserver) run() {
 		ctx, cancel := context.WithTimeout(o.ctx, o.budget)
 		err := errors.Join(o.refresh(ctx, sources), ctx.Err())
 		observeDeploymentRefreshResult(err)
-		if err != nil {
+		if err != nil && !errors.Is(err, errComparisonPending) {
 			slog.Warn("Deployment gauge refresh incomplete", "error", err)
 		}
 		cancel()
@@ -116,6 +116,9 @@ var deploymentRefreshHealthy = promauto.NewGauge(prometheus.GaugeOpts{Name: "soa
 
 func observeDeploymentRefreshResult(err error) {
 	deploymentRefreshAttempt.SetToCurrentTime()
+	if errors.Is(err, errComparisonPending) {
+		return
+	}
 	if err != nil {
 		deploymentRefreshFailures.Inc()
 		deploymentRefreshHealthy.Set(0)

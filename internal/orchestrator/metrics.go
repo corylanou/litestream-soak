@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -785,7 +786,7 @@ func (m *controlMetrics) prepareLatestDeploymentComparison(db *model.DB) (func()
 		return nil, err
 	}
 	if !ok {
-		return func() {}, nil
+		return nil, errComparisonPending
 	}
 	if comparison == nil {
 		return func() {}, nil
@@ -1031,7 +1032,7 @@ func (m *controlMetrics) prepareSourceComparisons(db *model.DB) (func(), error) 
 			return nil, err
 		}
 		if !ok {
-			return func() {}, nil
+			return nil, errComparisonPending
 		}
 		if comparison == nil || comparison.Base == nil {
 			continue
@@ -1373,3 +1374,5 @@ func (m *controlMetrics) comparison(db *model.DB, baseSource, headSource string)
 	}
 	return comparison, err == nil, err
 }
+
+var errComparisonPending = errors.New("deployment comparison is still building")

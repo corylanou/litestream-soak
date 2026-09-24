@@ -99,13 +99,14 @@ func (a *API) runComparisonFlight(e *comparisonCacheEntry, f *comparisonFlight, 
 	start := time.Now()
 	value, err := buildRequestedDeploymentComparison(a.db.WithReadContext(ctx), key.source, key.baseSource, key.headSource)
 
+	var persistAt time.Time
 	a.comparisons.mu.Lock()
 	e.flight = nil
 	switch {
 	case err != nil:
 	case value != nil && time.Since(start) >= comparisonCacheMinCost:
 		e.cached, e.cachedAt = value, time.Now()
-		a.storeComparisonSnapshot(key, value, e.cachedAt)
+		persistAt = e.cachedAt
 	default:
 		e.cached = nil
 	}
@@ -116,6 +117,9 @@ func (a *API) runComparisonFlight(e *comparisonCacheEntry, f *comparisonFlight, 
 
 	f.value, f.err = value, err
 	close(f.done)
+	if !persistAt.IsZero() {
+		a.storeComparisonSnapshot(key, value, persistAt)
+	}
 }
 
 func (c *comparisonCache) evictExpiredLocked() {
