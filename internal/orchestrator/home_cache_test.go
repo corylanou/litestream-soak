@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/model"
 )
 
 func TestHomePageServesFreshSnapshot(t *testing.T) {
@@ -116,5 +118,27 @@ func TestWarmDashboardCachesSlowBuildBeforeFirstRequest(t *testing.T) {
 	defer api.home.mu.Unlock()
 	if len(api.home.entries) != 1 {
 		t.Fatalf("home cache entries = %d, want the warmed default dashboard", len(api.home.entries))
+	}
+}
+
+func TestSourceComparisonMetricsSkipRetiredSources(t *testing.T) {
+	db := openTestDB(t)
+	for _, worker := range []model.Worker{
+		{ID: "worker-pr-1-active", Name: "active", Source: "pr-1", GitSHA: "sha", ProfileName: "low-volume", ProfileConfig: "{}", Status: model.WorkerRunning},
+		{ID: "worker-pr-2-retired", Name: "retired", Source: "pr-2", GitSHA: "sha", ProfileName: "low-volume", ProfileConfig: "{}", Status: model.WorkerStopped},
+	} {
+		createTestWorker(t, db, worker)
+	}
+	metrics := NewControlMetrics(db)
+	var requested []string
+	metrics.comparisons = func(source, baseSource, headSource string) (*DeploymentComparisonResponse, bool, error) {
+		requested = append(requested, headSource)
+		return nil, true, nil
+	}
+	if _, err := metrics.prepareSourceComparisons(db); err != nil {
+		t.Fatalf("prepareSourceComparisons() error = %v", err)
+	}
+	if len(requested) != 1 || requested[0] != "pr-1" {
+		t.Fatalf("requested comparisons = %v, want only the active pr-1 source", requested)
 	}
 }
