@@ -5,7 +5,6 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 
 	"github.com/corylanou/litestream-soak/internal/reporting"
@@ -83,9 +82,7 @@ func recentRunIncidents(incidents []RunIncident) []RunIncident {
 	if len(incidents) <= dashboardIncidentLimit {
 		return incidents
 	}
-	sorted := slices.Clone(incidents)
-	slices.SortStableFunc(sorted, func(a, b RunIncident) int { return a.At.Compare(b.At) })
-	return sorted[len(sorted)-dashboardIncidentLimit:]
+	return selectRepresentativeIncidents(incidents, dashboardIncidentLimit)
 }
 
 func recentProfileRecords(records []reporting.ProfileRecordEvidence) []reporting.ProfileRecordEvidence {
