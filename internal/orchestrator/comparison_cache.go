@@ -17,8 +17,11 @@ const (
 	comparisonPeekWait      = 2 * time.Second
 	comparisonCacheMinCost  = time.Second
 	comparisonBuildTimeout  = 20 * time.Minute
+	comparisonQueueTimeout  = 25 * time.Minute
 	homeComparisonWait      = 250 * time.Millisecond
 )
+
+var comparisonBuildSlot = make(chan struct{}, 1)
 
 type comparisonCache struct {
 	mu      sync.Mutex
@@ -95,10 +98,21 @@ func (a *API) runComparisonFlight(e *comparisonCacheEntry, f *comparisonFlight, 
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, comparisonBuildTimeout)
-	defer cancel()
+	var value *DeploymentComparisonResponse
+	var err error
 	start := time.Now()
-	value, err := buildRequestedDeploymentComparison(a.db.WithReadContext(ctx), key.source, key.baseSource, key.headSource)
+	queued, cancelQueue := context.WithTimeout(parent, comparisonQueueTimeout)
+	defer cancelQueue()
+	select {
+	case comparisonBuildSlot <- struct{}{}:
+		ctx, cancel := context.WithTimeout(parent, comparisonBuildTimeout)
+		start = time.Now()
+		value, err = buildRequestedDeploymentComparison(a.db.WithReadContext(ctx), key.source, key.baseSource, key.headSource)
+		cancel()
+		<-comparisonBuildSlot
+	case <-queued.Done():
+		err = queued.Err()
+	}
 
 	var persistAt time.Time
 	a.comparisons.mu.Lock()
