@@ -17,6 +17,7 @@ const (
 	comparisonPeekWait      = 2 * time.Second
 	comparisonCacheMinCost  = time.Second
 	comparisonBuildTimeout  = 20 * time.Minute
+	comparisonQueueTimeout  = 10 * time.Minute
 	homeComparisonWait      = 250 * time.Millisecond
 )
 
@@ -100,6 +101,8 @@ func (a *API) runComparisonFlight(e *comparisonCacheEntry, f *comparisonFlight, 
 	var value *DeploymentComparisonResponse
 	var err error
 	start := time.Now()
+	queued, cancelQueue := context.WithTimeout(parent, comparisonQueueTimeout)
+	defer cancelQueue()
 	select {
 	case comparisonBuildSlot <- struct{}{}:
 		ctx, cancel := context.WithTimeout(parent, comparisonBuildTimeout)
@@ -107,8 +110,8 @@ func (a *API) runComparisonFlight(e *comparisonCacheEntry, f *comparisonFlight, 
 		value, err = buildRequestedDeploymentComparison(a.db.WithReadContext(ctx), key.source, key.baseSource, key.headSource)
 		cancel()
 		<-comparisonBuildSlot
-	case <-parent.Done():
-		err = parent.Err()
+	case <-queued.Done():
+		err = queued.Err()
 	}
 
 	var persistAt time.Time
