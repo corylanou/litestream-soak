@@ -464,6 +464,7 @@ func attributedReportJSON(raw json.RawMessage, workerID string, attributed bool)
 const (
 	reliabilityIncidentLimit      = 50
 	reliabilityProfileRecordLimit = 20
+	reliabilityRecentIncidents    = 10
 )
 
 func summarizeRunEvidence(e *WorkerRunEvidence) {
@@ -511,9 +512,18 @@ func selectRepresentativeIncidents(incidents []RunIncident, limit int) []RunInci
 		if len(keep) >= limit {
 			break
 		}
+		if len(keep) >= limit-reliabilityRecentIncidents {
+			break
+		}
 		if incident.Classification == "unexpected" && !firstOfKind[incident.Kind] {
 			firstOfKind[incident.Kind] = true
 			keep[i] = true
+		}
+	}
+	for i, recent := len(ordered)-1, 0; i >= 0 && recent < reliabilityRecentIncidents && len(keep) < limit; i-- {
+		if !keep[i] {
+			keep[i] = true
+			recent++
 		}
 	}
 	for _, unexpected := range []bool{true, false} {

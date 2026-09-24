@@ -418,7 +418,7 @@
             {{if .DetectionLimitations}}<ul>{{range .DetectionLimitations}}<li>{{.}}</li>{{end}}</ul>{{end}}
             <p>Unattributed observations: {{.UnattributedObservations}} · Pending observations: {{.PendingObservations}} · Incomplete observations: {{.IncompleteObservations}} · Legacy release scoring: {{.ReleaseScoringReason}}</p>
             {{if .Eligible}}<p>Eligible for a clean soak.</p>{{else}}<p>Not eligible for a clean soak:</p><ul>{{range .EligibilityReasons}}<li>{{.}}</li>{{end}}</ul>{{end}}
-            {{if .Incidents}}{{$shown := recentIncidents .Incidents}}{{if gt .IncidentCount (len $shown)}}<p>Showing the latest {{len $shown}} of {{.IncidentCount}} incidents.{{if .IncidentKinds}} By kind:{{range $kind, $count := .IncidentKinds}} {{$kind}} {{$count}};{{end}}{{end}}</p>{{end}}<ul>{{range $shown}}<li>{{formatTime .At}} · {{.Kind}} · {{.Classification}}{{if not .Attributed}} · attribution unproven{{end}}: {{.Message}}</li>{{end}}</ul>{{end}}
+            {{if .Incidents}}{{$shown := recentIncidents .Incidents}}{{if gt .IncidentCount (len $shown)}}<p>Showing {{len $shown}} of {{.IncidentCount}} incidents (the first of each failure kind and the most recent).{{if .IncidentKinds}} By kind:{{range $kind, $count := .IncidentKinds}} {{$kind}} {{$count}};{{end}}{{end}}</p>{{end}}<ul>{{range $shown}}<li>{{formatTime .At}} · {{.Kind}} · {{.Classification}}{{if not .Attributed}} · attribution unproven{{end}}: {{.Message}}</li>{{end}}</ul>{{end}}
           </div>
         </details>
         {{else}}<p>Complete-run evidence is unavailable; coverage is unknown.</p>{{end}}

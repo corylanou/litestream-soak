@@ -884,3 +884,16 @@ func TestSelectRepresentativeIncidentsKeepsEarlyFailures(t *testing.T) {
 		t.Fatalf("latest selected incident at %v, want the newest", selected[len(selected)-1].At)
 	}
 }
+
+func TestSelectRepresentativeIncidentsKeepsRecentNonFailures(t *testing.T) {
+	base := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	var incidents []RunIncident
+	for i := 0; i < 100; i++ {
+		incidents = append(incidents, RunIncident{Kind: "provider_retry", Classification: "unexpected", At: base.Add(time.Duration(i) * time.Minute)})
+	}
+	incidents = append(incidents, RunIncident{Kind: "maintenance_observer_incomplete", Classification: "unavailable", At: base.Add(200 * time.Minute)})
+	selected := selectRepresentativeIncidents(incidents, 50)
+	if len(selected) != 50 || selected[len(selected)-1].Classification != "unavailable" {
+		t.Fatalf("latest selected = %+v, want the newest unavailable observation retained", selected[len(selected)-1])
+	}
+}
