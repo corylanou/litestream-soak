@@ -103,3 +103,18 @@ func TestOnlyComparisonPending(t *testing.T) {
 		}
 	}
 }
+
+func TestWarmDashboardCachesSlowBuildBeforeFirstRequest(t *testing.T) {
+	previous := homeCacheMinCost
+	homeCacheMinCost = 0
+	t.Cleanup(func() { homeCacheMinCost = previous })
+	api := NewAPI(openTestDB(t), nil, nil, nil, nil, nil)
+
+	api.WarmDashboard()
+
+	api.home.mu.Lock()
+	defer api.home.mu.Unlock()
+	if len(api.home.entries) != 1 {
+		t.Fatalf("home cache entries = %d, want the warmed default dashboard", len(api.home.entries))
+	}
+}
