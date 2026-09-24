@@ -89,7 +89,7 @@ func TestPRStatePollerRetiresDefinitiveTerminalPullRequests(t *testing.T) {
 			if requests.Load() != 1 {
 				t.Fatalf("requests = %d, want 1", requests.Load())
 			}
-			archives, err := db.ListRunArchives(source, runArchiveTypeTeardown, 10)
+			archives, err := db.ListRunArchives(source, runArchiveTypeTeardown, 10, true)
 			if err != nil {
 				t.Fatalf("ListRunArchives() error = %v", err)
 			}
@@ -550,7 +550,7 @@ func pullRequestStateBody(t *testing.T, number int, state string, merged bool, r
 func assertPRSourceUntouched(t *testing.T, db *model.DB, fly *teardownTestServer, source, workerID, machineID, volumeID string) {
 	t.Helper()
 
-	archives, err := db.ListRunArchives(source, runArchiveTypeTeardown, 10)
+	archives, err := db.ListRunArchives(source, runArchiveTypeTeardown, 10, true)
 	if err != nil {
 		t.Fatalf("ListRunArchives() error = %v", err)
 	}

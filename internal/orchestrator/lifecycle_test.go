@@ -1807,7 +1807,7 @@ func TestSuccessTeardownWaitsForDeployment(t *testing.T) {
 	if current.Status == model.WorkerStopped || destroys.Load() != 0 {
 		t.Fatalf("replacement destroyed: status=%s deletes=%d", current.Status, destroys.Load())
 	}
-	archives, err := db.ListRunArchives(worker.Source, runArchiveTypeSuccess, 10)
+	archives, err := db.ListRunArchives(worker.Source, runArchiveTypeSuccess, 10, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1884,7 +1884,7 @@ func TestSuccessTeardownRevalidatesAfterWorkerLock(t *testing.T) {
 			if current.Status != model.WorkerRunning || current.ErrorMessage != "" {
 				t.Fatalf("stale cleanup modified worker: %+v", current)
 			}
-			archives, err := db.ListRunArchives(worker.Source, runArchiveTypeSuccess, 10)
+			archives, err := db.ListRunArchives(worker.Source, runArchiveTypeSuccess, 10, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1935,7 +1935,7 @@ func TestSuccessTeardownArchivesBeforeCleanup(t *testing.T) {
 			if current.Status != wantStatus {
 				t.Fatalf("status = %s, want %s", current.Status, wantStatus)
 			}
-			archives, err := db.ListRunArchives(worker.Source, runArchiveTypeSuccess, 10)
+			archives, err := db.ListRunArchives(worker.Source, runArchiveTypeSuccess, 10, true)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -55,7 +55,7 @@ func TestRecordRunArchiveIsIdempotent(t *testing.T) {
 		t.Fatalf("second.ID = %d, want %d", second.ID, archive.ID)
 	}
 
-	archives, err := db.ListRunArchives("pr-1228", "success", 10)
+	archives, err := db.ListRunArchives("pr-1228", "success", 10, true)
 	if err != nil {
 		t.Fatalf("ListRunArchives() error = %v", err)
 	}
@@ -64,6 +64,14 @@ func TestRecordRunArchiveIsIdempotent(t *testing.T) {
 	}
 	if archives[0].Summary != "PR #1228 completed cleanly." {
 		t.Fatalf("Summary = %q, want original summary", archives[0].Summary)
+	}
+
+	withoutPayload, err := db.ListRunArchives("", "", 10, false)
+	if err != nil {
+		t.Fatalf("ListRunArchives(without payload) error = %v", err)
+	}
+	if len(withoutPayload) != 1 || withoutPayload[0].Payload != "" || withoutPayload[0].Summary != archives[0].Summary {
+		t.Fatalf("ListRunArchives(without payload) = %+v, want metadata only", withoutPayload)
 	}
 
 	stored, err := db.GetRunArchive(archive.ID)

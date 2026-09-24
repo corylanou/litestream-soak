@@ -338,6 +338,8 @@ curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
   "https://litestream-soak-ctl.fly.dev/api/run-archives?source=pr-1228&type=success" | jq .
 ```
 
+The list returns archive metadata and summaries only. Add `&payload=true` to include each archive's full evidence payload (often over 1 MB each), or fetch one archive with `/api/run-archives/{id}`.
+
 ## Upstream PR Retirement
 
 The control plane polls GitHub for every `pr-N` source with a live worker and

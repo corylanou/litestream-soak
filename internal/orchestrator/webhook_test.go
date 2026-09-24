@@ -354,7 +354,7 @@ func TestWebhookHandlerRetiresTerminalPullRequestFleetWithFailures(t *testing.T)
 			}
 			h.WaitForRetirements()
 
-			archives, err := db.ListRunArchives(source, runArchiveTypeTeardown, 10)
+			archives, err := db.ListRunArchives(source, runArchiveTypeTeardown, 10, true)
 			if err != nil {
 				t.Fatalf("ListRunArchives() error = %v", err)
 			}
