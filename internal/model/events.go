@@ -105,6 +105,7 @@ func (d *DB) RecordWindowedEventAt(workerID, eventType, message, details string,
 }
 
 func (d *DB) ListEvents(limit int) ([]Event, error) {
+	defer d.blobs.hold()()
 	rows, err := d.query(`SELECT id, worker_id, event_type, message, details, created_at FROM events ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -131,6 +132,7 @@ func (d *DB) ListEvents(limit int) ([]Event, error) {
 }
 
 func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
+	defer d.blobs.hold()()
 	rows, err := d.query(`
 		SELECT id, worker_id, event_type, message, details, created_at
 		FROM events

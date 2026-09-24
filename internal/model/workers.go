@@ -104,6 +104,7 @@ func scanWorker(scanner workerScanner, w *Worker) error {
 }
 
 func (d *DB) queryWorkers(query string, args ...any) ([]Worker, error) {
+	defer d.blobs.hold()()
 	rows, err := d.query(query, args...)
 	if err != nil {
 		return nil, err
@@ -376,6 +377,7 @@ func (d *DB) UpdateWorkerMachineVersionAndConfig(id, machineID, gitSHA, litestre
 }
 
 func (d *DB) GetWorker(id string) (*Worker, error) {
+	defer d.blobs.hold()()
 	var w Worker
 	err := scanWorker(
 		d.queryRow("SELECT "+workerColumns+" FROM workers WHERE id = ?", id),

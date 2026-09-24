@@ -62,16 +62,25 @@ func (c *profileBlobCache) startPinning() {
 	c.pinned = make(map[int64]bool)
 }
 
-func (c *profileBlobCache) finishSweep() map[int64]bool {
+func (c *profileBlobCache) isPinned(id int64) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	pinned := c.pinned
-	c.pinning = false
-	c.pinned = nil
+	return c.pinned[id]
+}
+
+func (c *profileBlobCache) clearCache() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	clear(c.ids)
 	clear(c.bodies)
 	c.bodyBytes = 0
-	return pinned
+}
+
+func (c *profileBlobCache) finishSweep() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pinning = false
+	c.pinned = nil
 }
 
 func newProfileBlobCache() *profileBlobCache {
@@ -443,68 +452,94 @@ func (d *DB) PruneProfileBlobs(ctx context.Context) (int64, error) {
 
 	d.blobs.sweep.Lock()
 	d.blobs.startPinning()
-	var maxID int64
-	err := d.queryRow(`SELECT COALESCE(MAX(id),0) FROM evidence_profile_blobs`).Scan(&maxID)
 	d.blobs.sweep.Unlock()
-	if err != nil {
+	defer func() {
 		d.blobs.sweep.Lock()
 		d.blobs.finishSweep()
 		d.blobs.sweep.Unlock()
+	}()
+
+	var maxID int64
+	if err := d.queryRow(`SELECT COALESCE(MAX(id),0) FROM evidence_profile_blobs`).Scan(&maxID); err != nil {
 		return 0, err
 	}
-
 	referenced, err := d.referencedProfileBlobs(ctx)
+	if err != nil {
+		return 0, err
+	}
+	candidates, err := d.unreferencedProfileBlobs(ctx, maxID, referenced)
+	if err != nil {
+		return 0, err
+	}
 
-	d.blobs.sweep.Lock()
-	defer d.blobs.sweep.Unlock()
-	pinned := d.blobs.finishSweep()
+	var deleted int64
+	cleared := false
+	for start := 0; start < len(candidates); start += profileBlobDeleteBatch {
+		if err := ctx.Err(); err != nil {
+			return deleted, err
+		}
+		n, err := d.deleteProfileBlobBatch(ctx, candidates[start:min(start+profileBlobDeleteBatch, len(candidates))], !cleared)
+		deleted += n
+		cleared = true
+		if err != nil {
+			return deleted, err
+		}
+	}
+	if _, err := d.writer.ExecContext(ctx, `INSERT INTO evidence_snapshot_compaction (name, last_id) VALUES ('profile_blob_sweep', ?) ON CONFLICT(name) DO UPDATE SET last_id=excluded.last_id`, time.Now().Unix()); err != nil {
+		return deleted, err
+	}
+	if deleted > 0 {
+		slog.Info("Pruned unreferenced profile blobs", "deleted", deleted, "referenced", len(referenced))
+	}
+	return deleted, nil
+}
+
+const profileBlobDeleteBatch = 500
+
+func (d *DB) unreferencedProfileBlobs(ctx context.Context, maxID int64, referenced map[int64]bool) ([]int64, error) {
+	rows, err := d.reader.QueryContext(ctx, `SELECT id FROM evidence_profile_blobs WHERE id<=?`, maxID)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	for id := range pinned {
-		referenced[id] = true
-	}
-	rows, err := d.query(`SELECT id FROM evidence_profile_blobs WHERE id<=?`, maxID)
-	if err != nil {
-		return 0, err
-	}
-	var unreferenced []int64
+	defer func() { _ = rows.Close() }()
+	var candidates []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return 0, err
+			return nil, err
 		}
 		if !referenced[id] {
-			unreferenced = append(unreferenced, id)
+			candidates = append(candidates, id)
 		}
 	}
-	err = rows.Err()
-	_ = rows.Close()
-	if err != nil {
-		return 0, err
+	return candidates, rows.Err()
+}
+
+func (d *DB) deleteProfileBlobBatch(ctx context.Context, ids []int64, clearCache bool) (int64, error) {
+	d.blobs.sweep.Lock()
+	defer d.blobs.sweep.Unlock()
+	if clearCache {
+		d.blobs.clearCache()
 	}
 	tx, err := d.writer.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	for _, id := range unreferenced {
+	var deleted int64
+	for _, id := range ids {
+		if d.blobs.isPinned(id) {
+			continue
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM evidence_profile_blobs WHERE id=?`, id); err != nil {
 			_ = tx.Rollback()
 			return 0, err
 		}
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO evidence_snapshot_compaction (name, last_id) VALUES ('profile_blob_sweep', ?) ON CONFLICT(name) DO UPDATE SET last_id=excluded.last_id`, time.Now().Unix()); err != nil {
-		_ = tx.Rollback()
-		return 0, err
+		deleted++
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	if len(unreferenced) > 0 {
-		slog.Info("Pruned unreferenced profile blobs", "deleted", len(unreferenced), "referenced", len(referenced))
-	}
-	return int64(len(unreferenced)), nil
+	return deleted, nil
 }
 
 func (d *DB) referencedProfileBlobs(ctx context.Context) (map[int64]bool, error) {

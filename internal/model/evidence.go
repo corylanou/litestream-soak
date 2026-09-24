@@ -132,6 +132,7 @@ func evidenceWindowQuery(table, columns, deployment, at, order string, source st
 }
 
 func (d *DB) ListEvidenceVerifications(source string, windows ...EvidenceWindow) ([]EvidenceVerification, error) {
+	defer d.blobs.hold()()
 	query, args := evidenceWindowQuery("evidence_verifications", evidenceVerificationColumns+", COALESCE(evidence_region,''), COALESCE(evidence_profile,''), COALESCE(evidence_runtime,''), history_complete", verificationDeployment, "COALESCE(completed_at,started_at)", "COALESCE(completed_at,started_at), id", source, windows)
 	rows, err := d.query(query, args...)
 	if err != nil {
@@ -186,6 +187,7 @@ func (d *DB) ListEvidenceVerifications(source string, windows ...EvidenceWindow)
 }
 
 func (d *DB) ListEvidenceEvents(source string, windows ...EvidenceWindow) ([]Event, error) {
+	defer d.blobs.hold()()
 	query, args := evidenceWindowQuery("evidence_events", "id, COALESCE(worker_id,''), event_type, message, COALESCE(details,''), created_at", eventDeployment, "created_at", "created_at,id", source, windows)
 	rows, err := d.query(query, args...)
 	if err != nil {
