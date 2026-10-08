@@ -76,6 +76,7 @@ type manyDBChangeTracker interface {
 
 type Verifier struct {
 	onProfileIncident  func(string)
+	validationSteps    []reporting.VerificationStep
 	logicalEvidence    string
 	logicalWorkloadSHA string
 	cfg                Config
@@ -197,6 +198,18 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 		return result, fmt.Errorf("checkpoint: %w", err)
 	}
 
+	if v.cfg.boundedLoadProfile() {
+		v.validationSteps = nil
+		err := v.runValidationPhase(ctx, "load_retention", verificationPhaseBudget(v.cfg.LogicalTimeout, fileSize(v.cfg.DBPath)), func(phaseCtx context.Context) error {
+			return installLoadRetention(phaseCtx, v.cfg, heavyLoadMaxRows)
+		})
+		result.Steps = append(result.Steps, v.validationSteps...)
+		if err != nil {
+			v.failValidationResult(ctx, &result, err)
+			return result, err
+		}
+	}
+
 	if err := recordVerificationStep(&result, "sync", func() error {
 		return v.waitForSync(ctx, &result)
 	}); err != nil {
@@ -213,8 +226,9 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 	})
 
 	result.Steps[len(result.Steps)-1].OutputTail += "\n" + v.logicalEvidence
+	result.Steps = append(result.Steps, v.validationSteps...)
 	if validateErr != nil {
-		v.failResult(ctx, &result, validateErr.Error())
+		v.failValidationResult(ctx, &result, validateErr)
 		slog.Error("Verification failed", "error", validateErr, "duration", time.Since(start))
 		v.logResult(start, false, result.ErrorMessage)
 		return result, validateErr
@@ -650,11 +664,15 @@ func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath stri
 }
 
 func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPath string, result *VerificationResult) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, v.cfg.LogicalTimeout)
-	defer cancel()
 	result.BoundaryTXID = 0
-	source, err := v.captureVerificationBoundary(ctx, sourcePath, result.SyncTXID)
-	if err != nil {
+	v.validationSteps = nil
+	budget := verificationPhaseBudget(v.cfg.LogicalTimeout, fileSize(sourcePath)+fileSize(sourcePath+"-wal"))
+	var source verificationBoundary
+	if err := v.runValidationPhase(ctx, "source_snapshot", budget, func(phaseCtx context.Context) error {
+		var err error
+		source, err = v.captureVerificationBoundary(phaseCtx, sourcePath, result.SyncTXID)
+		return err
+	}); err != nil {
 		return false, err
 	}
 	result.BoundaryTXID = source.txid
@@ -663,34 +681,38 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		return false, err
 	}
 	defer cleanupConfig()
-	args := []string{"restore", "-config", configPath, "-txid", formatTXID(source.txid), "-o", restoredPath, sourcePath}
-	cmd := exec.CommandContext(ctx, "litestream", args...)
-	if v.cfg.ReplicaType == "s3" {
-		cmd.Env = v.cfg.s3CommandEnv(v.cfg.S3FaultProxyEndpoint)
-	}
-	output, err := boundedValidationOutput(cmd)
-	if err != nil {
-		v.logicalEvidence += " restore_boundary=unavailable"
-	} else {
-		v.logicalEvidence += " restore_boundary=pinned"
-	}
-
-	slog.Info("Validate output", "output", string(output))
-
-	if err != nil {
-		metadata := validationStepMetadata(ctx, cmd, output, err)
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			metadata.err = fmt.Errorf("validation failed (exit %d): %s", exitErr.ExitCode(), string(output))
-			return false, metadata
+	if err := v.runValidationPhase(ctx, "restore", budget, func(phaseCtx context.Context) error {
+		args := []string{"restore", "-config", configPath, "-txid", formatTXID(source.txid), "-o", restoredPath, sourcePath}
+		cmd := exec.CommandContext(phaseCtx, "litestream", args...)
+		if v.cfg.ReplicaType == "s3" {
+			cmd.Env = v.cfg.s3CommandEnv(v.cfg.S3FaultProxyEndpoint)
 		}
-		metadata.err = fmt.Errorf("run validate: %w: %s", err, string(output))
-		return false, metadata
-	}
-
-	if err := checkRestoredIntegrity(ctx, restoredPath); err != nil {
+		output, err := boundedValidationOutput(cmd)
+		slog.Info("Validate output", "output", string(output))
+		if err == nil {
+			v.logicalEvidence += " restore_boundary=pinned"
+			return nil
+		}
+		v.logicalEvidence += " restore_boundary=unavailable"
+		metadata := validationStepMetadata(phaseCtx, cmd, output, err)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			metadata.err = fmt.Errorf("validation failed (exit %d): %s", exitErr.ExitCode(), string(output))
+		} else {
+			metadata.err = fmt.Errorf("run validate: %w: %s", err, string(output))
+		}
+		return metadata
+	}); err != nil {
 		return false, err
 	}
-	if err := v.compareRestoredLogical(ctx, source.logicalSnapshot, restoredPath); err != nil {
+	if err := v.runValidationPhase(ctx, "integrity_check", budget, func(phaseCtx context.Context) error {
+		return checkRestoredIntegrity(phaseCtx, restoredPath)
+	}); err != nil {
+		return false, err
+	}
+	if err := v.runValidationPhase(ctx, "compare", budget, func(phaseCtx context.Context) error {
+		return v.compareRestoredLogical(phaseCtx, source.logicalSnapshot, restoredPath)
+	}); err != nil {
 		return false, err
 	}
 	return true, nil

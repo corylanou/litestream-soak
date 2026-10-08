@@ -285,13 +285,34 @@ Each worker periodically runs a verification cycle:
 5. restore and validate the replica;
 6. resume load and report the result.
 
+Source snapshot, restore, integrity check, and logical comparison each receive
+an independent deadline. `VERIFY_LOGICAL_TIMEOUT` is the per-phase floor
+(default 30 minutes), multiplied by the source database and WAL size rounded up
+to whole GiB (minimum one). Every phase reports its absolute deadline. A verifier
+deadline reports the phase, elapsed time, and process signal when available; it
+is inconclusive and does not count toward the known-bad pause policy. A restore
+that exits non-zero before its deadline remains a failure.
+
+`VERIFY_INTERVAL` is the minimum load interval after a cycle completes. The
+worker waits at least twice the preceding cycle's duration before the next
+cycle, so a long verification cannot cause back-to-back pauses. Load remains
+paused through validation to preserve the source boundary guarantee.
+
+The high-volume, high-vol-ams, burst-volume, gharchive-replay, gharchive-mixed,
+pinned-reader, and overload-truncate0 profiles retain at most 100,000 rows per
+synthetic load or GitHub replay table. The first verification installs retention
+triggers and trims existing rows in batches before syncing. Subsequent inserts
+trim old rows in the same transaction, so growth stays bounded even between
+verifications. Freed SQLite pages are reused; existing files are not vacuumed
+or shrunk. Other profiles, including the disk-exhaustion fixture, are unchanged.
+
 Verification statuses are meaningful:
 
 - `passed`: restore validation succeeded.
 - `failed`: the worker completed enough of the cycle to conclude replication or
   validation failed.
 - `aborted`: the cycle was interrupted, usually because the worker context was
-  canceled. Aborted reports are recorded as events but do not mark the worker
+  canceled or a verifier phase reached its deadline. Aborted reports are recorded as events but do not mark the worker
   degraded.
 - `pending`: a bounded many-database batch succeeded, but coverage remains
   outstanding. This is neither a pass nor a failure; it preserves prior failure

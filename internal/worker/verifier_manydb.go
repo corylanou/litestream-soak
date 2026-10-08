@@ -116,8 +116,12 @@ func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResul
 			return err
 		})
 		result.Steps[len(result.Steps)-1].OutputTail += "\n" + v.logicalEvidence
+		for _, step := range v.validationSteps {
+			step.Name += " " + name
+			result.Steps = append(result.Steps, step)
+		}
 		if validateErr != nil {
-			v.failResult(ctx, &result, fmt.Sprintf("restore validate %s: %v", name, validateErr))
+			v.failValidationResult(ctx, &result, fmt.Errorf("restore validate %s: %w", name, validateErr))
 			slog.Error("Many database verification failed", "db", dbPath, "error", validateErr, "duration", time.Since(start))
 			v.logResult(start, false, result.ErrorMessage)
 			return result, validateErr

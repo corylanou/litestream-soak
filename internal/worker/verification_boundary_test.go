@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -342,7 +343,7 @@ func TestVerificationBoundaryReservationExhaustionIsInconclusive(t *testing.T) {
 	pauser := &fakePauser{}
 	result, err := NewVerifier(cfg, pauser).RunCycle(context.Background())
 	<-locked
-	if err == nil || result.Passed || result.Status != "pending" || !strings.Contains(result.Summary, "inconclusive") {
+	if !errors.Is(err, context.DeadlineExceeded) || result.Passed || result.Status != "aborted" || !strings.Contains(result.Summary, "inconclusive: source_snapshot: verifier deadline") {
 		t.Fatalf("reservation exhaustion: %+v err=%v", result, err)
 	}
 	if pauser.resumeCalls != 1 {

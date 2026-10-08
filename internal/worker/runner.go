@@ -250,8 +250,8 @@ func (r *Runner) populate(ctx context.Context) error {
 func (r *Runner) runVerifyLoop(ctx context.Context) error {
 	slog.Info("Starting verification loop", "interval", r.cfg.VerifyInterval)
 
-	ticker := time.NewTicker(r.cfg.VerifyInterval)
-	defer ticker.Stop()
+	timer := time.NewTimer(r.cfg.VerifyInterval)
+	defer timer.Stop()
 
 	for {
 		select {
@@ -261,7 +261,8 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 				return cause
 			}
 			return nil
-		case <-ticker.C:
+		case <-timer.C:
+			cycleStarted := time.Now()
 			r.resetS3FaultProxyCycle()
 			result, err := r.verifier.RunCycle(ctx)
 			result = r.applyS3FaultProxyVerificationGuards(result)
@@ -272,6 +273,7 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 			if err != nil {
 				slog.Error("Verification cycle error", "error", err)
 			}
+			timer.Reset(verificationCooldown(r.cfg.VerifyInterval, time.Since(cycleStarted)))
 			switch result.Status {
 			case "failed":
 				slog.Error("VERIFICATION FAILED — replication integrity compromised")
