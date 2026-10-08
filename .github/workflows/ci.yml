@@ -115,7 +115,7 @@ jobs:
             role=operational
             sha="$GITHUB_SHA"
             case "$name" in
-              flyctl) sha=203d7369ecb26c9adecadb501cd95682decdb527 ;;
+              flyctl) sha=0284ecf29deec3209991ef9bb23ecb97765c7fc8 ;;
               litestream) role=candidate; sha=$(cat evidence/litestream.sha) ;;
               litestream-test) sha=ae88b164dd6304bcbb654a681df767ee59042eed ;;
             esac

@@ -112,7 +112,7 @@ func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResul
 		var passed bool
 		var err error
 		validateErr := recordVerificationStep(&result, "restore_validate "+name, func() error {
-			passed, err = v.validateDB(ctx, dbPath, restoredPath, result.restoreTXID())
+			passed, err = v.validateDBResult(ctx, dbPath, restoredPath, &result)
 			return err
 		})
 		result.Steps[len(result.Steps)-1].OutputTail += "\n" + v.logicalEvidence

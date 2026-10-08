@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,7 +78,7 @@ func TestVerificationBoundaryPinnedBinary(t *testing.T) {
 	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("logical-real-%d.sock", time.Now().UnixNano()))
 	cfg.LitestreamMetricsAddr = "127.0.0.1:0"
 	db := logicalTestDB(t, cfg.DBPath, `PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE t(id INTEGER PRIMARY KEY,v); INSERT INTO t VALUES(1,'initial');`)
-	config := fmt.Sprintf("socket:\n  enabled: true\n  path: %q\ndbs:\n  - path: %q\n    min-checkpoint-page-count: 1\n    checkpoint-interval: 100ms\n    replicas:\n      - path: %q\n        sync-interval: 100ms\n", cfg.SocketPath, cfg.DBPath, cfg.ReplicaPath)
+	config := fmt.Sprintf("socket:\n  enabled: true\n  path: %q\ndbs:\n  - path: %q\n    min-checkpoint-page-count: 1\n    truncate-page-n: 1\n    busy-timeout: 50ms\n    checkpoint-interval: 100ms\n    replicas:\n      - path: %q\n        sync-interval: 100ms\n", cfg.SocketPath, cfg.DBPath, cfg.ReplicaPath)
 	if err := os.WriteFile(cfg.ConfigPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -110,6 +111,15 @@ func TestVerificationBoundaryPinnedBinary(t *testing.T) {
 	}) {
 		t.Fatalf("initial sync failed: %v", err)
 	}
+	reader, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Rollback() }()
+	var pinnedRows int
+	if err := reader.QueryRow("SELECT count(*) FROM t").Scan(&pinnedRows); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Exec(`BEGIN; INSERT INTO t VALUES(2,CAST(x'610062' AS TEXT)); INSERT INTO t VALUES(3,x'00ff'); COMMIT;`); err != nil {
 		t.Fatal(err)
 	}
@@ -121,11 +131,14 @@ func TestVerificationBoundaryPinnedBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if info, err := os.Stat(cfg.DBPath + "-wal"); err != nil || info.Size() <= 4096+32+24 {
+		t.Fatalf("truncate threshold fixture not engaged: info=%v err=%v", info, err)
+	}
 	if passed, err := v.validateDB(ctx, cfg.DBPath, filepath.Join(dir, "pipeline.db"), synced.TXID); err != nil || !passed {
 		t.Fatalf("reserved boundary pipeline passed=%v: %v", passed, err)
 	}
 	t.Log(v.logicalEvidence)
-	var source logicalSnapshot
+	var source verificationBoundary
 	for attempt := 0; attempt < 4; attempt++ {
 		synced, err = v.syncOnceDB(ctx, time.Second, cfg.DBPath)
 		if err != nil {
@@ -147,11 +160,11 @@ func TestVerificationBoundaryPinnedBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	pinnedPath := filepath.Join(dir, "older-pinned.db")
-	output, err := exec.CommandContext(ctx, binary, "restore", "-config", cfg.ConfigPath, "-txid", formatTXID(synced.TXID), "-o", pinnedPath, cfg.DBPath).CombinedOutput()
+	output, err := exec.CommandContext(ctx, binary, "restore", "-config", cfg.ConfigPath, "-txid", formatTXID(source.txid), "-o", pinnedPath, cfg.DBPath).CombinedOutput()
 	if err != nil {
 		t.Fatalf("older pinned restore: %s: %v", output, err)
 	}
-	if err := v.compareRestoredLogical(ctx, source, pinnedPath); err != nil {
+	if err := v.compareRestoredLogical(ctx, source.logicalSnapshot, pinnedPath); err != nil {
 		t.Fatalf("newer replica changed pinned boundary: %v", err)
 	}
 	latestPath := filepath.Join(dir, "latest-negative.db")
@@ -159,11 +172,14 @@ func TestVerificationBoundaryPinnedBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("latest negative restore: %s: %v", output, err)
 	}
-	if err := v.compareRestoredLogical(ctx, source, latestPath); err == nil {
+	if err := v.compareRestoredLogical(ctx, source.logicalSnapshot, latestPath); err == nil {
 		t.Fatal("newer unpinned restore unexpectedly matched source boundary")
 	} else {
 		t.Logf("retained unpinned mismatch: %v", err)
 	}
-	t.Logf("pinned boundary=%016x survives newer committed replica; latest remains a mismatch", synced.TXID)
+	if strings.Contains(readFile(t, logPath), "bump litestream seq: database is locked") {
+		t.Fatal("verifier blocked sequence write")
+	}
+	t.Logf("pinned boundary=%016x survives newer committed replica; latest remains a mismatch", source.txid)
 
 }

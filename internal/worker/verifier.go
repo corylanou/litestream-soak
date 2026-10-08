@@ -39,6 +39,7 @@ type VerificationResult struct {
 	LitestreamGoroutinesOnSyncFailure *reporting.LitestreamGoroutineSnapshot
 	SyncTXID                          uint64
 	SyncReplicatedTXID                uint64
+	BoundaryTXID                      uint64
 	CheckpointResidualBusy            bool
 }
 
@@ -207,7 +208,7 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 	var passed bool
 	var err error
 	validateErr := recordVerificationStep(&result, "restore_validate", func() error {
-		passed, err = v.validate(ctx, result.restoreTXID())
+		passed, err = v.validateDBResult(ctx, v.cfg.DBPath, restoredPath, &result)
 		return err
 	})
 
@@ -244,10 +245,16 @@ func failureStatus(ctx context.Context) string {
 
 func (v *Verifier) failResult(ctx context.Context, result *VerificationResult, message string) {
 	result.Status = failureStatus(ctx)
+	if result.Status != "aborted" && strings.Contains(message, "source boundary unavailable: acquire writer reservation:") {
+		result.Status = "pending"
+	}
 	result.ErrorMessage = message
 	summary := summarizeVerificationMessage(message)
-	if result.Status == "aborted" {
+	switch result.Status {
+	case "aborted":
 		summary = "verification aborted: " + summary
+	case "pending":
+		summary = "verification inconclusive: " + summary
 	}
 	result.Summary = summary
 	v.finalizeResult(result)
@@ -387,6 +394,7 @@ func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) 
 func (v *Verifier) waitForSyncDB(ctx context.Context, result *VerificationResult, dbPath string) error {
 	slog.Info("Waiting for Litestream sync")
 	if result != nil {
+		result.BoundaryTXID = 0
 		result.SyncStatusBeforeSync = v.collectSyncStatus()
 	}
 
@@ -638,18 +646,24 @@ func (v *Verifier) validate(ctx context.Context, txid uint64) (bool, error) {
 }
 
 func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath string, txid uint64) (bool, error) {
+	return v.validateDBResult(ctx, sourcePath, restoredPath, &VerificationResult{SyncTXID: txid})
+}
+
+func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPath string, result *VerificationResult) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, v.cfg.LogicalTimeout)
 	defer cancel()
-	source, err := v.captureVerificationBoundary(ctx, sourcePath, txid)
+	result.BoundaryTXID = 0
+	source, err := v.captureVerificationBoundary(ctx, sourcePath, result.SyncTXID)
 	if err != nil {
 		return false, err
 	}
+	result.BoundaryTXID = source.txid
 	configPath, cleanupConfig, err := v.validateConfigPath(sourcePath)
 	if err != nil {
 		return false, err
 	}
 	defer cleanupConfig()
-	args := []string{"restore", "-config", configPath, "-txid", formatTXID(txid), "-o", restoredPath, sourcePath}
+	args := []string{"restore", "-config", configPath, "-txid", formatTXID(source.txid), "-o", restoredPath, sourcePath}
 	cmd := exec.CommandContext(ctx, "litestream", args...)
 	if v.cfg.ReplicaType == "s3" {
 		cmd.Env = v.cfg.s3CommandEnv(v.cfg.S3FaultProxyEndpoint)
@@ -676,7 +690,7 @@ func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath stri
 	if err := checkRestoredIntegrity(ctx, restoredPath); err != nil {
 		return false, err
 	}
-	if err := v.compareRestoredLogical(ctx, source, restoredPath); err != nil {
+	if err := v.compareRestoredLogical(ctx, source.logicalSnapshot, restoredPath); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -763,6 +777,9 @@ func (v *Verifier) writePerDBValidateConfig(sourcePath string) (string, error) {
 }
 
 func (r VerificationResult) restoreTXID() uint64 {
+	if r.BoundaryTXID != 0 {
+		return r.BoundaryTXID
+	}
 	return r.SyncTXID
 }
 

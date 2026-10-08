@@ -37,7 +37,7 @@ func TestVerificationRequiresPinnedRestore(t *testing.T) {
 	}
 }
 
-func TestVerificationBoundaryRejectsDriftThenReacquires(t *testing.T) {
+func TestVerificationBoundaryAdoptsAdvancedTXID(t *testing.T) {
 	dir := t.TempDir()
 	cfg := DefaultConfig()
 	cfg.DBPath = filepath.Join(dir, "source.db")
@@ -47,8 +47,11 @@ func TestVerificationBoundaryRejectsDriftThenReacquires(t *testing.T) {
 		_, _ = w.Write([]byte(`{"status":"ok","txid":43,"replicated_txid":43}`))
 	}))
 	v := NewVerifier(cfg)
-	if _, err := v.captureVerificationBoundary(context.Background(), cfg.DBPath, 42); err == nil {
-		t.Fatal("credited stale TXID")
+	if _, err := v.captureVerificationBoundary(context.Background(), cfg.DBPath, 42); err != nil {
+		t.Fatalf("bookkeeping advance rejected: %v", err)
+	}
+	if !strings.Contains(v.logicalEvidence, "boundary_txid=000000000000002b") {
+		t.Fatalf("wrong boundary: %s", v.logicalEvidence)
 	}
 	if _, err := v.captureVerificationBoundary(context.Background(), cfg.DBPath, 43); err != nil {
 		t.Fatalf("reacquisition: %v", err)
@@ -70,16 +73,15 @@ func TestVerificationBoundaryExcludesInFlightWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := NewVerifier(cfg)
-	if _, err := v.captureVerificationBoundary(context.Background(), cfg.DBPath, 42); err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if _, err := v.captureVerificationBoundary(ctx, cfg.DBPath, 42); err == nil {
 		t.Fatal("accepted in-flight writer")
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, err := db.Exec("INSERT INTO t VALUES(3)"); err == nil {
-			t.Error("writer committed during reserved sync")
-		}
 		_, _ = w.Write([]byte(`{"status":"ok","txid":43,"replicated_txid":43}`))
 	}))
 	source, err := v.captureVerificationBoundary(context.Background(), cfg.DBPath, 43)
@@ -144,7 +146,7 @@ func TestVerificationBoundaryFailureSurvivesLaterCycle(t *testing.T) {
 			return
 		}
 		txid := 43
-		if syncs.Add(1) == 1 {
+		if syncs.Add(1) == 2 {
 			txid = 42
 		}
 		_, _ = fmt.Fprintf(w, `{"status":"ok","txid":%d,"replicated_txid":%d}`, txid, txid)
@@ -163,7 +165,7 @@ func TestVerificationBoundaryFailureSurvivesLaterCycle(t *testing.T) {
 		t.Fatal("later success erased failure")
 	}
 	history := readFile(t, filepath.Join(dir, "verification.log"))
-	if !strings.Contains(history, "| FAIL |") || !strings.Contains(history, "| PASS |") || !strings.Contains(history, "requested=000000000000002a reserved=000000000000002b") {
+	if !strings.Contains(history, "| FAIL |") || !strings.Contains(history, "| PASS |") || !strings.Contains(history, "requested=000000000000002b reserved=000000000000002a") {
 		t.Fatalf("attempt history lost: %s", history)
 	}
 	if pauser.resumeCalls != 2 {
@@ -212,5 +214,190 @@ func TestVerificationBoundaryFollowsCheckpointThaw(t *testing.T) {
 	}
 	if len(source.tables) != 1 || source.tables[0].rows != 2 {
 		t.Fatalf("snapshot predates thaw commit: %+v", source)
+	}
+}
+
+func TestVerificationBoundarySyncCanWriteSequence(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(dir, "source.db")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("seq-boundary-%d.sock", time.Now().UnixNano()))
+	db := logicalTestDB(t, cfg.DBPath, "PRAGMA busy_timeout=0; PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE t(id); INSERT INTO t VALUES(1); CREATE TABLE _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER); INSERT INTO _litestream_seq VALUES(1,1)")
+	reader, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Rollback() }()
+	var count int
+	if err := reader.QueryRow("SELECT count(*) FROM t").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO t VALUES(2)"); err != nil {
+		t.Fatal(err)
+	}
+	startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE); UPDATE _litestream_seq SET seq=seq+1"); err != nil {
+			http.Error(w, "bump litestream seq: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"ok","txid":43,"replicated_txid":43}`))
+	}))
+	source, err := NewVerifier(cfg).captureVerificationBoundary(context.Background(), cfg.DBPath, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(source.tables) != 2 {
+		t.Fatalf("unexpected snapshot: %+v", source)
+	}
+}
+
+func TestVerificationBoundaryWaitsForWriter(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(dir, "source.db")
+	db := logicalTestDB(t, cfg.DBPath, "PRAGMA journal_mode=WAL; CREATE TABLE t(id)")
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec("INSERT INTO t VALUES(1)"); err != nil {
+		t.Fatal(err)
+	}
+	startBoundarySyncFixture(t, &cfg, 42)
+	released := make(chan error, 1)
+	timer := time.AfterFunc(3300*time.Millisecond, func() { released <- tx.Commit() })
+	defer timer.Stop()
+	_, err = NewVerifier(cfg).captureVerificationBoundary(context.Background(), cfg.DBPath, 42)
+	if commitErr := <-released; commitErr != nil {
+		t.Fatal(commitErr)
+	}
+	if err != nil {
+		t.Fatalf("short-lived writer rejected: %v", err)
+	}
+}
+
+func TestVerificationRestoresAdoptedBoundary(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(dir, "source.db")
+	logicalTestDB(t, cfg.DBPath, "CREATE TABLE t(id); INSERT INTO t VALUES(1)")
+	logicalTestDB(t, cfg.DBPath+".restored", "CREATE TABLE t(id); INSERT INTO t VALUES(1)")
+	writeFakePinnedRestore(t, dir, `case "$*" in *"-txid 000000000000002b"*) exit 0;; *) exit 1;; esac`)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	startBoundarySyncFixture(t, &cfg, 43)
+	passed, err := NewVerifier(cfg).validate(context.Background(), 42)
+	if err != nil || !passed {
+		t.Fatalf("adopted restore: passed=%v err=%v", passed, err)
+	}
+}
+
+func TestVerificationBoundaryRejectsUnreplicatedAdvance(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(dir, "source.db")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("lag-boundary-%d.sock", time.Now().UnixNano()))
+	logicalTestDB(t, cfg.DBPath, "CREATE TABLE t(id)")
+	startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"ok","txid":43,"replicated_txid":42}`))
+	}))
+	if _, err := NewVerifier(cfg).captureVerificationBoundary(context.Background(), cfg.DBPath, 42); err == nil {
+		t.Fatal("accepted unreplicated boundary")
+	}
+}
+
+func TestVerificationBoundaryReservationExhaustionIsInconclusive(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "source.db")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("busy-boundary-%d.sock", time.Now().UnixNano()))
+	cfg.LogicalTimeout = 200 * time.Millisecond
+	db := logicalTestDB(t, cfg.DBPath, "PRAGMA journal_mode=WAL; CREATE TABLE t(id)")
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sync" {
+			_, _ = w.Write([]byte(`{"active":false}`))
+			return
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.Exec("INSERT INTO t VALUES(1)"); err != nil {
+			t.Error(err)
+			return
+		}
+		body := `{"status":"ok","txid":42,"replicated_txid":42}`
+		w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+		_, _ = w.Write([]byte(body))
+		w.(http.Flusher).Flush()
+		close(locked)
+		<-release
+	}))
+	pauser := &fakePauser{}
+	result, err := NewVerifier(cfg, pauser).RunCycle(context.Background())
+	<-locked
+	if err == nil || result.Passed || result.Status != "pending" || !strings.Contains(result.Summary, "inconclusive") {
+		t.Fatalf("reservation exhaustion: %+v err=%v", result, err)
+	}
+	if pauser.resumeCalls != 1 {
+		t.Fatalf("resume calls=%d", pauser.resumeCalls)
+	}
+}
+
+func TestVerificationReportsAdoptedBoundary(t *testing.T) {
+	for _, restoreFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restore_fails=%t", restoreFails), func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := DefaultConfig()
+			cfg.DataDir = dir
+			cfg.DBPath = filepath.Join(dir, "source.db")
+			cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("report-boundary-%d.sock", time.Now().UnixNano()))
+			logicalTestDB(t, cfg.DBPath, "CREATE TABLE t(id); INSERT INTO t VALUES(1)")
+			body := `cp "$SOURCE_PATH" "$SOURCE_PATH.restored"`
+			if restoreFails {
+				body = "exit 1"
+			}
+			writeFakePinnedRestore(t, dir, body)
+			t.Setenv("SOURCE_PATH", cfg.DBPath)
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			var syncs atomic.Int64
+			startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/sync" {
+					_, _ = w.Write([]byte(`{"active":false}`))
+					return
+				}
+				txid := 42
+				if syncs.Add(1) > 1 {
+					txid = 43
+				}
+				_, _ = fmt.Fprintf(w, `{"status":"ok","txid":%d,"replicated_txid":%d}`, txid, txid)
+			}))
+			result, err := NewVerifier(cfg, &fakePauser{}).RunCycle(context.Background())
+			if (err != nil) != restoreFails || result.Passed == restoreFails {
+				t.Fatalf("passed=%v err=%v", result.Passed, err)
+			}
+			if result.SyncTXID != 42 || result.restoreTXID() != 43 {
+				t.Fatalf("reported sync=%d restore=%d; want 42 and 43", result.SyncTXID, result.restoreTXID())
+			}
+		})
+	}
+}
+
+func TestVerificationClearsPreviousDatabaseBoundary(t *testing.T) {
+	cfg := DefaultConfig()
+	startBoundarySyncFixture(t, &cfg, 12)
+	v := NewVerifier(cfg)
+	result := VerificationResult{SyncTXID: 42, BoundaryTXID: 43}
+	if err := v.waitForSyncDB(context.Background(), &result, "next.db"); err != nil {
+		t.Fatal(err)
+	}
+	if result.BoundaryTXID != 0 || result.restoreTXID() != 12 {
+		t.Fatalf("retained previous boundary: %+v", result)
 	}
 }

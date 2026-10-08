@@ -27,6 +27,10 @@ func TestBinarySecurityEvidence(t *testing.T) {
 {"finding":{"osv":"GO-2026-4883","trace":[{"module":"github.com/docker/docker","function":"init"}]}}`, status: "supported"},
 		{name: "residual ID wrong module", role: "operational", output: `{"config":{}}
 {"finding":{"osv":"GO-2026-4883","trace":[{"module":"example.org/module","function":"Run"}]}}`, status: "supported", wantFailure: true},
+		{name: "containerd finding remains blocked", role: "operational", output: `{"config":{}}
+{"finding":{"osv":"GO-2026-6597","trace":[{"module":"github.com/containerd/containerd/v2","function":"Run"}]}}`, status: "supported", wantFailure: true},
+		{name: "grpc finding remains blocked", role: "operational", output: `{"config":{}}
+{"finding":{"osv":"GO-2026-6443","trace":[{"module":"google.golang.org/grpc","function":"Run"}]}}`, status: "supported", wantFailure: true},
 		{name: "module evidence", role: "operational", output: `{"config":{}}
 {"finding":{"osv":"GO-EXAMPLE","trace":[{"module":"example.org/module"}]}}`, status: "supported"},
 		{name: "empty output", role: "candidate", status: "error", wantFailure: true},
@@ -56,7 +60,7 @@ func TestBinarySecurityEvidence(t *testing.T) {
 				t.Fatal(err)
 			}
 			out := filepath.Join(dir, "evidence")
-			cmd := exec.Command("bash", "../../scripts/scan-binary.sh", tc.role, "203d7369ecb26c9adecadb501cd95682decdb527", binary, out)
+			cmd := exec.Command("bash", "../../scripts/scan-binary.sh", tc.role, "0284ecf29deec3209991ef9bb23ecb97765c7fc8", binary, out)
 			goExit := "0"
 			if tc.metadataFailure {
 				goExit = "1"
@@ -79,7 +83,7 @@ func TestBinarySecurityEvidence(t *testing.T) {
 			if err := json.Unmarshal(data, &summary); err != nil {
 				t.Fatal(err)
 			}
-			if summary.Status != tc.status || summary.Role != tc.role || summary.SourceSHA != "203d7369ecb26c9adecadb501cd95682decdb527" {
+			if summary.Status != tc.status || summary.Role != tc.role || summary.SourceSHA != "0284ecf29deec3209991ef9bb23ecb97765c7fc8" {
 				t.Fatalf("unexpected summary: %s", data)
 			}
 			if tc.expectedFindings > 0 && len(summary.Findings) != tc.expectedFindings {
@@ -99,7 +103,7 @@ func TestOperationalToolBuildIsExplicitlyPatched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"203d7369ecb26c9adecadb501cd95682decdb527", "v0.56.0", "0.4.101-soak.1", "go mod verify", "git diff -- go.mod go.sum"} {
+	for _, want := range []string{"0284ecf29deec3209991ef9bb23ecb97765c7fc8", "github.com/containerd/containerd/v2@v2.3.6", "0.4.114-soak.1", "go mod verify", "git diff -- go.mod go.sum"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("missing %s", want)
 		}
