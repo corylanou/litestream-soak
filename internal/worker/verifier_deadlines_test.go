@@ -175,3 +175,14 @@ func TestValidationPhasePreservesCompletedRestoreFailure(t *testing.T) {
 		t.Fatalf("lost restore failure metadata: %+v", step)
 	}
 }
+
+func TestValidationReservationFailureIsInconclusive(t *testing.T) {
+	v := NewVerifier(DefaultConfig())
+	result := VerificationResult{StartedAt: time.Now()}
+	err := errors.New("source boundary unavailable: acquire writer reservation: context deadline exceeded")
+	v.failValidationResult(context.Background(), &result, err)
+	record := model.Verification{Status: result.Status, Passed: result.Passed}
+	if result.Status != "pending" || !record.Inconclusive() || record.Failed() {
+		t.Fatalf("reservation failure became actionable: %+v", result)
+	}
+}
