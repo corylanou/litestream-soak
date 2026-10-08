@@ -60,6 +60,6 @@ if [[ "$role" = operational ]]; then
           .osv == "GO-2026-6225"
         else false end;
       [.[] | select(.finding) | .finding | select(.trace[0].function != null) |
-       select(($name == "flyctl" and $sha == "203d7369ecb26c9adecadb501cd95682decdb527" and reviewed) | not)] | length == 0
+       select(($name == "flyctl" and $sha == "0284ecf29deec3209991ef9bb23ecb97765c7fc8" and reviewed) | not)] | length == 0
     ' "${inputs[@]}" >/dev/null
 fi

@@ -3,15 +3,16 @@ set -euo pipefail
 source_dir=${1:?fresh source directory required}
 binary=${2:?absolute output binary required}
 [[ "$binary" = /* ]] || exit 2
-source_sha=203d7369ecb26c9adecadb501cd95682decdb527
-version=0.4.101-soak.1
+source_sha=0284ecf29deec3209991ef9bb23ecb97765c7fc8
+version=0.4.114-soak.1
 git clone https://github.com/superfly/flyctl.git "$source_dir"
 git -C "$source_dir" checkout --detach "$source_sha"
 test "$(git -C "$source_dir" rev-parse HEAD)" = "$source_sha"
 cd "$source_dir"
 go version
-go mod edit -require=golang.org/x/crypto@v0.56.0
-go mod download golang.org/x/crypto
+go mod edit -go=1.26.8
+go mod edit -require=github.com/containerd/containerd/v2@v2.3.6
+go mod download github.com/containerd/containerd/v2
 go mod verify
 git diff -- go.mod go.sum >"${binary}.dependency.patch"
 git rev-parse HEAD >"${binary}.source.sha"

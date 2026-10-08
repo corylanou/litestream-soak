@@ -39,21 +39,28 @@ never edits the candidate. No production credentials are needed for these checks
 
 ## Operational flyctl remediation
 
-The common build selects upstream v0.4.101, commit
-`203d7369ecb26c9adecadb501cd95682decdb527`, then changes only x/crypto from v0.55.0
-to v0.56.0. The result identifies itself as `0.4.101-soak.1` with a patched commit
-suffix and dirty VCS build metadata. The control image retains the dependency
-patch, effective go.mod/go.sum, and module graph. CI attaches binary scans;
-the optional source scan records the additional call traces.
-Deployment jobs use the same build script and compiler. Flyctl retains symbols
-for binary scan fidelity; stripped Go 1.26 macOS scans were observed to report
-additional module-wide symbols absent from the unstripped scan. This patch belongs only
-to harness-owned flyctl; it is never applied to Litestream.
+The common build selects upstream v0.4.114, commit
+`0284ecf29deec3209991ef9bb23ecb97765c7fc8`, then updates containerd/v2 from v2.3.5
+to v2.3.6 and raises the effective module Go directive to 1.26.8. Upstream
+already includes gRPC v1.84.0 and x/crypto v0.57.0, so the
+previous x/crypto override is removed. The result identifies itself as
+`0.4.114-soak.1` with a patched commit suffix and dirty VCS build metadata.
+The control image retains the dependency patch, effective go.mod/go.sum, and
+module graph. CI attaches binary scans; the optional source scan records the
+additional call traces.
 
-The upstream update removes many findings recorded in #233 and PR #232. The
-additional crypto patch fixes GO-2026-6354 and GO-2026-6355, SSH channel deadlocks
-that may matter to SSH-backed remote builder connections. The selected candidate
-may still contain these advisories; candidate findings remain visible.
+Deployment jobs use the same build script and Go 1.26.8 compiler, required by
+containerd v2.3.6. The harness and Litestream compilers are unchanged. Flyctl
+retains symbols
+for binary scan fidelity; stripped Go 1.26 macOS scans were observed to report
+additional module-wide symbols absent from the unstripped scan. This patch
+belongs only to harness-owned flyctl; it is never applied to Litestream.
+
+The upstream update fixes GO-2026-6443 (gRPC) and GO-2026-6444 (containerd).
+The additional containerd patch fixes GO-2026-6597, which remains in the latest
+upstream release at the time of this update. Existing SSH fixes GO-2026-6354 and
+GO-2026-6355 remain covered by upstream's newer x/crypto. The selected Litestream
+candidate may still contain advisories; candidate findings remain visible.
 
 The control plane invokes `logs -a <app> --json --no-tail`: upstream selects its
 HTTP polling path, not the NATS/WireGuard tailing path, and emits JSON log entries
@@ -61,7 +68,7 @@ with level, instance, message, region, timestamp and metadata. Deployments use
 remote-only builds, build-only/image-label output, and machine-list JSON. The
 build checks required command flags; harness tests verify platform JSON decoding,
 event classification, image-reference parsing and deployment snapshots. The
-coordinator also verified the patched macOS binary against live Fly APIs:
+coordinator previously verified the v0.4.101-soak.1 macOS binary against live Fly APIs:
 machine-list JSON identified the started control machine, and buffered JSON logs
 exited successfully. No credentials were copied. These checks do not perform a
 live deployment; the coordinator owns that validation.
@@ -69,7 +76,10 @@ live deployment; the coordinator owns that validation.
 ## Reviewed residuals
 
 Only these three advisory IDs are permitted for the flyctl binary at the pinned
-source SHA, scoped to the exact modules below. They remain in all raw evidence
+source SHA, scoped to the exact modules below. The v0.4.114 update keeps the same
+Docker v28.5.2, credential helpers v0.9.8, ACR helper revision, and remote-only
+operational usage; no advisory IDs or module scopes are added. They remain
+in all raw evidence
 and summaries. Any other operational symbol finding fails CI. Package/module-only
 findings are retained for review rather than equated with executable paths.
 

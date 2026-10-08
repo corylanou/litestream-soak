@@ -8,7 +8,7 @@ COPY . .
 RUN go build -ldflags "-s -w" -o /usr/local/bin/soakctl ./cmd/soakctl
 RUN go version -m /usr/local/bin/soakctl >/tmp/soakctl.buildinfo && cat /tmp/soakctl.buildinfo
 
-FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS flyctl
+FROM golang:1.26.8-bookworm@sha256:dc9ad6c05acc7a88e5b71bde60a5fe3bd4b9f0db209011711b464107438a8107 AS flyctl
 ENV GOTOOLCHAIN=local
 COPY scripts/build-flyctl.sh /opt/build/
 RUN bash /opt/build/build-flyctl.sh /src/flyctl /usr/local/bin/flyctl
