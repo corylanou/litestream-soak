@@ -244,10 +244,16 @@ func failureStatus(ctx context.Context) string {
 
 func (v *Verifier) failResult(ctx context.Context, result *VerificationResult, message string) {
 	result.Status = failureStatus(ctx)
+	if result.Status != "aborted" && strings.Contains(message, "source boundary unavailable: acquire writer reservation:") {
+		result.Status = "pending"
+	}
 	result.ErrorMessage = message
 	summary := summarizeVerificationMessage(message)
-	if result.Status == "aborted" {
+	switch result.Status {
+	case "aborted":
 		summary = "verification aborted: " + summary
+	case "pending":
+		summary = "verification inconclusive: " + summary
 	}
 	result.Summary = summary
 	v.finalizeResult(result)
@@ -649,7 +655,7 @@ func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath stri
 		return false, err
 	}
 	defer cleanupConfig()
-	args := []string{"restore", "-config", configPath, "-txid", formatTXID(txid), "-o", restoredPath, sourcePath}
+	args := []string{"restore", "-config", configPath, "-txid", formatTXID(source.txid), "-o", restoredPath, sourcePath}
 	cmd := exec.CommandContext(ctx, "litestream", args...)
 	if v.cfg.ReplicaType == "s3" {
 		cmd.Env = v.cfg.s3CommandEnv(v.cfg.S3FaultProxyEndpoint)
@@ -676,7 +682,7 @@ func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath stri
 	if err := checkRestoredIntegrity(ctx, restoredPath); err != nil {
 		return false, err
 	}
-	if err := v.compareRestoredLogical(ctx, source, restoredPath); err != nil {
+	if err := v.compareRestoredLogical(ctx, source.logicalSnapshot, restoredPath); err != nil {
 		return false, err
 	}
 	return true, nil

@@ -11,27 +11,35 @@ physical file checksums are no longer a correctness gate.
 
 The worker pauses configured load producers, checkpoints, and waits for
 replication. After any checkpoint thaw/re-pause, it acquires SQLite's writer
-reservation (`BEGIN IMMEDIATE`) before a second sync and source snapshot.
-An in-flight writer prevents acquisition; sending SIGSTOP alone is not treated
-as proof of quiescence. The reserved sync must report the requested source TXID
-and replication through that TXID. The replica watermark is not used as the
-source boundary. Schema and all tables are read in one consistent transaction
-while the reservation excludes commits, including writers outside the harness.
-The reservation is released before restoring; load producers resume on every
-cycle exit, including cancellation.
+reservation (`BEGIN IMMEDIATE`) to confirm no application transaction remains
+in flight. Sending SIGSTOP alone is not treated as proof of quiescence. It
+releases the reservation before syncing so Litestream can checkpoint and write
+its sequence counter, then reacquires the reservation for the source snapshot.
+Application producers must remain paused throughout this protocol; arbitrary
+external application writers are not supported during boundary acquisition.
+Each reservation waits up to three seconds per attempt and retries for up to
+15 seconds, capped by the enclosing phase deadline.
+
+With the final reservation held, the worker adopts the sync's source TXID if it
+is at least the earlier TXID and replication has reached that new source TXID.
+The replica watermark itself is not used as the source boundary. Schema and all
+tables are read in one consistent transaction while the reservation excludes
+commits. The reservation is released before restoring; load producers resume
+on every cycle exit, including cancellation.
 
 Restore invokes `litestream restore -txid` directly, followed by independent
 SQLite integrity and logical/schema comparison. The shipped 4ed7a308 binary
 supports this path even though the independently pinned workload helper does
 not accept `validate -txid`. There is no latest fallback. Missing pin support,
-zero TXIDs, unavailable writer reservations, sync errors, or boundary drift
+zero TXIDs, sync errors, or backwards/unreplicated boundaries
 produce failed attempts with explicit unavailable evidence and no correctness
-credit. A later cycle acquires a fresh boundary; it does not replace the earlier
-failed attempt. The immutable source digest remains unchanged during restore,
+credit. Unavailable writer reservations are inconclusive (`pending`), with no
+restore-failure incident or correctness credit. A later cycle acquires a fresh
+boundary; it does not replace the earlier failed attempt. The immutable source digest remains unchanged during restore,
 so a newer replica commit cannot change a successful pinned comparison.
 
 Evidence separates workload/run identity from `boundary_txid`,
-`source_boundary=writer-reserved-sync`, and `restore_boundary=pinned`.
+`source_boundary=paused-sync-writer-reserved-snapshot`, and `restore_boundary=pinned`.
 The historical Amsterdam 126454/126455 mismatch remains a failure with an
 unproven cause; its unpinned restore does not establish Litestream corruption.
 
