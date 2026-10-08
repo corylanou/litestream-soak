@@ -46,6 +46,9 @@ func (v *Verifier) runValidationPhase(parent context.Context, name string, budge
 		if !errors.As(err, &metadata) {
 			metadata = &verificationStepMetadataError{err: err}
 		}
+		if metadata.exitCode != nil && *metadata.exitCode > 0 {
+			return err
+		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			metadata.err = &verifierDeadlineError{phase: name, elapsed: time.Since(started), signal: metadata.signal}
 		} else {

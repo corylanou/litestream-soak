@@ -153,3 +153,25 @@ func TestValidationPhaseCancellation(t *testing.T) {
 		})
 	}
 }
+
+func TestValidationPhasePreservesCompletedRestoreFailure(t *testing.T) {
+	v := NewVerifier(DefaultConfig())
+	exitCode := 7
+	failure := &verificationStepMetadataError{
+		err:        errors.New("validation failed (exit 7): broken replica"),
+		exitCode:   &exitCode,
+		outputTail: "broken replica",
+	}
+	err := v.runValidationPhase(context.Background(), "restore", time.Millisecond, func(ctx context.Context) error {
+		<-ctx.Done()
+		return failure
+	})
+	result := VerificationResult{StartedAt: time.Now()}
+	v.failValidationResult(context.Background(), &result, err)
+	if result.Status != "failed" || !strings.Contains(result.ErrorMessage, "validation failed (exit 7): broken replica") {
+		t.Fatalf("completed restore failure became inconclusive: %+v", result)
+	}
+	if step := v.validationSteps[0]; step.ExitCode == nil || *step.ExitCode != 7 || step.OutputTail != "broken replica" {
+		t.Fatalf("lost restore failure metadata: %+v", step)
+	}
+}
