@@ -39,6 +39,7 @@ type VerificationResult struct {
 	LitestreamGoroutinesOnSyncFailure *reporting.LitestreamGoroutineSnapshot
 	SyncTXID                          uint64
 	SyncReplicatedTXID                uint64
+	BoundaryTXID                      uint64
 	CheckpointResidualBusy            bool
 }
 
@@ -207,7 +208,7 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 	var passed bool
 	var err error
 	validateErr := recordVerificationStep(&result, "restore_validate", func() error {
-		passed, err = v.validate(ctx, result.restoreTXID())
+		passed, err = v.validateDBResult(ctx, v.cfg.DBPath, restoredPath, &result)
 		return err
 	})
 
@@ -393,6 +394,7 @@ func (v *Verifier) waitForSync(ctx context.Context, result *VerificationResult) 
 func (v *Verifier) waitForSyncDB(ctx context.Context, result *VerificationResult, dbPath string) error {
 	slog.Info("Waiting for Litestream sync")
 	if result != nil {
+		result.BoundaryTXID = 0
 		result.SyncStatusBeforeSync = v.collectSyncStatus()
 	}
 
@@ -644,12 +646,18 @@ func (v *Verifier) validate(ctx context.Context, txid uint64) (bool, error) {
 }
 
 func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath string, txid uint64) (bool, error) {
+	return v.validateDBResult(ctx, sourcePath, restoredPath, &VerificationResult{SyncTXID: txid})
+}
+
+func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPath string, result *VerificationResult) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, v.cfg.LogicalTimeout)
 	defer cancel()
-	source, err := v.captureVerificationBoundary(ctx, sourcePath, txid)
+	result.BoundaryTXID = 0
+	source, err := v.captureVerificationBoundary(ctx, sourcePath, result.SyncTXID)
 	if err != nil {
 		return false, err
 	}
+	result.BoundaryTXID = source.txid
 	configPath, cleanupConfig, err := v.validateConfigPath(sourcePath)
 	if err != nil {
 		return false, err
@@ -769,6 +777,9 @@ func (v *Verifier) writePerDBValidateConfig(sourcePath string) (string, error) {
 }
 
 func (r VerificationResult) restoreTXID() uint64 {
+	if r.BoundaryTXID != 0 {
+		return r.BoundaryTXID
+	}
 	return r.SyncTXID
 }
 

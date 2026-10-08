@@ -349,3 +349,55 @@ func TestVerificationBoundaryReservationExhaustionIsInconclusive(t *testing.T) {
 		t.Fatalf("resume calls=%d", pauser.resumeCalls)
 	}
 }
+
+func TestVerificationReportsAdoptedBoundary(t *testing.T) {
+	for _, restoreFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restore_fails=%t", restoreFails), func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := DefaultConfig()
+			cfg.DataDir = dir
+			cfg.DBPath = filepath.Join(dir, "source.db")
+			cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("report-boundary-%d.sock", time.Now().UnixNano()))
+			logicalTestDB(t, cfg.DBPath, "CREATE TABLE t(id); INSERT INTO t VALUES(1)")
+			body := `cp "$SOURCE_PATH" "$SOURCE_PATH.restored"`
+			if restoreFails {
+				body = "exit 1"
+			}
+			writeFakePinnedRestore(t, dir, body)
+			t.Setenv("SOURCE_PATH", cfg.DBPath)
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			var syncs atomic.Int64
+			startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/sync" {
+					_, _ = w.Write([]byte(`{"active":false}`))
+					return
+				}
+				txid := 42
+				if syncs.Add(1) > 1 {
+					txid = 43
+				}
+				_, _ = fmt.Fprintf(w, `{"status":"ok","txid":%d,"replicated_txid":%d}`, txid, txid)
+			}))
+			result, err := NewVerifier(cfg, &fakePauser{}).RunCycle(context.Background())
+			if (err != nil) != restoreFails || result.Passed == restoreFails {
+				t.Fatalf("passed=%v err=%v", result.Passed, err)
+			}
+			if result.SyncTXID != 42 || result.restoreTXID() != 43 {
+				t.Fatalf("reported sync=%d restore=%d; want 42 and 43", result.SyncTXID, result.restoreTXID())
+			}
+		})
+	}
+}
+
+func TestVerificationClearsPreviousDatabaseBoundary(t *testing.T) {
+	cfg := DefaultConfig()
+	startBoundarySyncFixture(t, &cfg, 12)
+	v := NewVerifier(cfg)
+	result := VerificationResult{SyncTXID: 42, BoundaryTXID: 43}
+	if err := v.waitForSyncDB(context.Background(), &result, "next.db"); err != nil {
+		t.Fatal(err)
+	}
+	if result.BoundaryTXID != 0 || result.restoreTXID() != 12 {
+		t.Fatalf("retained previous boundary: %+v", result)
+	}
+}
