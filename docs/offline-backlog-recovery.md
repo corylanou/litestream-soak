@@ -54,7 +54,7 @@ against container memory, so disk and memory limits are not independent.
 | `ONE_SHOT_RECOVERY_WRITE_RATE` | 600 | Aggregate target rows per second |
 | `ONE_SHOT_RECOVERY_WORKERS` | 8 | Paced writer goroutines |
 | `ONE_SHOT_RECOVERY_PAYLOAD_BYTES` | 2048 | Bytes per inserted row |
-| `ONE_SHOT_RECOVERY_TRUNCATE_PAGE_N` | 0 | Existing overload truncate setting |
+| `ONE_SHOT_RECOVERY_TRUNCATE_PAGE_N` | 0 | Existing overload truncate setting; Litestream maps zero to its default TRUNCATE backstop (121,359 pages, about 500 MB at 4 KiB/page) per [Litestream #1348](https://github.com/benbjohnson/litestream/pull/1348) |
 | `ONE_SHOT_RECOVERY_PIN_HOLD_SECONDS` | 4 | Existing pinned-reader hold; 0 disables |
 | `ONE_SHOT_RECOVERY_PIN_PAUSE_SECONDS` | 1 | Existing pinned-reader pause |
 | `ONE_SHOT_CPUS` | 1 | Docker CPU quota |
@@ -62,7 +62,8 @@ against container memory, so disk and memory limits are not independent.
 | `ONE_SHOT_TMPFS_SIZE` | 384m | Docker fixture filesystem limit |
 
 This reuses the fleet pinned-reader implementation and overload defaults
-(600 rows/s, eight goroutines, 2 KiB rows, truncate threshold zero). The fixture
+(600 rows/s, eight goroutines, 2 KiB rows, `truncate-page-n: 0`, which Litestream
+maps to its default TRUNCATE backstop per [Litestream #1348](https://github.com/benbjohnson/litestream/pull/1348)). The fixture
 serializes commits and source sync to map exact row boundaries to replicated
 TXIDs. Effective writer concurrency is therefore **one**, reported explicitly;
 it is not an eight-connection contention benchmark. Replica sync runs separately

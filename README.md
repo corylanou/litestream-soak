@@ -56,7 +56,7 @@ is unsupported.
 | `low-volume` | `worker-main-low-vol` | Constant synthetic writes at low rate with a small initial database. |
 | `high-volume` | `worker-main-high-vol` | Higher-rate wave synthetic writes, larger payloads, more load workers, and a 100 GB volume. |
 | `burst-volume` | `worker-main-burst-vol` | Burst-pattern synthetic writes against a 100 GB volume. |
-| `overload-truncate0` | `worker-main-overload-truncate0` | Constant synthetic load with `truncate-page-n: 0`; observe actual WAL growth and drain, without assuming overload engaged. |
+| `overload-truncate0` | `worker-main-overload-truncate0` | Sustained synthetic overload with `truncate-page-n: 0`, which Litestream maps to its default TRUNCATE backstop (121,359 pages, about 500 MB at 4 KiB/page); checks that the zero sentinel keeps the backstop engaged under overload. See [Litestream #1348](https://github.com/benbjohnson/litestream/pull/1348). |
 | `pinned-reader` | `worker-main-pinned-reader` | Synthetic writes with a companion read transaction held for 4m, separated by 45s pauses; observe checkpoint and WAL behavior. |
 | `read-heavy` | `worker-main-read-heavy` | Constant synthetic writes with a high read ratio to exercise read-heavy contention. |
 | `gharchive-replay` | `worker-main-gharchive` | Replays GH Archive events from `https://data.gharchive.org/2025-01-01-0.json.gz`. |

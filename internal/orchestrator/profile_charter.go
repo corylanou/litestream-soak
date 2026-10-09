@@ -82,10 +82,10 @@ var profileCharters = map[string]ProfileCharter{
 		WhyItMatters:  "Mirrors the most common real Litestream use case: a transactional application database.",
 	},
 	"overload-truncate0": {
-		Synopsis:      "Sustained overload with the WAL truncate threshold disabled: 8 writers at 600 writes/s of 2KB rows with truncate-page-n: 0.",
-		Stresses:      "WAL growth bounding and backlog drain when writes outpace replication and the operator has disabled the explicit truncate threshold.",
-		GuardsAgainst: "Unbounded WAL and local L0 backlog growth when chunked sync falls behind and no configured truncate threshold exists as a backstop.",
-		WhyItMatters:  "Guards the litestream#1343 and litestream#1331 fixes: a zero threshold must fall back to a default backstop and limited sync batches must re-loop until drained, or sustained overload fills the disk.",
+		Synopsis:      "Sustained overload with truncate-page-n: 0, which Litestream maps to its default TRUNCATE backstop of 121,359 pages (about 500 MB at 4 KiB/page): 8 writers at 600 writes/s of 2KB rows.",
+		Stresses:      "WAL growth bounding and backlog drain when writes outpace replication while the default TRUNCATE backstop remains engaged.",
+		GuardsAgainst: "Unbounded WAL and local L0 backlog growth when chunked sync falls behind or the zero sentinel fails to retain Litestream's default TRUNCATE backstop.",
+		WhyItMatters:  "Guards the benbjohnson/litestream#1348, litestream#1343, and litestream#1331 fixes: zero uses the default backstop, and limited sync batches must re-loop until drained, or sustained overload fills the disk.",
 	},
 	"pinned-reader": {
 		Synopsis:      "Steady writes at 200 writes/s while a companion reader repeatedly holds a read transaction open for 4 minutes at a time.",
