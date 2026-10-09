@@ -1,6 +1,6 @@
 module github.com/corylanou/litestream-soak
 
-go 1.25.13
+go 1.26.9
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.5

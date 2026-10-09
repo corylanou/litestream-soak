@@ -47,7 +47,7 @@ func TestFTSPinnedRestoreComparison(t *testing.T) {
 			for _, setting := range build.Settings {
 				settings[setting.Key] = setting.Value
 			}
-			if build.GoVersion != "go1.25.13" || settings["vcs.revision"] != sha || settings["vcs.modified"] != "false" {
+			if build.GoVersion != "go1.26.9" || settings["vcs.revision"] != sha || settings["vcs.modified"] != "false" {
 				t.Fatalf("binary identity mismatch: Go=%s revision=%s modified=%s expected=%s", build.GoVersion, settings["vcs.revision"], settings["vcs.modified"], sha)
 			}
 			dir, err := os.MkdirTemp(root, strings.ToLower(role)+"-")

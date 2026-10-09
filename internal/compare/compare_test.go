@@ -9,7 +9,7 @@ import (
 )
 
 func fixturePlan() Plan {
-	return Plan{ID: "experiment-1", Baseline: "main", Candidate: "branch:fix", Repeats: 4, Contract: Contract{Backend: "file", FixtureSHA256: strings.Repeat("a", 64), FixtureBytes: 1024, FixtureAgeSeconds: 3600, Seed: 42, GeneratorSHA: strings.Repeat("b", 40), OracleSHA: strings.Repeat("c", 40), Hardware: "shared-cpu-1x/1024", Region: "ord", ConfigSHA256: strings.Repeat("d", 64), OperationBudget: 100, Toolchain: "go1.25.13"}}
+	return Plan{ID: "experiment-1", Baseline: "main", Candidate: "branch:fix", Repeats: 4, Contract: Contract{Backend: "file", FixtureSHA256: strings.Repeat("a", 64), FixtureBytes: 1024, FixtureAgeSeconds: 3600, Seed: 42, GeneratorSHA: strings.Repeat("b", 40), OracleSHA: strings.Repeat("c", 40), Hardware: "shared-cpu-1x/1024", Region: "ord", ConfigSHA256: strings.Repeat("d", 64), OperationBudget: 100, Toolchain: "go1.26.9"}}
 }
 
 func pinnedPlan(t *testing.T) Plan {

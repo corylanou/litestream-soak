@@ -2,7 +2,7 @@ ARG LITESTREAM_SHA=main
 ARG WORKLOAD_SHA=ae88b164dd6304bcbb654a681df767ee59042eed
 
 # Stage 1: Build litestream + litestream-test from source
-FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS litestream-builder
+FROM golang:1.26.9-bookworm@sha256:bcef992b77b1e2031aaaa51da75cebc32da8e9c182e12e633ea79023c79d9eff AS litestream-builder
 ENV GOTOOLCHAIN=local
 RUN go version
 ARG LITESTREAM_SHA
@@ -15,7 +15,7 @@ RUN go build \
     -tags osusergo,netgo,sqlite_omit_load_extension \
     -o /usr/local/bin/litestream ./cmd/litestream
 RUN go version -m /usr/local/bin/litestream >/tmp/litestream.buildinfo && cat /tmp/litestream.buildinfo
-FROM golang:1.25.13-bookworm@sha256:e401dae1bf814e29204a8cb7915682e1780951e609ca0dd8865ee1937f510c48 AS workload-builder
+FROM golang:1.26.9-bookworm@sha256:bcef992b77b1e2031aaaa51da75cebc32da8e9c182e12e633ea79023c79d9eff AS workload-builder
 ENV GOTOOLCHAIN=local
 RUN go version
 ARG WORKLOAD_SHA
@@ -29,7 +29,7 @@ RUN CGO_CFLAGS="-DSQLITE_DEFAULT_WAL_AUTOCHECKPOINT=0" go build \
 RUN go version -m /usr/local/bin/litestream-test >/tmp/litestream-test.buildinfo && cat /tmp/litestream-test.buildinfo
 
 # Stage 2: Build soakworker
-FROM golang:1.25.13-bookworm@sha256:e401dae1bf814e29204a8cb7915682e1780951e609ca0dd8865ee1937f510c48 AS soakworker-builder
+FROM golang:1.26.9-bookworm@sha256:bcef992b77b1e2031aaaa51da75cebc32da8e9c182e12e633ea79023c79d9eff AS soakworker-builder
 ENV GOTOOLCHAIN=local
 RUN go version
 WORKDIR /src/soak

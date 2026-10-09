@@ -10,7 +10,7 @@ git -C "$source_dir" checkout --detach "$source_sha"
 test "$(git -C "$source_dir" rev-parse HEAD)" = "$source_sha"
 cd "$source_dir"
 go version
-go mod edit -go=1.26.8
+go mod edit -go=1.26.9
 go mod edit -require=github.com/containerd/containerd/v2@v2.3.6
 go mod download github.com/containerd/containerd/v2
 go mod verify

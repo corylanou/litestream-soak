@@ -1,4 +1,4 @@
-export GOTOOLCHAIN := go1.25.13
+export GOTOOLCHAIN := go1.26.9
 
 LITESTREAM_SHA ?= main
 LITESTREAM_REPO ?= ../../../benbjohnson/litestream

@@ -320,7 +320,7 @@ func TestControlDockerfileRebuildsPinnedFlyctl(t *testing.T) {
 	}
 	content := string(readFile(t, "Dockerfile.control"))
 	for _, want := range []string{
-		"golang:1.26.8-bookworm@sha256:",
+		"golang:1.26.9-bookworm@sha256:",
 		"bash /opt/build/build-flyctl.sh /src/flyctl /usr/local/bin/flyctl",
 
 		"go version -m /usr/local/bin/flyctl",
@@ -393,7 +393,7 @@ func TestBuildsUsePatchedToolchain(t *testing.T) {
 					continue
 				}
 				builders++
-				if !strings.HasPrefix(stage, "golang:1.25.13-bookworm@sha256:") && !strings.HasPrefix(stage, "golang:1.26.6-bookworm@sha256:") && !strings.HasPrefix(stage, "golang:1.26.8-bookworm@sha256:") {
+				if !strings.HasPrefix(stage, "golang:1.26.9-bookworm@sha256:") {
 					t.Error("Go builder must pin the patched compiler image")
 				}
 				if !strings.Contains(stage, "ENV GOTOOLCHAIN=local") {
@@ -408,7 +408,7 @@ func TestBuildsUsePatchedToolchain(t *testing.T) {
 			}
 		})
 	}
-	if !strings.Contains(string(readFile(t, "go.mod")), "\ngo 1.25.13\n") {
+	if !strings.Contains(string(readFile(t, "go.mod")), "\ngo 1.26.9\n") {
 		t.Error("maintained module must require the patched compiler")
 	}
 }
@@ -418,8 +418,8 @@ func TestLocalBuildsPinAndAttributeToolchain(t *testing.T) {
 		path string
 		want []string
 	}{
-		{"Makefile", []string{"export GOTOOLCHAIN := go1.25.13", "go version -m"}},
-		{"scripts/local-rig-one-shot.sh", []string{"export GOTOOLCHAIN=go1.25.13", `cache_key="$scenario-$sha-$GOTOOLCHAIN"`, "go version -m", `toolchain_metadata=`}},
+		{"Makefile", []string{"export GOTOOLCHAIN := go1.26.9", "go version -m"}},
+		{"scripts/local-rig-one-shot.sh", []string{"export GOTOOLCHAIN=go1.26.9", `cache_key="$scenario-$sha-$GOTOOLCHAIN"`, "go version -m", `toolchain_metadata=`}},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			content := string(readFile(t, tc.path))
