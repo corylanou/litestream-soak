@@ -551,3 +551,99 @@ cp "$LOGICAL_FIXTURES/$(basename "$source")" "$restored"
 		t.Fatal("failure evidence lost after recovery")
 	}
 }
+
+type writeOnResumeManyDBLoad struct {
+	*manyDBLoad
+	paths []string
+}
+
+func (l *writeOnResumeManyDBLoad) Resume() {
+	l.manyDBLoad.Resume()
+	for _, path := range l.paths {
+		l.markChanged(path)
+	}
+}
+
+func TestManyDBCycleFinalizesWhileCheckpointStaysBusy(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.NumDatabases = 2
+	cfg.ActivePercent = 100
+	cfg.VerifyChangedLimit = 2
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("busy-%d.sock", time.Now().UnixNano()))
+	paths := cfg.ManyDBPaths()
+	fixtures := filepath.Join(dir, "fixtures")
+	const schema = "CREATE TABLE t(id INTEGER PRIMARY KEY); INSERT INTO t VALUES(1),(2);"
+	for _, path := range paths {
+		logicalTestDB(t, path, "PRAGMA journal_mode=WAL; "+schema)
+		logicalTestDB(t, filepath.Join(fixtures, filepath.Base(path)), schema)
+		reader, err := sql.Open("sqlite", walDSN(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, err := reader.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.ExecContext(context.Background(), "BEGIN"); err != nil {
+			t.Fatal(err)
+		}
+		var count int
+		if err := conn.QueryRowContext(context.Background(), "SELECT count(*) FROM t").Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+			_ = conn.Close()
+			_ = reader.Close()
+		})
+	}
+	writeFakePinnedRestore(t, dir, `
+while [ "$#" -gt 0 ]; do
+ case "$1" in
+ -config|-txid) shift ;;
+ -o) restored="$2"; shift ;;
+ *) source="$1" ;;
+
+ esac
+ shift
+done
+cp "$LOGICAL_FIXTURES/$(basename "$source")" "$restored"
+`)
+	t.Setenv("LOGICAL_FIXTURES", fixtures)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sync" {
+			_, _ = w.Write([]byte(`{"status":"ok","txid":42,"replicated_txid":42}`))
+		} else {
+			_, _ = w.Write([]byte(`{"active":false}`))
+		}
+	}))
+	load := &writeOnResumeManyDBLoad{manyDBLoad: newManyDBLoad(&cfg), paths: paths}
+	verifier := NewVerifier(cfg, load)
+	verifier.checkpointAttempts = 2
+	verifier.checkpointRetryDelay = time.Millisecond
+	verifier.checkpointBusyTimeout = 20 * time.Millisecond
+
+	var statuses []string
+	for range 3 {
+		result, err := verifier.RunCycle(context.Background())
+		if err != nil {
+			t.Fatalf("cycle=%+v, %v", result, err)
+		}
+		if !result.CheckpointResidualBusy {
+			t.Fatal("checkpoint was not busy; fixture does not model Litestream's read transaction")
+		}
+		statuses = append(statuses, result.Status)
+		if result.Status == "passed" {
+			if !result.Passed {
+				t.Fatalf("passed status without Passed: %+v", result)
+			}
+			return
+		}
+	}
+	count, age := load.manyDBPendingCoverage()
+	t.Fatalf("statuses=%v never finalized; pending_databases=%d oldest_pending_age_seconds=%.3f", statuses, count, age)
+}

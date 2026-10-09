@@ -92,7 +92,7 @@ func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResul
 		}(restoredPath)
 
 		if err := recordVerificationStep(&result, "checkpoint "+name, func() error {
-			residualBusy, cpErr := v.checkpointDB(ctx, dbPath)
+			residualBusy, cpErr := v.checkpointDB(ctx, dbPath, false)
 			result.CheckpointResidualBusy = result.CheckpointResidualBusy || residualBusy
 			return cpErr
 		}); err != nil {
