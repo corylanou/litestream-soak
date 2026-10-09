@@ -119,7 +119,7 @@ soak SHA appear alongside `soak-logical-v1` in verification evidence; local
 unattributed tools are explicitly `unknown`. Deployment identity attribution is
 handled by the reporting workflow separately.
 
-All three worker builder stages retain Go 1.25.13, `GOTOOLCHAIN=local`, and binary
+All three worker builder stages retain Go 1.26.9, `GOTOOLCHAIN=local`, and binary
 compiler metadata. Integration of these version strings into immutable run
 identity belongs to audit issue #205.
 
@@ -132,7 +132,7 @@ Set `SOAK_LOGICAL_LITESTREAM_BINARY` to its absolute path and
 `ae88b164dd6304bcbb654a681df767ee59042eed`, with that SHA as `main.Version`. Run:
 
 ```sh
-GOTOOLCHAIN=go1.25.13 go test ./internal/worker -run '^Test(LogicalOraclePinnedLitestream|VerificationBoundaryPinnedBinary)$' -count=1 -v
+GOTOOLCHAIN=go1.26.9 go test ./internal/worker -run '^Test(LogicalOraclePinnedLitestream|VerificationBoundaryPinnedBinary)$' -count=1 -v
 ```
 
 The test starts a temporary file replica, commits byte-sensitive rows in WAL,
@@ -144,7 +144,7 @@ remains independently pinned; its unsupported TXID flag is no longer a restore
 fallback.
 
 `TestVerificationBoundaryPinnedBinary` additionally checks the clean embedded
-revision and Go 1.25.13 build identity. It exercises writer-reserved sync and
+revision and Go 1.26.9 build identity. It exercises writer-reserved sync and
 source capture against that binary, then commits newer replica data: the older
 pinned restore must match while an unpinned latest restore must fail comparison.
 Failed boundary acquisitions are logged before fresh acquisition; historical

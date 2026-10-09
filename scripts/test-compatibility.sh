@@ -20,7 +20,7 @@ report_result() {
   fi
 }
 trap report_result EXIT
-export GOTOOLCHAIN=go1.25.13
+export GOTOOLCHAIN=go1.26.9
 export CGO_ENABLED=1
 printf 'candidate=%s\nworkload=%s\nevidence=%s\n' "$candidate" "$workload" "$evidence"
 for prerequisite in git go cc; do
@@ -36,10 +36,10 @@ for role in candidate workload; do
   git -C "$source_dir" fetch --depth=1 https://github.com/benbjohnson/litestream.git "$revision"
   git -C "$source_dir" checkout -q --detach FETCH_HEAD
   test "$(git -C "$source_dir" rev-parse HEAD)" = "$revision"
-  toolchain=go1.25.13
+  toolchain=go1.26.9
   required=$(sed -n 's/^go //p' "$source_dir/go.mod")
-  if [ "$role" = candidate ] && [ "$(printf '%s\n' 1.25.13 "$required" | sort -V | tail -n 1)" != 1.25.13 ]; then
-    toolchain=go1.26.6
+  if [ "$role" = candidate ] && [ "$(printf '%s\n' 1.26.9 "$required" | sort -V | tail -n 1)" != 1.26.9 ]; then
+    toolchain="go$required"
   fi
   if [ "$role" = candidate ]; then candidate_toolchain=$toolchain; fi
   GOTOOLCHAIN=$toolchain CGO_CFLAGS=-DSQLITE_DEFAULT_WAL_AUTOCHECKPOINT=0 go -C "$source_dir" build \

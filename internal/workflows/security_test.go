@@ -103,7 +103,7 @@ func TestOperationalToolBuildIsExplicitlyPatched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"0284ecf29deec3209991ef9bb23ecb97765c7fc8", "github.com/containerd/containerd/v2@v2.3.6", "0.4.114-soak.1", "go mod verify", "git diff -- go.mod go.sum"} {
+	for _, want := range []string{"0284ecf29deec3209991ef9bb23ecb97765c7fc8", "github.com/containerd/containerd/v2@v2.3.6", "golang.org/x/net@v0.60.0", "0.4.114-soak.1", "go mod verify", "git diff -- go.mod go.sum"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("missing %s", want)
 		}

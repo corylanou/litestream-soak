@@ -10,7 +10,7 @@ settings are preserved with every run and differ from normal fleet profiles;
 resource comparisons require the same fixture configuration and storage substrate.
 
 ```sh
-GOTOOLCHAIN=go1.25.13 go build -o bin/tenantfixture ./cmd/tenantfixture
+GOTOOLCHAIN=go1.26.9 go build -o bin/tenantfixture ./cmd/tenantfixture
 mkdir -p .local-rig/tenants
 bin/tenantfixture \
   -litestream /absolute/path/to/litestream \
@@ -100,7 +100,7 @@ Run the real two-tenant smoke explicitly:
 
 ```sh
 SOAK_TENANT_LITESTREAM_BINARY=/absolute/path/to/reference-litestream \
-  GOTOOLCHAIN=go1.25.13 go test ./internal/worker \
+  GOTOOLCHAIN=go1.26.9 go test ./internal/worker \
   -run TestTenantLifecyclePinnedRestore -count=1 -v
 ```
 

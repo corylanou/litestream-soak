@@ -11,7 +11,7 @@ report logic only and are not benchmark evidence.
 
 ## Prepare immutable inputs
 
-Build the harness from one recorded source revision using Go 1.25.13. Use that
+Build the harness from one recorded source revision using Go 1.26.9. Use that
 same harness binary for the entire experiment. Verify `go version -m` reports
 `vcs.revision` and `vcs.modified=false`. If the toolchain does not stamp a linked
 worktree, build the exact revision from a clean standalone clone; do not bypass
@@ -20,7 +20,7 @@ independent of the candidate Litestream source. Neither uses `litestream-test`
 from a candidate build.
 
 ```sh
-GOTOOLCHAIN=go1.25.13 go build -buildvcs=true -o bin/soakcompare ./cmd/soakcompare
+GOTOOLCHAIN=go1.26.9 go build -buildvcs=true -o bin/soakcompare ./cmd/soakcompare
 bin/soakcompare -fixture /absolute/path/fixture.db -seed 42 -rows 1000
 ```
 
@@ -61,7 +61,7 @@ with these fields (replace placeholders with measured values):
     "region": "local",
     "config_sha256": "LOCAL_CONFIG_DIGEST",
     "operation_budget": 1000,
-    "toolchain": "go1.25.13"
+    "toolchain": "go1.26.9"
   }
 }
 ```
@@ -216,7 +216,7 @@ oracle tests. To execute the full matrix against an explicitly supplied real
 binary (same SHA on both arms for execution validation):
 
 ```sh
-GOTOOLCHAIN=go1.25.13 \
+GOTOOLCHAIN=go1.26.9 \
 SOAK_COMPARE_TEST_BINARY=/absolute/path/litestream \
 SOAK_COMPARE_TEST_SHA=FULL_BINARY_SHA \
 SOAK_COMPARE_TEST_BUDGET=1000 \

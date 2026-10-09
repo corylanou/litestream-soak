@@ -9,7 +9,7 @@ Build a Litestream executable from an immutable source revision, record that
 revision and compiler, and supply its independently calculated SHA-256:
 
 ```sh
-GOTOOLCHAIN=go1.25.13 go run ./cmd/soakrecovery \
+GOTOOLCHAIN=go1.26.9 go run ./cmd/soakrecovery \
   -binary /absolute/path/to/litestream \
   -sha256 <64-character-sha256> \
   -output /absolute/path/to/new-evidence-directory \
@@ -78,7 +78,7 @@ Run the bounded integration test explicitly:
 SOAK_RECOVERY_BINARY=/absolute/path/to/litestream \
 SOAK_RECOVERY_SHA256=<64-character-sha256> \
 SOAK_RECOVERY_OUTPUT=/absolute/path/to/new-test-evidence \
-GOTOOLCHAIN=go1.25.13 go test ./internal/recovery -run TestRecoveryPinnedBinary -v -count=1
+GOTOOLCHAIN=go1.26.9 go test ./internal/recovery -run TestRecoveryPinnedBinary -v -count=1
 ```
 
 Without the binary environment variable this expensive test is skipped, visibly.

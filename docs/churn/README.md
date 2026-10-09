@@ -12,7 +12,7 @@ the worker with the usual local replica settings:
 ```sh
 export LOAD_MODE=queue
 export CHURN_CONFIG='{"slots":1024,"hot_percent":80,"workers":1,"rate":100,"payload_size":256,"seed":7}'
-export GOTOOLCHAIN=go1.25.13
+export GOTOOLCHAIN=go1.26.9
 go run ./cmd/soakworker
 ```
 
@@ -99,7 +99,7 @@ Run the opt-in real file-replica smoke using the pinned binaries documented in
 the logical verification guide:
 
 ```sh
-GOTOOLCHAIN=go1.25.13 go test ./internal/worker -run TestChurnPinnedLitestream -v
+GOTOOLCHAIN=go1.26.9 go test ./internal/worker -run TestChurnPinnedLitestream -v
 ```
 
 Set SOAK_LOGICAL_LITESTREAM_BINARY and SOAK_LOGICAL_WORKLOAD_BINARY first. Without

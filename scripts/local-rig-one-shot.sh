@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export GOTOOLCHAIN=go1.25.13
+export GOTOOLCHAIN=go1.26.9
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 scenario="${1:-}"
@@ -70,7 +70,7 @@ cp "$root/scripts/local-rig-one-shot/recovery_test.go.tmpl" "$mod_dir/recovery_t
 cat >"$mod_dir/go.mod" <<EOF
 module github.com/corylanou/litestream-soak/local-rig-one-shot
 
-go 1.25.13
+go 1.26.9
 
 require github.com/benbjohnson/litestream v0.0.0
 require github.com/corylanou/litestream-soak v0.0.0

@@ -6,7 +6,7 @@ an empty one. Only generated fixture databases are mutated. All artifacts are
 retained; choose a new directory for each attempt.
 
 ```sh
-GOTOOLCHAIN=go1.25.13 go run ./cmd/schemafixture \
+GOTOOLCHAIN=go1.26.9 go run ./cmd/schemafixture \
   -dir /tmp/schema-vacuum-run-001 \
   -litestream /absolute/path/to/pinned/litestream \
   -sha 4ed7a308f6271ebfd2b0a6e4b70b03011a37e4a3 \
@@ -112,7 +112,7 @@ Pinned real restore tests:
 
 ```sh
 SOAK_SCHEMA_LITESTREAM_BINARY=/absolute/path/to/pinned/litestream \
-  GOTOOLCHAIN=go1.25.13 go test ./internal/worker -run TestSchemaFixture -v
+  GOTOOLCHAIN=go1.26.9 go test ./internal/worker -run TestSchemaFixture -v
 ```
 
 Set `SOAK_SCHEMA_S3_ENDPOINT` plus the AWS fixture credentials to additionally

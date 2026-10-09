@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export GOTOOLCHAIN=go1.25.13
+export GOTOOLCHAIN=go1.26.9
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${SCHEMA_FIXTURE_IMAGE:?set SCHEMA_FIXTURE_IMAGE to a local image containing the pinned /usr/local/bin/litestream}"
 sha="${SCHEMA_FIXTURE_SHA:-4ed7a308f6271ebfd2b0a6e4b70b03011a37e4a3}"

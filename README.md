@@ -56,7 +56,7 @@ is unsupported.
 | `low-volume` | `worker-main-low-vol` | Constant synthetic writes at low rate with a small initial database. |
 | `high-volume` | `worker-main-high-vol` | Higher-rate wave synthetic writes, larger payloads, more load workers, and a 100 GB volume. |
 | `burst-volume` | `worker-main-burst-vol` | Burst-pattern synthetic writes against a 100 GB volume. |
-| `overload-truncate0` | `worker-main-overload-truncate0` | Constant synthetic load with `truncate-page-n: 0`; observe actual WAL growth and drain, without assuming overload engaged. |
+| `overload-truncate0` | `worker-main-overload-truncate0` | Sustained synthetic overload with `truncate-page-n: 0`, which Litestream maps to its default TRUNCATE backstop (121,359 pages, about 500 MB at 4 KiB/page); checks that the zero sentinel keeps the backstop engaged under overload. See [Litestream #1348](https://github.com/benbjohnson/litestream/pull/1348). |
 | `pinned-reader` | `worker-main-pinned-reader` | Synthetic writes with a companion read transaction held for 4m, separated by 45s pauses; observe checkpoint and WAL behavior. |
 | `read-heavy` | `worker-main-read-heavy` | Constant synthetic writes with a high read ratio to exercise read-heavy contention. |
 | `gharchive-replay` | `worker-main-gharchive` | Replays GH Archive events from `https://data.gharchive.org/2025-01-01-0.json.gz`. |
@@ -467,12 +467,12 @@ Pass logs report attempted, mutated, skipped, and failed record counts.
 
 ## Development
 
-Maintained builds use Go 1.25.13. Make targets and the one-shot rig select this
+Maintained builds use Go 1.26.9. Make targets and the one-shot rig select this
 compiler explicitly, including builds in the upstream Litestream module.
-Docker builders pin the Go 1.25.13 Bookworm image by digest and disable automatic
-toolchain switching. The control image and deployment jobs build flyctl v0.4.101 from pinned
-source with an explicit x/crypto v0.56.0 patch, labeled `0.4.101-soak.1`.
-Its dedicated builder uses Go 1.26.6 because flyctl requires Go 1.26. Binary compiler
+Docker builders pin the Go 1.26.9 Bookworm image by digest and disable automatic
+toolchain switching. The control image and deployment jobs build flyctl v0.4.114 from pinned
+source with containerd/v2 v2.3.6 and x/net v0.60.0, labeled `0.4.114-soak.1`.
+Its dedicated builder uses Go 1.26.9. Binary compiler
 metadata is printed during image builds and retained under `/opt/soak/*.buildinfo`.
 The upstream Litestream SHA resolution and build flags remain unchanged.
 See [binary security evidence](docs/binary-security.md) for scan states,
@@ -487,7 +487,7 @@ existing local upstream checkout and prints its SHA; it does not select a new re
 Common local checks:
 
 ```bash
-export GOTOOLCHAIN=go1.25.13
+export GOTOOLCHAIN=go1.26.9
 go version
 go build ./...
 go test ./...
@@ -588,7 +588,7 @@ those outcomes.
 Run `bash scripts/test-compatibility.sh` locally for the same compatibility check
 used by PR CI. It builds real Litestream at
 `4ed7a308f6271ebfd2b0a6e4b70b03011a37e4a3` and the independent workload validator
-at `ae88b164dd6304bcbb654a681df767ee59042eed` with Go 1.25.13.
+at `ae88b164dd6304bcbb654a681df767ee59042eed` with Go 1.26.9.
 An optional first argument selects another full lowercase 40-character candidate
 commit SHA; the workload stays fixed. Mutable refs are rejected. Network access
 to GitHub and Go module downloads, Git, a C compiler, and Go are required.
@@ -631,10 +631,10 @@ is activated by this suite.
 Set `SOAK_FTS_BASELINE_BINARY`, `SOAK_FTS_BASELINE_SHA`,
 `SOAK_FTS_CANDIDATE_BINARY`, and `SOAK_FTS_CANDIDATE_SHA` to absolute executable
 paths and their full commit SHAs. Each executable must have clean embedded build metadata matching its expected
-SHA and Go 1.25.13; pseudo-version output is retained without using its
+SHA and Go 1.26.9; pseudo-version output is retained without using its
 shortened SHA as identity. Set `SOAK_FTS_EVIDENCE_DIR` to an absolute local
 artifact directory and `SOAK_FTS_WORKER_SHA` to the tested soak revision, then
-run `GOTOOLCHAIN=go1.25.13 go test ./internal/worker -run
+run `GOTOOLCHAIN=go1.26.9 go test ./internal/worker -run
 TestFTSPinnedRestoreComparison -count=1 -v`. The test never selects a moving
 ref. It retains per-role databases, pinned restore output, replication logs,
 actual-work counts, profile artifacts and metadata, and an expected negative

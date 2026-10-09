@@ -6,7 +6,7 @@ fleet replacement continues to use fresh state. Run this command manually with
 trusted binaries and a new output directory:
 
 ```sh
-GOTOOLCHAIN=go1.25.13 go run ./cmd/soakupgrade \
+GOTOOLCHAIN=go1.26.9 go run ./cmd/soakupgrade \
   -mode persistent-upgrade \
   -baseline /absolute/path/to/baseline-litestream \
   -baseline-sha256 BASELINE_BINARY_SHA256 \
@@ -56,7 +56,7 @@ the baseline binary digest, and any fixture failure. The sealed contents include
 the maintenance log. Reuse a retained fixture with:
 
 ```sh
-GOTOOLCHAIN=go1.25.13 go run ./cmd/soakupgrade \
+GOTOOLCHAIN=go1.26.9 go run ./cmd/soakupgrade \
   -mode persistent-upgrade -fixture /absolute/path/to/previous-comparison/fixture \
   -baseline /absolute/path/to/baseline-litestream \
   -baseline-sha256 BASELINE_BINARY_SHA256 \
@@ -122,7 +122,7 @@ modes against an actual local binary (including rollback to itself):
 
 ```sh
 UPGRADE_TEST_BINARY=/absolute/path/to/litestream \
-  GOTOOLCHAIN=go1.25.13 go test ./internal/upgrade \
+  GOTOOLCHAIN=go1.26.9 go test ./internal/upgrade \
   -run TestPinnedBinaryLifecycle -count=1 -v
 ```
 
