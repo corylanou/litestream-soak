@@ -200,9 +200,15 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 
 	if v.cfg.boundedLoadProfile() {
 		v.validationSteps = nil
+		var retentionStats loadRetentionStats
 		err := v.runValidationPhase(ctx, "load_retention", verificationPhaseBudget(v.cfg.LogicalTimeout, fileSize(v.cfg.DBPath)), func(phaseCtx context.Context) error {
-			return installLoadRetention(phaseCtx, v.cfg, heavyLoadMaxRows)
+			var err error
+			retentionStats, err = installLoadRetention(phaseCtx, v.cfg, heavyLoadMaxRows)
+			return err
 		})
+		if len(v.validationSteps) > 0 {
+			v.validationSteps[len(v.validationSteps)-1].OutputTail = retentionStats.outputTail()
+		}
 		result.Steps = append(result.Steps, v.validationSteps...)
 		if err != nil {
 			v.failValidationResult(ctx, &result, err)
