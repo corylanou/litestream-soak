@@ -41,7 +41,8 @@ never edits the candidate. No production credentials are needed for these checks
 
 The common build selects upstream v0.4.114, commit
 `0284ecf29deec3209991ef9bb23ecb97765c7fc8`, then updates containerd/v2 from v2.3.5
-to v2.3.6 and raises the effective module Go directive to 1.26.9. Upstream
+to v2.3.6, golang.org/x/net to v0.60.0, and the effective module Go directive to
+1.26.9. Upstream
 already includes gRPC v1.84.0 and x/crypto v0.57.0, so the
 previous x/crypto override is removed. The result identifies itself as
 `0.4.114-soak.1` with a patched commit suffix and dirty VCS build metadata.

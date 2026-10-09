@@ -471,7 +471,7 @@ Maintained builds use Go 1.26.9. Make targets and the one-shot rig select this
 compiler explicitly, including builds in the upstream Litestream module.
 Docker builders pin the Go 1.26.9 Bookworm image by digest and disable automatic
 toolchain switching. The control image and deployment jobs build flyctl v0.4.114 from pinned
-source with containerd/v2 v2.3.6, labeled `0.4.114-soak.1`.
+source with containerd/v2 v2.3.6 and x/net v0.60.0, labeled `0.4.114-soak.1`.
 Its dedicated builder uses Go 1.26.9. Binary compiler
 metadata is printed during image builds and retained under `/opt/soak/*.buildinfo`.
 The upstream Litestream SHA resolution and build flags remain unchanged.
