@@ -269,8 +269,11 @@ latest image and version metadata.
 
 When creating non-main workers, the control plane tries to fork a running main
 worker volume with the same profile and region. If no matching running main
-worker volume exists, or the fork fails, it creates a fresh encrypted Fly volume
-and records the reason. Successful PR runs can be archived and torn down
+worker volume exists, or Fly definitively rejects the fork (a 4xx response other
+than 408 or 429), it creates a fresh encrypted Fly volume under the same
+provisioning attempt and records the reason. A fork whose outcome is unknown
+(timeout, network error, or 5xx) leaves the attempt retained for
+reconciliation instead of issuing another create request. Successful PR runs can be archived and torn down
 automatically by success teardown. PR fleets can also be stopped or destroyed by
 the max-age policy when that policy is enabled.
 
