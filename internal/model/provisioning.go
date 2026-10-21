@@ -27,11 +27,12 @@ const provisioningSchema = `CREATE TABLE IF NOT EXISTS worker_provisioning (
  id TEXT PRIMARY KEY, worker_id TEXT NOT NULL, image_ref TEXT NOT NULL, git_sha TEXT NOT NULL, litestream_sha TEXT NOT NULL,
  deployment_id INTEGER NOT NULL DEFAULT 0, workload_sha TEXT NOT NULL DEFAULT '', phase TEXT NOT NULL, volume_size_gb INTEGER NOT NULL, volume_name TEXT NOT NULL, volume_id TEXT NOT NULL DEFAULT '', machine_id TEXT NOT NULL DEFAULT '', started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE UNIQUE INDEX IF NOT EXISTS worker_provisioning_active ON worker_provisioning(worker_id) WHERE phase!='complete';`
+DROP INDEX IF EXISTS worker_provisioning_active;
+CREATE UNIQUE INDEX IF NOT EXISTS worker_provisioning_open ON worker_provisioning(worker_id) WHERE phase NOT IN ('complete','abandoned');`
 
 func (d *DB) ActiveProvisioning(workerID string) (*ProvisioningAttempt, error) {
 	var a ProvisioningAttempt
-	err := d.queryRow(`SELECT id,worker_id,image_ref,git_sha,litestream_sha,phase,volume_name,volume_id,machine_id,volume_size_gb,deployment_id,workload_sha FROM worker_provisioning WHERE worker_id=? AND phase!='complete'`, workerID).Scan(&a.ID, &a.WorkerID, &a.ImageRef, &a.GitSHA, &a.LitestreamSHA, &a.Phase, &a.VolumeName, &a.VolumeID, &a.MachineID, &a.VolumeSizeGB, &a.DeploymentID, &a.WorkloadSHA)
+	err := d.queryRow(`SELECT id,worker_id,image_ref,git_sha,litestream_sha,phase,volume_name,volume_id,machine_id,volume_size_gb,deployment_id,workload_sha FROM worker_provisioning WHERE worker_id=? AND phase NOT IN ('complete','abandoned')`, workerID).Scan(&a.ID, &a.WorkerID, &a.ImageRef, &a.GitSHA, &a.LitestreamSHA, &a.Phase, &a.VolumeName, &a.VolumeID, &a.MachineID, &a.VolumeSizeGB, &a.DeploymentID, &a.WorkloadSHA)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -101,6 +102,31 @@ func (d *DB) CompleteProvisioning(a ProvisioningAttempt, events []Event) error {
 		if _, err := tx.Exec(`INSERT INTO events(worker_id,event_type,message,details) VALUES(?,?,?,?)`, a.WorkerID, event.EventType, event.Message, event.Details); err != nil {
 			return err
 		}
+	}
+	return tx.Commit()
+}
+
+func (d *DB) AbandonProvisioning(a ProvisioningAttempt, event Event) error {
+	unlock := d.LockWorkerReports(a.WorkerID)
+	defer unlock()
+	tx, err := d.writer.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.Exec(`UPDATE worker_provisioning SET phase='abandoned' WHERE id=? AND phase=?`, a.ID, a.Phase)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("provisioning abandonment lost its state claim")
+	}
+	if _, err := tx.Exec(`INSERT INTO events(worker_id,event_type,message,details) VALUES(?,?,?,?)`, event.WorkerID, event.EventType, event.Message, event.Details); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

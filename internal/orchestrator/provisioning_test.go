@@ -62,6 +62,8 @@ type provisioningFly struct {
 	volumePosts, machinePosts, deletes int
 	loseVolume, loseMachine            bool
 	readFailure                        bool
+	rejectVolume                       bool
+	allowDeletes                       bool
 }
 
 func (f *provisioningFly) serve(w http.ResponseWriter, r *http.Request) {
@@ -83,6 +85,24 @@ func (f *provisioningFly) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "missing", 404)
+	case r.Method == http.MethodPost && r.URL.Path == "/apps/app/volumes" && f.rejectVolume:
+		f.volumePosts++
+		http.Error(w, `{"error":"rejected"}`, http.StatusBadRequest)
+	case r.Method == http.MethodDelete && f.allowDeletes:
+		f.deletes++
+		id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		for i := range f.volumes {
+			if f.volumes[i].ID == id {
+				f.volumes[i].State = "pending_destroy"
+				f.volumes[i].AttachedMachineID = ""
+			}
+		}
+		for i := range f.machines {
+			if f.machines[i].ID == id {
+				f.machines[i].State = "destroyed"
+			}
+		}
+		w.WriteHeader(http.StatusOK)
 	case r.Method == http.MethodPost && r.URL.Path == "/apps/app/volumes":
 		f.volumePosts++
 		var request flyapi.CreateVolumeRequest
@@ -722,5 +742,105 @@ func TestLegacyRetiringVolumeWithAllocationRemainsAmbiguous(t *testing.T) {
 	}
 	if writes.Load() != 0 {
 		t.Fatal("attached allocation allowed fresh provisioning")
+	}
+}
+
+func TestTeardownClosesParkedAttemptAndPermitsRelaunch(t *testing.T) {
+	fake := &provisioningFly{rejectVolume: true, allowDeletes: true}
+	db, manager, desired, request := provisioningFixture(t, fake)
+	if _, err := manager.CreateWorker(context.Background(), request); err == nil {
+		t.Fatal("rejected volume create did not report provisioning unavailable")
+	}
+	if attempt, err := db.ActiveProvisioning(request.WorkerID); err != nil || attempt == nil {
+		t.Fatalf("ActiveProvisioning() = %+v, %v; want parked attempt", attempt, err)
+	}
+
+	if err := manager.DestroyWorker(context.Background(), request.WorkerID); err != nil {
+		t.Fatalf("DestroyWorker() error = %v", err)
+	}
+	if got := mustWorker(t, db, request.WorkerID); got.Status != model.WorkerStopped {
+		t.Fatalf("worker status = %s, want stopped", got.Status)
+	}
+	if attempt, err := db.ActiveProvisioning(request.WorkerID); err != nil || attempt != nil {
+		t.Fatalf("ActiveProvisioning() = %+v, %v; want closed attempt", attempt, err)
+	}
+	requireWorkerEvent(t, db, request.WorkerID, "worker_provisioning_abandoned")
+
+	fake.mu.Lock()
+	fake.rejectVolume = false
+	fake.mu.Unlock()
+	desired.GitSHA = "next"
+	if err := manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, "next-image"); err != nil {
+		t.Fatalf("relaunch after teardown: %v", err)
+	}
+	worker := mustWorker(t, db, request.WorkerID)
+	if worker.Status != model.WorkerRunning || worker.GitSHA != "next" {
+		t.Fatalf("relaunched worker = %+v, want running on next", worker)
+	}
+}
+
+func TestTeardownDestroysAttemptVolumeBeforeClosingAttempt(t *testing.T) {
+	fake := &provisioningFly{loseVolume: true, allowDeletes: true}
+	db, manager, _, request := provisioningFixture(t, fake)
+	if _, err := manager.CreateWorker(context.Background(), request); err == nil {
+		t.Fatal("lost volume response did not report uncertainty")
+	}
+
+	if err := manager.DestroyWorker(context.Background(), request.WorkerID); err != nil {
+		t.Fatalf("DestroyWorker() error = %v", err)
+	}
+	fake.mu.Lock()
+	state := fake.volumes[0].State
+	fake.mu.Unlock()
+	if state != "pending_destroy" {
+		t.Fatalf("attempt volume state = %s, want pending_destroy", state)
+	}
+	if attempt, err := db.ActiveProvisioning(request.WorkerID); err != nil || attempt != nil {
+		t.Fatalf("ActiveProvisioning() = %+v, %v; want closed attempt", attempt, err)
+	}
+}
+
+func TestTeardownKeepsAttemptOpenWhenInventoryFails(t *testing.T) {
+	fake := &provisioningFly{rejectVolume: true, allowDeletes: true}
+	db, manager, _, request := provisioningFixture(t, fake)
+	if _, err := manager.CreateWorker(context.Background(), request); err == nil {
+		t.Fatal("rejected volume create did not report provisioning unavailable")
+	}
+	fake.mu.Lock()
+	fake.readFailure = true
+	fake.mu.Unlock()
+
+	if err := manager.DestroyWorker(context.Background(), request.WorkerID); err == nil {
+		t.Fatal("DestroyWorker() succeeded without provisioning inventory")
+	}
+	if got := mustWorker(t, db, request.WorkerID); got.Status == model.WorkerStopped {
+		t.Fatal("worker marked stopped while its attempt was unresolved")
+	}
+	if attempt, err := db.ActiveProvisioning(request.WorkerID); err != nil || attempt == nil {
+		t.Fatalf("ActiveProvisioning() = %+v, %v; want retained attempt", attempt, err)
+	}
+}
+
+func TestTeardownDestroysUnboundAttemptMachine(t *testing.T) {
+	fake := &provisioningFly{loseMachine: true, allowDeletes: true}
+	db, manager, _, request := provisioningFixture(t, fake)
+	if _, err := manager.CreateWorker(context.Background(), request); err == nil {
+		t.Fatal("lost machine response did not report uncertainty")
+	}
+	if got := mustWorker(t, db, request.WorkerID); got.FlyMachineID != "" {
+		t.Fatalf("worker bound machine %q despite lost response", got.FlyMachineID)
+	}
+
+	if err := manager.DestroyWorker(context.Background(), request.WorkerID); err != nil {
+		t.Fatalf("DestroyWorker() error = %v", err)
+	}
+	fake.mu.Lock()
+	machineState := fake.machines[0].State
+	fake.mu.Unlock()
+	if machineState != "destroyed" {
+		t.Fatalf("unbound attempt machine state = %s, want destroyed", machineState)
+	}
+	if attempt, err := db.ActiveProvisioning(request.WorkerID); err != nil || attempt != nil {
+		t.Fatalf("ActiveProvisioning() = %+v, %v; want closed attempt", attempt, err)
 	}
 }
