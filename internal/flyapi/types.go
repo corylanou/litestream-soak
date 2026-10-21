@@ -114,8 +114,8 @@ type CreateMachineRequest struct {
 
 type CreateVolumeRequest struct {
 	Name      string `json:"name"`
-	SizeGB    int    `json:"size_gb"`
-	Region    string `json:"region"`
-	SourceID  string `json:"source_vol_id,omitempty"`
+	SizeGB    int    `json:"size_gb,omitempty"`
+	Region    string `json:"region,omitempty"`
+	SourceID  string `json:"source_volume_id,omitempty"`
 	Encrypted bool   `json:"encrypted"`
 }
