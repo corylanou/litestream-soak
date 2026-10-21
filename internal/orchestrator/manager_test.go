@@ -264,6 +264,91 @@ func TestCreateWorkerForksPRWorkerFromEligibleMainVolume(t *testing.T) {
 	}
 }
 
+func forkFallbackRequest() WorkerRequest {
+	return WorkerRequest{
+		WorkerID:    "worker-pr-62-low-vol",
+		Name:        "worker-pr-62-low-vol",
+		Source:      "pr-62",
+		GitSHA:      "soak-sha",
+		ProfileName: "low-volume",
+		ImageRef:    "registry.fly.io/litestream-soak:test",
+		Region:      "ord",
+		Workload: workload.Config{
+			LoadMode:    "synthetic",
+			InitialSize: "5MB",
+		},
+	}
+}
+
+func createRunningMainLowVol(t *testing.T, db *model.DB) {
+	t.Helper()
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-main-low-vol",
+		AppName:       "litestream-soak",
+		Name:          "worker-main-low-vol",
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		GitSHA:        "main",
+		ProfileName:   "low-volume",
+		ProfileConfig: "{}",
+		Region:        "ord",
+		FlyMachineID:  "machine-main",
+		FlyVolumeID:   "vol-main-001",
+	})
+}
+
+func TestCreateWorkerFallsBackToFreshVolumeWhenForkIsRejected(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	createRunningMainLowVol(t, db)
+	fly := newCreateWorkerFlyServer(t)
+	fly.forkStatus = http.StatusBadRequest
+	mgr := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+	worker, err := mgr.CreateWorker(context.Background(), forkFallbackRequest())
+	if err != nil {
+		t.Fatalf("CreateWorker() error = %v", err)
+	}
+	if worker.Status != model.WorkerRunning || worker.FlyVolumeID == "" {
+		t.Fatalf("worker = %+v, want running with a volume", worker)
+	}
+
+	volumes := fly.volumeRequests()
+	if len(volumes) != 2 || volumes[0].SourceID != "vol-main-001" || volumes[1].SourceID != "" || volumes[1].Region != "ord" || volumes[1].SizeGB == 0 {
+		t.Fatalf("volume requests = %+v, want rejected fork then fresh create", volumes)
+	}
+	event := requireWorkerEvent(t, db, worker.ID, "worker_volume_fresh")
+	if !strings.Contains(event.Details, "fork_volume_rejected") {
+		t.Fatalf("fresh event details = %q, want fork_volume_rejected reason", event.Details)
+	}
+	if attempt, err := db.ActiveProvisioning(worker.ID); err != nil || attempt != nil {
+		t.Fatalf("ActiveProvisioning() = %+v, %v; want completed attempt", attempt, err)
+	}
+}
+
+func TestCreateWorkerRetainsAttemptWhenForkOutcomeIsAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	createRunningMainLowVol(t, db)
+	fly := newCreateWorkerFlyServer(t)
+	fly.forkStatus = http.StatusBadGateway
+	mgr := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+
+	request := forkFallbackRequest()
+	if _, err := mgr.CreateWorker(context.Background(), request); err == nil || !strings.Contains(err.Error(), "provisioning unavailable") {
+		t.Fatalf("CreateWorker() error = %v, want provisioning unavailable", err)
+	}
+	if volumes := fly.volumeRequests(); len(volumes) != 1 {
+		t.Fatalf("volume requests = %+v, want only the fork attempt", volumes)
+	}
+	requireWorkerEvent(t, db, request.WorkerID, "worker_provisioning_unavailable")
+	if attempt, err := db.ActiveProvisioning(request.WorkerID); err != nil || attempt == nil {
+		t.Fatalf("ActiveProvisioning() = %+v, %v; want retained attempt", attempt, err)
+	}
+}
+
 func TestCreateWorkerRejectsNonFiniteWorkloadBeforePersisting(t *testing.T) {
 	db := openTestDB(t)
 	fly := newCreateWorkerFlyServer(t)
@@ -854,6 +939,7 @@ type createWorkerFlyServer struct {
 	forkStarted       chan struct{}
 	releaseFork       chan struct{}
 	releaseForkOnce   sync.Once
+	forkStatus        int
 }
 
 func newCreateWorkerFlyServer(t *testing.T) *createWorkerFlyServer {
@@ -903,7 +989,12 @@ func (f *createWorkerFlyServer) handle(w http.ResponseWriter, r *http.Request) {
 		id := fmt.Sprintf("vol-%03d", len(f.volumes))
 		forkStarted := f.forkStarted
 		releaseFork := f.releaseFork
+		forkStatus := f.forkStatus
 		f.mu.Unlock()
+		if req.SourceID != "" && forkStatus != 0 {
+			http.Error(w, `{"error":"fork rejected"}`, forkStatus)
+			return
+		}
 		if req.SourceID != "" && forkStarted != nil {
 			forkStarted <- struct{}{}
 			<-releaseFork

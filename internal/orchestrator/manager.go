@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -236,11 +237,14 @@ func (m *Manager) createWorkerVolume(ctx context.Context, worker model.Worker, v
 			m.recordWorkerVolumeForked(worker, *sourceWorker, vol.ID)
 			return vol, nil
 		}
-		if attempt != nil {
+		if attempt != nil && !providerRejectedRequest(err) {
 			return nil, fmt.Errorf("fork outcome unavailable; retained for reconciliation: %w", err)
 		}
 		freshReason = "fork_volume_failed"
-		slog.Warn("Failed to fork worker volume; creating fresh volume", "worker_id", worker.ID, "source_worker_id", sourceWorker.ID, "source_volume_id", sourceWorker.FlyVolumeID, "error", err)
+		if providerRejectedRequest(err) {
+			freshReason = "fork_volume_rejected"
+		}
+		slog.Warn("Failed to fork worker volume; creating fresh volume", "worker_id", worker.ID, "source_worker_id", sourceWorker.ID, "source_volume_id", sourceWorker.FlyVolumeID, "reason", freshReason, "error", err)
 	}
 
 	vol, err := client.CreateVolume(ctx, flyapi.CreateVolumeRequest{
@@ -254,6 +258,18 @@ func (m *Manager) createWorkerVolume(ctx context.Context, worker model.Worker, v
 	}
 	m.recordWorkerVolumeFresh(worker, freshReason, sourceWorker, vol.ID)
 	return vol, nil
+}
+
+func providerRejectedRequest(err error) bool {
+	var apiErr *flyapi.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.StatusCode {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	}
+	return apiErr.StatusCode >= 400 && apiErr.StatusCode < 500
 }
 
 func (m *Manager) lockForkSourceForWorker(ctx context.Context, worker model.Worker) (*model.Worker, func(), string, error) {
