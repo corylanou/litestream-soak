@@ -348,10 +348,10 @@ func (v *Verifier) resumeLoad() {
 }
 
 func (v *Verifier) checkpoint(ctx context.Context) (residualBusy bool, _ error) {
-	return v.checkpointDB(ctx, v.cfg.DBPath)
+	return v.checkpointDB(ctx, v.cfg.DBPath, true)
 }
 
-func (v *Verifier) checkpointDB(ctx context.Context, dbPath string) (residualBusy bool, _ error) {
+func (v *Verifier) checkpointDB(ctx context.Context, dbPath string, resumeLoadBetweenAttempts bool) (residualBusy bool, _ error) {
 	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)",
 		dbPath, v.checkpointBusyTimeout.Milliseconds())
 	db, err := sql.Open("sqlite", dsn)
@@ -368,7 +368,7 @@ func (v *Verifier) checkpointDB(ctx context.Context, dbPath string) (residualBus
 			// SIGSTOP can freeze a load process mid-transaction, making the
 			// busy state permanent for the cycle; briefly resuming the
 			// writers lets the lock holder finish before the retry.
-			if len(v.pausers) > 0 {
+			if resumeLoadBetweenAttempts && len(v.pausers) > 0 {
 				v.resumeLoad()
 			}
 			select {
@@ -376,7 +376,7 @@ func (v *Verifier) checkpointDB(ctx context.Context, dbPath string) (residualBus
 				return false, ctx.Err()
 			case <-time.After(v.checkpointRetryDelay):
 			}
-			if len(v.pausers) > 0 {
+			if resumeLoadBetweenAttempts && len(v.pausers) > 0 {
 				if err := v.pauseLoad(ctx); err != nil {
 					return false, fmt.Errorf("re-pause load during checkpoint retry: %w", err)
 				}
