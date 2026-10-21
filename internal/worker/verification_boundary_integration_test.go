@@ -29,7 +29,7 @@ func TestVerificationBoundaryPinnedBinary(t *testing.T) {
 	}
 	goVersion := os.Getenv("SOAK_COMPATIBILITY_GO_VERSION")
 	if goVersion == "" {
-		goVersion = "go1.26.9"
+		goVersion = "go1.26.10"
 	}
 	build, err := buildinfo.ReadFile(binary)
 	if err != nil {

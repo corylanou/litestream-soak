@@ -40,7 +40,7 @@ func TestOverlapSamplerFinalEvidence(t *testing.T) {
 	}
 	dir := t.TempDir()
 	files := map[string]string{
-		"go.mod":     "module sampler\ngo 1.26.9\n",
+		"go.mod":     "module sampler\ngo 1.26.10\n",
 		"sampler.go": body.String(),
 		"sampler_test.go": `package sampler
 import ("errors"; "os"; "testing")

@@ -27,7 +27,7 @@ For a selected candidate or baseline, build its unchanged source using the same
 compiler and flags as the worker image, then run from the harness checkout:
 
 ```bash
-GOTOOLCHAIN=go1.26.9 bash scripts/scan-binary.sh candidate \
+GOTOOLCHAIN=go1.26.10 bash scripts/scan-binary.sh candidate \
   <full-source-sha> /absolute/path/to/litestream /absolute/path/to/evidence
 ```
 
@@ -42,7 +42,7 @@ never edits the candidate. No production credentials are needed for these checks
 The common build selects upstream v0.4.114, commit
 `0284ecf29deec3209991ef9bb23ecb97765c7fc8`, then updates containerd/v2 from v2.3.5
 to v2.3.6, golang.org/x/net to v0.60.0, and the effective module Go directive to
-1.26.9. Upstream
+1.26.10. Upstream
 already includes gRPC v1.84.0 and x/crypto v0.57.0, so the
 previous x/crypto override is removed. The result identifies itself as
 `0.4.114-soak.1` with a patched commit suffix and dirty VCS build metadata.
@@ -50,10 +50,11 @@ The control image retains the dependency patch, effective go.mod/go.sum, and
 module graph. CI attaches binary scans; the optional source scan records the
 additional call traces.
 
-Deployment jobs use the same build script and Go 1.26.9 compiler, required by
+Deployment jobs use the same build script and Go 1.26.10 compiler, required by
 containerd v2.3.6. The harness, workload, and Litestream builders also use Go
-1.26.9 to address the standard library advisories GO-2026-6608 through
-GO-2026-6617. Flyctl
+1.26.10 to address the standard library advisories GO-2026-6608 through
+GO-2026-6617 and GO-2026-6809 (crypto/x509 distrust of compromised
+intermediates, fixed in Go 1.26.10). Flyctl
 retains symbols
 for binary scan fidelity; stripped Go 1.26 macOS scans were observed to report
 additional module-wide symbols absent from the unstripped scan. This patch

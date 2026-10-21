@@ -1,6 +1,7 @@
 package flyapi
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -116,5 +117,70 @@ func TestGetVolumePreservesNotFound(t *testing.T) {
 	_, err := client.GetVolume(t.Context(), "missing-volume")
 	if !IsNotFound(err) {
 		t.Fatalf("GetVolume() error = %v, want not found", err)
+	}
+}
+
+func captureVolumeCreateBody(t *testing.T) (*Client, *string) {
+	t.Helper()
+
+	var captured string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/apps/litestream-soak/volumes" {
+			http.NotFound(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		captured = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"vol-new","name":"soak_fork","state":"hydrating"}`)
+	}))
+	t.Cleanup(server.Close)
+	return NewClientWithBaseURL("litestream-soak", "test-token", server.URL), &captured
+}
+
+func TestForkVolumeSendsOnlySourceVolumeIDNameAndEncryption(t *testing.T) {
+	t.Parallel()
+
+	client, body := captureVolumeCreateBody(t)
+	if _, err := client.ForkVolume(t.Context(), "vol-main-001", "soak_fork"); err != nil {
+		t.Fatalf("ForkVolume() error = %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(*body), &decoded); err != nil {
+		t.Fatalf("decode fork body %q: %v", *body, err)
+	}
+	if got := decoded["source_volume_id"]; got != "vol-main-001" {
+		t.Fatalf("fork body source_volume_id=%v want vol-main-001 (body %s)", got, *body)
+	}
+	for _, forbidden := range []string{"size_gb", "region", "source_vol_id"} {
+		if _, present := decoded[forbidden]; present {
+			t.Fatalf("fork body must omit %q: %s", forbidden, *body)
+		}
+	}
+	if got := decoded["encrypted"]; got != true {
+		t.Fatalf("fork body encrypted=%v want true", got)
+	}
+}
+
+func TestCreateVolumeSendsSizeAndRegionForFreshVolumes(t *testing.T) {
+	t.Parallel()
+
+	client, body := captureVolumeCreateBody(t)
+	if _, err := client.CreateVolume(t.Context(), CreateVolumeRequest{Name: "soak_fresh", SizeGB: 50, Region: "ord", Encrypted: true}); err != nil {
+		t.Fatalf("CreateVolume() error = %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(*body), &decoded); err != nil {
+		t.Fatalf("decode body %q: %v", *body, err)
+	}
+	if decoded["size_gb"] != float64(50) || decoded["region"] != "ord" {
+		t.Fatalf("fresh body missing size/region: %s", *body)
+	}
+	if _, present := decoded["source_volume_id"]; present {
+		t.Fatalf("fresh body must omit source_volume_id: %s", *body)
 	}
 }
