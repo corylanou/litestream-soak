@@ -474,22 +474,22 @@ func unreferencedProvisioningVolume(volume flyapi.Volume, machines []flyapi.Mach
 	return true
 }
 
-func (m *Manager) abandonProvisioningForDestroy(ctx context.Context, worker model.Worker) error {
+func (m *Manager) destroyProvisioningResources(ctx context.Context, worker model.Worker) (*model.ProvisioningAttempt, error) {
 	a, err := m.db.ActiveProvisioning(worker.ID)
 	if err != nil || a == nil {
-		return err
+		return nil, err
 	}
 	if m.fly == nil {
-		return errors.New("fly client unavailable for provisioning inventory")
+		return nil, errors.New("fly client unavailable for provisioning inventory")
 	}
 	client := m.flyClientForWorker(worker)
 	machines, err := client.ListMachines(ctx)
 	if err != nil {
-		return fmt.Errorf("machine inventory: %w", err)
+		return nil, fmt.Errorf("machine inventory: %w", err)
 	}
 	volumes, err := client.ListVolumes(ctx)
 	if err != nil {
-		return fmt.Errorf("volume inventory: %w", err)
+		return nil, fmt.Errorf("volume inventory: %w", err)
 	}
 	var errs []error
 	for _, machine := range machines {
@@ -515,11 +515,15 @@ func (m *Manager) abandonProvisioningForDestroy(ctx context.Context, worker mode
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
-		return err
+		return nil, err
 	}
-	event, err := provisioningEvent(worker, *a, "worker_provisioning_abandoned", "Provisioning attempt closed after teardown confirmed no owned resources remain")
+	return a, nil
+}
+
+func (m *Manager) abandonProvisioning(worker model.Worker, a model.ProvisioningAttempt) error {
+	event, err := provisioningEvent(worker, a, "worker_provisioning_abandoned", "Provisioning attempt closed after teardown confirmed no owned resources remain")
 	if err != nil {
 		return err
 	}
-	return m.db.AbandonProvisioning(*a, event)
+	return m.db.AbandonProvisioning(a, event)
 }

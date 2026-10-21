@@ -820,3 +820,27 @@ func TestTeardownKeepsAttemptOpenWhenInventoryFails(t *testing.T) {
 		t.Fatalf("ActiveProvisioning() = %+v, %v; want retained attempt", attempt, err)
 	}
 }
+
+func TestTeardownDestroysUnboundAttemptMachine(t *testing.T) {
+	fake := &provisioningFly{loseMachine: true, allowDeletes: true}
+	db, manager, _, request := provisioningFixture(t, fake)
+	if _, err := manager.CreateWorker(context.Background(), request); err == nil {
+		t.Fatal("lost machine response did not report uncertainty")
+	}
+	if got := mustWorker(t, db, request.WorkerID); got.FlyMachineID != "" {
+		t.Fatalf("worker bound machine %q despite lost response", got.FlyMachineID)
+	}
+
+	if err := manager.DestroyWorker(context.Background(), request.WorkerID); err != nil {
+		t.Fatalf("DestroyWorker() error = %v", err)
+	}
+	fake.mu.Lock()
+	machineState := fake.machines[0].State
+	fake.mu.Unlock()
+	if machineState != "destroyed" {
+		t.Fatalf("unbound attempt machine state = %s, want destroyed", machineState)
+	}
+	if attempt, err := db.ActiveProvisioning(request.WorkerID); err != nil || attempt != nil {
+		t.Fatalf("ActiveProvisioning() = %+v, %v; want closed attempt", attempt, err)
+	}
+}

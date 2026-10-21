@@ -525,11 +525,17 @@ func (m *Manager) destroyWorker(ctx context.Context, workerID string) error {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("volume cleanup: %w", err))
 		}
 	}
+	attempt, err := m.destroyProvisioningResources(ctx, *worker)
+	if err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("provisioning cleanup: %w", err))
+	}
 	if err := m.clearWorkerReplicaPrefix(ctx, *worker); err != nil {
 		cleanupErrors = append(cleanupErrors, fmt.Errorf("replica cleanup: %w", err))
 	}
-	if err := m.abandonProvisioningForDestroy(ctx, *worker); err != nil {
-		cleanupErrors = append(cleanupErrors, fmt.Errorf("provisioning cleanup: %w", err))
+	if attempt != nil && len(cleanupErrors) == 0 {
+		if err := m.abandonProvisioning(*worker, *attempt); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("provisioning cleanup: %w", err))
+		}
 	}
 
 	if cleanupErr := errors.Join(cleanupErrors...); cleanupErr != nil {
