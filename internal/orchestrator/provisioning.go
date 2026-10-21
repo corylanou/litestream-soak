@@ -473,3 +473,53 @@ func unreferencedProvisioningVolume(volume flyapi.Volume, machines []flyapi.Mach
 	}
 	return true
 }
+
+func (m *Manager) abandonProvisioningForDestroy(ctx context.Context, worker model.Worker) error {
+	a, err := m.db.ActiveProvisioning(worker.ID)
+	if err != nil || a == nil {
+		return err
+	}
+	if m.fly == nil {
+		return errors.New("fly client unavailable for provisioning inventory")
+	}
+	client := m.flyClientForWorker(worker)
+	machines, err := client.ListMachines(ctx)
+	if err != nil {
+		return fmt.Errorf("machine inventory: %w", err)
+	}
+	volumes, err := client.ListVolumes(ctx)
+	if err != nil {
+		return fmt.Errorf("volume inventory: %w", err)
+	}
+	var errs []error
+	for _, machine := range machines {
+		if machine.State == "destroyed" {
+			continue
+		}
+		if machine.Config.Env["SOAK_RUN_ID"] != a.ID && (a.MachineID == "" || machine.ID != a.MachineID) {
+			continue
+		}
+		if err := client.DestroyMachine(ctx, machine.ID, true); err != nil && !flyapi.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("attempt machine %s: %w", machine.ID, err))
+		}
+	}
+	for _, volume := range volumes {
+		if retiringProvisioningVolume(volume) || volume.State == "destroyed" {
+			continue
+		}
+		if volume.Name != a.VolumeName && (a.VolumeID == "" || volume.ID != a.VolumeID) {
+			continue
+		}
+		if err := client.DestroyVolume(ctx, volume.ID); err != nil && !flyapi.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("attempt volume %s: %w", volume.ID, err))
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	event, err := provisioningEvent(worker, *a, "worker_provisioning_abandoned", "Provisioning attempt closed after teardown confirmed no owned resources remain")
+	if err != nil {
+		return err
+	}
+	return m.db.AbandonProvisioning(*a, event)
+}

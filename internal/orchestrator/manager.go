@@ -528,6 +528,9 @@ func (m *Manager) destroyWorker(ctx context.Context, workerID string) error {
 	if err := m.clearWorkerReplicaPrefix(ctx, *worker); err != nil {
 		cleanupErrors = append(cleanupErrors, fmt.Errorf("replica cleanup: %w", err))
 	}
+	if err := m.abandonProvisioningForDestroy(ctx, *worker); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("provisioning cleanup: %w", err))
+	}
 
 	if cleanupErr := errors.Join(cleanupErrors...); cleanupErr != nil {
 		statusErr := m.db.UpdateWorkerStatus(workerID, worker.Status, fmt.Sprintf("worker cleanup incomplete: %v", cleanupErr))

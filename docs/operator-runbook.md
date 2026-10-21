@@ -1664,6 +1664,12 @@ retained legacy volumes leave provisioning unresolved for operator accounting.
 A legacy pending worker with no conflicting resources can receive fresh resources
 after machine and volume inventory succeeds and its previous machine is confirmed
 missing or destroyed. Reconciliation does not delete volumes or replica prefixes.
+Destroying a worker, including source teardown, closes its open provisioning
+attempt. It first inventories the app and destroys any live machine or volume
+the attempt owns, then marks the attempt `abandoned` and records
+`worker_provisioning_abandoned`. If inventory or cleanup fails, the attempt
+stays open and the worker is not marked stopped, so teardown remains retryable.
+A relaunch of the same source can then provision fresh attempts.
 A deployment replacement refuses teardown while a provisioning attempt remains
 unresolved.
 
