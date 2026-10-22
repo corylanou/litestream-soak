@@ -178,6 +178,25 @@ fixture did not engage the intended fault. Use `scripts/local-rig-one-shot.sh`
 to collect compaction-resume and disk-full recovery evidence. The existence of the runner is not evidence that a selected
 candidate or fixture passed.
 
+The local S3 emulator builds MinIO and its `mc` client from source using
+`Dockerfile.minio`, following upstream Litestream's source-build approach.
+MinIO is pinned to `01ce918d8279a20e4706b96a64396146894adee4`
+(`RELEASE.2025-09-07T16-13-09Z`), and `mc` to
+`7394ce0dd2a80935aded936b09fa12cbb3cb8096`
+(`RELEASE.2025-08-13T08-35-41Z`). Docker with Compose and network access to
+fetch the base images and Go modules are required for the first build.
+
+```bash
+docker compose -f docker-compose.yml build minio minio-init
+docker compose -f docker-compose.yml up -d minio minio-init
+```
+
+Compose also builds missing images automatically when the one-shot rig starts
+the emulator. Both services use the same build definition; Docker caches the
+shared layers. The init service waits for MinIO health and creates the
+`litestream-soak` bucket idempotently. Ports 9000 and 9001 must be available.
+After changing the source pins, rerun the build command before starting the rig.
+
 The `provider-request-canceled` local rig injects the production Tigris failure
 shape, HTTP 408 with API code `RequestCanceled`, into `ListObjectsV2` and
 requires the restore to recover. This verifies the S3 retry policy directly;

@@ -14,6 +14,30 @@ var dockerfiles = []string{
 	"Dockerfile.worker",
 }
 
+func TestLocalEmulatorDoesNotUseRemovedImages(t *testing.T) {
+	t.Parallel()
+	content := string(readFile(t, "docker-compose.yml"))
+	removed := regexp.MustCompile(`(?m)^\s*image:\s*["']?(?:(?:docker\.io|index\.docker\.io|registry-1\.docker\.io)/)?minio/(?:minio|mc)(?:[:@\s"']|$)`)
+	if removed.MatchString(content) {
+		t.Fatal("local emulator must build from source instead of pulling removed MinIO images")
+	}
+}
+
+func TestLocalEmulatorBuildPinsSourceCommits(t *testing.T) {
+	t.Parallel()
+	content := string(readFile(t, "Dockerfile.minio"))
+	for _, name := range []string{"MINIO", "MC"} {
+		pin := regexp.MustCompile(`(?m)^ARG ` + name + `_COMMIT=[a-f0-9]{40}$`)
+		if !pin.MatchString(content) {
+			t.Errorf("%s source must be pinned to a full commit SHA", name)
+		}
+		module := "github.com/minio/" + strings.ToLower(name) + `@${` + name + `_COMMIT}`
+		if !strings.Contains(content, module) {
+			t.Errorf("build must consume the pinned source: %s", module)
+		}
+	}
+}
+
 var dockerfileRuntimes = []struct {
 	path      string
 	command   string
