@@ -25,8 +25,9 @@ func TestVerifierRetainsRestoreReplans(t *testing.T) {
 			logicalTestDB(t, cfg.DBPath+".restored", "CREATE TABLE t(id INTEGER); INSERT INTO t VALUES(1)")
 			startBoundarySyncFixture(t, &cfg, 42)
 			script := "#!/bin/sh\nif [ \"$LOG_LEVEL\" != DEBUG ]; then echo debug-disabled; exit 9; fi\necho 'restore file disappeared, recalculating plan token=private' >&2\necho 'restore file disappeared, recalculating plan'\n"
+			script += "echo 'head-marker'\ni=0; while [ $i -lt 1000 ]; do echo 'time=2026-10-22 level=DEBUG msg=\"s3 request\" s3.operation=GetObject s3.method=GET'; i=$((i+1)); done\n"
 			if fail {
-				script += "echo 'restore plan retries exhausted: decode: file does not exist' >&2\nexit 7\n"
+				script += "echo 'Error: decode database: unexpected EOF' >&2\nexit 7\n"
 			}
 			if err := os.WriteFile(filepath.Join(dir, "litestream"), []byte(script), 0700); err != nil {
 				t.Fatal(err)
@@ -38,11 +39,23 @@ func TestVerifierRetainsRestoreReplans(t *testing.T) {
 			if passed == fail || (err != nil) != fail {
 				t.Fatalf("passed=%v err=%v", passed, err)
 			}
+			if fail {
+				got := reporting.ClassifyVerificationFailure("integrity", err.Error())
+				if got.Stage != "restore" || got.Restore == nil || got.Signature != "restore_decode_error" {
+					t.Fatalf("classification=%+v", got)
+				}
+			}
+			if fail && (strings.Contains(err.Error(), "s3 request") || !strings.Contains(err.Error(), "decode database: unexpected EOF")) {
+				t.Fatalf("error must contain only final failure: %v", err)
+			}
 			var restore reporting.VerificationStep
 			for _, step := range v.validationSteps {
 				if step.Name == "restore" {
 					restore = step
 				}
+			}
+			if len(restore.OutputTail) > 8*1024 || !strings.Contains(restore.OutputTail, "head-marker") || !restore.RestoreOutputTruncated {
+				t.Fatalf("evidence length=%d truncated=%v", len(restore.OutputTail), restore.RestoreOutputTruncated)
 			}
 			raw, err := json.Marshal(restore)
 			if err != nil {
@@ -108,7 +121,7 @@ func TestRestoreOutputCountsDiscardedReplans(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.text()
-	if output.replans != 1 || !output.truncated || strings.Contains(text, restoreReplanMessage) {
+	if output.replans != 1 || !output.truncated || !strings.Contains(text, restoreReplanMessage) {
 		t.Fatalf("count=%d truncated=%v", output.replans, output.truncated)
 	}
 }
@@ -155,5 +168,42 @@ func TestReportedReplansSurviveSummaryRewrite(t *testing.T) {
 				t.Fatal("verification report not received")
 			}
 		})
+	}
+}
+
+func TestRestoreOutputPreservesLongFinalError(t *testing.T) {
+	var output restoreOutput
+	final := "Error: decode header: " + strings.Repeat("detail ", 1000)
+	input := "time=now level=DEBUG msg=first\n" + strings.Repeat("time=now level=DEBUG msg=read\n", 1000) + final
+	for start := 0; start < len(input); start += 13 {
+		if _, err := output.Write([]byte(input[start:min(start+13, len(input))])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	evidence := output.text()
+	if output.finalError != strings.TrimSpace(final) {
+		t.Fatalf("final error length=%d want=%d", len(output.finalError), len(strings.TrimSpace(final)))
+	}
+	if len(evidence) > 8*1024 || !strings.HasPrefix(evidence, "time=now level=DEBUG msg=first") {
+		t.Fatalf("invalid evidence length=%d", len(evidence))
+	}
+}
+
+func TestRestoreOutputPreservesUnindentedErrorBlock(t *testing.T) {
+	var output restoreOutput
+	final := "Error: restore failed:\noperation error S3: GetObject\nStatusCode: 503"
+	input := "time=now level=DEBUG msg=read\n" + final
+	for _, line := range strings.SplitAfter(input, "\n") {
+		if _, err := output.Write([]byte(line)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output.text()
+	if output.finalError != final {
+		t.Fatalf("final error=%q", output.finalError)
+	}
+	got := reporting.ClassifyVerificationFailure("restore", output.finalError)
+	if got.Signature != "restore_s3_slowdown" {
+		t.Fatalf("classification=%+v", got)
 	}
 }

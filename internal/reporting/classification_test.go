@@ -501,9 +501,11 @@ func TestClassifyVerificationFailureTransientBucketAndSlowdown(t *testing.T) {
 
 func TestRestoreReplanFailureSignatures(t *testing.T) {
 	for _, tc := range []struct{ message, signature string }{
+		{"cannot recalculate restore plan: permission denied", "restore_plan_recalculation_failed"},
+		{"cannot recalculate restore plan: context deadline exceeded", "restore_plan_recalculation_failed"},
 		{"restore plan retries exhausted: decode ltx: open ltx file: file does not exist", "restore_plan_retries_exhausted"},
-		{"cannot recalculate restore plan for txid 0000000000000042: transaction not available", "restore_plan_recalculation_failed"},
-		{"cannot recalculate restore plan: operation error S3: ListObjectsV2: StatusCode: 503, api error SlowDown: retry", "restore_plan_recalculation_failed"},
+		{"cannot recalculate restore plan for txid 0000000000000042: transaction not available", "restore_target_unavailable"},
+		{"cannot recalculate restore plan: operation error S3: ListObjectsV2: StatusCode: 503, api error SlowDown: retry", "restore_s3_slowdown"},
 	} {
 		t.Run(tc.signature, func(t *testing.T) {
 			got := ClassifyVerificationFailure("logical", tc.message)
@@ -511,5 +513,50 @@ func TestRestoreReplanFailureSignatures(t *testing.T) {
 				t.Fatalf("classification=%+v", got)
 			}
 		})
+	}
+}
+
+func TestRestoreFailureIgnoresDebugOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name, final, signature string
+		transport              bool
+	}{
+		{"reopen race", "Error: decode header for input 24: reopen ltx file at offset 0: file does not exist", "restore_decode_error", false},
+		{"target missing", "Error: no matching backup files available", "restore_target_unavailable", false},
+		{"transaction missing", "Error: transaction not available", "restore_target_unavailable", false},
+		{"recalculate", "Error: cannot recalculate restore plan", "restore_target_unavailable", false},
+		{"transport", "Error: cannot recalculate restore plan: operation error S3: GetObject, https response error StatusCode: 408, api error RequestCanceled: Request is canceled.", "restore_s3_get_request_canceled", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := "validation failed (exit 1): time=2026-10-22T10:00:00Z level=DEBUG msg=\"s3 request\" s3.operation=GetObject s3.method=GET\n" +
+				"time=2026-10-22T10:00:01Z level=WARN msg=\"restore file disappeared, recalculating plan\"\n" + tc.final + "\n"
+			got := ClassifyVerificationFailure("integrity", output)
+			if got.Stage != "restore" || got.Signature != tc.signature || (got.ObjectStore != nil) != tc.transport {
+				t.Fatalf("classification=%+v", got)
+			}
+		})
+	}
+}
+
+func TestRestoreErrorOutput(t *testing.T) {
+	for _, tc := range []struct{ name, output, want string }{
+		{"multiline", "time=now level=DEBUG msg=read\nError: restore failed:\n  operation error S3: GetObject\n  StatusCode: 503\n", "Error: restore failed:\n  operation error S3: GetObject\n  StatusCode: 503"},
+		{"unindented multiline", "time=now level=DEBUG msg=read\nError: restore failed:\noperation error S3: GetObject\nStatusCode: 503\n", "Error: restore failed:\noperation error S3: GetObject\nStatusCode: 503"},
+		{"plain", "starting restore\nfinal failure", "final failure"},
+		{"trailing diagnostic", "Error: decode failed\ntime=now level=DEBUG msg=closed\n", "Error: decode failed"},
+		{"no final error", "time=now level=DEBUG msg=read\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RestoreErrorOutput(tc.output); got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMultilineSyncFailurePreservesContext(t *testing.T) {
+	got := ClassifyVerificationFailure("integrity", "wait for sync:\noperation error S3: GetObject, StatusCode: 503, api error SlowDown: retry")
+	if got.Stage != "sync" || got.Signature != "sync_s3_slowdown" {
+		t.Fatalf("classification=%+v", got)
 	}
 }
