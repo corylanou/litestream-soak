@@ -230,19 +230,21 @@ type ActiveVerification struct {
 }
 
 type VerificationStep struct {
-	Name            string     `json:"name"`
-	StartedAt       time.Time  `json:"started_at"`
-	CompletedAt     time.Time  `json:"completed_at"`
-	DurationMS      int        `json:"duration_ms"`
-	Status          string     `json:"status"`
-	Error           string     `json:"error,omitempty"`
-	Command         []string   `json:"command,omitempty"`
-	DeadlineAt      *time.Time `json:"deadline_at,omitempty"`
-	ExitCode        *int       `json:"exit_code,omitempty"`
-	Signal          string     `json:"signal,omitempty"`
-	ContextCanceled bool       `json:"context_canceled,omitempty"`
-	ContextError    string     `json:"context_error,omitempty"`
-	OutputTail      string     `json:"output_tail,omitempty"`
+	RestoreReplanCount     int        `json:"restore_replan_count,omitempty"`
+	RestoreOutputTruncated bool       `json:"restore_output_truncated,omitempty"`
+	Name                   string     `json:"name"`
+	StartedAt              time.Time  `json:"started_at"`
+	CompletedAt            time.Time  `json:"completed_at"`
+	DurationMS             int        `json:"duration_ms"`
+	Status                 string     `json:"status"`
+	Error                  string     `json:"error,omitempty"`
+	Command                []string   `json:"command,omitempty"`
+	DeadlineAt             *time.Time `json:"deadline_at,omitempty"`
+	ExitCode               *int       `json:"exit_code,omitempty"`
+	Signal                 string     `json:"signal,omitempty"`
+	ContextCanceled        bool       `json:"context_canceled,omitempty"`
+	ContextError           string     `json:"context_error,omitempty"`
+	OutputTail             string     `json:"output_tail,omitempty"`
 }
 
 type ReplicaLevelReport struct {
