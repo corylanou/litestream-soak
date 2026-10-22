@@ -700,6 +700,45 @@ func (m *Manager) reconcileSourceFleet(ctx context.Context, source string, desir
 	if err := m.ensureFleetSpec(ctx, FleetSpec{Workers: resolved}, deployment.ImageRef); err != nil {
 		slog.Error("Failed to reconcile source fleet", "source", source, "error", err)
 	}
+	if err := m.resumeDeploymentDormantWorkers(ctx, *deployment, "fleet_reconcile", true); err != nil {
+		slog.Error("Failed to resume outdated dormant workers", "source", source, "error", err)
+	}
+}
+
+func (m *Manager) resumeDeploymentDormantWorkers(ctx context.Context, deployment model.Deployment, trigger string, onlyOutdated bool) error {
+	workers, err := m.db.ListDormantWorkers(deployment.Source)
+	if err != nil {
+		return err
+	}
+	var resumeErrors []error
+	for _, listed := range workers {
+		err := func() error {
+			unlock, err := m.lockWorker(ctx, listed.ID)
+			if err != nil {
+				return err
+			}
+			defer unlock()
+			current, _, err := m.latestReadyDeploymentMatches(deployment.Source, deployment.ImageRef, deployment.GitSHA, deployment.LitestreamSHA)
+			if err != nil {
+				return err
+			}
+			if !current {
+				return nil
+			}
+			worker, err := m.db.GetWorker(listed.ID)
+			if err != nil {
+				return err
+			}
+			if worker.Status != model.WorkerDormant || (onlyOutdated && workerMatchesDeployment(*worker, deployment)) {
+				return nil
+			}
+			return m.resumeDormantWorker(ctx, *worker, deployment.ImageRef, deployment.GitSHA, deployment.LitestreamSHA, trigger)
+		}()
+		if err != nil {
+			resumeErrors = append(resumeErrors, fmt.Errorf("%s: %w", listed.ID, err))
+		}
+	}
+	return errors.Join(resumeErrors...)
 }
 
 func (m *Manager) EnsureSourceFleet(ctx context.Context, source, gitSHA, litestreamSHA, imageRef string) error {

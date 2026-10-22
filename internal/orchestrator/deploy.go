@@ -190,25 +190,21 @@ func (d *Deployer) rolloutDeploymentReady(ctx context.Context, target model.Depl
 	}
 
 	slog.Info("Deployment ready, starting rolling update", "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "trigger", trigger)
-	if err := d.manager.EnsureSourceFleet(ctx, source, sha, litestreamSHA, imageRef); err != nil {
-		return "", err
+	rolloutErr := d.manager.EnsureSourceFleet(ctx, source, sha, litestreamSHA, imageRef)
+	if err := ctx.Err(); err != nil {
+		return "", errors.Join(rolloutErr, err)
 	}
-	if err := d.manager.rollingUpdateSourceLocked(ctx, source, imageRef, sha, litestreamSHA); err != nil {
-		return "", err
-	}
+	rolloutErr = errors.Join(rolloutErr, d.manager.rollingUpdateSourceLocked(ctx, source, imageRef, sha, litestreamSHA))
 	current, latest, err = d.manager.latestReadyDeploymentMatches(source, imageRef, sha, litestreamSHA)
 	if err != nil {
-		return "", err
+		return "", errors.Join(rolloutErr, err)
 	}
 	if !current {
 		slog.Info("Deployment ready superseded, skipping dormant resume", "source", source, "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "latest_sha", latest.GitSHA, "latest_litestream_sha", latest.LitestreamSHA, "latest_image", latest.ImageRef, "trigger", trigger)
-		return imageRef, nil
+		return imageRef, rolloutErr
 	}
-	if err := d.manager.ResumeDormantWorkers(ctx, source, imageRef, sha, litestreamSHA, trigger); err != nil {
-		return "", err
-	}
-
-	return imageRef, nil
+	rolloutErr = errors.Join(rolloutErr, d.manager.resumeDeploymentDormantWorkers(ctx, target, trigger, false))
+	return imageRef, rolloutErr
 }
 
 func validateDeploymentRepository(source, repository string) error {
