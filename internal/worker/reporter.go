@@ -91,6 +91,18 @@ func (r *Reporter) SendVerification(ctx context.Context, payload reporting.Verif
 		return nil
 	}
 
+	replans := 0
+	restored := false
+	for _, step := range payload.Steps {
+		if step.Name == "restore" || strings.HasPrefix(step.Name, "restore ") {
+			restored = true
+			replans += step.RestoreReplanCount
+		}
+	}
+	if restored {
+		payload.Summary += fmt.Sprintf("; restore re-plans: %d", replans)
+	}
+
 	payload.WorkerIdentity = r.identity
 	return r.postJSON(ctx, "/api/workers/"+url.PathEscape(r.identity.WorkerID)+"/verifications", payload)
 }

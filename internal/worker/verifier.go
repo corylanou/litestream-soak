@@ -687,14 +687,19 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		return false, err
 	}
 	defer cleanupConfig()
-	if err := v.runValidationPhase(ctx, "restore", budget, func(phaseCtx context.Context) error {
+	var restoreEvidence restoreOutput
+	restoreErr := v.runValidationPhase(ctx, "restore", budget, func(phaseCtx context.Context) error {
 		args := []string{"restore", "-config", configPath, "-txid", formatTXID(source.txid), "-o", restoredPath, sourcePath}
 		cmd := exec.CommandContext(phaseCtx, "litestream", args...)
 		if v.cfg.ReplicaType == "s3" {
 			cmd.Env = v.cfg.s3CommandEnv(v.cfg.S3FaultProxyEndpoint)
 		}
-		output, err := boundedValidationOutput(cmd)
-		slog.Info("Validate output", "output", string(output))
+		cmd.Env = setCommandEnv(cmd.Environ(), "LOG_LEVEL", "DEBUG")
+		cmd.Stdout, cmd.Stderr = &restoreEvidence, &restoreEvidence
+		cmd.WaitDelay = time.Second
+		err := cmd.Run()
+		output := []byte(restoreEvidence.text())
+		slog.Info("Validate output", "output", string(output), "restore_replan_count", restoreEvidence.replans)
 		if err == nil {
 			v.logicalEvidence += " restore_boundary=pinned"
 			return nil
@@ -708,8 +713,13 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 			metadata.err = fmt.Errorf("run validate: %w: %s", err, string(output))
 		}
 		return metadata
-	}); err != nil {
-		return false, err
+	})
+	restoreStep := &v.validationSteps[len(v.validationSteps)-1]
+	restoreStep.OutputTail = restoreEvidence.text()
+	restoreStep.RestoreReplanCount = restoreEvidence.replans
+	restoreStep.RestoreOutputTruncated = restoreEvidence.truncated
+	if restoreErr != nil {
+		return false, restoreErr
 	}
 	if err := v.runValidationPhase(ctx, "integrity_check", budget, func(phaseCtx context.Context) error {
 		return checkRestoredIntegrity(phaseCtx, restoredPath)

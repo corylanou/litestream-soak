@@ -498,3 +498,18 @@ func TestClassifyVerificationFailureTransientBucketAndSlowdown(t *testing.T) {
 		t.Fatalf("Signature = %q, want restore_s3_slowdown", classification.Signature)
 	}
 }
+
+func TestRestoreReplanFailureSignatures(t *testing.T) {
+	for _, tc := range []struct{ message, signature string }{
+		{"restore plan retries exhausted: decode ltx: open ltx file: file does not exist", "restore_plan_retries_exhausted"},
+		{"cannot recalculate restore plan for txid 0000000000000042: transaction not available", "restore_plan_recalculation_failed"},
+		{"cannot recalculate restore plan: operation error S3: ListObjectsV2: StatusCode: 503, api error SlowDown: retry", "restore_plan_recalculation_failed"},
+	} {
+		t.Run(tc.signature, func(t *testing.T) {
+			got := ClassifyVerificationFailure("logical", tc.message)
+			if got.Stage != "restore" || got.Signature != tc.signature {
+				t.Fatalf("classification=%+v", got)
+			}
+		})
+	}
+}

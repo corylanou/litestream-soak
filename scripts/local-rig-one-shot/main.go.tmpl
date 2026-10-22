@@ -1469,7 +1469,7 @@ func runRestoreRetentionRace(ctx context.Context, cfg config) (res result, runEr
 	var records []map[string]any
 	for i := 0; runCtx.Err() == nil; i++ {
 		attemptStart := time.Now()
-		record := map[string]any{"attempt": i + 1, "started_at": attemptStart.UTC(), "stage": "plan", "restored_valid": false}
+		record := map[string]any{"attempt": i + 1, "started_at": attemptStart.UTC(), "stage": "plan", "restored_valid": false, "restore_replan_count": 0}
 		records = append(records, record)
 		plan, planErr := litestream.CalcRestorePlan(runCtx, client, 0, time.Time{}, logger)
 		if planErr != nil {
@@ -1508,6 +1508,7 @@ func runRestoreRetentionRace(ctx context.Context, cfg config) (res result, runEr
 		observedClient := &raceRestoreClient{ReplicaClient: client}
 		restoreDB.Replica.Client = observedClient
 		minimumRows := int(syncedRows.Load())
+		replansBefore := counter.count("restore file disappeared, recalculating plan")
 		retentionBefore := counter.count("l0 retention enforced")
 		deletedBefore := counter.count("l0 files deleted")
 		compactionBefore := counter.count("compaction complete")
@@ -1542,6 +1543,7 @@ func runRestoreRetentionRace(ctx context.Context, cfg config) (res result, runEr
 		record["duration_ms"] = time.Since(attemptStart).Milliseconds()
 		outcome := rig.AttemptVerdict(err, runCtx.Err() != nil, err == nil, exposed)
 		record["outcome"] = outcome
+		counter.recordRestoreReplans(record, replansBefore, outcome)
 		if outcome == "aborted" {
 			record["error"] = err.Error()
 			_ = os.Remove(restorePath)
@@ -1582,6 +1584,7 @@ func runRestoreRetentionRace(ctx context.Context, cfg config) (res result, runEr
 	res.Stats["l1_interval_ms"] = raceL1Interval.Milliseconds()
 	res.Stats["writer_syncs"] = syncsDone
 	res.Stats["writer_rows"] = rowsTotal
+	res.Stats["restore_replan_count"] = counter.count("restore file disappeared, recalculating plan")
 	res.Stats["restores_attempted"] = attempts
 	res.Stats["restores_failed"] = failures
 	res.Stats["race_failures"] = raceFailures
@@ -1658,7 +1661,7 @@ func (h *raceLogCounter) Handle(ctx context.Context, r slog.Record) error {
 		})
 	}
 	h.counts.mu.Unlock()
-	if r.Level < slog.LevelInfo {
+	if r.Level < slog.LevelInfo && r.Message != "restore file disappeared, recalculating plan" {
 		return nil
 	}
 	return h.Handler.Handle(ctx, r)
@@ -2520,4 +2523,12 @@ func errorString(err error) string {
 		return errno.Error()
 	}
 	return err.Error()
+}
+
+func (h *raceLogCounter) recordRestoreReplans(record map[string]any, before int, outcome string) {
+	count := h.count("restore file disappeared, recalculating plan") - before
+	record["restore_replan_count"] = count
+	if count > 0 {
+		record["outcome_after_replan"] = outcome
+	}
 }

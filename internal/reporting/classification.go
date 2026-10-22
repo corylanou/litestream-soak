@@ -65,7 +65,7 @@ func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassifi
 		classification.ObjectStore = objectStore
 		if s3Transport {
 			classification.Signature = "s3_transport"
-		} else if signature := objectStoreSignature(classification.Stage, *objectStore); signature != "" {
+		} else if signature := objectStoreSignature(classification.Stage, *objectStore); signature != "" && restoreReplanFailureSignature(text) == "" {
 			classification.Signature = signature
 		}
 	}
@@ -242,6 +242,8 @@ func inferFailureSignature(stage, text, original string) string {
 		return "litestream_sync_socket_refused"
 	case strings.Contains(text, "wait for sync") && (strings.Contains(text, "context deadline exceeded") || strings.Contains(text, "client.timeout exceeded")):
 		return "litestream_sync_timeout"
+	case restoreReplanFailureSignature(text) != "":
+		return restoreReplanFailureSignature(text)
 	case strings.Contains(text, "wrong # of entries in index"):
 		return "sqlite_index_mismatch"
 	case strings.Contains(text, "open ltx file: file does not exist") || strings.Contains(text, "no such key") || strings.Contains(text, "missing ltx"):
@@ -349,4 +351,15 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func restoreReplanFailureSignature(text string) string {
+	switch {
+	case strings.Contains(text, "restore plan retries exhausted"):
+		return "restore_plan_retries_exhausted"
+	case strings.Contains(text, "cannot recalculate restore plan"):
+		return "restore_plan_recalculation_failed"
+	default:
+		return ""
+	}
 }
