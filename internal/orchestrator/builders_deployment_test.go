@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -519,5 +520,39 @@ func TestFinalizeDeploymentScorecardSortsAndCalculatesRate(t *testing.T) {
 	}
 	if got := []string{scorecard.Failures[0].Signature, scorecard.Failures[1].Signature, scorecard.Failures[2].Signature}; got[0] != "litestream_sync_socket_refused" || got[1] != "litestream_sync_timeout" || got[2] != "restore_s3_list_request_canceled" {
 		t.Fatalf("failure order = %v", got)
+	}
+}
+
+func TestDeploymentComparisonIgnoresUnreplicatedBoundaryAbort(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)
+	worker := model.Worker{ID: "worker", Name: "worker", ProfileName: "high-volume", FlyMachineID: "machine"}
+	deployment := model.Deployment{ID: 1, StartedAt: start}
+	passed := model.Verification{Attributed: true, Run: fixtureRun(worker, deployment), WorkerID: worker.ID, StartedAt: start.Add(time.Minute), Status: "passed", Passed: true}
+	aborted := model.Verification{Attributed: true, Run: fixtureRun(worker, deployment), WorkerID: worker.ID, StartedAt: start.Add(2 * time.Minute), Status: "aborted", ErrorMessage: "source boundary unavailable: requested=000000000000002a reserved=000000000000002c replicated=000000000000002b"}
+	baseOutcome, baseVerified := scoreDeploymentWorker(worker, deployment, []model.Verification{passed}, nil)
+	for _, priorPass := range []bool{false, true} {
+		t.Run(fmt.Sprintf("prior_pass=%t", priorPass), func(t *testing.T) {
+			checks := []model.Verification{aborted}
+			if priorPass {
+				checks = append(checks, passed)
+			}
+			outcome, verified := scoreDeploymentWorker(worker, deployment, checks, nil)
+			if verified != priorPass {
+				t.Fatalf("verified=%v, want %v", verified, priorPass)
+			}
+			base, head := DeploymentScorecard{}, DeploymentScorecard{}
+			countDeploymentScorecardOutcome(&base, map[string]DeploymentFailureCount{}, baseOutcome, baseVerified)
+			countDeploymentScorecardOutcome(&head, map[string]DeploymentFailureCount{}, outcome, verified)
+			base.Outcomes = []DeploymentWorkerOutcome{baseOutcome}
+			if verified {
+				head.Outcomes = []DeploymentWorkerOutcome{outcome}
+			}
+			comparison := DeploymentComparisonResponse{Base: &base, Head: head}
+			finalizeDeploymentComparison(&comparison, false)
+			if comparison.Verdict == "worse" || comparison.Head.FailedWorkers != 0 || len(comparison.RegressedWorkers) != 0 {
+				t.Fatalf("abort scored as regression: %+v", comparison)
+			}
+		})
 	}
 }

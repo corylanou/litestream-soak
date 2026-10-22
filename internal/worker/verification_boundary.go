@@ -11,6 +11,14 @@ import (
 	"modernc.org/sqlite"
 )
 
+type unreplicatedBoundaryError struct {
+	requested, local, replicated uint64
+}
+
+func (e *unreplicatedBoundaryError) Error() string {
+	return fmt.Sprintf("source boundary unavailable: requested=%016x reserved=%016x replicated=%016x", e.requested, e.local, e.replicated)
+}
+
 type verificationBoundary struct {
 	logicalSnapshot
 	txid uint64
@@ -50,9 +58,13 @@ func (v *Verifier) captureVerificationBoundary(ctx context.Context, path string,
 	if err := acquireVerificationReservation(ctx, conn); err != nil {
 		return verificationBoundary{}, err
 	}
-	if synced.TXID < txid || synced.ReplicatedTXID < synced.TXID {
+	if synced.TXID < txid {
 		return verificationBoundary{}, fmt.Errorf("source boundary unavailable: requested=%016x reserved=%016x replicated=%016x", txid, synced.TXID, synced.ReplicatedTXID)
 	}
+	if synced.ReplicatedTXID < synced.TXID {
+		return verificationBoundary{}, &unreplicatedBoundaryError{requested: txid, local: synced.TXID, replicated: synced.ReplicatedTXID}
+	}
+
 	source, err := v.logicalValidation(ctx, path, synced.TXID)
 	if err != nil {
 		return verificationBoundary{}, err
