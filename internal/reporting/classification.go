@@ -45,6 +45,9 @@ func (c *FailureClassification) Valid() bool {
 }
 
 func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassification {
+	if strings.Contains(errorMessage, "\n") && strings.Contains(strings.ToLower(errorMessage), "level=") {
+		errorMessage = RestoreErrorOutput(errorMessage)
+	}
 	text := strings.ToLower(errorMessage)
 	classification := FailureClassification{
 		Stage: InferFailureStage(checkType, errorMessage),
@@ -65,7 +68,7 @@ func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassifi
 		classification.ObjectStore = objectStore
 		if s3Transport {
 			classification.Signature = "s3_transport"
-		} else if signature := objectStoreSignature(classification.Stage, *objectStore); signature != "" && restoreReplanFailureSignature(text) == "" {
+		} else if signature := objectStoreSignature(classification.Stage, *objectStore); signature != "" {
 			classification.Signature = signature
 		}
 	}
@@ -127,7 +130,7 @@ func InferFailureStage(checkType, errorMessage string) string {
 		return "disk_capacity"
 	case strings.Contains(text, "wait for sync") || strings.Contains(text, "sync request") || strings.Contains(text, "decode sync response") || strings.Contains(text, "litestream.sock"):
 		return "sync"
-	case strings.Contains(text, "restore failed") || strings.Contains(text, "check_type=restore") || strings.Contains(text, "get ltx time bounds") || strings.Contains(text, "restore plan") || strings.Contains(text, "calc restore") ||
+	case strings.Contains(text, "no matching backup files available") || strings.Contains(text, "transaction not available") || strings.Contains(text, "restore failed") || strings.Contains(text, "check_type=restore") || strings.Contains(text, "get ltx time bounds") || strings.Contains(text, "restore plan") || strings.Contains(text, "calc restore") ||
 		strings.Contains(text, "read page header") || strings.Contains(text, "open ltx file") || strings.Contains(text, "no such key") || strings.Contains(text, "missing ltx"):
 		return "restore"
 	case strings.Contains(text, "integrity check") || strings.Contains(text, "check_type=integrity_check") || strings.Contains(text, "wrong # of entries in index"):
@@ -357,9 +360,37 @@ func restoreReplanFailureSignature(text string) string {
 	switch {
 	case strings.Contains(text, "restore plan retries exhausted"):
 		return "restore_plan_retries_exhausted"
+	case strings.Contains(text, "no matching backup files available") || strings.Contains(text, "transaction not available") || strings.HasSuffix(strings.Trim(text, " .\"'"), "cannot recalculate restore plan"):
+		return "restore_target_unavailable"
 	case strings.Contains(text, "cannot recalculate restore plan"):
 		return "restore_plan_recalculation_failed"
 	default:
 		return ""
 	}
+}
+
+func RestoreErrorOutput(output string) string {
+	var lines []string
+	finalBlock := false
+	for _, line := range strings.Split(output, "\n") {
+		continuation := strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "level=debug") || strings.Contains(lower, "level=info") || strings.Contains(lower, "level=warn") {
+			continue
+		}
+		startsError := strings.HasPrefix(lower, "error:") || strings.Contains(lower, "level=error")
+		if startsError || (!finalBlock && !continuation) {
+			lines = nil
+		}
+		finalBlock = finalBlock || startsError
+		if continuation && len(lines) > 0 {
+			line = "  " + line
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }

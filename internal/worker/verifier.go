@@ -708,9 +708,9 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		metadata := validationStepMetadata(phaseCtx, cmd, output, err)
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			metadata.err = fmt.Errorf("validation failed (exit %d): %s", exitErr.ExitCode(), string(output))
+			metadata.err = fmt.Errorf("restore failed: validation failed (exit %d): %s", exitErr.ExitCode(), restoreEvidence.finalError)
 		} else {
-			metadata.err = fmt.Errorf("run validate: %w: %s", err, string(output))
+			metadata.err = fmt.Errorf("restore failed: run validate: %w: %s", err, restoreEvidence.finalError)
 		}
 		return metadata
 	})

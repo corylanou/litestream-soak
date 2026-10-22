@@ -3,18 +3,24 @@ package worker
 import (
 	"bytes"
 	"strings"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 const restoreReplanMessage = "restore file disappeared, recalculating plan"
+const restoreEvidenceLimit = 8 * 1024
 const restoreOutputTruncated = "[restore output truncated]\n"
 
 type restoreOutput struct {
-	pending   []byte
-	output    []byte
-	matchTail string
-	replans   int
-	truncated bool
-	dropping  bool
+	pending      []byte
+	output       []byte
+	head         []byte
+	headComplete bool
+	finalError   string
+	matchTail    string
+	replans      int
+	truncated    bool
+	dropping     bool
 }
 
 func (b *restoreOutput) Write(p []byte) (int, error) {
@@ -52,7 +58,19 @@ func (b *restoreOutput) flushLine() {
 	}
 	line := []byte(redactLogIncident(string(b.pending)))
 	b.pending = nil
-	limit := syncDiagnosticOutputLimit - len(restoreOutputTruncated)
+	if final := reporting.RestoreErrorOutput(string(line)); final != "" {
+		if len(b.finalError)+len(line)+1 <= syncDiagnosticOutputLimit {
+			b.finalError = reporting.RestoreErrorOutput(b.finalError + "\n" + string(line))
+		} else {
+			b.finalError = final
+		}
+	}
+	limit := (restoreEvidenceLimit - len(restoreOutputTruncated)) / 2
+	if !b.headComplete && len(b.head)+len(line) <= limit {
+		b.head = append(b.head, line...)
+		return
+	}
+	b.headComplete = true
 	if len(line) > limit {
 		b.truncated = true
 		return
@@ -72,7 +90,7 @@ func (b *restoreOutput) flushLine() {
 func (b *restoreOutput) text() string {
 	b.flushLine()
 	if b.truncated {
-		return restoreOutputTruncated + string(b.output)
+		return string(b.head) + restoreOutputTruncated + string(b.output)
 	}
-	return string(b.output)
+	return string(b.head) + string(b.output)
 }
