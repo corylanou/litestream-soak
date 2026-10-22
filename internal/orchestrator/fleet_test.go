@@ -165,12 +165,14 @@ func TestEnsureFleetSpecCapsConfigDriftReplacementsPerCycle(t *testing.T) {
 			FlyVolumeID:   fmt.Sprintf("old-volume-%d", i),
 		})
 		spec.Workers = append(spec.Workers, DesiredWorker{
-			WorkerID:    workerID,
-			Name:        workerID,
-			Source:      "main",
-			ProfileName: "low-volume",
-			Region:      "ord",
-			Workload:    workload.Config{WriteRate: 10},
+			WorkerID:      workerID,
+			Name:          workerID,
+			Source:        "main",
+			GitSHA:        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			LitestreamSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			ProfileName:   "low-volume",
+			Region:        "ord",
+			Workload:      workload.Config{WriteRate: 10},
 		})
 	}
 

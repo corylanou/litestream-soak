@@ -605,6 +605,16 @@ func buildDeploymentRollout(db *model.DB, deployment model.Deployment) (Deployme
 	})
 
 	response.Status = inferDeploymentRolloutStatus(response)
+	latest, err := db.GetLatestReadyDeployment(source)
+	if err != nil {
+		return DeploymentRolloutResponse{}, err
+	}
+	if latest != nil && deployment.Status == "ready" && latest.ID != deployment.ID &&
+		(latest.StartedAt.After(deployment.StartedAt) || (latest.StartedAt.Equal(deployment.StartedAt) && latest.ID > deployment.ID)) {
+		response.Status = "superseded"
+		response.DormantFleetAlert = false
+		response.DormantFleetSince = nil
+	}
 	response.Summary = summarizeDeploymentRollout(response)
 	applyDeploymentRolloutGuidance(&response, time.Now().UTC())
 	return response, nil
@@ -684,6 +694,8 @@ func summarizeDeploymentRollout(rollout DeploymentRolloutResponse) string {
 		return fmt.Sprintf("The %s fleet is 100%% dormant, leaving zero soak coverage until at least one worker resumes.", subject)
 	}
 	switch rollout.Status {
+	case "superseded":
+		return fmt.Sprintf("The %s rollout was superseded by a newer ready deployment.", subject)
 	case "no_workers":
 		return fmt.Sprintf("The %s rollout is recorded, but no workers for that source are registered yet.", subject)
 	case "rolling_out":
@@ -866,6 +878,8 @@ func inferDeploymentNextAction(rollout DeploymentRolloutResponse) string {
 		return "Restore zero soak coverage now by resuming at least one dormant worker, then confirm heartbeats and verification restart."
 	}
 	switch rollout.Status {
+	case "superseded":
+		return "Follow the newest ready deployment for this source."
 	case "no_workers":
 		return "Create or reconcile the main fleet before trusting this release."
 	case "rolling_out":
@@ -903,6 +917,8 @@ func inferDeploymentNextChecks(rollout DeploymentRolloutResponse) []string {
 	}
 	checks := make([]string, 0, 3)
 	switch rollout.Status {
+	case "superseded":
+		return []string{"Inspect the newest ready deployment for current rollout progress."}
 	case "no_workers":
 		return []string{
 			"Confirm the main fleet reconciler is enabled.",

@@ -872,3 +872,127 @@ func mustWorker(t *testing.T, db *model.DB, id string) *model.Worker {
 	}
 	return worker
 }
+
+func TestDeploymentReadyPersistsBeforeAcceptanceWhileSourceLocked(t *testing.T) {
+	db := openTestDB(t)
+	old := model.Deployment{Source: "main", GitSHA: "1111111", LitestreamSHA: "aaaaaaa", ImageRef: "registry.fly.io/app:old", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&old); err != nil {
+		t.Fatal(err)
+	}
+	createTestWorker(t, db, model.Worker{ID: "old", Name: "old", Source: "main", GitSHA: "0000000", LitestreamSHA: "aaaaaaa", Status: model.WorkerRunning})
+	oldDeployment := mustDeploymentByVersion(t, db, "main", old.GitSHA, old.LitestreamSHA)
+	before, err := buildDeploymentRollout(db, *oldDeployment)
+	if err != nil || before.Status != "rolling_out" {
+		t.Fatalf("old rollout = %s, %v", before.Status, err)
+	}
+	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	unlock, err := manager.lockSource(context.Background(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	api := NewAPIWithContext(ctx, db, nil, nil, nil, manager, NewDeployer(manager, db, "litestream-soak", false))
+	defer func() { cancel(); unlock(); waitForAPIRollouts(t, api) }()
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?source=main&sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil)
+	response := httptest.NewRecorder()
+	api.handleDeploymentReady(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	latest, err := db.GetLatestReadyDeployment("main")
+	if err != nil || latest == nil || latest.GitSHA != "2222222" {
+		t.Fatalf("accepted deployment not persisted: %+v, %v", latest, err)
+	}
+	after, err := buildDeploymentRollout(db, *oldDeployment)
+	if err != nil || after.Status != "superseded" {
+		t.Fatalf("old rollout = %s, %v; want superseded", after.Status, err)
+	}
+}
+
+func TestDeploymentReadyRejectsPersistenceFailure(t *testing.T) {
+	db := openTestDB(t)
+	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	api := NewAPI(db, nil, nil, nil, manager, NewDeployer(manager, db, "litestream-soak", false))
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	defer waitForAPIRollouts(t, api)
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil)
+	response := httptest.NewRecorder()
+	api.handleDeploymentReady(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d: %s; want 500", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), `"accepted":true`) {
+		t.Fatal("failed persistence reported as accepted")
+	}
+}
+
+func TestReconcileFleetResumesVersionRolloutAfterRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "restart.db")
+	db, err := model.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := model.Deployment{Source: "main", GitSHA: "1111111", LitestreamSHA: "aaaaaaa", ImageRef: "registry.fly.io/app:old", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&old); err != nil {
+		t.Fatal(err)
+	}
+	spec := FleetSpec{Workers: []DesiredWorker{
+		{WorkerID: "worker-one", Name: "worker-one", Source: "main", GitSHA: old.GitSHA, LitestreamSHA: old.LitestreamSHA, ProfileName: "low-volume", Region: "ord", Workload: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}},
+		{WorkerID: "worker-two", Name: "worker-two", Source: "main", GitSHA: old.GitSHA, LitestreamSHA: old.LitestreamSHA, ProfileName: "low-volume", Region: "ord", Workload: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}},
+	}}
+	oldFly := newDeployTestFlyServer(t, db, "main", old.GitSHA, old.LitestreamSHA, old.ImageRef)
+	manager := NewManager(oldFly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	if err := manager.ensureFleetSpec(context.Background(), spec, old.ImageRef); err != nil {
+		t.Fatal(err)
+	}
+	latest := model.Deployment{Source: "main", GitSHA: "2222222", LitestreamSHA: "bbbbbbb", ImageRef: "registry.fly.io/app:new", Status: "ready"}
+	ctx, cancel := context.WithCancel(context.Background())
+	unlock, err := manager.lockSource(context.Background(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPIWithContext(ctx, db, nil, nil, nil, manager, NewDeployer(manager, db, "litestream-soak", false))
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil)
+	response := httptest.NewRecorder()
+	api.handleDeploymentReady(response, request)
+	cancel()
+	unlock()
+	waitForAPIRollouts(t, api)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	nextFly := newDeployTestFlyServer(t, db, "main", latest.GitSHA, latest.LitestreamSHA, latest.ImageRef)
+	nextFly.machines = 2
+	nextFly.volumes = 2
+	manager = NewManager(nextFly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	if _, err := manager.RollWorker(context.Background(), "worker-one", latest.ImageRef, latest.GitSHA, latest.LitestreamSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = model.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	restartedFly := newDeployTestFlyServer(t, db, "main", latest.GitSHA, latest.LitestreamSHA, latest.ImageRef)
+	restartedFly.machines = 3
+	restartedFly.volumes = 3
+	restarted := NewManager(restartedFly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	restarted.reconcileFleet(context.Background(), spec)
+	rollout, err := buildLatestDeploymentRollout(db, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rollout.UpdatedWorkers != 2 || rollout.OutdatedWorkers != 0 {
+		t.Fatalf("restart rollout: updated=%d outdated=%d", rollout.UpdatedWorkers, rollout.OutdatedWorkers)
+	}
+	restartedFly.assertCreateCounts(t, 4, 4)
+	if worker := mustWorker(t, db, "worker-two"); worker.Status != model.WorkerRunning {
+		t.Fatalf("recovered worker status = %s", worker.Status)
+	}
+	restartedFly.assertNoErrors(t)
+}

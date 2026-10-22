@@ -2685,12 +2685,13 @@ func TestHandleDeploymentReady(t *testing.T) {
 		t.Parallel()
 
 		db := openTestDB(t)
-		deployer := &Deployer{db: db}
+		manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+		deployer := NewDeployer(manager, db, "litestream-soak", false)
 		api := NewAPI(db, nil, nil, nil, nil, deployer)
 		t.Cleanup(func() {
 			waitForAPIRollouts(t, api)
 		})
-		request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?sha=not-hex-sha&litestream_sha=ls-abc123&image=registry.fly.io%2Fapp%3Anot-hex-sha", nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?source=custom&sha=abcdef1&litestream_sha=ls-abc123&image=registry.fly.io%2Fapp%3Aabcdef1", nil)
 		recorder := httptest.NewRecorder()
 
 		api.handleDeploymentReady(recorder, request)
@@ -2703,17 +2704,17 @@ func TestHandleDeploymentReady(t *testing.T) {
 		if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
 			t.Fatalf("decode response: %v", err)
 		}
-		if resp["sha"] != "not-hex-sha" {
-			t.Fatalf("sha = %v, want not-hex-sha", resp["sha"])
+		if resp["sha"] != "abcdef1" {
+			t.Fatalf("sha = %v, want abcdef1", resp["sha"])
 		}
-		if resp["source"] != "main" {
-			t.Fatalf("source = %v, want main", resp["source"])
+		if resp["source"] != "custom" {
+			t.Fatalf("source = %v, want custom", resp["source"])
 		}
 		if resp["trigger"] != "deploy_ready" {
 			t.Fatalf("trigger = %v, want deploy_ready", resp["trigger"])
 		}
-		if resp["image_ref"] != "registry.fly.io/app:not-hex-sha" {
-			t.Fatalf("image_ref = %v, want registry.fly.io/app:not-hex-sha", resp["image_ref"])
+		if resp["image_ref"] != "registry.fly.io/app:abcdef1" {
+			t.Fatalf("image_ref = %v, want registry.fly.io/app:abcdef1", resp["image_ref"])
 		}
 		if resp["accepted"] != true {
 			t.Fatalf("accepted = %v, want true", resp["accepted"])
