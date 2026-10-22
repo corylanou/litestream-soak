@@ -1088,3 +1088,27 @@ func TestDeploymentContinuesAfterDefaultWorkerReplacementFailure(t *testing.T) {
 	}
 	fly.assertNoErrors(t)
 }
+
+func TestDeploymentDormantResumeRecreatesWithoutRelocking(t *testing.T) {
+	db := openTestDB(t)
+	target := model.Deployment{Source: "main", GitSHA: "2222222", LitestreamSHA: "bbbbbbb", ImageRef: "registry.fly.io/app:new", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&target); err != nil {
+		t.Fatal(err)
+	}
+	desired := DefaultFleetForSource("main", target.GitSHA, target.LitestreamSHA).Workers[0]
+	createTestWorker(t, db, model.Worker{ID: desired.WorkerID, Name: desired.Name, AppName: "litestream-soak", Source: "main", GitSHA: "1111111", LitestreamSHA: "aaaaaaa", Status: model.WorkerDormant, ProfileName: desired.ProfileName, ProfileConfig: desired.Workload.JSON(), Region: "syd", FlyMachineID: "old-machine", FlyVolumeID: "old-volume"})
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := manager.resumeDeploymentDormantWorkers(ctx, target, "test", true); err != nil {
+		t.Fatal(err)
+	}
+	worker := mustWorker(t, db, desired.WorkerID)
+	if worker.Status != model.WorkerProbing || worker.GitSHA != target.GitSHA || worker.Region != desired.Region {
+		t.Fatalf("recreated worker: status=%s sha=%s region=%s", worker.Status, worker.GitSHA, worker.Region)
+	}
+	if got := len(fly.machineRequests()); got != 1 {
+		t.Fatalf("machine creates = %d, want 1", got)
+	}
+}

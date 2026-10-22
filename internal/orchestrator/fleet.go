@@ -732,7 +732,7 @@ func (m *Manager) resumeDeploymentDormantWorkers(ctx context.Context, deployment
 			if worker.Status != model.WorkerDormant || (onlyOutdated && workerMatchesDeployment(*worker, deployment)) {
 				return nil
 			}
-			return m.resumeDormantWorker(ctx, *worker, deployment.ImageRef, deployment.GitSHA, deployment.LitestreamSHA, trigger)
+			return m.resumeDormantWorkerLocked(ctx, *worker, deployment.ImageRef, deployment.GitSHA, deployment.LitestreamSHA, trigger)
 		}()
 		if err != nil {
 			resumeErrors = append(resumeErrors, fmt.Errorf("%s: %w", listed.ID, err))
