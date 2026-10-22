@@ -672,24 +672,73 @@ func (m *Manager) reconcileFleet(ctx context.Context, spec FleetSpec) {
 	}
 
 	for _, source := range sources {
-		deployment, err := resolveReadyDeploymentTarget(m.db, source, "", "", "")
-		if err != nil {
-			slog.Warn("Skipping fleet reconciliation without a ready source deployment", "source", source, "error", err)
-			continue
-		}
+		m.reconcileSourceFleet(ctx, source, workersBySource[source])
+	}
+}
 
-		resolved := make([]DesiredWorker, 0, len(workersBySource[source]))
-		for _, desired := range workersBySource[source] {
-			desired.Source = source
-			desired.GitSHA = deployment.GitSHA
-			desired.LitestreamSHA = deployment.LitestreamSHA
-			desired.PRNumber = sourcePRNumber(source)
-			resolved = append(resolved, desired)
-		}
-		if err := m.ensureFleetSpec(ctx, FleetSpec{Workers: resolved}, deployment.ImageRef); err != nil {
-			slog.Error("Failed to reconcile source fleet", "source", source, "error", err)
+func (m *Manager) reconcileSourceFleet(ctx context.Context, source string, desiredWorkers []DesiredWorker) {
+	unlock, err := m.lockSource(ctx, source)
+	if err != nil {
+		return
+	}
+	defer unlock()
+
+	deployment, err := resolveReadyDeploymentTarget(m.db, source, "", "", "")
+	if err != nil {
+		slog.Warn("Skipping fleet reconciliation without a ready source deployment", "source", source, "error", err)
+		return
+	}
+
+	resolved := make([]DesiredWorker, 0, len(desiredWorkers))
+	for _, desired := range desiredWorkers {
+		desired.Source = source
+		desired.GitSHA = deployment.GitSHA
+		desired.LitestreamSHA = deployment.LitestreamSHA
+		desired.PRNumber = sourcePRNumber(source)
+		resolved = append(resolved, desired)
+	}
+	if err := m.ensureFleetSpec(ctx, FleetSpec{Workers: resolved}, deployment.ImageRef); err != nil {
+		slog.Error("Failed to reconcile source fleet", "source", source, "error", err)
+	}
+	if err := m.resumeDeploymentDormantWorkers(ctx, *deployment, "fleet_reconcile", true); err != nil {
+		slog.Error("Failed to resume outdated dormant workers", "source", source, "error", err)
+	}
+}
+
+func (m *Manager) resumeDeploymentDormantWorkers(ctx context.Context, deployment model.Deployment, trigger string, onlyOutdated bool) error {
+	workers, err := m.db.ListDormantWorkers(deployment.Source)
+	if err != nil {
+		return err
+	}
+	var resumeErrors []error
+	for _, listed := range workers {
+		err := func() error {
+			unlock, err := m.lockWorker(ctx, listed.ID)
+			if err != nil {
+				return err
+			}
+			defer unlock()
+			current, _, err := m.latestReadyDeploymentMatches(deployment.Source, deployment.ImageRef, deployment.GitSHA, deployment.LitestreamSHA)
+			if err != nil {
+				return err
+			}
+			if !current {
+				return nil
+			}
+			worker, err := m.db.GetWorker(listed.ID)
+			if err != nil {
+				return err
+			}
+			if worker.Status != model.WorkerDormant || (onlyOutdated && workerMatchesDeployment(*worker, deployment)) {
+				return nil
+			}
+			return m.resumeDormantWorkerLocked(ctx, *worker, deployment.ImageRef, deployment.GitSHA, deployment.LitestreamSHA, trigger)
+		}()
+		if err != nil {
+			resumeErrors = append(resumeErrors, fmt.Errorf("%s: %w", listed.ID, err))
 		}
 	}
+	return errors.Join(resumeErrors...)
 }
 
 func (m *Manager) EnsureSourceFleet(ctx context.Context, source, gitSHA, litestreamSHA, imageRef string) error {
@@ -728,6 +777,16 @@ func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef 
 	configDriftReplacements := 0
 	deferredWorkers := make([]string, 0)
 	for _, desired := range spec.Workers {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		currentTarget, _, err := m.latestReadyDeploymentMatches(firstNonEmpty(desired.Source, "main"), imageRef, desired.GitSHA, desired.LitestreamSHA)
+		if err != nil {
+			return err
+		}
+		if !currentTarget {
+			return errors.Join(ensureErrors...)
+		}
 		current, ok := byName[desired.Name]
 		var activeAttempt *model.ProvisioningAttempt
 		if ok {
@@ -765,7 +824,7 @@ func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef 
 				ensureErrors = append(ensureErrors, fmt.Errorf("%s: compare desired worker spec: %w", desired.Name, err))
 				continue
 			}
-			if matches {
+			if matches && workerMatchesDeployment(current, model.Deployment{GitSHA: desired.GitSHA, LitestreamSHA: desired.LitestreamSHA}) {
 				continue
 			}
 		}
@@ -777,6 +836,13 @@ func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef 
 				}
 				defer unlock()
 
+				currentTarget, _, err := m.latestReadyDeploymentMatches(firstNonEmpty(desired.Source, "main"), imageRef, desired.GitSHA, desired.LitestreamSHA)
+				if err != nil {
+					return false, err
+				}
+				if !currentTarget {
+					return false, nil
+				}
 				worker, err := m.db.GetWorker(current.ID)
 				if err != nil {
 					return false, fmt.Errorf("reload worker: %w", err)
@@ -788,7 +854,8 @@ func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef 
 				if err != nil {
 					return false, fmt.Errorf("compare desired worker spec: %w", err)
 				}
-				if matches {
+				deploymentMatches := workerMatchesDeployment(*worker, model.Deployment{GitSHA: desired.GitSHA, LitestreamSHA: desired.LitestreamSHA})
+				if matches && deploymentMatches {
 					return false, nil
 				}
 
@@ -796,10 +863,12 @@ func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef 
 				if err != nil {
 					return false, err
 				}
-				if configDriftReplacements >= maxConfigDriftReplacementsPerCycle {
+				if deploymentMatches && configDriftReplacements >= maxConfigDriftReplacementsPerCycle {
 					return true, nil
 				}
-				configDriftReplacements++
+				if deploymentMatches {
+					configDriftReplacements++
+				}
 				details := fmt.Sprintf(
 					"profile=%s region=%s volume_size_gb=%d",
 					request.ProfileName,

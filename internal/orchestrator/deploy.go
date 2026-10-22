@@ -96,21 +96,29 @@ func (d *Deployer) DeployNewSHA(sha string) error {
 }
 
 func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, litestreamSHA, imageRef, trigger, repository, workloadSHA string) (string, error) {
+	target, err := d.recordDeploymentReady(ctx, source, sha, litestreamSHA, imageRef, trigger, repository, workloadSHA)
+	if err != nil {
+		return "", err
+	}
+	return d.rolloutDeploymentReady(ctx, target, trigger)
+}
+
+func (d *Deployer) recordDeploymentReady(ctx context.Context, source, sha, litestreamSHA, imageRef, trigger, repository, workloadSHA string) (model.Deployment, error) {
 	source = strings.TrimSpace(source)
 	if source == "" {
 		source = "main"
 	}
 	repository = strings.TrimSpace(repository)
 	if err := validateDeploymentRepository(source, repository); err != nil {
-		return "", err
+		return model.Deployment{}, err
 	}
 	sha = strings.TrimSpace(sha)
 	if !validSHARe.MatchString(sha) {
-		return "", fmt.Errorf("invalid deployment sha %q: must be 7-40 hex characters", sha)
+		return model.Deployment{}, fmt.Errorf("invalid deployment sha %q: must be 7-40 hex characters", sha)
 	}
 	litestreamSHA = strings.TrimSpace(litestreamSHA)
 	if litestreamSHA == "" {
-		return "", fmt.Errorf("litestream sha is required")
+		return model.Deployment{}, fmt.Errorf("litestream sha is required")
 	}
 	trigger = strings.TrimSpace(trigger)
 	if trigger == "" {
@@ -118,11 +126,11 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 	}
 	imageRef = strings.TrimSpace(imageRef)
 	if imageRef == "" {
-		return "", fmt.Errorf("deployment image ref is required")
+		return model.Deployment{}, fmt.Errorf("deployment image ref is required")
 	}
 	workloadSHA = strings.ToLower(strings.TrimSpace(workloadSHA))
 	if workloadSHA != "" && (len(workloadSHA) != 40 || !validSHARe.MatchString(workloadSHA)) {
-		return "", fmt.Errorf("workload sha must be a full 40-character commit SHA")
+		return model.Deployment{}, fmt.Errorf("workload sha must be a full 40-character commit SHA")
 	}
 	target := model.Deployment{
 		WorkloadSHA:   workloadSHA,
@@ -135,28 +143,38 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 		Status:        "ready",
 	}
 	if err := validateReadyDeploymentTarget(target); err != nil {
-		return "", err
+		return model.Deployment{}, err
 	}
 	if d.manager == nil {
-		return "", fmt.Errorf("deployment manager unavailable")
+		return model.Deployment{}, fmt.Errorf("deployment manager unavailable")
 	}
 
+	if err := ctx.Err(); err != nil {
+		return model.Deployment{}, err
+	}
+
+	if err := d.db.UpsertReadyDeployment(&target); err != nil {
+		return model.Deployment{}, fmt.Errorf("record ready deployment: %w", err)
+	}
+
+	message := fmt.Sprintf("Image ready for soak %s / litestream %s via %s", trimSHA(sha), shortVersionValue(litestreamSHA), trigger)
+	if err := d.db.RecordEvent("", "deploy_ready_received", message, imageRef); err != nil {
+		return model.Deployment{}, fmt.Errorf("record deploy event: %w", err)
+	}
+
+	return target, nil
+}
+
+func (d *Deployer) rolloutDeploymentReady(ctx context.Context, target model.Deployment, trigger string) (string, error) {
+	source, sha, litestreamSHA, imageRef := target.Source, target.GitSHA, target.LitestreamSHA, target.ImageRef
+	trigger = firstNonEmpty(strings.TrimSpace(trigger), "deploy_ready")
 	unlockSource, err := d.manager.lockSource(ctx, source)
 	if err != nil {
 		return "", fmt.Errorf("lock deployment source: %w", err)
 	}
 	defer unlockSource()
 	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("start deployment ready rollout: %w", err)
-	}
-
-	if err := d.db.UpsertReadyDeployment(&target); err != nil {
-		return "", fmt.Errorf("record ready deployment: %w", err)
-	}
-
-	message := fmt.Sprintf("Image ready for soak %s / litestream %s via %s", trimSHA(sha), shortVersionValue(litestreamSHA), trigger)
-	if err := d.db.RecordEvent("", "deploy_ready_received", message, imageRef); err != nil {
-		return "", fmt.Errorf("record deploy event: %w", err)
+		return "", err
 	}
 
 	current, latest, err := d.manager.latestReadyDeploymentMatches(source, imageRef, sha, litestreamSHA)
@@ -172,25 +190,21 @@ func (d *Deployer) NotifyDeploymentReady(ctx context.Context, source, sha, lites
 	}
 
 	slog.Info("Deployment ready, starting rolling update", "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "trigger", trigger)
-	if err := d.manager.EnsureSourceFleet(ctx, source, sha, litestreamSHA, imageRef); err != nil {
-		return "", err
+	rolloutErr := d.manager.EnsureSourceFleet(ctx, source, sha, litestreamSHA, imageRef)
+	if err := ctx.Err(); err != nil {
+		return "", errors.Join(rolloutErr, err)
 	}
-	if err := d.manager.rollingUpdateSourceLocked(ctx, source, imageRef, sha, litestreamSHA); err != nil {
-		return "", err
-	}
+	rolloutErr = errors.Join(rolloutErr, d.manager.rollingUpdateSourceLocked(ctx, source, imageRef, sha, litestreamSHA))
 	current, latest, err = d.manager.latestReadyDeploymentMatches(source, imageRef, sha, litestreamSHA)
 	if err != nil {
-		return "", err
+		return "", errors.Join(rolloutErr, err)
 	}
 	if !current {
 		slog.Info("Deployment ready superseded, skipping dormant resume", "source", source, "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "latest_sha", latest.GitSHA, "latest_litestream_sha", latest.LitestreamSHA, "latest_image", latest.ImageRef, "trigger", trigger)
-		return imageRef, nil
+		return imageRef, rolloutErr
 	}
-	if err := d.manager.ResumeDormantWorkers(ctx, source, imageRef, sha, litestreamSHA, trigger); err != nil {
-		return "", err
-	}
-
-	return imageRef, nil
+	rolloutErr = errors.Join(rolloutErr, d.manager.resumeDeploymentDormantWorkers(ctx, target, trigger, false))
+	return imageRef, rolloutErr
 }
 
 func validateDeploymentRepository(source, repository string) error {

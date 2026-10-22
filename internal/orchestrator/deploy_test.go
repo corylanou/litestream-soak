@@ -872,3 +872,243 @@ func mustWorker(t *testing.T, db *model.DB, id string) *model.Worker {
 	}
 	return worker
 }
+
+func TestDeploymentReadyPersistsBeforeAcceptanceWhileSourceLocked(t *testing.T) {
+	db := openTestDB(t)
+	old := model.Deployment{Source: "main", GitSHA: "1111111", LitestreamSHA: "aaaaaaa", ImageRef: "registry.fly.io/app:old", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&old); err != nil {
+		t.Fatal(err)
+	}
+	createTestWorker(t, db, model.Worker{ID: "old", Name: "old", Source: "main", GitSHA: "0000000", LitestreamSHA: "aaaaaaa", Status: model.WorkerRunning})
+	oldDeployment := mustDeploymentByVersion(t, db, "main", old.GitSHA, old.LitestreamSHA)
+	before, err := buildDeploymentRollout(db, *oldDeployment)
+	if err != nil || before.Status != "rolling_out" {
+		t.Fatalf("old rollout = %s, %v", before.Status, err)
+	}
+	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	unlock, err := manager.lockSource(context.Background(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	api := NewAPIWithContext(ctx, db, nil, nil, nil, manager, NewDeployer(manager, db, "litestream-soak", false))
+	defer func() { cancel(); unlock(); waitForAPIRollouts(t, api) }()
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?source=main&sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil)
+	response := httptest.NewRecorder()
+	api.handleDeploymentReady(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	latest, err := db.GetLatestReadyDeployment("main")
+	if err != nil || latest == nil || latest.GitSHA != "2222222" {
+		t.Fatalf("accepted deployment not persisted: %+v, %v", latest, err)
+	}
+	after, err := buildDeploymentRollout(db, *oldDeployment)
+	if err != nil || after.Status != "superseded" {
+		t.Fatalf("old rollout = %s, %v; want superseded", after.Status, err)
+	}
+}
+
+func TestDeploymentReadyRejectsPersistenceFailure(t *testing.T) {
+	db := openTestDB(t)
+	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	api := NewAPI(db, nil, nil, nil, manager, NewDeployer(manager, db, "litestream-soak", false))
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	defer waitForAPIRollouts(t, api)
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil)
+	response := httptest.NewRecorder()
+	api.handleDeploymentReady(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d: %s; want 500", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), `"accepted":true`) {
+		t.Fatal("failed persistence reported as accepted")
+	}
+}
+
+func TestReconcileFleetResumesVersionRolloutAfterRestart(t *testing.T) {
+	testReconcileFleetResumesVersionRolloutAfterRestart(t, false)
+}
+
+func TestReconcileFleetResumesDormantRolloutAfterRestart(t *testing.T) {
+	testReconcileFleetResumesVersionRolloutAfterRestart(t, true)
+}
+
+func testReconcileFleetResumesVersionRolloutAfterRestart(t *testing.T, dormant bool) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "restart.db")
+	db, err := model.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := model.Deployment{Source: "main", GitSHA: "1111111", LitestreamSHA: "aaaaaaa", ImageRef: "registry.fly.io/app:old", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&old); err != nil {
+		t.Fatal(err)
+	}
+	spec := FleetSpec{Workers: []DesiredWorker{
+		{WorkerID: "worker-one", Name: "worker-one", Source: "main", GitSHA: old.GitSHA, LitestreamSHA: old.LitestreamSHA, ProfileName: "low-volume", Region: "ord", Workload: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}},
+		{WorkerID: "worker-two", Name: "worker-two", Source: "main", GitSHA: old.GitSHA, LitestreamSHA: old.LitestreamSHA, ProfileName: "low-volume", Region: "ord", Workload: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}},
+	}}
+	oldFly := newDeployTestFlyServer(t, db, "main", old.GitSHA, old.LitestreamSHA, old.ImageRef)
+	manager := NewManager(oldFly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	if err := manager.ensureFleetSpec(context.Background(), spec, old.ImageRef); err != nil {
+		t.Fatal(err)
+	}
+	if dormant {
+		if err := db.MarkWorkerDormant("worker-two", "paused", "known_failure", "next_deploy"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	latest := model.Deployment{Source: "main", GitSHA: "2222222", LitestreamSHA: "bbbbbbb", ImageRef: "registry.fly.io/app:new", Status: "ready"}
+	ctx, cancel := context.WithCancel(context.Background())
+	unlock, err := manager.lockSource(context.Background(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPIWithContext(ctx, db, nil, nil, nil, manager, NewDeployer(manager, db, "litestream-soak", false))
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil)
+	response := httptest.NewRecorder()
+	api.handleDeploymentReady(response, request)
+	cancel()
+	unlock()
+	waitForAPIRollouts(t, api)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	nextFly := newDeployTestFlyServer(t, db, "main", latest.GitSHA, latest.LitestreamSHA, latest.ImageRef)
+	nextFly.machines = 2
+	nextFly.volumes = 2
+	manager = NewManager(nextFly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	if _, err := manager.RollWorker(context.Background(), "worker-one", latest.ImageRef, latest.GitSHA, latest.LitestreamSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = model.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	restartedFly := newDeployTestFlyServer(t, db, "main", latest.GitSHA, latest.LitestreamSHA, latest.ImageRef)
+	restartedFly.machines = 3
+	restartedFly.volumes = 3
+	restarted := NewManager(restartedFly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	restarted.reconcileFleet(context.Background(), spec)
+	rollout, err := buildLatestDeploymentRollout(db, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rollout.UpdatedWorkers != 2 || rollout.OutdatedWorkers != 0 {
+		t.Fatalf("restart rollout: updated=%d outdated=%d", rollout.UpdatedWorkers, rollout.OutdatedWorkers)
+	}
+	wantStatus := model.WorkerRunning
+	wantVolumes := 4
+	if dormant {
+		wantStatus = model.WorkerProbing
+		wantVolumes = 3
+	}
+	restartedFly.assertCreateCounts(t, wantVolumes, 4)
+	if worker := mustWorker(t, db, "worker-two"); worker.Status != wantStatus {
+		t.Fatalf("recovered worker status = %s", worker.Status)
+	}
+	restartedFly.assertNoErrors(t)
+}
+
+func TestDeploymentDormantResumeStopsWhenSuperseded(t *testing.T) {
+	db := openTestDB(t)
+	const source = "custom"
+	const sha = "1111111"
+	const ls = "aaaaaaa"
+	const image = "registry.fly.io/app:old"
+	for _, id := range []string{"first", "second"} {
+		createTestWorker(t, db, model.Worker{ID: id, Name: id, AppName: "litestream-soak", Source: source, GitSHA: "0000000", LitestreamSHA: ls, Status: model.WorkerDormant, ProfileName: "low-volume", ProfileConfig: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}.JSON(), FlyVolumeID: "vol-" + id})
+	}
+	fly := newDeployTestFlyServer(t, db, source, sha, ls, image)
+	var once sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fly.handle(w, r)
+		if r.Method == http.MethodPost && r.URL.Path == "/apps/litestream-soak/machines" {
+			once.Do(func() {
+				if err := db.UpsertReadyDeployment(&model.Deployment{Source: source, GitSHA: "2222222", LitestreamSHA: "bbbbbbb", ImageRef: "registry.fly.io/app:new", Status: "ready"}); err != nil {
+					t.Error(err)
+				}
+			})
+		}
+	}))
+	defer server.Close()
+	client := flyapi.NewClientWithBaseURL("litestream-soak", "test-token", server.URL)
+	manager := NewManager(client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	deployer := NewDeployer(manager, db, "litestream-soak", false)
+	if _, err := deployer.NotifyDeploymentReady(context.Background(), source, sha, ls, image, "test", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := fly.machineCreates(); got != 1 {
+		t.Fatalf("superseded rollout created %d machines, want 1", got)
+	}
+	fly.assertNoErrors(t)
+}
+
+func TestDeploymentContinuesAfterDefaultWorkerReplacementFailure(t *testing.T) {
+	db := openTestDB(t)
+	old := model.Deployment{Source: "main", GitSHA: "1111111", LitestreamSHA: "aaaaaaa", ImageRef: "registry.fly.io/app:old", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&old); err != nil {
+		t.Fatal(err)
+	}
+	oldFly := newDeployTestFlyServer(t, db, "main", old.GitSHA, old.LitestreamSHA, old.ImageRef)
+	manager := NewManager(oldFly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	spec := DefaultFleetForSource("main", old.GitSHA, old.LitestreamSHA)
+	if err := manager.ensureFleetSpec(context.Background(), spec, old.ImageRef); err != nil {
+		t.Fatal(err)
+	}
+	broken := mustWorker(t, db, spec.Workers[0].WorkerID)
+	createTestWorker(t, db, model.Worker{ID: "extra", Name: "extra", AppName: "litestream-soak", Source: "main", GitSHA: old.GitSHA, LitestreamSHA: old.LitestreamSHA, Status: model.WorkerRunning, ProfileName: "low-volume", ProfileConfig: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}.JSON(), FlyMachineID: "extra-machine", FlyVolumeID: "extra-volume"})
+	fly := newDeployTestFlyServer(t, db, "main", "2222222", "bbbbbbb", "registry.fly.io/app:new")
+	fly.machines = oldFly.machineCreates()
+	fly.volumes = oldFly.volumeCreates()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/apps/litestream-soak/machines/"+broken.FlyMachineID+"/stop" {
+			http.Error(w, "replacement rejected", http.StatusBadRequest)
+			return
+		}
+		fly.handle(w, r)
+	}))
+	defer server.Close()
+	client := flyapi.NewClientWithBaseURL("litestream-soak", "test-token", server.URL)
+	manager = NewManager(client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	deployer := NewDeployer(manager, db, "litestream-soak", false)
+	_, err := deployer.NotifyDeploymentReady(context.Background(), "main", "2222222", "bbbbbbb", "registry.fly.io/app:new", "test", "", "")
+	if err == nil || !strings.Contains(err.Error(), broken.Name) {
+		t.Fatalf("rollout error = %v; want failed worker", err)
+	}
+	if worker := mustWorker(t, db, "extra"); worker.GitSHA != "2222222" {
+		t.Fatalf("healthy extra worker remained at %s", worker.GitSHA)
+	}
+	fly.assertNoErrors(t)
+}
+
+func TestDeploymentDormantResumeRecreatesWithoutRelocking(t *testing.T) {
+	db := openTestDB(t)
+	target := model.Deployment{Source: "main", GitSHA: "2222222", LitestreamSHA: "bbbbbbb", ImageRef: "registry.fly.io/app:new", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&target); err != nil {
+		t.Fatal(err)
+	}
+	desired := DefaultFleetForSource("main", target.GitSHA, target.LitestreamSHA).Workers[0]
+	createTestWorker(t, db, model.Worker{ID: desired.WorkerID, Name: desired.Name, AppName: "litestream-soak", Source: "main", GitSHA: "1111111", LitestreamSHA: "aaaaaaa", Status: model.WorkerDormant, ProfileName: desired.ProfileName, ProfileConfig: desired.Workload.JSON(), Region: "syd", FlyMachineID: "old-machine", FlyVolumeID: "old-volume"})
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := manager.resumeDeploymentDormantWorkers(ctx, target, "test", true); err != nil {
+		t.Fatal(err)
+	}
+	worker := mustWorker(t, db, desired.WorkerID)
+	if worker.Status != model.WorkerProbing || worker.GitSHA != target.GitSHA || worker.Region != desired.Region {
+		t.Fatalf("recreated worker: status=%s sha=%s region=%s", worker.Status, worker.GitSHA, worker.Region)
+	}
+	if got := len(fly.machineRequests()); got != 1 {
+		t.Fatalf("machine creates = %d, want 1", got)
+	}
+}

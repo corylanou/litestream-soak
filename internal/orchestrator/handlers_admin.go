@@ -59,6 +59,10 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 		source = "main"
 	}
 	request.SHA = strings.TrimSpace(request.SHA)
+	if !validSHARe.MatchString(request.SHA) {
+		respondError(w, r, http.StatusBadRequest, nil, "sha must be 7-40 hex characters")
+		return
+	}
 	request.LitestreamSHA = strings.TrimSpace(request.LitestreamSHA)
 	request.ImageRef = strings.TrimSpace(request.ImageRef)
 	request.Repository = strings.TrimSpace(request.Repository)
@@ -82,8 +86,14 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 		trigger = "deploy_ready"
 	}
 
+	target, err := a.deployer.recordDeploymentReady(r.Context(), source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger, request.Repository, request.WorkloadSHA)
+	if err != nil {
+		respondError(w, r, http.StatusInternalServerError, err, "record ready deployment")
+		return
+	}
+
 	a.runRollout(func(rolloutCtx context.Context) {
-		imageRef, err := a.deployer.NotifyDeploymentReady(rolloutCtx, source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger, request.Repository, request.WorkloadSHA)
+		imageRef, err := a.deployer.rolloutDeploymentReady(rolloutCtx, target, trigger)
 		if err != nil {
 			slog.Error("Deployment ready rollout failed", "source", source, "sha", request.SHA, "litestream_sha", request.LitestreamSHA, "error", err)
 			_ = a.db.RecordEvent("", "deploy_ready_failed", fmt.Sprintf("Rollout failed for %s / litestream %s: %v", shortVersionValue(request.SHA), shortVersionValue(request.LitestreamSHA), err), imageRef)

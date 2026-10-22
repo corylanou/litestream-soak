@@ -608,6 +608,13 @@ func (m *Manager) rollingUpdateSourceLocked(ctx context.Context, source, newImag
 			}
 			defer unlock()
 
+			current, _, err := m.latestReadyDeploymentMatches(source, newImageRef, newSHA, newLitestreamSHA)
+			if err != nil {
+				return nil, false, err
+			}
+			if !current {
+				return nil, false, nil
+			}
 			w, err := m.db.GetWorker(listed.ID)
 			if err != nil {
 				return nil, false, fmt.Errorf("reload worker: %w", err)

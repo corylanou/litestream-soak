@@ -630,6 +630,22 @@ func (m *Manager) resumeDormantWorkers(ctx context.Context, source string, worke
 }
 
 func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, imageRef, gitSHA, litestreamSHA, resumeTrigger string) error {
+	unlock, err := m.lockWorker(ctx, worker.ID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	current, err := m.db.GetWorker(worker.ID)
+	if err != nil {
+		return err
+	}
+	if current.Status != model.WorkerDormant {
+		return nil
+	}
+	return m.resumeDormantWorkerLocked(ctx, *current, imageRef, gitSHA, litestreamSHA, resumeTrigger)
+}
+
+func (m *Manager) resumeDormantWorkerLocked(ctx context.Context, worker model.Worker, imageRef, gitSHA, litestreamSHA, resumeTrigger string) error {
 	imageRef = strings.TrimSpace(imageRef)
 	if imageRef == "" {
 		return fmt.Errorf("worker %s resume image is required", worker.ID)
@@ -648,7 +664,7 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 		return fmt.Errorf("build dormant worker replacement: %w", err)
 	}
 	if desired, ok := defaultFleetDesiredWorker(worker.Source, worker.ID, worker.Name); ok && !workerPhysicalSpecMatchesDesired(worker, desired) {
-		return m.recreateDormantWorkerForProbe(
+		return m.recreateDormantWorkerForProbeLocked(
 			ctx,
 			worker,
 			request,
@@ -678,7 +694,7 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	machine, err := m.createWorkerMachine(ctx, resumeWorker, imageRef, volumeID, workloadCfg)
 	if err != nil {
 		resumeErr := fmt.Errorf("create probe machine: %w", err)
-		if recreateErr := m.recreateDormantWorkerForProbe(ctx, worker, request, resumeTrigger, resumeErr); recreateErr != nil {
+		if recreateErr := m.recreateDormantWorkerForProbeLocked(ctx, worker, request, resumeTrigger, resumeErr); recreateErr != nil {
 			return fmt.Errorf("%w; recreate dormant worker: %v", resumeErr, recreateErr)
 		}
 		return nil
@@ -716,7 +732,7 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 	return nil
 }
 
-func (m *Manager) recreateDormantWorkerForProbe(ctx context.Context, worker model.Worker, request WorkerRequest, resumeTrigger string, resumeErr error) error {
+func (m *Manager) recreateDormantWorkerForProbeLocked(ctx context.Context, worker model.Worker, request WorkerRequest, resumeTrigger string, resumeErr error) error {
 	fly := m.flyClientForWorker(worker)
 	if worker.FlyMachineID != "" {
 		if err := fly.DestroyMachine(ctx, worker.FlyMachineID, true); err != nil && !flyapi.IsNotFound(err) {
@@ -734,7 +750,7 @@ func (m *Manager) recreateDormantWorkerForProbe(ctx context.Context, worker mode
 		return fmt.Errorf("record recreate event: %w", err)
 	}
 
-	if _, err := m.CreateWorker(ctx, request); err != nil {
+	if _, err := m.createWorker(ctx, request); err != nil {
 		return err
 	}
 
