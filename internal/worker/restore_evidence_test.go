@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,11 +58,7 @@ func TestVerifierRetainsRestoreReplans(t *testing.T) {
 			if !strings.Contains(restore.OutputTail, "recalculating plan") || strings.Contains(restore.OutputTail, "private") {
 				t.Fatalf("restore output: %q", restore.OutputTail)
 			}
-			result := VerificationResult{StartedAt: time.Now(), Summary: "verification complete", Steps: v.validationSteps}
-			v.finalizeResult(&result)
-			if !strings.Contains(result.Summary, "restore re-plans: 2") {
-				t.Fatalf("summary=%q", result.Summary)
-			}
+
 		})
 	}
 }
@@ -103,17 +101,6 @@ func TestRestoreOutputRedactsCompleteLines(t *testing.T) {
 	}
 }
 
-func TestVerificationSummaryAggregatesDatabaseReplans(t *testing.T) {
-	result := VerificationResult{StartedAt: time.Now(), Summary: "verification passed", Steps: []reporting.VerificationStep{
-		{Name: "restore first.db", RestoreReplanCount: 2},
-		{Name: "restore second.db", RestoreReplanCount: 3},
-	}}
-	NewVerifier(DefaultConfig()).finalizeResult(&result)
-	if result.Summary != "verification passed; restore re-plans: 5" {
-		t.Fatalf("summary=%q", result.Summary)
-	}
-}
-
 func TestRestoreOutputCountsDiscardedReplans(t *testing.T) {
 	var output restoreOutput
 	input := restoreReplanMessage + "\n" + strings.Repeat("ordinary output\n", 10000)
@@ -123,5 +110,50 @@ func TestRestoreOutputCountsDiscardedReplans(t *testing.T) {
 	text := output.text()
 	if output.replans != 1 || !output.truncated || strings.Contains(text, restoreReplanMessage) {
 		t.Fatalf("count=%d truncated=%v", output.replans, output.truncated)
+	}
+}
+
+func TestReportedReplansSurviveSummaryRewrite(t *testing.T) {
+	for _, scenario := range []string{"deadline", "fault guard", "success"} {
+		t.Run(scenario, func(t *testing.T) {
+			received := make(chan reporting.VerificationPayload, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var payload reporting.VerificationPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				received <- payload
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			cfg := DefaultConfig()
+			cfg.ControlBaseURL = server.URL
+			result := VerificationResult{StartedAt: time.Now(), Summary: "verification passed", Status: "passed", Passed: true, Steps: []reporting.VerificationStep{
+				{Name: "restore first.db", RestoreReplanCount: 2},
+				{Name: "restore second.db", RestoreReplanCount: 3},
+			}}
+			v := NewVerifier(cfg)
+			v.finalizeResult(&result)
+			switch scenario {
+			case "deadline":
+				v.failValidationResult(context.Background(), &result, &verifierDeadlineError{phase: "restore", elapsed: time.Second})
+			case "fault guard":
+				result = failedS3FaultGuardResult(result, "fault guard failed", "fault not exercised")
+			}
+			reporter := NewReporter(cfg)
+			if err := reporter.SendVerification(context.Background(), reporting.VerificationPayload{Summary: result.Summary, Steps: result.Steps}); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case payload := <-received:
+				if !strings.HasSuffix(payload.Summary, "; restore re-plans: 5") || strings.Count(payload.Summary, "restore re-plans:") != 1 {
+					t.Fatalf("summary=%q", payload.Summary)
+				}
+			default:
+				t.Fatal("verification report not received")
+			}
+		})
 	}
 }

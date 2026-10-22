@@ -879,17 +879,6 @@ func validationStepMetadata(ctx context.Context, cmd *exec.Cmd, output []byte, e
 }
 
 func (v *Verifier) finalizeResult(result *VerificationResult) {
-	replans := 0
-	restored := false
-	for _, step := range result.Steps {
-		if step.Name == "restore" || strings.HasPrefix(step.Name, "restore ") {
-			restored = true
-			replans += step.RestoreReplanCount
-		}
-	}
-	if restored {
-		result.Summary += fmt.Sprintf("; restore re-plans: %d", replans)
-	}
 	result.CompletedAt = time.Now().UTC()
 	result.DurationMS = int(result.CompletedAt.Sub(result.StartedAt).Milliseconds())
 	if v.cfg.ManyDBEnabled() {
