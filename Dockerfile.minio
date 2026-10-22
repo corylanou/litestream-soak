@@ -1,0 +1,36 @@
+FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS build
+
+ARG MINIO_COMMIT=01ce918d8279a20e4706b96a64396146894adee4
+ARG MINIO_RELEASE=RELEASE.2025-09-07T16-13-09Z
+ARG MINIO_VERSION=2025-09-07T16:13:09Z
+
+ARG MC_COMMIT=7394ce0dd2a80935aded936b09fa12cbb3cb8096
+ARG MC_RELEASE=RELEASE.2025-08-13T08-35-41Z
+ARG MC_VERSION=2025-08-13T08:35:41Z
+
+ENV GOTOOLCHAIN=local CGO_ENABLED=0
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    go install -trimpath -ldflags "\
+      -X github.com/minio/minio/cmd.Version=${MINIO_VERSION} \
+      -X github.com/minio/minio/cmd.ReleaseTag=${MINIO_RELEASE} \
+      -X github.com/minio/minio/cmd.CommitID=${MINIO_COMMIT}" \
+      github.com/minio/minio@${MINIO_COMMIT}
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    go install -trimpath -ldflags "\
+      -X github.com/minio/mc/cmd.Version=${MC_VERSION} \
+      -X github.com/minio/mc/cmd.ReleaseTag=${MC_RELEASE} \
+      -X github.com/minio/mc/cmd.CommitID=${MC_COMMIT}" \
+      github.com/minio/mc@${MC_COMMIT}
+
+RUN go version -m /go/bin/minio /go/bin/mc
+
+FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
+
+COPY --from=build /go/bin/minio /go/bin/mc /usr/bin/
+
+EXPOSE 9000 9001
+ENTRYPOINT ["minio"]
