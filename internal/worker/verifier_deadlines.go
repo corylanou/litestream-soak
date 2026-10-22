@@ -84,7 +84,8 @@ func (e *verifierDeadlineError) Unwrap() error { return context.DeadlineExceeded
 func (v *Verifier) failValidationResult(ctx context.Context, result *VerificationResult, err error) {
 	v.failResult(ctx, result, err.Error())
 	var deadline *verifierDeadlineError
-	if errors.As(err, &deadline) && result.Status != "aborted" {
+	var boundary *unreplicatedBoundaryError
+	if (errors.As(err, &deadline) || errors.As(err, &boundary)) && result.Status != "aborted" {
 		result.Status = "aborted"
 		result.Summary = "verification inconclusive: " + summarizeVerificationMessage(err.Error())
 	}

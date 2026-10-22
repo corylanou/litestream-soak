@@ -402,3 +402,51 @@ func TestVerificationClearsPreviousDatabaseBoundary(t *testing.T) {
 		t.Fatalf("retained previous boundary: %+v", result)
 	}
 }
+
+func TestVerificationBoundaryUnreplicatedAdvanceAbortsCycle(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "source.db")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("abort-boundary-%d.sock", time.Now().UnixNano()))
+	db := logicalTestDB(t, cfg.DBPath, "PRAGMA journal_mode=WAL; CREATE TABLE t(id); CREATE TABLE _litestream_seq(id INTEGER PRIMARY KEY, seq INTEGER); INSERT INTO _litestream_seq VALUES(1,1)")
+	var syncs atomic.Int64
+	startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sync" {
+			_, _ = w.Write([]byte(`{"active":false}`))
+			return
+		}
+		if syncs.Add(1) == 1 {
+			_, _ = w.Write([]byte(`{"status":"ok","txid":42,"replicated_txid":42}`))
+			return
+		}
+		if _, err := db.Exec("UPDATE _litestream_seq SET seq=seq+1"); err != nil {
+			t.Error(err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"ok","txid":44,"replicated_txid":43}`))
+	}))
+	pauser := &fakePauser{}
+	result, err := NewVerifier(cfg, pauser).RunCycle(context.Background())
+	if err == nil || result.Status != "aborted" || result.Passed {
+		t.Fatalf("uncovered boundary: status=%s passed=%v err=%v", result.Status, result.Passed, err)
+	}
+	if !strings.Contains(result.ErrorMessage, "requested=000000000000002a reserved=000000000000002c replicated=000000000000002b") || !strings.Contains(result.Summary, "verification inconclusive:") {
+		t.Fatalf("missing boundary evidence: %+v", result)
+	}
+	if result.BoundaryTXID != 0 {
+		t.Fatalf("accepted boundary: %d", result.BoundaryTXID)
+	}
+	for _, step := range result.Steps {
+		if step.Name == "restore" {
+			t.Fatal("restore attempted without a covered boundary")
+		}
+	}
+	if pauser.resumeCalls != 1 {
+		t.Fatalf("resume calls=%d", pauser.resumeCalls)
+	}
+	if _, err := db.Exec("INSERT INTO t VALUES(1)"); err != nil {
+		t.Fatalf("reservation leaked: %v", err)
+	}
+}
