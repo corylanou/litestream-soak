@@ -29,33 +29,27 @@ func (v *Verifier) captureVerificationBoundary(ctx context.Context, path string,
 	if txid == 0 {
 		return verificationBoundary{}, fmt.Errorf("source boundary unavailable: zero TXID")
 	}
-	uri := url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw"}
-	db, err := sql.Open("sqlite", uri.String())
+	reservation, err := openVerificationReservation(ctx, path)
 	if err != nil {
 		return verificationBoundary{}, err
 	}
-	defer func() { _ = db.Close() }()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return verificationBoundary{}, err
-	}
-	defer func() { _ = conn.Close() }()
+	defer reservation.close()
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		_, _ = conn.ExecContext(cleanup, "ROLLBACK")
+		_ = reservation.release(cleanup)
 	}()
-	if err := acquireVerificationReservation(ctx, conn); err != nil {
+	if err := reservation.acquire(ctx); err != nil {
 		return verificationBoundary{}, err
 	}
-	if _, err := conn.ExecContext(ctx, "ROLLBACK"); err != nil {
+	if err := reservation.release(ctx); err != nil {
 		return verificationBoundary{}, err
 	}
 	synced, err := v.syncOnceDB(ctx, v.cfg.verifySyncTimeout(), path)
 	if err != nil {
 		return verificationBoundary{}, fmt.Errorf("source boundary unavailable: paused sync: %w", err)
 	}
-	if err := acquireVerificationReservation(ctx, conn); err != nil {
+	if err := reservation.acquire(ctx); err != nil {
 		return verificationBoundary{}, err
 	}
 	if synced.TXID < txid {
@@ -71,6 +65,58 @@ func (v *Verifier) captureVerificationBoundary(ctx context.Context, path string,
 	}
 	v.logicalEvidence += " source_boundary=paused-sync-writer-reserved-snapshot"
 	return verificationBoundary{logicalSnapshot: source, txid: synced.TXID}, nil
+}
+
+type verificationReservation struct {
+	db      *sql.DB
+	conn    *sql.Conn
+	path    string
+	endHeld func()
+}
+
+func openVerificationReservation(ctx context.Context, path string) (*verificationReservation, error) {
+	uri := url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw"}
+	db, err := sql.Open("sqlite", uri.String())
+	if err != nil {
+		return nil, err
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &verificationReservation{db: db, conn: conn, path: path}, nil
+}
+
+func (r *verificationReservation) close() {
+	_ = r.conn.Close()
+	_ = r.db.Close()
+	r.endHeldTracking()
+}
+
+func (r *verificationReservation) endHeldTracking() {
+	if r.endHeld != nil {
+		r.endHeld()
+		r.endHeld = nil
+	}
+}
+
+func (r *verificationReservation) acquire(ctx context.Context) error {
+	endWait := harnessWriters.begin("verifier_reservation_wait", r.path)
+	err := acquireVerificationReservation(ctx, r.conn)
+	endWait()
+	if err == nil {
+		r.endHeld = harnessWriters.begin("verifier_reservation", r.path)
+	}
+	return err
+}
+
+func (r *verificationReservation) release(ctx context.Context) error {
+	if _, err := r.conn.ExecContext(ctx, "ROLLBACK"); err != nil {
+		return err
+	}
+	r.endHeldTracking()
+	return nil
 }
 
 func acquireVerificationReservation(ctx context.Context, conn *sql.Conn) error {

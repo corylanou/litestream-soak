@@ -31,12 +31,14 @@ type Runner struct {
 	verifier                *Verifier
 	reporter                *Reporter
 	s3FaultProxy            *s3FaultProxy
+	harnessWriters          *harnessWriterTracker
 }
 
 func NewRunner(cfg Config) *Runner {
 	runner := &Runner{
-		cfg:      cfg,
-		identity: workerIdentity(cfg),
+		cfg:            cfg,
+		identity:       workerIdentity(cfg),
+		harnessWriters: harnessWriters,
 	}
 	runner.profiles = newPprofCapturer(&runner.cfg)
 	runner.litestreamManager = newLitestreamManager(&runner.cfg)

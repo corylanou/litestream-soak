@@ -21,6 +21,7 @@ type loadSupervisor struct {
 	procDone chan struct{}
 
 	startCmd func(ctx context.Context) (*exec.Cmd, error)
+	dbPath   string
 
 	initialBackoff time.Duration
 	maxBackoff     time.Duration
@@ -48,15 +49,16 @@ func (s *loadSupervisor) start(ctx context.Context) error {
 	s.procDone = done
 	s.mu.Unlock()
 	SetLoadRunning(true)
-	go s.supervise(ctx, cmd, done)
+	go s.supervise(ctx, cmd, done, harnessWriters.begin("load_generator", s.dbPath))
 	return nil
 }
 
-func (s *loadSupervisor) supervise(ctx context.Context, cmd *exec.Cmd, done chan struct{}) {
+func (s *loadSupervisor) supervise(ctx context.Context, cmd *exec.Cmd, done chan struct{}, endWriter func()) {
 	backoff := s.initialBackoff
 	for {
 		started := time.Now()
 		err := cmd.Wait()
+		endWriter()
 		s.mu.Lock()
 		s.exited = true
 		s.mu.Unlock()
@@ -91,6 +93,7 @@ func (s *loadSupervisor) supervise(ctx context.Context, cmd *exec.Cmd, done chan
 				slog.Error("Failed to restart load generator", "error", startErr)
 				continue
 			}
+			endWriter = harnessWriters.begin("load_generator", s.dbPath)
 			done = make(chan struct{})
 			s.mu.Lock()
 			s.cmd = next

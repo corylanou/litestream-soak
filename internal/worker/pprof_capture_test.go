@@ -17,6 +17,22 @@ import (
 	"time"
 )
 
+func TestProfileUploadTimeoutScalesWithArtifactSize(t *testing.T) {
+	if got := profileUploadTimeout(0); got != 15*time.Second {
+		t.Fatalf("empty timeout=%s", got)
+	}
+	if got := profileUploadTimeout(64 << 10); got < 15*time.Second {
+		t.Fatalf("small timeout=%s", got)
+	}
+	small, large := profileUploadTimeout(1<<20), profileUploadTimeout(64<<20)
+	if large <= small || large <= 15*time.Second {
+		t.Fatalf("timeout did not grow: small=%s large=%s", small, large)
+	}
+	if got := profileUploadTimeout(1 << 40); got != profileUploadMaxTimeout {
+		t.Fatalf("cap=%s", got)
+	}
+}
+
 func TestPprofCapturerSkipsWhenDisabled(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.DataDir = t.TempDir()

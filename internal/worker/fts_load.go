@@ -54,8 +54,10 @@ func (l *ftsLoad) Start(ctx context.Context, onFailure func(error)) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	l.cancel = cancel
 	l.done = make(chan struct{})
+	endWriter := harnessWriters.begin("fts_load", l.cfg.DBPath)
 	go func() {
 		defer close(l.done)
+		defer endWriter()
 		defer func() {
 			if err := db.Close(); err != nil {
 				slog.Error("Close FTS database", "error", err)

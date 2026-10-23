@@ -212,12 +212,20 @@ type VerificationPayload struct {
 type WorkerEventPayload struct {
 	WorkloadEvent
 	WorkerIdentity
-	EventType          string                `json:"event_type"`
-	Message            string                `json:"message,omitempty"`
-	SentAt             time.Time             `json:"sent_at"`
-	ActiveVerification *ActiveVerification   `json:"active_verification,omitempty"`
-	FailureDebug       *FailureDebugSnapshot `json:"failure_debug,omitempty"`
+	EventType            string                `json:"event_type"`
+	Message              string                `json:"message,omitempty"`
+	SentAt               time.Time             `json:"sent_at"`
+	ActiveVerification   *ActiveVerification   `json:"active_verification,omitempty"`
+	FailureDebug         *FailureDebugSnapshot `json:"failure_debug,omitempty"`
+	SQLiteBusy           bool                  `json:"sqlite_busy,omitempty"`
+	ActiveHarnessWriters []HarnessWriter       `json:"active_harness_writers,omitempty"`
 	RuntimePayload
+}
+
+type HarnessWriter struct {
+	Name      string    `json:"name"`
+	DBPath    string    `json:"db_path,omitempty"`
+	StartedAt time.Time `json:"started_at"`
 }
 
 type ActiveVerification struct {

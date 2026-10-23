@@ -45,6 +45,7 @@ func installLoadRetention(ctx context.Context, cfg Config, maxRows int) (loadRet
 	if maxRows <= 0 {
 		return stats, fmt.Errorf("load retention requires a positive row cap")
 	}
+	defer harnessWriters.begin("load_retention", cfg.DBPath)()
 	uri := url.URL{Scheme: "file", Path: cfg.DBPath, RawQuery: fmt.Sprintf("mode=rw&_pragma=busy_timeout(%d)", loadRetentionBusyTimeout.Milliseconds())}
 	db, err := sql.Open("sqlite", uri.String())
 	if err != nil {

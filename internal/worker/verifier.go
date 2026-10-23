@@ -334,6 +334,7 @@ func (v *Verifier) pauseLoad(ctx context.Context) error {
 			return fmt.Errorf("pause load generator %d of %d: %w", i+1, len(v.pausers), err)
 		}
 	}
+	harnessWriters.setActive("load_paused", v.cfg.DBPath, true)
 	return nil
 }
 
@@ -344,6 +345,7 @@ func (v *Verifier) resumeLoad() {
 	for _, pauser := range v.pausers {
 		pauser.Resume()
 	}
+	harnessWriters.setActive("load_paused", v.cfg.DBPath, false)
 	slog.Info("Resumed load generators", "count", len(v.pausers))
 }
 
@@ -354,6 +356,7 @@ func (v *Verifier) checkpoint(ctx context.Context) (residualBusy bool, _ error) 
 func (v *Verifier) checkpointDB(ctx context.Context, dbPath string, resumeLoadBetweenAttempts bool) (residualBusy bool, _ error) {
 	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)",
 		dbPath, v.checkpointBusyTimeout.Milliseconds())
+	defer harnessWriters.begin("verifier_checkpoint", dbPath)()
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return false, fmt.Errorf("open database: %w", err)
