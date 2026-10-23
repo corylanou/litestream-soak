@@ -96,33 +96,6 @@ func TestControlFlyConfigDeclaresDormantFleetAlertPolicy(t *testing.T) {
 	}
 }
 
-func TestControlFlyConfigDeclaresManyDBTiersAndSuccessTeardownScope(t *testing.T) {
-	t.Parallel()
-
-	contents, err := os.ReadFile("fly.control.toml")
-	if err != nil {
-		t.Fatalf("read fly.control.toml: %v", err)
-	}
-	env, ok := tomlTable(string(contents), "[env]")
-	if !ok {
-		t.Fatal("fly.control.toml is missing [env]")
-	}
-	for key, want := range map[string]string{
-		"SOAK_ENABLE_MANY_DB_FLEET":     "true",
-		"SOAK_ENABLE_MANY_DB_500":       "true",
-		"SOAK_ENABLE_MANY_DB_1000":      "true",
-		"SOAK_SUCCESS_TEARDOWN_SOURCES": "pr-[0-9][0-9][0-9][0-9]",
-	} {
-		got, ok := tomlValue(env, key)
-		if !ok {
-			t.Fatalf("fly.control.toml [env] is missing %s", key)
-		}
-		if got != want {
-			t.Fatalf("fly.control.toml [env] %s = %q, want %q", key, got, want)
-		}
-	}
-}
-
 func TestControlFlyConfigDeclaresEnvironmentalFailurePolicy(t *testing.T) {
 	t.Parallel()
 

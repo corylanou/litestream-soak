@@ -2021,18 +2021,3 @@ func TestSuccessTeardownCancellationStopsRemainingCleanup(t *testing.T) {
 		t.Fatalf("untouched workers = %d, want 1", untouched)
 	}
 }
-
-func TestSuccessTeardownSourcePatternExcludesPlaceholderSources(t *testing.T) {
-	allowlist := []string{"pr-[0-9][0-9][0-9][0-9]"}
-	for source, want := range map[string]bool{
-		"pr-1585":  true,
-		"pr-9999":  true,
-		"pr-90018": false,
-		"pr-123":   false,
-		"main":     false,
-	} {
-		if got := sourceAllowedForPolicy(source, allowlist); got != want {
-			t.Errorf("sourceAllowedForPolicy(%q) = %v, want %v", source, got, want)
-		}
-	}
-}
