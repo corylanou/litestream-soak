@@ -164,6 +164,16 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	if strings.TrimSpace(workloadCfg.VerifySyncTimeout) != "" {
 		env["VERIFY_SYNC_TIMEOUT"] = workloadCfg.VerifySyncTimeout
 	}
+	for key, value := range map[string]string{
+		"VERIFY_SOURCE_SNAPSHOT_BUDGET": workloadCfg.VerifySourceSnapshotBudget,
+		"VERIFY_RESTORE_BUDGET":         workloadCfg.VerifyRestoreBudget,
+		"VERIFY_INTEGRITY_CHECK_BUDGET": workloadCfg.VerifyIntegrityCheckBudget,
+		"VERIFY_COMPARE_BUDGET":         workloadCfg.VerifyCompareBudget,
+	} {
+		if strings.TrimSpace(value) != "" {
+			env[key] = value
+		}
+	}
 	if strings.TrimSpace(workloadCfg.DiskFullNoProgressWindow) != "" {
 		env["DISK_FULL_NO_PROGRESS_WINDOW"] = workloadCfg.DiskFullNoProgressWindow
 	}

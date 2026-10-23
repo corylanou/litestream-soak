@@ -70,15 +70,19 @@ type Config struct {
 	LogicalMaxValueBytes int
 	LogicalTimeout       time.Duration
 
-	VerifyInterval           time.Duration
-	MonitorInterval          time.Duration
-	ReplicaLevelPollInterval time.Duration // how often replica LTX level counts are listed for metrics; 0 disables
-	VerifyType               string        // quick, integrity, checksum, full
-	VerifySyncDegradedAfter  time.Duration
-	VerifySyncTimeout        time.Duration
-	DiskFullNoProgressWindow time.Duration
-	DiskFullRecoveryReserve  int64
-	DiskFullRecoveryTimeout  time.Duration
+	VerifyInterval             time.Duration
+	MonitorInterval            time.Duration
+	ReplicaLevelPollInterval   time.Duration // how often replica LTX level counts are listed for metrics; 0 disables
+	VerifyType                 string        // quick, integrity, checksum, full
+	VerifySyncDegradedAfter    time.Duration
+	VerifySyncTimeout          time.Duration
+	VerifySourceSnapshotBudget time.Duration
+	VerifyRestoreBudget        time.Duration
+	VerifyIntegrityCheckBudget time.Duration
+	VerifyCompareBudget        time.Duration
+	DiskFullNoProgressWindow   time.Duration
+	DiskFullRecoveryReserve    int64
+	DiskFullRecoveryTimeout    time.Duration
 
 	// Replica config
 	ReplicaType string // "file" or "s3"
@@ -605,6 +609,28 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 		}
 		c.VerifySyncTimeout = d
 	}
+	for _, budget := range []struct {
+		key    string
+		target *time.Duration
+	}{
+		{"VERIFY_SOURCE_SNAPSHOT_BUDGET", &c.VerifySourceSnapshotBudget},
+		{"VERIFY_RESTORE_BUDGET", &c.VerifyRestoreBudget},
+		{"VERIFY_INTEGRITY_CHECK_BUDGET", &c.VerifyIntegrityCheckBudget},
+		{"VERIFY_COMPARE_BUDGET", &c.VerifyCompareBudget},
+	} {
+		v := getenv(budget.key)
+		if v == "" {
+			continue
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid %s: %w", budget.key, err)
+		}
+		if d <= 0 {
+			return c, fmt.Errorf("invalid %s: must be positive", budget.key)
+		}
+		*budget.target = d
+	}
 	if v := getenv("DISK_FULL_NO_PROGRESS_WINDOW"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
@@ -1122,6 +1148,18 @@ func (c Config) WorkloadConfig() workload.Config {
 	if c.TruncatePageN != nil {
 		n := *c.TruncatePageN
 		cfg.TruncatePageN = &n
+	}
+	if c.VerifySourceSnapshotBudget > 0 {
+		cfg.VerifySourceSnapshotBudget = c.VerifySourceSnapshotBudget.String()
+	}
+	if c.VerifyRestoreBudget > 0 {
+		cfg.VerifyRestoreBudget = c.VerifyRestoreBudget.String()
+	}
+	if c.VerifyIntegrityCheckBudget > 0 {
+		cfg.VerifyIntegrityCheckBudget = c.VerifyIntegrityCheckBudget.String()
+	}
+	if c.VerifyCompareBudget > 0 {
+		cfg.VerifyCompareBudget = c.VerifyCompareBudget.String()
 	}
 	if c.PinnedReaderHold > 0 {
 		cfg.PinnedReaderHold = c.PinnedReaderHold.String()
