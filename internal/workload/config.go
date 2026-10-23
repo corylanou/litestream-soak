@@ -12,6 +12,7 @@ type Config struct {
 	Churn churn.Config `json:"churn,omitzero"`
 
 	LoadMode                                  string  `json:"load_mode,omitempty"`
+	ReplicaBackend                            string  `json:"replica_backend,omitempty"`
 	WriteRate                                 int     `json:"write_rate,omitempty"`
 	Pattern                                   string  `json:"pattern,omitempty"`
 	PayloadSize                               int     `json:"payload_size,omitempty"`

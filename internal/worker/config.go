@@ -86,8 +86,13 @@ type Config struct {
 	DiskFullRecoveryTimeout    time.Duration
 
 	// Replica config
-	ReplicaType string // "file" or "s3"
-	ReplicaPath string // for file:// replicas (local directory)
+	ReplicaBackend     string
+	ReplicaType        string // "file", "s3", "sftp", "nats" or "webdav"
+	ReplicaPath        string // for file:// replicas (local directory)
+	ReplicaBaseURL     string
+	ReplicaPasswordSet bool
+	ReplicaKeyPath     string
+	ArtifactS3         s3Store
 
 	// S3/Tigris config (only used when ReplicaType == "s3")
 	S3Bucket                                  string
@@ -151,6 +156,8 @@ type Config struct {
 
 	// Control plane
 	ControlBaseURL string
+
+	LocalResultsPath string
 }
 
 func DefaultConfig() Config {
@@ -203,8 +210,9 @@ func DefaultConfig() Config {
 		DiskFullNoProgressWindow: 10 * time.Minute,
 		DiskFullRecoveryTimeout:  10 * time.Minute,
 
-		ReplicaType: "file",
-		ReplicaPath: "/data/replicas",
+		ReplicaBackend: workload.ReplicaBackendTigris,
+		ReplicaType:    "file",
+		ReplicaPath:    "/data/replicas",
 
 		S3Endpoint: "https://fly.storage.tigris.dev",
 		S3Path:     "soak",
@@ -366,6 +374,9 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 		c.DBPath = v + "/test.db"
 		c.ConfigPath = v + "/litestream.yml"
 		c.SocketPath = v + "/litestream.sock"
+	}
+	if v := strings.TrimSpace(getenv("LITESTREAM_SOCKET_PATH")); v != "" {
+		c.SocketPath = v
 	}
 
 	if v := getenv("PROFILE"); v != "" {
@@ -666,6 +677,9 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 		c.DiskFullRecoveryTimeout = d
 	}
 
+	if v := getenv("REPLICA_BACKEND"); v != "" {
+		c.ReplicaBackend = workload.NormalizeReplicaBackend(v)
+	}
 	if v := getenv("REPLICA_TYPE"); v != "" {
 		c.ReplicaType = v
 	}
@@ -923,6 +937,9 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 	if v := getenv("METRICS_ADDR"); v != "" {
 		c.MetricsAddr = v
 	}
+	if v := strings.TrimSpace(getenv("SOAK_LOCAL_RESULTS")); v != "" {
+		c.LocalResultsPath = v
+	}
 	if v := getenv("CONTROL_BASE_URL"); v != "" {
 		c.ControlBaseURL = v
 	}
@@ -945,6 +962,9 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 		}
 	}
 
+	if err := applyReplicaBackend(&c, getenv); err != nil {
+		return c, err
+	}
 	if err := loadChurnConfig(&c, getenv); err != nil {
 		return c, err
 	}
@@ -982,6 +1002,9 @@ func (c Config) ReplicaURL() string {
 	if c.ReplicaType == "file" {
 		return "file://" + c.ReplicaPath
 	}
+	if c.remoteReplicaType() {
+		return c.remoteReplicaURL("")
+	}
 	return fmt.Sprintf("s3://%s/%s", c.S3Bucket, c.S3Path)
 }
 
@@ -992,6 +1015,9 @@ func (c Config) ReplicaURLForDB(dbPath string) string {
 	name := filepath.Base(dbPath)
 	if c.ReplicaType == "file" {
 		return "file://" + filepath.Join(c.ReplicaPath, name)
+	}
+	if c.remoteReplicaType() {
+		return c.remoteReplicaURL(name)
 	}
 	return fmt.Sprintf("s3://%s/%s", c.S3Bucket, path.Join(strings.Trim(c.S3Path, "/"), name))
 }
@@ -1165,6 +1191,9 @@ func (c Config) WorkloadConfig() workload.Config {
 		ReplayDataURL:            c.ReplayDataURL,
 		ReplaySpeed:              c.ReplaySpeed,
 		ReplayLoop:               c.ReplayLoop,
+	}
+	if backend := workload.NormalizeReplicaBackend(c.ReplicaBackend); backend != workload.ReplicaBackendTigris {
+		cfg.ReplicaBackend = backend
 	}
 	if c.L1CompactionInterval > 0 {
 		cfg.L1CompactionInterval = c.L1CompactionInterval.String()

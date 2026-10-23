@@ -46,6 +46,9 @@ func normalizeWorkloadConfig(cfg workload.Config) workload.Config {
 	if cfg.LoadMode == "" {
 		cfg.LoadMode = "synthetic"
 	}
+	if cfg.UsesTigrisReplica() {
+		cfg.ReplicaBackend = ""
+	}
 	if cfg.CPUs == 0 {
 		cfg.CPUs = 1
 	}
@@ -92,7 +95,8 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 		"SNAPSHOT_INTERVAL":   workloadCfg.SnapshotInterval,
 		"SYNC_INTERVAL":       workloadCfg.SyncInterval,
 		"LOAD_MODE":           workloadCfg.LoadMode,
-		"REPLICA_TYPE":        "s3",
+		"REPLICA_BACKEND":     workloadCfg.ReplicaBackendName(),
+		"REPLICA_TYPE":        workload.ReplicaTypeForBackend(workloadCfg.ReplicaBackend),
 		"S3_BUCKET":           m.replica.Bucket,
 		"BUCKET_NAME":         m.replica.Bucket,
 		"S3_PATH":             s3Path,
@@ -183,7 +187,7 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	if strings.TrimSpace(workloadCfg.DiskFullRecoveryTimeout) != "" {
 		env["DISK_FULL_RECOVERY_TIMEOUT"] = workloadCfg.DiskFullRecoveryTimeout
 	}
-	if workloadCfg.S3FaultProxyEnabled {
+	if workloadCfg.S3FaultProxyEnabled && workloadCfg.UsesTigrisReplica() {
 		env["S3_FAULT_PROXY_ENABLED"] = "true"
 		env["S3_FAULT_PROXY_TARGET_ENDPOINT"] = m.replica.Endpoint
 	}

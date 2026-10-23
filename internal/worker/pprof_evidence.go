@@ -123,7 +123,7 @@ func (c *pprofCapturer) newRecord(label, kind, artifact string) *profileRecord {
 		}
 	})
 	upload := "local"
-	if c.cfg.ReplicaType == "s3" {
+	if c.cfg.profileUploadEnabled() {
 		upload = "pending"
 	}
 	workloadConfig := c.workload
@@ -161,7 +161,7 @@ func (c *pprofCapturer) saveRecord(ctx context.Context, filename string, record 
 func (c *pprofCapturer) pending(filename string) bool {
 	body, err := os.ReadFile(filename + ".json")
 	if os.IsNotExist(err) {
-		return c.cfg.ReplicaType == "s3"
+		return c.cfg.profileUploadEnabled()
 	}
 	var record profileRecord
 	return err != nil || json.Unmarshal(body, &record) != nil || record.Upload == "pending"
@@ -172,7 +172,7 @@ func (c *pprofCapturer) retryPending(ctx context.Context, dir string) {
 }
 
 func (c *pprofCapturer) retryPendingPhase(ctx context.Context, dir, phase string) {
-	if c.cfg.ReplicaType != "s3" {
+	if !c.cfg.profileUploadEnabled() {
 		return
 	}
 	entries, err := os.ReadDir(dir)
