@@ -51,6 +51,13 @@ func (f *recordingS3Fixture) snapshot() (map[string]uint64, map[string]bool, int
 	return requests, hosts, f.unsigned
 }
 
+func newRecordingUpstream(t *testing.T, fixture *recordingS3Fixture) string {
+	t.Helper()
+	upstream := httptest.NewServer(fixture)
+	t.Cleanup(upstream.Close)
+	return upstream.URL
+}
+
 func TestRealLitestreamRequestsMatchMeters(t *testing.T) {
 	if os.Getenv("SOAK_TEST_LITESTREAM_BINARY") != "1" {
 		t.Skip("set SOAK_TEST_LITESTREAM_BINARY=1 to run against the installed litestream binary")

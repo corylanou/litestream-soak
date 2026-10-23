@@ -1053,6 +1053,14 @@ func (c Config) manyDBMaxRowsPerDatabase() int {
 	return workload.DefaultMaxRowsPerDatabase(c.NumDatabases)
 }
 
+func (c Config) directS3Endpoint() string {
+	target := strings.TrimSpace(c.S3FaultProxyTargetEndpoint)
+	if c.S3FaultProxyEnabled && c.ReplicaType == "s3" && c.s3FaultProxyObserveMode() && target != "" {
+		return target
+	}
+	return c.S3Endpoint
+}
+
 func (c Config) s3FaultProxyObserveMode() bool {
 	return normalizeS3FaultProxyMode(c.S3FaultProxyMode) == s3FaultProxyModeObserve
 }

@@ -202,7 +202,7 @@ func collectObjectStoragePrefix(cfg Config) *reporting.ObjectStoragePrefixSnapsh
 		URL:         prefixURL,
 		LevelCounts: make(map[string]int),
 	}
-	host := endpointHost(cfg.S3Endpoint)
+	host := endpointHost(cfg.directS3Endpoint())
 	for level := 9; level >= 0; level-- {
 		levelName := fmt.Sprintf("%04d", level)
 		levelURL := prefixURL + levelName + "/"

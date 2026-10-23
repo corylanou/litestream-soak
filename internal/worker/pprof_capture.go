@@ -312,7 +312,7 @@ func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) e
 	if c.cfg.S3Bucket == "" || c.cfg.S3AccessKey == "" || c.cfg.S3SecretKey == "" {
 		return fmt.Errorf("profile upload credentials or bucket unavailable")
 	}
-	endpoint, err := url.Parse(c.cfg.S3Endpoint)
+	endpoint, err := url.Parse(c.cfg.directS3Endpoint())
 	if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") {
 		return fmt.Errorf("invalid profile upload endpoint")
 	}

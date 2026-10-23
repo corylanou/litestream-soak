@@ -696,7 +696,11 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		args := []string{"restore", "-config", configPath, "-txid", formatTXID(source.txid), "-o", restoredPath, sourcePath}
 		cmd := exec.CommandContext(phaseCtx, "litestream", args...)
 		if v.cfg.ReplicaType == "s3" {
-			cmd.Env = v.cfg.s3CommandEnv(v.cfg.S3FaultProxyEndpoint)
+			proxyEndpoint := v.cfg.S3FaultProxyEndpoint
+			if v.observeModeValidateEndpoint() != "" {
+				proxyEndpoint = ""
+			}
+			cmd.Env = v.cfg.s3CommandEnv(proxyEndpoint)
 		}
 		cmd.Env = setCommandEnv(cmd.Environ(), "LOG_LEVEL", "DEBUG")
 		cmd.Stdout, cmd.Stderr = &restoreEvidence, &restoreEvidence
@@ -768,23 +772,27 @@ func (v *Verifier) validateConfigPath(sourcePath string) (string, func(), error)
 }
 
 func (v *Verifier) needsPerDBValidateConfig(sourcePath string) bool {
-	if !v.cfg.ManyDBEnabled() || strings.TrimSpace(sourcePath) == "" || sourcePath == v.cfg.DBPath {
+	if strings.TrimSpace(sourcePath) == "" {
 		return false
 	}
-	if v.cfg.manyDBConfigMode() == "dir" {
+	if v.observeModeValidateEndpoint() != "" {
 		return true
 	}
-	return v.observeModeValidateEndpoint() != ""
+	if !v.cfg.ManyDBEnabled() || sourcePath == v.cfg.DBPath {
+		return false
+	}
+	return v.cfg.manyDBConfigMode() == "dir"
 }
 
-// Observe-mode validation restores bypass the counting proxy so verifier LIST
-// traffic does not pollute the litestream-originated LIST metric; fault modes
-// keep the proxy in the validation path for fault observation.
+// Observe-mode validation restores bypass the counting proxy so verifier
+// traffic is counted once, from the restore log, and never as replica
+// traffic; fault modes keep the proxy in the validation path for fault
+// observation.
 func (v *Verifier) observeModeValidateEndpoint() string {
-	if !v.cfg.S3FaultProxyEnabled || v.cfg.ReplicaType != "s3" || !v.cfg.s3FaultProxyObserveMode() {
-		return ""
+	if endpoint := v.cfg.directS3Endpoint(); endpoint != v.cfg.S3Endpoint {
+		return endpoint
 	}
-	return strings.TrimSpace(v.cfg.S3FaultProxyTargetEndpoint)
+	return ""
 }
 
 func (v *Verifier) writePerDBValidateConfig(sourcePath string) (string, error) {
