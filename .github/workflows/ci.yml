@@ -51,7 +51,7 @@ jobs:
           version: v2.12.2
 
       - name: actionlint
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/coverage-matrix.yml
 
   compatibility:
     timeout-minutes: 15
