@@ -1347,7 +1347,7 @@ const sourcePauseHistoryLimitCap = 1000
 func pauseEvidenceHistory(db *model.DB, workerID string, deployment model.Deployment, initialLimit int) ([]model.Verification, error) {
 	limit := initialLimit
 	for {
-		verifications, err := db.ListVerifications(workerID, limit)
+		verifications, err := db.ListVerificationsExcludingMeteringRuns(workerID, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -1468,7 +1468,7 @@ func singleWorkerFailureCorroborated(db *model.DB, failures []actionableAttentio
 	for _, failure := range failures {
 		limit := minConsecutive*5 + 10
 		for {
-			verifications, err := db.ListVerifications(failure.WorkerID, limit)
+			verifications, err := db.ListVerificationsExcludingMeteringRuns(failure.WorkerID, limit)
 			if err != nil {
 				return false, err
 			}

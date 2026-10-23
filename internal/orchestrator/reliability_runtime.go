@@ -33,6 +33,9 @@ func applyRuntimeEvidence(db *model.DB, deployment model.Deployment, end *time.T
 		if record.Run.DeploymentID == 0 && (record.ReceivedAt.Before(deployment.StartedAt) || (end != nil && record.ReceivedAt.After(*end))) {
 			return nil
 		}
+		if runInMeteringWindow(record.Run) {
+			return nil
+		}
 		var eventIdentity struct {
 			ID         string `json:"workload_event_id"`
 			IncidentID string `json:"incident_event_id"`

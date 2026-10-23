@@ -132,6 +132,9 @@ func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Ti
 		if v.Run.DeploymentID == 0 && (at.Before(deployment.StartedAt) || (end != nil && at.After(*end))) {
 			continue
 		}
+		if runInMeteringWindow(v.Run) {
+			continue
+		}
 		e := ensure(v.WorkerID, v.Run.ProfileName, v.Run.Region)
 		attributed := v.MatchesDeployment(model.Worker{ID: v.WorkerID}, deployment)
 		if !attributed {
@@ -221,6 +224,9 @@ func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Ti
 		}
 		_ = json.Unmarshal([]byte(event.Details), &payload)
 		if payload.DeploymentID == 0 && (event.CreatedAt.Before(deployment.StartedAt) || (end != nil && event.CreatedAt.After(*end))) {
+			continue
+		}
+		if runInMeteringWindow(payload.WorkerIdentity) {
 			continue
 		}
 		eventID := firstNonEmpty(payload.WorkloadEventID, payload.IncidentEventID)

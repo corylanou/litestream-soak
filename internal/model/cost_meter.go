@@ -54,6 +54,7 @@ type CostMeterSource struct {
 	Totals                     CostMeterTotals   `json:"totals"`
 	WorkerPeakDiskUsedBytesSum uint64            `json:"worker_peak_disk_used_bytes_sum"`
 	Workers                    []CostMeterWorker `json:"workers"`
+	MeteringWindow             *MeteringWindow   `json:"metering_window,omitempty"`
 }
 
 func (t CostMeterTotals) IsZero() bool {

@@ -26,6 +26,7 @@ type homePageData struct {
 	LatestDeployment         *DeploymentRolloutResponse
 	ReleaseComparison        *DeploymentComparisonResponse
 	ComparisonPending        bool
+	MeteringWindows          []model.MeteringWindow
 	ActiveSources            []homeSourceCard
 	LatestRolloutURL         string
 	LatestRolloutPromptURL   string
@@ -88,10 +89,11 @@ type homeSourceCard struct {
 }
 
 type workerPageData struct {
-	GeneratedAt time.Time
-	Incident    *IncidentBundle
-	Ticks       []model.VerificationTick
-	ChartData   workerChartData
+	GeneratedAt     time.Time
+	Incident        *IncidentBundle
+	Ticks           []model.VerificationTick
+	ChartData       workerChartData
+	MeteringWindows []model.MeteringWindow
 }
 
 type helpPageData struct {
@@ -342,6 +344,10 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 	if err != nil {
 		return homePageData{}, err
 	}
+	meteringWindows, err := activeMeteringWindows(a.db, requestedSource, baseSource, headSource)
+	if err != nil {
+		return homePageData{}, err
+	}
 
 	diagnosis := buildDiagnosisSnapshot(activeWorkerSummaries(summaries))
 
@@ -362,6 +368,7 @@ func (a *API) buildHomePageData(r *http.Request) (homePageData, error) {
 		LatestDeployment:         rollout,
 		ReleaseComparison:        releaseComparison,
 		ComparisonPending:        comparisonPending,
+		MeteringWindows:          meteringWindows,
 		ActiveSources:            activeSources,
 		LatestRolloutURL:         latestRolloutURL,
 		LatestRolloutPromptURL:   latestRolloutPromptURL,
@@ -622,11 +629,18 @@ func (a *API) handleWorkerPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	meteringWindows, err := activeMeteringWindows(a.db, bundle.Worker.Source)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	renderHTML(w, "worker", workerPageData{
-		GeneratedAt: time.Now().UTC(),
-		Incident:    bundle,
-		Ticks:       buildWorkerTicks(bundle.RecentVerifications),
-		ChartData:   buildWorkerChartData(bundle.RecentVerifications),
+		GeneratedAt:     time.Now().UTC(),
+		Incident:        bundle,
+		Ticks:           buildWorkerTicks(bundle.RecentVerifications),
+		ChartData:       buildWorkerChartData(bundle.RecentVerifications),
+		MeteringWindows: meteringWindows,
 	})
 }
 

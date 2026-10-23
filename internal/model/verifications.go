@@ -163,10 +163,34 @@ func (d *DB) RecordVerification(v *Verification) error {
 	return nil
 }
 
+const nonMeteringRunClause = `CASE WHEN json_valid(run_identity_json) THEN
+	CASE WHEN json_valid(json_extract(run_identity_json, '$.profile_config')) THEN
+		COALESCE(json_type(json_extract(run_identity_json, '$.profile_config'), '$.metering_window'), '') = 'true'
+	ELSE 0 END
+ELSE 0 END = 0`
+
 func (d *DB) ListVerifications(workerID string, limit int) ([]Verification, error) {
+	return d.listVerifications(workerID, limit, "")
+}
+
+func (d *DB) ListVerificationsExcludingMeteringRuns(workerID string, limit int) ([]Verification, error) {
+	return d.listVerifications(workerID, limit, " AND "+nonMeteringRunClause)
+}
+
+func (d *DB) CountMeteringRunVerifications(workerID string, deploymentID int) (int, error) {
+	var count int
+	err := d.queryRow(`
+		SELECT COUNT(*) FROM verifications
+		WHERE worker_id = ? AND CASE WHEN json_valid(run_identity_json) THEN json_extract(run_identity_json, '$.deployment_id') END = ? AND NOT (`+nonMeteringRunClause+`)`,
+		workerID, deploymentID,
+	).Scan(&count)
+	return count, err
+}
+
+func (d *DB) listVerifications(workerID string, limit int, filter string) ([]Verification, error) {
 	rows, err := d.query(`
 		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message, failure_classification_json, run_identity_json, attributed
-		FROM verifications WHERE worker_id = ? ORDER BY started_at DESC LIMIT ?`,
+		FROM verifications WHERE worker_id = ?`+filter+` ORDER BY started_at DESC LIMIT ?`,
 		workerID, limit,
 	)
 	if err != nil {

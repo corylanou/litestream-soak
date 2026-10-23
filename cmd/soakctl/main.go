@@ -124,6 +124,9 @@ func main() {
 			slog.Error("Failed to close database", "error", err)
 		}
 	}()
+	if err := orchestrator.SyncMeteringWindows(db, time.Now().UTC()); err != nil {
+		slog.Error("Failed to sync metering windows", "error", err)
+	}
 
 	metrics := orchestrator.NewControlMetrics(db)
 	alerts := orchestrator.NewAlertDispatcher(db, controlBaseURL, alertWebhookURL, alertWebhookToken)

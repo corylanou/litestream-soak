@@ -184,6 +184,7 @@ type DeploymentScorecard struct {
 	EnvironmentalFailures   int                       `json:"environmental_failures"`
 	RampUpFailures          int                       `json:"ramp_up_failures"`
 	AwaitingWorkers         int                       `json:"awaiting_workers"`
+	MeteringWindowExcluded  int                       `json:"metering_window_excluded,omitempty"`
 	PassRate                float64                   `json:"pass_rate"`
 	Failures                []DeploymentFailureCount  `json:"failures,omitempty"`
 	Outcomes                []DeploymentWorkerOutcome `json:"outcomes,omitempty"`

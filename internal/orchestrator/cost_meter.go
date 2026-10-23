@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -67,17 +69,43 @@ func (a *API) handleCostMeter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	source := strings.TrimSpace(r.URL.Query().Get("source"))
-	sources, err := a.db.WithReadContext(r.Context()).CostMeter(source, since)
+	db := a.db.WithReadContext(r.Context())
+	sources, err := db.CostMeter(source, since)
 	if err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to load cost meter")
 		return
 	}
+	windows, err := db.ListMeteringWindows(source)
+	if err != nil {
+		respondError(w, r, http.StatusInternalServerError, err, "failed to load metering windows")
+		return
+	}
+	sources = attachMeteringWindows(sources, windows, since)
 	writeAPIJSON(w, CostMeterResponse{
 		Source:      source,
 		Since:       since,
 		WindowStart: since.Truncate(time.Hour),
 		Sources:     sources,
 	})
+}
+
+func attachMeteringWindows(sources []model.CostMeterSource, windows []model.MeteringWindow, since time.Time) []model.CostMeterSource {
+	for _, window := range windows {
+		if window.EndedAt != nil && !window.EndedAt.After(since) {
+			continue
+		}
+		index := slices.IndexFunc(sources, func(entry model.CostMeterSource) bool { return entry.Source == window.Source })
+		if index < 0 {
+			sources = append(sources, model.CostMeterSource{Source: window.Source, Workers: []model.CostMeterWorker{}})
+			index = len(sources) - 1
+		}
+		current := sources[index].MeteringWindow
+		if current == nil || window.StartedAt.After(current.StartedAt) {
+			sources[index].MeteringWindow = &window
+		}
+	}
+	sort.Slice(sources, func(i, j int) bool { return sources[i].Source < sources[j].Source })
+	return sources
 }
 
 func parseCostMeterSince(raw string, now time.Time) (time.Time, error) {
