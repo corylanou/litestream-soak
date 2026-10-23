@@ -93,6 +93,12 @@ var profileCharters = map[string]ProfileCharter{
 		GuardsAgainst: "Checkpoint starvation, WAL runaway, and wasted passive-checkpoint churn while readers pin the WAL for minutes.",
 		WhyItMatters:  "Guards the litestream#1339 fix and the SnapshotReader lock-release contract: long-lived readers are common in reporting workloads and must not degrade replication or stall writers.",
 	},
+	"large-db": {
+		Synopsis:      "Seeds a 6 GB database on a 100 GB volume, then applies light steady writes at 10 writes/s with a 2-hour verification cadence.",
+		Stresses:      "Snapshot upload, multi-GB restore, integrity check, and logical compare on a database far larger than the rest of the fleet.",
+		GuardsAgainst: "Memory growth that scales with database size during replication or compaction, and restore regressions that only appear on multi-GB databases.",
+		WhyItMatters:  "Guards the litestream#1479, litestream#1483, and litestream#1497 memory fixes and the litestream#1568 restore concurrency change, which only matter on large databases.",
+	},
 	"many-dbs-100-list": {
 		Synopsis:      "Replicates 100 separate SQLite databases, each declared explicitly in the config (list mode).",
 		Stresses:      "Managing many simultaneous replication streams enumerated one by one.",

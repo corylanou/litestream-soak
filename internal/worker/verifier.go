@@ -675,9 +675,9 @@ func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath stri
 func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPath string, result *VerificationResult) (bool, error) {
 	result.BoundaryTXID = 0
 	v.validationSteps = nil
-	budget := verificationPhaseBudget(v.cfg.LogicalTimeout, fileSize(sourcePath)+fileSize(sourcePath+"-wal"))
+	sourceSize := fileSize(sourcePath) + fileSize(sourcePath+"-wal")
 	var source verificationBoundary
-	if err := v.runValidationPhase(ctx, "source_snapshot", budget, func(phaseCtx context.Context) error {
+	if err := v.runValidationPhase(ctx, "source_snapshot", v.cfg.verificationPhaseBudget("source_snapshot", sourceSize), func(phaseCtx context.Context) error {
 		var err error
 		source, err = v.captureVerificationBoundary(phaseCtx, sourcePath, result.SyncTXID)
 		return err
@@ -691,7 +691,7 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 	}
 	defer cleanupConfig()
 	var restoreEvidence restoreOutput
-	restoreErr := v.runValidationPhase(ctx, "restore", budget, func(phaseCtx context.Context) error {
+	restoreErr := v.runValidationPhase(ctx, "restore", v.cfg.verificationPhaseBudget("restore", sourceSize), func(phaseCtx context.Context) error {
 		args := []string{"restore", "-config", configPath, "-txid", formatTXID(source.txid), "-o", restoredPath, sourcePath}
 		cmd := exec.CommandContext(phaseCtx, "litestream", args...)
 		if v.cfg.ReplicaType == "s3" {
@@ -724,12 +724,12 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 	if restoreErr != nil {
 		return false, restoreErr
 	}
-	if err := v.runValidationPhase(ctx, "integrity_check", budget, func(phaseCtx context.Context) error {
+	if err := v.runValidationPhase(ctx, "integrity_check", v.cfg.verificationPhaseBudget("integrity_check", sourceSize), func(phaseCtx context.Context) error {
 		return checkRestoredIntegrity(phaseCtx, restoredPath)
 	}); err != nil {
 		return false, err
 	}
-	if err := v.runValidationPhase(ctx, "compare", budget, func(phaseCtx context.Context) error {
+	if err := v.runValidationPhase(ctx, "compare", v.cfg.verificationPhaseBudget("compare", sourceSize), func(phaseCtx context.Context) error {
 		return v.compareRestoredLogical(phaseCtx, source.logicalSnapshot, restoredPath)
 	}); err != nil {
 		return false, err
