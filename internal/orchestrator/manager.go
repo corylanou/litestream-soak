@@ -729,6 +729,16 @@ func (m *Manager) replaceWorkerWithRequest(ctx context.Context, w model.Worker, 
 	if err != nil {
 		return nil, err
 	}
+	if supersededProvisioning(w, attempt, request.ImageRef, request.GitSHA, request.LitestreamSHA) {
+		event, err := provisioningEvent(w, *attempt, "worker_provisioning_superseded", "Superseded unresolved provisioning from an older deployment before replacement")
+		if err != nil {
+			return nil, err
+		}
+		if err := m.db.AbandonProvisioning(*attempt, event); err != nil {
+			return nil, fmt.Errorf("supersede stale provisioning: %w", err)
+		}
+		attempt = nil
+	}
 	if attempt != nil || w.Status == model.WorkerPending {
 		return nil, fmt.Errorf("reconcile unresolved provisioning before replacement")
 	}
@@ -766,6 +776,19 @@ func (m *Manager) replaceWorkerWithRequest(ctx context.Context, w model.Worker, 
 	m.clearOldWorkerReplicaPrefix(ctx, w)
 
 	return m.createWorker(ctx, request)
+}
+
+func supersededProvisioning(w model.Worker, attempt *model.ProvisioningAttempt, imageRef, gitSHA, litestreamSHA string) bool {
+	if attempt == nil || w.Status == model.WorkerPending || attempt.Phase != "machine_ready" {
+		return false
+	}
+	if attempt.MachineID == "" || attempt.MachineID != w.FlyMachineID || attempt.VolumeID == "" || attempt.VolumeID != w.FlyVolumeID {
+		return false
+	}
+	if attempt.GitSHA != w.GitSHA || attempt.LitestreamSHA != w.LitestreamSHA {
+		return false
+	}
+	return attempt.ImageRef != imageRef || attempt.GitSHA != gitSHA || attempt.LitestreamSHA != litestreamSHA
 }
 
 func replacementRequest(w model.Worker, newImageRef, newSHA, newLitestreamSHA string) (WorkerRequest, error) {
