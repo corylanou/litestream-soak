@@ -25,16 +25,17 @@ const (
 )
 
 type pprofCapturer struct {
-	onRecord     func(*profileRecord)
-	onStatus     func(string, string)
-	cfg          *Config
-	gate         chan struct{}
-	statusMu     sync.Mutex
-	uploadWake   chan struct{}
-	events       chan string
-	identityOnce sync.Once
-	binaries     map[string]profileBinary
-	lastCPU      time.Time
+	onRecord       func(*profileRecord)
+	onStatus       func(string, string)
+	availableBytes func(string) (uint64, error)
+	cfg            *Config
+	gate           chan struct{}
+	statusMu       sync.Mutex
+	uploadWake     chan struct{}
+	events         chan string
+	identityOnce   sync.Once
+	binaries       map[string]profileBinary
+	lastCPU        time.Time
 }
 
 func newPprofCapturer(cfg *Config) *pprofCapturer {
@@ -174,8 +175,8 @@ func (c *pprofCapturer) captureEndpoint(ctx context.Context, label, name, endpoi
 		slog.Warn("Create pprof directory failed", "error", err)
 		return
 	}
-	if !c.captureSpaceAvailable(dir) {
-		c.recordStatus(label, "storage-full")
+	if reason := c.captureAdmission(dir); reason != "" {
+		c.recordStatus(label, reason)
 		return
 	}
 	ext := "pprof"
@@ -247,11 +248,20 @@ func (c *pprofCapturer) pruneLocalProfiles(dir string, keep int) {
 	// (one file per profile kind) always survives, while restarts cannot
 	// accumulate baselines without bound.
 	var files, baselines []pprofProfileFile
+	names := make(map[string]bool, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || (!strings.HasSuffix(entry.Name(), ".pprof") && !strings.HasSuffix(entry.Name(), ".txt")) {
+		names[entry.Name()] = true
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() {
 			continue
 		}
-		if c.pending(filepath.Join(dir, entry.Name())) {
+		if manifest, ok := strings.CutSuffix(name, ".json"); ok {
+			if (!strings.HasSuffix(manifest, ".pprof") && !strings.HasSuffix(manifest, ".txt")) || names[manifest] || c.pending(filepath.Join(dir, manifest)) {
+				continue
+			}
+		} else if (!strings.HasSuffix(name, ".pprof") && !strings.HasSuffix(name, ".txt")) || c.pending(filepath.Join(dir, name)) {
 			continue
 		}
 		info, err := entry.Info()
