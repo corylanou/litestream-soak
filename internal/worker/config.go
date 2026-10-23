@@ -71,6 +71,7 @@ type Config struct {
 	LogicalTimeout       time.Duration
 
 	VerifyInterval             time.Duration
+	VerifyRestoreRotation      bool
 	MonitorInterval            time.Duration
 	ReplicaLevelPollInterval   time.Duration // how often replica LTX level counts are listed for metrics; 0 disables
 	VerifyType                 string        // quick, integrity, checksum, full
@@ -312,7 +313,11 @@ func WorkloadFromEnvironment(env map[string]string) (workload.Config, error) {
 
 func configFromLookup(getenv func(string) string) (Config, error) {
 	c := DefaultConfig()
+	c.VerifyRestoreRotation = true
 
+	if v := getenv("SOAK_VERIFY_RESTORE_ROTATION"); v != "" {
+		c.VerifyRestoreRotation = parseBoolEnv(v)
+	}
 	if v := getenv("WORKER_ID"); v != "" {
 		c.WorkerID = v
 	}

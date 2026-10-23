@@ -20,6 +20,7 @@ type restoreOutput struct {
 	matchTail    string
 	replans      int
 	requests     map[string]uint64
+	planTXID     uint64
 	truncated    bool
 	dropping     bool
 }
@@ -62,6 +63,9 @@ func (b *restoreOutput) flushLine() {
 			b.requests = make(map[string]uint64)
 		}
 		b.requests[method]++
+	}
+	if txid, ok := parseRestorePlanTXID(string(b.pending)); ok {
+		b.planTXID = txid
 	}
 	line := []byte(redactLogIncident(string(b.pending)))
 	b.pending = nil

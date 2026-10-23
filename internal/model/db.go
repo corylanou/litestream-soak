@@ -59,7 +59,9 @@ CREATE TABLE IF NOT EXISTS verifications (
     passed BOOLEAN,
     duration_ms INTEGER,
     error_message TEXT,
-    failure_classification_json TEXT NOT NULL DEFAULT ''
+    failure_classification_json TEXT NOT NULL DEFAULT '',
+    restore_mode TEXT NOT NULL DEFAULT '',
+    restore_mode_fallback TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS deployments (
@@ -378,6 +380,8 @@ func ensureVerificationColumns(db *sql.DB) error {
 		`ALTER TABLE verifications ADD COLUMN run_identity_json TEXT NOT NULL DEFAULT '{}'`,
 		`ALTER TABLE verifications ADD COLUMN attributed BOOLEAN NOT NULL DEFAULT 0`,
 		`ALTER TABLE verifications ADD COLUMN failure_classification_json TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE verifications ADD COLUMN restore_mode TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE verifications ADD COLUMN restore_mode_fallback TEXT NOT NULL DEFAULT ''`,
 	}
 
 	for _, statement := range statements {

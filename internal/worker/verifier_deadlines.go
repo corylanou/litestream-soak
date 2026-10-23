@@ -98,7 +98,8 @@ func (v *Verifier) failValidationResult(ctx context.Context, result *Verificatio
 	v.failResult(ctx, result, err.Error())
 	var deadline *verifierDeadlineError
 	var boundary *unreplicatedBoundaryError
-	if (errors.As(err, &deadline) || errors.As(err, &boundary)) && result.Status != "aborted" {
+	var evidence *restoreEvidenceInconclusiveError
+	if (errors.As(err, &deadline) || errors.As(err, &boundary) || errors.As(err, &evidence)) && result.Status != "aborted" {
 		result.Status = "aborted"
 		result.Summary = "verification inconclusive: " + summarizeVerificationMessage(err.Error())
 	}
