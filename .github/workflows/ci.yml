@@ -50,6 +50,9 @@ jobs:
         with:
           version: v2.12.2
 
+      - name: actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+
   compatibility:
     timeout-minutes: 15
     runs-on: ubuntu-latest
