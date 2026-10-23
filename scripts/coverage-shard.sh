@@ -91,8 +91,8 @@ case "$shard" in
     ;;
   large-db)
     duration=9000
-    shard_env+=("INITIAL_SIZE=6GB" "VERIFY_INTERVAL=25m" "VERIFY_SYNC_TIMEOUT=60m" "WRITE_RATE=10")
-    check_args=(-min-passed 2 -databases 1)
+    shard_env+=("INITIAL_SIZE=6GB" "SNAPSHOT_INTERVAL=1h" "VERIFY_INTERVAL=20m" "VERIFY_SYNC_TIMEOUT=60m" "WRITE_RATE=10")
+    check_args=(-min-passed 3 -databases 1)
     ;;
   *)
     printf 'unknown shard: %s\n' "$shard" >&2
