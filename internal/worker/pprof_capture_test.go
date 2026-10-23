@@ -391,8 +391,145 @@ func TestPprofBoundsEvidenceAndRejectsOversize(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if c.captureSpaceAvailable(dir) {
-		t.Fatal("full storage admitted capture")
+	if reason := c.captureAdmission(dir); reason != "storage-entry-limit" {
+		t.Fatalf("full evidence directory admission = %q, want storage-entry-limit", reason)
+	}
+}
+
+func writeProfileManifest(t *testing.T, filename string, record profileRecord, modTime time.Time) {
+	t.Helper()
+	body, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filename, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filename, modTime, modTime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func fillProfileDirectory(t *testing.T, dir, upload string) []string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	var written []string
+	base := time.Now().Add(-time.Hour)
+	for i := 0; len(written)+2 <= pprofMaxEvidenceFiles; i++ {
+		modTime := base.Add(time.Duration(i) * time.Second)
+		artifact := filepath.Join(dir, fmt.Sprintf("20260101T000000.%09dZ_hourly_heap.pprof", i))
+		if i%2 == 0 {
+			if err := os.WriteFile(artifact, []byte("evidence"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(artifact, modTime, modTime); err != nil {
+				t.Fatal(err)
+			}
+			writeProfileManifest(t, artifact+".json", profileRecord{Status: "available", Upload: upload, ArtifactUploaded: upload == "uploaded"}, modTime)
+			written = append(written, artifact, artifact+".json")
+			continue
+		}
+		writeProfileManifest(t, artifact+".json", profileRecord{Status: "unavailable", Upload: upload, Error: "404 Not Found"}, modTime)
+		written = append(written, artifact+".json")
+	}
+	return written
+}
+
+func TestPprofCleanupAdmitsCaptureWhenUploadedManifestsFillDirectory(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.ReplicaType = "s3"
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("pprof-%d.sock", time.Now().UnixNano()))
+	startTestUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "evidence") }))
+	dir := filepath.Join(cfg.DataDir, "profiles")
+	fillProfileDirectory(t, dir, "uploaded")
+	c := newPprofCapturer(&cfg)
+	var reasons []string
+	c.onStatus = func(_, reason string) { reasons = append(reasons, reason) }
+	c.captureEndpoint(context.Background(), "incident", "heap", "heap", time.Second)
+	if len(reasons) != 0 {
+		t.Fatalf("capture statuses = %v, want admission", reasons)
+	}
+	captured, _ := filepath.Glob(filepath.Join(dir, "*_incident_heap.pprof"))
+	if len(captured) != 1 {
+		t.Fatalf("incident captures = %v, want one", captured)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries)+2 > pprofMaxEvidenceFiles {
+		t.Fatalf("entries after cleanup = %d, want below limit %d", len(entries), pprofMaxEvidenceFiles)
+	}
+	orphans := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".pprof.json") {
+			if _, err := os.Stat(filepath.Join(dir, strings.TrimSuffix(entry.Name(), ".json"))); os.IsNotExist(err) {
+				orphans++
+			}
+		}
+	}
+	if orphans == 0 || orphans >= pprofMaxEvidenceFiles/2 {
+		t.Fatalf("unavailable manifests retained = %d, want newest retained and oldest pruned", orphans)
+	}
+}
+
+func TestPprofCleanupRetainsUnuploadedEvidence(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.ReplicaType = "s3"
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("pprof-%d.sock", time.Now().UnixNano()))
+	requests := make(chan struct{}, 1)
+	startTestUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- struct{}{}
+		_, _ = io.WriteString(w, "evidence")
+	}))
+	dir := filepath.Join(cfg.DataDir, "profiles")
+	written := fillProfileDirectory(t, dir, "pending")
+	c := newPprofCapturer(&cfg)
+	var reasons []string
+	c.onStatus = func(_, reason string) { reasons = append(reasons, reason) }
+	c.captureEndpoint(context.Background(), "incident", "heap", "heap", time.Second)
+	if !slices.Equal(reasons, []string{"storage-entry-limit"}) {
+		t.Fatalf("capture statuses = %v, want storage-entry-limit", reasons)
+	}
+	if len(requests) != 0 {
+		t.Fatal("capture requested despite full evidence directory")
+	}
+	for _, filename := range written {
+		if _, err := os.Stat(filename); err != nil {
+			t.Fatalf("un-uploaded evidence removed: %v", err)
+		}
+	}
+}
+
+func TestPprofDiskExhaustionReportsStorageFull(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("pprof-%d.sock", time.Now().UnixNano()))
+	requests := make(chan struct{}, 1)
+	startTestUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- struct{}{}
+		_, _ = io.WriteString(w, "evidence")
+	}))
+	c := newPprofCapturer(&cfg)
+	c.availableBytes = func(string) (uint64, error) { return pprofMaxCaptureBytes - 1, nil }
+	var reasons []string
+	c.onStatus = func(_, reason string) { reasons = append(reasons, reason) }
+	c.captureEndpoint(context.Background(), "incident", "heap", "heap", time.Second)
+	if !slices.Equal(reasons, []string{"storage-full"}) {
+		t.Fatalf("capture statuses = %v, want storage-full", reasons)
+	}
+	if len(requests) != 0 {
+		t.Fatal("capture requested despite exhausted disk")
+	}
+	reasons = nil
+	stop := c.beginFTSProfile(context.Background(), "build")
+	stop()
+	if !slices.Equal(reasons, []string{"storage-full"}) {
+		t.Fatalf("FTS profile statuses = %v, want storage-full", reasons)
 	}
 }
 

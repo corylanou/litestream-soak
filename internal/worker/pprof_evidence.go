@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -248,16 +249,33 @@ func (c *pprofCapturer) retryPendingPhase(ctx context.Context, dir, phase string
 	}
 }
 
-func (c *pprofCapturer) captureSpaceAvailable(dir string) bool {
+func (c *pprofCapturer) captureAdmission(dir string) string {
+	c.pruneLocalProfiles(dir, pprofLocalRetentionFiles)
+	availableBytes := c.availableBytes
+	if availableBytes == nil {
+		availableBytes = profileAvailableBytes
+	}
+	if available, err := availableBytes(dir); err == nil && available < pprofMaxCaptureBytes {
+		slog.Warn("Pprof capture unavailable: disk space exhausted", "available_bytes", available, "required_bytes", pprofMaxCaptureBytes)
+		return "storage-full"
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return false
+		return "storage-unavailable"
 	}
 	if len(entries)+2 > pprofMaxEvidenceFiles {
-		slog.Warn("Pprof capture unavailable: evidence storage full; retained uploads require retrieval", "limit", pprofMaxEvidenceFiles)
-		return false
+		slog.Warn("Pprof capture unavailable: evidence entry limit reached; retained uploads require retrieval", "limit", pprofMaxEvidenceFiles)
+		return "storage-entry-limit"
 	}
-	return true
+	return ""
+}
+
+func profileAvailableBytes(dir string) (uint64, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(dir, &stat); err != nil {
+		return 0, err
+	}
+	return stat.Bavail * uint64(stat.Bsize), nil
 }
 
 func (r *Runner) startProfileCapture(ctx context.Context) func() {

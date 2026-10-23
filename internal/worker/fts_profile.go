@@ -17,8 +17,8 @@ func (c *pprofCapturer) beginFTSProfile(ctx context.Context, phase string) func(
 		c.recordStatus(label, "storage-unavailable")
 		return func() {}
 	}
-	if !c.captureSpaceAvailable(dir) {
-		c.recordStatus(label, "storage-full")
+	if reason := c.captureAdmission(dir); reason != "" {
+		c.recordStatus(label, reason)
 		return func() {}
 	}
 	filename := fmt.Sprintf("%s_%s_worker_cpu.pprof", time.Now().UTC().Format("20060102T150405.000000000Z"), profileLabel(label))
