@@ -72,9 +72,9 @@ case "$shard" in
   manydb-100|manydb-500|manydb-1000)
     databases="${shard#manydb-}"
     case "$databases" in
-      100) duration=1500 ;;
-      500) duration=1800 ;;
-      1000) duration=2400 ;;
+      100) duration=2100 ;;
+      500) duration=2700 ;;
+      1000) duration=3600 ;;
     esac
     shard_env+=(
       "NUM_DATABASES=$databases"
@@ -82,6 +82,7 @@ case "$shard" in
       "ACTIVE_PERCENT=5"
       "ACTIVE_ROTATE_INTERVAL=2m"
       "VERIFY_SAMPLE_SIZE=5"
+      "VERIFY_CHANGED_LIMIT=10"
       "WRITE_RATE=20"
       "PAYLOAD_SIZE=512"
       "INITIAL_SIZE=1MB"
