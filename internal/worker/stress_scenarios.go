@@ -79,20 +79,39 @@ func (c Config) ForStressScenario(name string) (Config, error) {
 }
 
 func stressScenarioAt(now time.Time, count int, phase time.Duration) (int, time.Time) {
-	slot := now.UnixNano() / int64(phase)
-	end := time.Unix(0, (slot+1)*int64(phase)).UTC()
-	return int(slot % int64(count)), end
+	slot := stressScenarioSlot(now, phase)
+	return stressScenarioSlotIndex(slot, count), stressScenarioSlotEnd(slot, phase)
+}
+
+func stressScenarioSlot(now time.Time, phase time.Duration) int64 {
+	return now.UnixNano() / int64(phase)
+}
+
+func stressScenarioSlotIndex(slot int64, count int) int {
+	return int(slot % int64(count))
+}
+
+func stressScenarioSlotEnd(slot int64, phase time.Duration) time.Time {
+	return time.Unix(0, (slot+1)*int64(phase)).UTC()
 }
 
 func RunStressScenarioSchedule(ctx context.Context, cfg Config, run func(context.Context, Config) error) error {
+	return runStressScenarioSchedule(ctx, cfg, time.Now, run)
+}
+
+func runStressScenarioSchedule(ctx context.Context, cfg Config, clock func() time.Time, run func(context.Context, Config) error) error {
 	if len(cfg.StressScenarios) == 0 || cfg.StressScenarioPhase <= 0 {
 		return errors.New("stress scenario schedule is not configured")
 	}
+	previous := int64(-1)
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
-		index, end := stressScenarioAt(time.Now(), len(cfg.StressScenarios), cfg.StressScenarioPhase)
+		now := clock()
+		slot := max(stressScenarioSlot(now, cfg.StressScenarioPhase), previous+1)
+		previous = slot
+		index, end := stressScenarioSlotIndex(slot, len(cfg.StressScenarios)), stressScenarioSlotEnd(slot, cfg.StressScenarioPhase)
 		name := cfg.StressScenarios[index]
 		phase, err := cfg.ForStressScenario(name)
 		if err != nil {
@@ -100,7 +119,7 @@ func RunStressScenarioSchedule(ctx context.Context, cfg Config, run func(context
 		}
 		slog.Info("Starting stress scenario phase", "scenario", name, "until", end)
 		phaseCtx, cancel := context.WithCancelCause(ctx)
-		timer := time.AfterFunc(time.Until(end), func() { cancel(errStressScenarioPhaseEnded) })
+		timer := time.AfterFunc(end.Sub(now), func() { cancel(errStressScenarioPhaseEnded) })
 		err = run(phaseCtx, phase)
 		timer.Stop()
 		ended := errors.Is(context.Cause(phaseCtx), errStressScenarioPhaseEnded)
