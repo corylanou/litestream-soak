@@ -25,6 +25,19 @@ func verificationPhaseBudget(floor time.Duration, size int64) time.Duration {
 	return floor * time.Duration(units)
 }
 
+func (c Config) verificationPhaseBudget(phase string, size int64) time.Duration {
+	overrides := map[string]time.Duration{
+		"source_snapshot": c.VerifySourceSnapshotBudget,
+		"restore":         c.VerifyRestoreBudget,
+		"integrity_check": c.VerifyIntegrityCheckBudget,
+		"compare":         c.VerifyCompareBudget,
+	}
+	if budget := overrides[phase]; budget > 0 {
+		return budget
+	}
+	return verificationPhaseBudget(c.LogicalTimeout, size)
+}
+
 func verificationCooldown(interval, elapsed time.Duration) time.Duration {
 	if elapsed > time.Duration(math.MaxInt64/2) {
 		return time.Duration(math.MaxInt64)
