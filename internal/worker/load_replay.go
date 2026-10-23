@@ -83,6 +83,7 @@ func (m *loadReplayManager) startLoad(ctx context.Context) error {
 		}
 		return cmd, nil
 	})
+	m.loadSup.dbPath = m.cfg.DBPath
 
 	return m.loadSup.start(ctx)
 }
@@ -127,18 +128,20 @@ func (m *loadReplayManager) startReplay(ctx context.Context) error {
 
 	m.replayEngine = engine
 
-	go superviseReplay(ctx, m.cfg.ReplayDataset, m.cfg.ReplayLoop,
+	go superviseReplay(ctx, m.cfg.ReplayDataset, m.cfg.DBPath, m.cfg.ReplayLoop,
 		5*time.Second, 2*time.Minute, 5*time.Minute, engine.Run)
 
 	slog.Info("Replay engine started", "dataset", m.cfg.ReplayDataset, "speed", m.cfg.ReplaySpeed)
 	return nil
 }
 
-func superviseReplay(ctx context.Context, dataset string, loop bool, initialBackoff, maxBackoff, healthyReset time.Duration, run func(context.Context) error) {
+func superviseReplay(ctx context.Context, dataset, dbPath string, loop bool, initialBackoff, maxBackoff, healthyReset time.Duration, run func(context.Context) error) {
 	backoff := initialBackoff
 	for {
 		started := time.Now()
+		endWriter := harnessWriters.begin("replay", dbPath)
 		err := run(ctx)
+		endWriter()
 		if ctx.Err() != nil {
 			return
 		}

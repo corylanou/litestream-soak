@@ -334,7 +334,7 @@ func (v *Verifier) pauseLoad(ctx context.Context) error {
 			return fmt.Errorf("pause load generator %d of %d: %w", i+1, len(v.pausers), err)
 		}
 	}
-	harnessWriters.setActive("load_paused", "", true)
+	harnessWriters.setActive("load_paused", v.cfg.DBPath, true)
 	return nil
 }
 
@@ -345,7 +345,7 @@ func (v *Verifier) resumeLoad() {
 	for _, pauser := range v.pausers {
 		pauser.Resume()
 	}
-	harnessWriters.setActive("load_paused", "", false)
+	harnessWriters.setActive("load_paused", v.cfg.DBPath, false)
 	slog.Info("Resumed load generators", "count", len(v.pausers))
 }
 

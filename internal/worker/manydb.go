@@ -294,6 +294,7 @@ func writeManyDBRow(ctx context.Context, dbPath string, payloadSize int, rowSlot
 	if rowSlot <= 0 {
 		return fmt.Errorf("row slot must be positive")
 	}
+	defer harnessWriters.begin("many_db_write", dbPath)()
 	db, err := sql.Open("sqlite", manyDBDSN(dbPath))
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)

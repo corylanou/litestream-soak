@@ -40,23 +40,23 @@ func (v *Verifier) captureVerificationBoundary(ctx context.Context, path string,
 		return verificationBoundary{}, err
 	}
 	defer func() { _ = conn.Close() }()
-	defer harnessWriters.begin("verifier_reservation", path)()
+	reservation := &verificationReservation{conn: conn, path: path}
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		_, _ = conn.ExecContext(cleanup, "ROLLBACK")
+		_ = reservation.release(cleanup)
 	}()
-	if err := acquireVerificationReservation(ctx, conn); err != nil {
+	if err := reservation.acquire(ctx); err != nil {
 		return verificationBoundary{}, err
 	}
-	if _, err := conn.ExecContext(ctx, "ROLLBACK"); err != nil {
+	if err := reservation.release(ctx); err != nil {
 		return verificationBoundary{}, err
 	}
 	synced, err := v.syncOnceDB(ctx, v.cfg.verifySyncTimeout(), path)
 	if err != nil {
 		return verificationBoundary{}, fmt.Errorf("source boundary unavailable: paused sync: %w", err)
 	}
-	if err := acquireVerificationReservation(ctx, conn); err != nil {
+	if err := reservation.acquire(ctx); err != nil {
 		return verificationBoundary{}, err
 	}
 	if synced.TXID < txid {
@@ -72,6 +72,31 @@ func (v *Verifier) captureVerificationBoundary(ctx context.Context, path string,
 	}
 	v.logicalEvidence += " source_boundary=paused-sync-writer-reserved-snapshot"
 	return verificationBoundary{logicalSnapshot: source, txid: synced.TXID}, nil
+}
+
+type verificationReservation struct {
+	conn    *sql.Conn
+	path    string
+	endHeld func()
+}
+
+func (r *verificationReservation) acquire(ctx context.Context) error {
+	endWait := harnessWriters.begin("verifier_reservation_wait", r.path)
+	err := acquireVerificationReservation(ctx, r.conn)
+	endWait()
+	if err == nil {
+		r.endHeld = harnessWriters.begin("verifier_reservation", r.path)
+	}
+	return err
+}
+
+func (r *verificationReservation) release(ctx context.Context) error {
+	_, err := r.conn.ExecContext(ctx, "ROLLBACK")
+	if r.endHeld != nil {
+		r.endHeld()
+		r.endHeld = nil
+	}
+	return err
 }
 
 func acquireVerificationReservation(ctx context.Context, conn *sql.Conn) error {

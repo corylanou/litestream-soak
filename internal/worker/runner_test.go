@@ -1465,7 +1465,7 @@ func TestSuperviseReplayDoesNotRestartAfterCleanNonLoopExit(t *testing.T) {
 	var runs atomic.Int32
 	done := make(chan struct{})
 	go func() {
-		superviseReplay(context.Background(), "test", false,
+		superviseReplay(context.Background(), "test", "", false,
 			time.Millisecond, time.Millisecond, time.Minute,
 			func(context.Context) error {
 				runs.Add(1)
@@ -1491,7 +1491,7 @@ func TestSuperviseReplayRestartsAfterError(t *testing.T) {
 	block := make(chan struct{})
 	defer close(block)
 
-	go superviseReplay(ctx, "test", false,
+	go superviseReplay(ctx, "test", "", false,
 		time.Millisecond, time.Millisecond, time.Minute,
 		func(c context.Context) error {
 			if runs.Add(1) == 1 {

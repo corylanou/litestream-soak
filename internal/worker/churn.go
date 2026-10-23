@@ -47,8 +47,9 @@ func populateChurn(ctx context.Context, cfg Config) error {
 }
 
 type churnLoad struct {
-	engine *churn.Engine
-	db     *sql.DB
+	engine    *churn.Engine
+	db        *sql.DB
+	endWriter func()
 }
 
 func startChurn(ctx context.Context, cfg Config, observe churn.Observer) (*churnLoad, error) {
@@ -60,15 +61,18 @@ func startChurn(ctx context.Context, cfg Config, observe churn.Observer) (*churn
 		observe = func(op string, n int64, d time.Duration, err error) { recordChurn(cfg, op, n, d, err) }
 	}
 	engine := churn.New(cfg.LoadMode, cfg.Churn, observe)
+	endWriter := harnessWriters.begin("churn", cfg.DBPath)
 	if err := engine.Start(ctx, db); err != nil {
+		endWriter()
 		_ = db.Close()
 		return nil, err
 	}
-	return &churnLoad{engine: engine, db: db}, nil
+	return &churnLoad{engine: engine, db: db, endWriter: endWriter}, nil
 }
 
 func (l *churnLoad) Stop() {
 	l.engine.Stop()
+	l.endWriter()
 	if err := l.db.Close(); err != nil {
 		slog.Error("Close churn database", "error", err)
 	}
