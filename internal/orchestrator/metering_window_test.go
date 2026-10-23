@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
+	workerconfig "github.com/corylanou/litestream-soak/internal/worker"
 	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
@@ -31,14 +33,14 @@ func TestMeteringWindowEnablesObserveOnlyForListedSource(t *testing.T) {
 	}
 	for _, spec := range []FleetSpec{mainSpec, DefaultFleetForSource("main", "sha", "ls")} {
 		for _, worker := range spec.Workers {
-			if !worker.Workload.S3FaultProxyEnabled || worker.Workload.S3FaultProxyMode != "observe" {
-				t.Fatalf("%s proxy = %v/%q, want enabled observe for metering source", worker.Name, worker.Workload.S3FaultProxyEnabled, worker.Workload.S3FaultProxyMode)
+			if !worker.Workload.S3FaultProxyEnabled || worker.Workload.S3FaultProxyMode != "observe" || !worker.Workload.MeteringWindow {
+				t.Fatalf("%s proxy = %v/%q metering=%v, want enabled observe metering run for metering source", worker.Name, worker.Workload.S3FaultProxyEnabled, worker.Workload.S3FaultProxyMode, worker.Workload.MeteringWindow)
 			}
 		}
 	}
 	for _, worker := range DefaultFleetForSource("pr-1228", "sha", "ls").Workers {
-		if worker.Workload.S3FaultProxyEnabled || worker.Workload.S3FaultProxyMode != "" {
-			t.Fatalf("%s proxy = %v/%q, want direct replication for unlisted source", worker.Name, worker.Workload.S3FaultProxyEnabled, worker.Workload.S3FaultProxyMode)
+		if worker.Workload.S3FaultProxyEnabled || worker.Workload.S3FaultProxyMode != "" || worker.Workload.MeteringWindow {
+			t.Fatalf("%s proxy = %v/%q metering=%v, want direct replication for unlisted source", worker.Name, worker.Workload.S3FaultProxyEnabled, worker.Workload.S3FaultProxyMode, worker.Workload.MeteringWindow)
 		}
 	}
 }
@@ -53,8 +55,8 @@ func TestMeteringWindowKeepsFaultModeProfiles(t *testing.T) {
 	})
 	want := map[string]string{"fault": "source-get-reset", "default-fault": "", "plain": "observe"}
 	for _, worker := range workers {
-		if !worker.Workload.S3FaultProxyEnabled || worker.Workload.S3FaultProxyMode != want[worker.Name] {
-			t.Fatalf("%s proxy = %v/%q, want enabled %q", worker.Name, worker.Workload.S3FaultProxyEnabled, worker.Workload.S3FaultProxyMode, want[worker.Name])
+		if !worker.Workload.S3FaultProxyEnabled || worker.Workload.S3FaultProxyMode != want[worker.Name] || !worker.Workload.MeteringWindow {
+			t.Fatalf("%s proxy = %v/%q metering=%v, want enabled %q metering run", worker.Name, worker.Workload.S3FaultProxyEnabled, worker.Workload.S3FaultProxyMode, worker.Workload.MeteringWindow, want[worker.Name])
 		}
 	}
 }
@@ -84,7 +86,7 @@ func fleetSpecJSON(t *testing.T) string {
 	return string(body)
 }
 
-func TestMeteringWindowResultsExcludedFromScoringAndComparison(t *testing.T) {
+func TestMeteringRunResultsExcludedFromScoringAndComparison(t *testing.T) {
 	db := openTestDB(t)
 	for _, deployment := range []model.Deployment{
 		{GitSHA: "sha-main", LitestreamSHA: "ls-main", ImageRef: "registry.fly.io/litestream-soak:sha-main", Source: "main", Status: "ready"},
@@ -113,21 +115,18 @@ func TestMeteringWindowResultsExcludedFromScoringAndComparison(t *testing.T) {
 		createTestWorker(t, db, worker)
 	}
 
-	if err := db.SyncMeteringWindows([]string{"main"}, mainDeployment.StartedAt); err != nil {
-		t.Fatalf("SyncMeteringWindows() error = %v", err)
-	}
-
 	mainAt := mainDeployment.StartedAt.Add(time.Second).UTC()
 	prAt := prDeployment.StartedAt.Add(time.Second).UTC()
 	for _, fixture := range []struct {
 		workerID string
 		at       time.Time
 		passed   bool
+		metering bool
 	}{
-		{"worker-main-low", mainAt, true},
-		{"worker-main-high", mainAt, false},
-		{"worker-pr-1228-low", prAt, true},
-		{"worker-pr-1228-high", prAt, true},
+		{"worker-main-low", mainAt, true, true},
+		{"worker-main-high", mainAt, false, true},
+		{"worker-pr-1228-low", prAt, true, false},
+		{"worker-pr-1228-high", prAt, true, false},
 	} {
 		completed := fixture.at
 		verification := &model.Verification{WorkerID: fixture.workerID, StartedAt: completed.Add(-15 * time.Second), CompletedAt: &completed, Status: "passed", CheckType: "integrity", Passed: fixture.passed, DurationMS: 15000}
@@ -135,7 +134,7 @@ func TestMeteringWindowResultsExcludedFromScoringAndComparison(t *testing.T) {
 			verification.Status = "failed"
 			verification.ErrorMessage = "wrong # of entries in index idx_load_test_timestamp"
 		}
-		mustRecordAttributedFixture(t, db, verification)
+		mustRecordRunFixture(t, db, verification, fixture.metering)
 	}
 
 	scorecard, err := buildDeploymentScorecard(db, *mainDeployment, nil)
@@ -147,7 +146,7 @@ func TestMeteringWindowResultsExcludedFromScoringAndComparison(t *testing.T) {
 	}
 	for _, evidence := range scorecard.Reliability {
 		if evidence.VerificationCount != 0 || evidence.UnexpectedFailures != 0 || len(evidence.Incidents) != 0 {
-			t.Fatalf("main reliability %s = %+v, want metering-window results excluded", evidence.WorkerID, evidence)
+			t.Fatalf("main reliability %s = %+v, want metering-run results excluded", evidence.WorkerID, evidence)
 		}
 	}
 
@@ -165,7 +164,141 @@ func TestMeteringWindowResultsExcludedFromScoringAndComparison(t *testing.T) {
 		t.Fatalf("buildRequestedDeploymentComparison() error = %v", err)
 	}
 	if comparison.Base == nil || comparison.Base.FailedWorkers != 0 || comparison.FailDelta != 0 || len(comparison.ImprovedWorkers) != 0 {
-		t.Fatalf("comparison base failed=%v failDelta=%d improved=%+v, want metering-window failure excluded", comparison.Base, comparison.FailDelta, comparison.ImprovedWorkers)
+		t.Fatalf("comparison base failed=%v failDelta=%d improved=%+v, want metering-run failure excluded", comparison.Base, comparison.FailDelta, comparison.ImprovedWorkers)
+	}
+}
+
+func TestMeteringRunRuntimeErrorsDoNotLeakIntoLaterRun(t *testing.T) {
+	db := openTestDB(t)
+	deployment := model.Deployment{GitSHA: "soak", LitestreamSHA: "litestream", WorkloadSHA: "generator", Source: "main", ImageRef: "image", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&deployment); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment = *stored
+	worker := model.Worker{ID: "meter-churn", Name: "meter-churn", Source: "main", ProfileName: "high-volume", ProfileConfig: "{}", FlyMachineID: "machine"}
+	createTestWorker(t, db, worker)
+	direct := fixtureRun(worker, deployment)
+	metered := meteringRun(direct)
+	metered.RunID = "metered"
+	direct.RunID = "direct"
+	for _, sample := range []struct {
+		run  reporting.WorkerIdentity
+		body string
+	}{
+		{metered, `{"litestream_snapshot_healthy":true,"workload_counters_present":true,"workload_counter_epoch":"e1","workload_attempts_total":20,"workload_mutations_total":10,"workload_errors_total":10,"maintenance_epoch":"m1","maintenance_observer_complete":true,"maintenance_observer_started_at":"2026-10-23T00:00:00Z","litestream_log_errors_total":4}`},
+		{direct, `{"litestream_snapshot_healthy":true,"workload_counters_present":true,"workload_counter_epoch":"e1","workload_attempts_total":30,"workload_mutations_total":27,"workload_errors_total":3}`},
+	} {
+		if err := db.RecordRuntimeEvidence(sample.run, json.RawMessage(sample.body), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	evidence, err := buildRunReliability(db, deployment, nil)
+	if err != nil || len(evidence) != 1 {
+		t.Fatalf("evidence=%+v err=%v", evidence, err)
+	}
+	if e := evidence[0]; e.WorkloadErrors != 3 || e.UnexpectedFailures != 3 || e.WorkloadAttempts != 30 {
+		t.Fatalf("errors/unexpected/attempts = %d/%d/%d, want 3/3/30 with metering run excluded", e.WorkloadErrors, e.UnexpectedFailures, e.WorkloadAttempts)
+	}
+}
+
+func TestMeteringRunFailuresDoNotPauseSource(t *testing.T) {
+	for _, metering := range []bool{false, true} {
+		db := openTestDB(t)
+		if err := db.UpsertReadyDeployment(&model.Deployment{GitSHA: "soak-sha", LitestreamSHA: "litestream-sha", ImageRef: "registry.fly.io/litestream-soak:soak-sha", Source: "main", Status: "ready"}); err != nil {
+			t.Fatal(err)
+		}
+		deployment, err := db.GetLatestDeployment("main")
+		if err != nil {
+			t.Fatal(err)
+		}
+		createTestWorker(t, db, model.Worker{ID: "worker-main-low-vol", Name: "worker-main-low-vol", Status: model.WorkerDegraded, Source: "main", GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA, ProfileName: "low-volume", ProfileConfig: "{}"})
+		createTestWorker(t, db, model.Worker{ID: "worker-main-read-heavy", Name: "worker-main-read-heavy", Status: model.WorkerRunning, Source: "main", GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA, ProfileName: "read-heavy", ProfileConfig: "{}"})
+
+		verifiedAt := time.Now().UTC().Add(time.Minute)
+		for _, age := range []time.Duration{40 * time.Second, 15 * time.Second} {
+			done := verifiedAt.Add(-age).Add(5 * time.Second)
+			mustRecordRunFixture(t, db, &model.Verification{WorkerID: "worker-main-low-vol", StartedAt: verifiedAt.Add(-age), CompletedAt: &done, Status: "failed", CheckType: "integrity", ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": context deadline exceeded`}, metering)
+		}
+		mustRecordRunFixture(t, db, &model.Verification{WorkerID: "worker-main-read-heavy", StartedAt: verifiedAt.Add(-10 * time.Second), CompletedAt: &verifiedAt, Status: "passed", CheckType: "integrity", Passed: true}, metering)
+
+		_, ok, err := failedSourcePauseCandidate(db, *deployment, FailedSourcePausePolicy{})
+		if err != nil {
+			t.Fatalf("metering=%v: failedSourcePauseCandidate() error = %v", metering, err)
+		}
+		if ok == metering {
+			t.Fatalf("metering=%v: failedSourcePauseCandidate() = %v, want %v", metering, ok, !metering)
+		}
+	}
+}
+
+func TestMeteringRunFailuresDoNotTriggerDormancy(t *testing.T) {
+	now := time.Now().UTC()
+	worker := model.Worker{ID: "worker-meter", CreatedAt: now.Add(-72 * time.Hour)}
+	for _, metering := range []bool{false, true} {
+		var verifications []model.Verification
+		for _, age := range []time.Duration{time.Hour, 12 * time.Hour, 30 * time.Hour} {
+			started := now.Add(-age)
+			completed := started.Add(10 * time.Second)
+			run := reporting.WorkerIdentity{RunID: "run", ProfileConfig: "{}"}
+			if metering {
+				run = meteringRun(run)
+			}
+			verifications = append(verifications, model.Verification{WorkerID: worker.ID, StartedAt: started, CompletedAt: &completed, Status: "failed", CheckType: "integrity", ErrorMessage: `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`, Run: run})
+		}
+		_, ok := detectDormancyCandidate(dormancyVerifications(worker, verifications), now, 24*time.Hour, 3)
+		if ok == metering {
+			t.Fatalf("metering=%v: dormancy candidate = %v, want %v", metering, ok, !metering)
+		}
+	}
+}
+
+func TestMeteringWindowMarkerRoundTripsThroughWorkerEnv(t *testing.T) {
+	m := &Manager{}
+	for _, metering := range []bool{false, true} {
+		env := m.workerEnv(model.Worker{ID: "meter-env"}, workload.Config{LoadMode: "synthetic", S3FaultProxyEnabled: metering, S3FaultProxyMode: "observe", MeteringWindow: metering})
+		effective, err := workerconfig.WorkloadFromEnvironment(env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if effective.MeteringWindow != metering || runInMeteringWindow(reporting.WorkerIdentity{ProfileConfig: effective.JSON()}) != metering {
+			t.Fatalf("metering=%v: effective profile %s lost the marker", metering, effective.JSON())
+		}
+	}
+}
+
+func meteringRun(run reporting.WorkerIdentity) reporting.WorkerIdentity {
+	run.ProfileConfig = workload.Config{S3FaultProxyEnabled: true, S3FaultProxyMode: "observe", MeteringWindow: true}.JSON()
+	run.ProfileHash = "metering"
+	return run
+}
+
+func mustRecordRunFixture(t *testing.T, db *model.DB, verification *model.Verification, metering bool) {
+	t.Helper()
+	worker, err := db.GetWorker(verification.WorkerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := db.GetLatestDeployment(worker.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.FlyMachineID == "" {
+		worker.FlyMachineID = "machine-" + worker.ID
+		if err := db.UpdateWorkerMachine(worker.ID, worker.FlyMachineID, worker.FlyVolumeID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	verification.Run = fixtureRun(*worker, *deployment)
+	if metering {
+		verification.Run = meteringRun(verification.Run)
+	}
+	verification.Attributed = true
+	if err := db.RecordVerification(verification); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -180,6 +180,9 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	if strings.TrimSpace(workloadCfg.S3FaultProxyMode) != "" {
 		env["S3_FAULT_PROXY_MODE"] = workloadCfg.S3FaultProxyMode
 	}
+	if workloadCfg.MeteringWindow {
+		env["SOAK_METERING_WINDOW"] = "true"
+	}
 	if workloadCfg.S3FaultProxyListenAddr != "" {
 		env["S3_FAULT_PROXY_LISTEN_ADDR"] = workloadCfg.S3FaultProxyListenAddr
 	}
@@ -442,7 +445,7 @@ func (m *Manager) evaluateDormancy(ctx context.Context, policy DormancyPolicy) {
 			slog.Error("Failed to list worker verifications for dormancy", "worker_id", worker.ID, "error", err)
 			continue
 		}
-		verifications = verificationsSince(verifications, dormancyEvaluationStart(worker))
+		verifications = dormancyVerifications(worker, verifications)
 
 		candidate, ok := detectDormancyCandidate(verifications, now, policy.Threshold, policy.MinFailures)
 		if !ok {
@@ -460,6 +463,11 @@ func (m *Manager) evaluateDormancy(ctx context.Context, policy DormancyPolicy) {
 			slog.Error("Failed to pause dormant worker", "worker_id", worker.ID, "error", err)
 		}
 	}
+}
+
+func dormancyVerifications(worker model.Worker, verifications []model.Verification) []model.Verification {
+	kept, _ := excludeMeteringRunVerifications(verificationsSince(verifications, dormancyEvaluationStart(worker)))
+	return kept
 }
 
 func dormancyEvaluationStart(worker model.Worker) time.Time {

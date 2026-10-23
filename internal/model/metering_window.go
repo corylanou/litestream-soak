@@ -22,13 +22,6 @@ type MeteringWindow struct {
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
 }
 
-func (w MeteringWindow) Contains(at time.Time) bool {
-	if at.Before(w.StartedAt) {
-		return false
-	}
-	return w.EndedAt == nil || at.Before(*w.EndedAt)
-}
-
 func (d *DB) SyncMeteringWindows(sources []string, now time.Time) error {
 	now = now.UTC()
 	listed := make(map[string]bool, len(sources))

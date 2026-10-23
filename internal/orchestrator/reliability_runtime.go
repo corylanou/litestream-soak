@@ -28,16 +28,12 @@ func applyRuntimeEvidence(db *model.DB, deployment model.Deployment, end *time.T
 	heartbeatMaintenance := make(map[string]reporting.MaintenanceEvidence)
 	seenEvents := make(map[string]bool)
 	maintenance := make(map[string]reporting.MaintenanceEvidence)
-	meteringWindows, err := db.ListMeteringWindows(deploymentScorecardSource(deployment))
-	if err != nil {
-		return err
-	}
 	windows := []model.EvidenceWindow{{DeploymentID: deployment.ID, Start: deployment.StartedAt, End: end}}
 	return db.EachRuntimeEvidenceCompact(deploymentScorecardSource(deployment), deployment.ID, windows, func(record model.RuntimeEvidence) error {
 		if record.Run.DeploymentID == 0 && (record.ReceivedAt.Before(deployment.StartedAt) || (end != nil && record.ReceivedAt.After(*end))) {
 			return nil
 		}
-		if meteringWindowsContain(meteringWindows, record.ReceivedAt) {
+		if runInMeteringWindow(record.Run) {
 			return nil
 		}
 		var eventIdentity struct {

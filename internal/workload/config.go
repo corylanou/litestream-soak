@@ -37,6 +37,7 @@ type Config struct {
 	S3Concurrency                             int     `json:"s3_concurrency,omitempty"`
 	S3FaultProxyEnabled                       bool    `json:"s3_fault_proxy_enabled,omitempty"`
 	S3FaultProxyMode                          string  `json:"s3_fault_proxy_mode,omitempty"`
+	MeteringWindow                            bool    `json:"metering_window,omitempty"`
 	S3FaultProxyListenAddr                    string  `json:"s3_fault_proxy_listen_addr,omitempty"`
 	S3FaultProxyMinContentLength              int64   `json:"s3_fault_proxy_min_content_length,omitempty"`
 	S3FaultProxyResetAfterBytes               int64   `json:"s3_fault_proxy_reset_after_bytes,omitempty"`

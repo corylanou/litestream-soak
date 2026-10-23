@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
+	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
 func meteringWindowSources() []string {
@@ -31,7 +33,11 @@ func withMeteringWindowObserveProxy(workers []DesiredWorker) []DesiredWorker {
 		return workers
 	}
 	for i := range workers {
-		if !slices.Contains(sources, workers[i].Source) || workers[i].Workload.S3FaultProxyEnabled {
+		if !slices.Contains(sources, workers[i].Source) {
+			continue
+		}
+		workers[i].Workload.MeteringWindow = true
+		if workers[i].Workload.S3FaultProxyEnabled {
 			continue
 		}
 		workers[i].Workload.S3FaultProxyEnabled = true
@@ -40,25 +46,23 @@ func withMeteringWindowObserveProxy(workers []DesiredWorker) []DesiredWorker {
 	return workers
 }
 
-func meteringWindowsContain(windows []model.MeteringWindow, at time.Time) bool {
-	for _, window := range windows {
-		if window.Contains(at) {
-			return true
-		}
+func runInMeteringWindow(run reporting.WorkerIdentity) bool {
+	if !strings.Contains(run.ProfileConfig, `"metering_window"`) {
+		return false
 	}
-	return false
+	cfg, err := workload.ParseConfig(run.ProfileConfig)
+	return err == nil && cfg.MeteringWindow
 }
 
-func excludeMeteringWindowVerifications(verifications []model.Verification, windows []model.MeteringWindow) ([]model.Verification, int) {
-	if len(windows) == 0 {
+func excludeMeteringRunVerifications(verifications []model.Verification) ([]model.Verification, int) {
+	if !slices.ContainsFunc(verifications, func(verification model.Verification) bool { return runInMeteringWindow(verification.Run) }) {
 		return verifications, 0
 	}
 	kept := make([]model.Verification, 0, len(verifications))
 	for _, verification := range verifications {
-		if at, ok := verificationObservedAt(verification); ok && meteringWindowsContain(windows, at) {
-			continue
+		if !runInMeteringWindow(verification.Run) {
+			kept = append(kept, verification)
 		}
-		kept = append(kept, verification)
 	}
 	return kept, len(verifications) - len(kept)
 }

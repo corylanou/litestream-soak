@@ -1387,6 +1387,7 @@ func releaseQualityActionableAttentionFailures(
 		if err != nil {
 			return nil, err
 		}
+		verifications, _ = excludeMeteringRunVerifications(verifications)
 		environmental := environmentalVerificationIDs(verifications, policy)
 		for _, verification := range verifications {
 			if verification.StartedAt.Before(deployment.StartedAt.UTC()) {
@@ -1472,7 +1473,8 @@ func singleWorkerFailureCorroborated(db *model.DB, failures []actionableAttentio
 			if err != nil {
 				return false, err
 			}
-			corroborated, decided := walkConsecutiveActionable(verifications, deployment, policy, minConsecutive)
+			scored, _ := excludeMeteringRunVerifications(verifications)
+			corroborated, decided := walkConsecutiveActionable(scored, deployment, policy, minConsecutive)
 			if corroborated {
 				return true, nil
 			}
