@@ -119,6 +119,9 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		} else if payload.FailureClassification == nil {
 			payload.FailureClassification = &computed
 		}
+		if payload.FailureClassification.RestoreMode == "" {
+			payload.FailureClassification.RestoreMode = payload.RestoreMode
+		}
 		vf = verificationFailure{
 			Stage:          payload.FailureClassification.Stage,
 			Signature:      payload.FailureClassification.Signature,

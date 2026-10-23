@@ -11,9 +11,10 @@ import (
 func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResult, retErr error) {
 	start := time.Now()
 	result = VerificationResult{
-		StartedAt: start.UTC(),
-		CheckType: v.cfg.VerifyType,
-		Status:    "running",
+		StartedAt:   start.UTC(),
+		CheckType:   v.cfg.VerifyType,
+		Status:      "running",
+		RestoreMode: restoreModeTXID,
 	}
 	defer func() {
 		RecordVerificationOutcome(result.Status, time.Since(start).Seconds())

@@ -237,6 +237,10 @@ func inferFailureSignature(stage, text, original string) string {
 		return "disk_capacity_full"
 	case stage == "sync" && isS3TransportFailure(text):
 		return "s3_transport"
+	case strings.Contains(text, "latest restore behind boundary"):
+		return "latest_restore_behind_boundary"
+	case strings.Contains(text, "latest restore txid unavailable"):
+		return "latest_restore_txid_unavailable"
 	case strings.Contains(text, "wait for db sync executor"):
 		return "litestream_db_sync_executor_timeout"
 	case strings.Contains(text, "litestream.sock") && strings.Contains(text, "too many open files"):

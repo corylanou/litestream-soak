@@ -41,6 +41,8 @@ type VerificationResult struct {
 	SyncReplicatedTXID                uint64
 	BoundaryTXID                      uint64
 	CheckpointResidualBusy            bool
+	RestoreMode                       string
+	RestoreModeFallback               string
 }
 
 type verificationStepMetadataError struct {
@@ -86,6 +88,7 @@ type Verifier struct {
 	onStart            func(context.Context, VerificationResult)
 	objectStore        *objectStoreMeter
 
+	restoreCycles         int
 	checkpointAttempts    int
 	checkpointRetryDelay  time.Duration
 	checkpointBusyTimeout time.Duration
@@ -113,6 +116,7 @@ func NewVerifier(cfg Config, pausers ...loadPauser) *Verifier {
 		logicalWorkloadSHA:    workloadSHA,
 		cfg:                   cfg,
 		pausers:               pausers,
+		restoreCycles:         restoreModeOffset(cfg.ProfileName),
 		httpClient:            newIPCClient(cfg.SocketPath, cfg.verifySyncTimeout()+30*time.Second),
 		checkpointAttempts:    3,
 		checkpointRetryDelay:  2 * time.Second,
@@ -142,14 +146,15 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 
 	start := time.Now()
 	result = VerificationResult{
-		StartedAt: start.UTC(),
-		CheckType: v.cfg.VerifyType,
-		Status:    "running",
+		StartedAt:   start.UTC(),
+		CheckType:   v.cfg.VerifyType,
+		Status:      "running",
+		RestoreMode: v.nextRestoreMode(),
 	}
 	defer func() {
 		RecordVerificationOutcome(result.Status, time.Since(start).Seconds())
 	}()
-	slog.Info("Starting verification cycle")
+	slog.Info("Starting verification cycle", "restore_mode", result.RestoreMode)
 	if v.onStart != nil {
 		v.onStart(ctx, result)
 	}
@@ -686,6 +691,25 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		return false, err
 	}
 	result.BoundaryTXID = source.txid
+	mode := result.RestoreMode
+	if mode == "" {
+		mode = restoreModeTXID
+	}
+	var target time.Time
+	if mode == restoreModeTimestamp {
+		boundaryAt, ok := boundaryLTXTimestamp(sourcePath, source.txid)
+		if ok {
+			target = boundaryAt.Add(time.Nanosecond)
+		} else {
+			mode = restoreModeTXID
+			result.RestoreModeFallback = restoreModeFallbackNoLTXBoundary
+		}
+	}
+	result.RestoreMode = mode
+	v.logicalEvidence += " restore_mode=" + mode
+	if result.RestoreModeFallback != "" {
+		v.logicalEvidence += " restore_mode_fallback=" + result.RestoreModeFallback
+	}
 	configPath, cleanupConfig, err := v.validateConfigPath(sourcePath)
 	if err != nil {
 		return false, err
@@ -693,7 +717,7 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 	defer cleanupConfig()
 	var restoreEvidence restoreOutput
 	restoreErr := v.runValidationPhase(ctx, "restore", v.cfg.verificationPhaseBudget("restore", sourceSize), func(phaseCtx context.Context) error {
-		args := []string{"restore", "-config", configPath, "-txid", formatTXID(source.txid), "-o", restoredPath, sourcePath}
+		args := restoreArgs(configPath, mode, source.txid, target, restoredPath, sourcePath)
 		cmd := exec.CommandContext(phaseCtx, "litestream", args...)
 		if v.cfg.ReplicaType == "s3" {
 			proxyEndpoint := v.cfg.S3FaultProxyEndpoint
@@ -709,6 +733,10 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		output := []byte(restoreEvidence.text())
 		v.objectStore.recordRestoreRequests(restoreEvidence.requests)
 		slog.Info("Validate output", "output", string(output), "restore_replan_count", restoreEvidence.replans)
+		if err == nil && mode == restoreModeLatest {
+			v.logicalEvidence += fmt.Sprintf(" restore_boundary=latest restored_txid=%016x", restoreEvidence.planTXID)
+			return nil
+		}
 		if err == nil {
 			v.logicalEvidence += " restore_boundary=pinned"
 			return nil
@@ -734,6 +762,14 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		return checkRestoredIntegrity(phaseCtx, restoredPath)
 	}); err != nil {
 		return false, err
+	}
+	if mode == restoreModeLatest {
+		if err := v.runValidationPhase(ctx, "latest_txid", v.cfg.verificationPhaseBudget("latest_txid", sourceSize), func(context.Context) error {
+			return checkLatestRestoreTXID(restoreEvidence.planTXID, source.txid)
+		}); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	if err := v.runValidationPhase(ctx, "compare", v.cfg.verificationPhaseBudget("compare", sourceSize), func(phaseCtx context.Context) error {
 		return v.compareRestoredLogical(phaseCtx, source.logicalSnapshot, restoredPath)

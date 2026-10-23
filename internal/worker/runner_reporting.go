@@ -159,6 +159,8 @@ func (r *Runner) sendVerification(ctx context.Context, result VerificationResult
 		ReplicaLevels:         replicaLevels,
 		FailureClassification: r.failureClassification(result),
 		FailureDebug:          failureDebug,
+		RestoreMode:           result.RestoreMode,
+		RestoreModeFallback:   result.RestoreModeFallback,
 		RuntimePayload:        snapshot.RuntimePayload,
 	}); err != nil {
 		slog.Warn("Failed to send verification report", "error", err)
@@ -182,6 +184,7 @@ func (r *Runner) failureClassification(result VerificationResult) *reporting.Fai
 	}
 	snapshot := r.currentSnapshot()
 	classification := reporting.ClassifyVerificationFailureWithRuntime(result.CheckType, result.ErrorMessage, r.cfg.ProfileName, &snapshot.RuntimePayload, result.CompletedAt)
+	classification.RestoreMode = result.RestoreMode
 	if classification.ObjectStore != nil {
 		classification.ObjectStore.Bucket = firstNonEmpty(classification.ObjectStore.Bucket, r.cfg.S3Bucket)
 		classification.ObjectStore.Prefix = firstNonEmpty(classification.ObjectStore.Prefix, strings.Trim(strings.TrimPrefix(r.cfg.S3Path, "/"), "/"))

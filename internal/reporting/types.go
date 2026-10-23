@@ -208,6 +208,8 @@ type VerificationPayload struct {
 	ReplicaLevels         *ReplicaLevelReport    `json:"replica_levels,omitempty"`
 	FailureClassification *FailureClassification `json:"failure_classification,omitempty"`
 	FailureDebug          *FailureDebugSnapshot  `json:"failure_debug,omitempty"`
+	RestoreMode           string                 `json:"restore_mode,omitempty"`
+	RestoreModeFallback   string                 `json:"restore_mode_fallback,omitempty"`
 	RuntimePayload
 }
 
@@ -429,6 +431,7 @@ type FailureClassification struct {
 	Signature   string              `json:"signature,omitempty"`
 	ObjectStore *ObjectStoreFailure `json:"object_store,omitempty"`
 	Restore     *RestoreFailure     `json:"restore,omitempty"`
+	RestoreMode string              `json:"restore_mode,omitempty"`
 }
 
 type ObjectStoreFailure struct {
