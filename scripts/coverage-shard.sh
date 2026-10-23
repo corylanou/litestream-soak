@@ -170,6 +170,10 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   sleep "${COVERAGE_SAMPLE_SECONDS:-30}"
 done
 
+if [ "$status" -eq 0 ] && ! kill -0 "$worker_pid" 2>/dev/null; then
+  printf 'worker exited before the shard duration elapsed\n' >&2
+  status=1
+fi
 if kill -0 "$worker_pid" 2>/dev/null; then
   kill -TERM "$worker_pid" 2>/dev/null || true
   for _ in $(seq 1 60); do
