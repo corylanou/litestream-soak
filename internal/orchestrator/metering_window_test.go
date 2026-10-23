@@ -416,6 +416,24 @@ func TestMeteredHistoryDoesNotHideRealPauseFailures(t *testing.T) {
 	}
 }
 
+func TestRunInMeteringWindowRequiresBooleanTrue(t *testing.T) {
+	for config, want := range map[string]bool{
+		`{"metering_window":true}`:   true,
+		`{"metering_window" : true}`: true,
+		`{"metering_window":"true"}`: false,
+		`{"metering_window":1}`:      false,
+		`{"metering_window":false}`:  false,
+		`{"metering_window":null}`:   false,
+		`[true]`:                     false,
+		`not json`:                   false,
+		``:                           false,
+	} {
+		if got := runInMeteringWindow(reporting.WorkerIdentity{ProfileConfig: config}); got != want {
+			t.Fatalf("runInMeteringWindow(%q) = %v, want %v", config, got, want)
+		}
+	}
+}
+
 func TestMeteredHistoryDoesNotHideRealScorecardResult(t *testing.T) {
 	db := openTestDB(t)
 	if err := db.UpsertReadyDeployment(&model.Deployment{GitSHA: "soak-sha", LitestreamSHA: "litestream-sha", ImageRef: "registry.fly.io/litestream-soak:soak-sha", Source: "main", Status: "ready"}); err != nil {
@@ -426,6 +444,9 @@ func TestMeteredHistoryDoesNotHideRealScorecardResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	createTestWorker(t, db, model.Worker{ID: "worker-main-low-vol", Name: "worker-main-low-vol", Status: model.WorkerRunning, Source: "main", GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA, ProfileName: "low-volume", ProfileConfig: "{}"})
+	if err := db.SyncMeteringWindows([]string{"main"}, deployment.StartedAt); err != nil {
+		t.Fatal(err)
+	}
 	passedAt := deployment.StartedAt.Add(time.Second).UTC()
 	mustRecordRunFixture(t, db, &model.Verification{WorkerID: "worker-main-low-vol", StartedAt: passedAt, CompletedAt: &passedAt, Status: "passed", CheckType: "integrity", Passed: true}, false)
 	for i := range 260 {

@@ -165,7 +165,7 @@ func (d *DB) RecordVerification(v *Verification) error {
 
 const nonMeteringRunClause = `CASE WHEN json_valid(run_identity_json) THEN
 	CASE WHEN json_valid(json_extract(run_identity_json, '$.profile_config')) THEN
-		COALESCE(json_extract(json_extract(run_identity_json, '$.profile_config'), '$.metering_window'), 0)
+		COALESCE(json_type(json_extract(run_identity_json, '$.profile_config'), '$.metering_window'), '') = 'true'
 	ELSE 0 END
 ELSE 0 END = 0`
 

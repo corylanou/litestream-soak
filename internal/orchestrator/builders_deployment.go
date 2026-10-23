@@ -307,6 +307,23 @@ func comparisonOutcomeKey(outcome DeploymentWorkerOutcome) string {
 	return firstNonEmpty(strings.TrimSpace(outcome.Profile), strings.TrimSpace(outcome.WorkerID), strings.TrimSpace(outcome.Name))
 }
 
+func scorecardVerifications(db *model.DB, workerID string, deploymentID int, sourceMetered bool) ([]model.Verification, int, error) {
+	if !sourceMetered {
+		verifications, err := db.ListVerifications(workerID, 256)
+		if err != nil {
+			return nil, 0, err
+		}
+		verifications, excluded := excludeMeteringRunVerifications(verifications)
+		return verifications, excluded, nil
+	}
+	verifications, err := db.ListVerificationsExcludingMeteringRuns(workerID, 256)
+	if err != nil {
+		return nil, 0, err
+	}
+	excluded, err := db.CountMeteringRunVerifications(workerID, deploymentID)
+	return verifications, excluded, err
+}
+
 func buildDeploymentScorecard(db *model.DB, deployment model.Deployment, windowEnd *time.Time) (DeploymentScorecard, error) {
 	workers, err := deploymentScorecardWorkers(db, deployment)
 	if err != nil {
@@ -321,13 +338,13 @@ func buildDeploymentScorecard(db *model.DB, deployment model.Deployment, windowE
 		Outcomes:     make([]DeploymentWorkerOutcome, 0, len(workers)),
 	}
 
+	meteringWindows, err := db.ListMeteringWindows(deploymentScorecardSource(deployment))
+	if err != nil {
+		return DeploymentScorecard{}, err
+	}
 	failureCounts := make(map[string]DeploymentFailureCount)
 	for _, worker := range workers {
-		verifications, err := db.ListVerificationsExcludingMeteringRuns(worker.ID, 256)
-		if err != nil {
-			return DeploymentScorecard{}, err
-		}
-		excluded, err := db.CountMeteringRunVerifications(worker.ID, deployment.ID)
+		verifications, excluded, err := scorecardVerifications(db, worker.ID, deployment.ID, len(meteringWindows) > 0)
 		if err != nil {
 			return DeploymentScorecard{}, err
 		}

@@ -60,6 +60,9 @@ func TestListVerificationsExcludingMeteringRunsSkipsMeteredRows(t *testing.T) {
 	record(base, `{"load_mode":"synthetic"}`)
 	record(base.Add(time.Minute), `not json`)
 	record(base.Add(2*time.Minute), ``)
+	for i, malformed := range []string{`{"metering_window":"true"}`, `{"metering_window":1}`, `{"metering_window":false}`, `{"metering_window":null}`, `[true]`} {
+		record(base.Add(-time.Duration(i+1)*time.Minute), malformed)
+	}
 	for i := range 30 {
 		record(base.Add(time.Hour+time.Duration(i)*time.Minute), `{"s3_fault_proxy_mode":"observe","metering_window":true}`)
 	}
@@ -75,7 +78,7 @@ func TestListVerificationsExcludingMeteringRunsSkipsMeteredRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 3 {
-		t.Fatalf("got %d rows, want 3 non-metered rows", len(all))
+	if len(all) != 8 {
+		t.Fatalf("got %d rows, want 8 rows without a boolean true metering marker", len(all))
 	}
 }
