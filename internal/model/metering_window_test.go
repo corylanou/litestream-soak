@@ -66,6 +66,7 @@ func TestListVerificationsExcludingMeteringRunsSkipsMeteredRows(t *testing.T) {
 	for i := range 30 {
 		record(base.Add(time.Hour+time.Duration(i)*time.Minute), `{"s3_fault_proxy_mode":"observe","metering_window":true}`)
 	}
+	record(base.Add(2*time.Hour), `{"metering_window":true,"write_rate":"invalid"}`)
 
 	got, err := db.ListVerificationsExcludingMeteringRuns("w-mixed", 2)
 	if err != nil {

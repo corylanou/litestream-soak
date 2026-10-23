@@ -418,15 +418,16 @@ func TestMeteredHistoryDoesNotHideRealPauseFailures(t *testing.T) {
 
 func TestRunInMeteringWindowRequiresBooleanTrue(t *testing.T) {
 	for config, want := range map[string]bool{
-		`{"metering_window":true}`:   true,
-		`{"metering_window" : true}`: true,
-		`{"metering_window":"true"}`: false,
-		`{"metering_window":1}`:      false,
-		`{"metering_window":false}`:  false,
-		`{"metering_window":null}`:   false,
-		`[true]`:                     false,
-		`not json`:                   false,
-		``:                           false,
+		`{"metering_window":true}`:                        true,
+		`{"metering_window" : true}`:                      true,
+		`{"metering_window":true,"write_rate":"invalid"}`: true,
+		`{"metering_window":"true"}`:                      false,
+		`{"metering_window":1}`:                           false,
+		`{"metering_window":false}`:                       false,
+		`{"metering_window":null}`:                        false,
+		`[true]`:                                          false,
+		`not json`:                                        false,
+		``:                                                false,
 	} {
 		if got := runInMeteringWindow(reporting.WorkerIdentity{ProfileConfig: config}); got != want {
 			t.Fatalf("runInMeteringWindow(%q) = %v, want %v", config, got, want)

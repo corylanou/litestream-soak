@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"os"
 	"slices"
 	"strings"
@@ -8,7 +9,6 @@ import (
 
 	"github.com/corylanou/litestream-soak/internal/model"
 	"github.com/corylanou/litestream-soak/internal/reporting"
-	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
 func meteringWindowSources() []string {
@@ -50,8 +50,13 @@ func runInMeteringWindow(run reporting.WorkerIdentity) bool {
 	if !strings.Contains(run.ProfileConfig, `"metering_window"`) {
 		return false
 	}
-	cfg, err := workload.ParseConfig(run.ProfileConfig)
-	return err == nil && cfg.MeteringWindow
+	var marker struct {
+		MeteringWindow json.RawMessage `json:"metering_window"`
+	}
+	if err := json.Unmarshal([]byte(run.ProfileConfig), &marker); err != nil {
+		return false
+	}
+	return string(marker.MeteringWindow) == "true"
 }
 
 func excludeMeteringRunVerifications(verifications []model.Verification) ([]model.Verification, int) {
