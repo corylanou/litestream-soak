@@ -86,8 +86,15 @@ type Config struct {
 	DiskFullRecoveryTimeout    time.Duration
 
 	// Replica config
-	ReplicaType string // "file" or "s3"
-	ReplicaPath string // for file:// replicas (local directory)
+	ReplicaBackend string
+	ReplicaType    string // "file" or "s3"
+	ReplicaPath    string // for file:// replicas (local directory)
+	ArtifactS3     s3Store
+
+	MinIOBinary       string
+	MinIOAddr         string
+	MinIODataDir      string
+	MinIOReadyTimeout time.Duration
 
 	// S3/Tigris config (only used when ReplicaType == "s3")
 	S3Bucket                                  string
@@ -203,8 +210,13 @@ func DefaultConfig() Config {
 		DiskFullNoProgressWindow: 10 * time.Minute,
 		DiskFullRecoveryTimeout:  10 * time.Minute,
 
-		ReplicaType: "file",
-		ReplicaPath: "/data/replicas",
+		ReplicaBackend: workload.ReplicaBackendTigris,
+		ReplicaType:    "file",
+		ReplicaPath:    "/data/replicas",
+
+		MinIOBinary:       "minio",
+		MinIOAddr:         "127.0.0.1:9100",
+		MinIOReadyTimeout: time.Minute,
 
 		S3Endpoint: "https://fly.storage.tigris.dev",
 		S3Path:     "soak",
@@ -666,6 +678,9 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 		c.DiskFullRecoveryTimeout = d
 	}
 
+	if v := getenv("REPLICA_BACKEND"); v != "" {
+		c.ReplicaBackend = workload.NormalizeReplicaBackend(v)
+	}
 	if v := getenv("REPLICA_TYPE"); v != "" {
 		c.ReplicaType = v
 	}
@@ -945,6 +960,9 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 		}
 	}
 
+	if err := applyReplicaBackend(&c, getenv("REPLICA_PATH") != ""); err != nil {
+		return c, err
+	}
 	if err := loadChurnConfig(&c, getenv); err != nil {
 		return c, err
 	}
@@ -1165,6 +1183,9 @@ func (c Config) WorkloadConfig() workload.Config {
 		ReplayDataURL:            c.ReplayDataURL,
 		ReplaySpeed:              c.ReplaySpeed,
 		ReplayLoop:               c.ReplayLoop,
+	}
+	if backend := workload.NormalizeReplicaBackend(c.ReplicaBackend); backend != workload.ReplicaBackendTigris {
+		cfg.ReplicaBackend = backend
 	}
 	if c.L1CompactionInterval > 0 {
 		cfg.L1CompactionInterval = c.L1CompactionInterval.String()
