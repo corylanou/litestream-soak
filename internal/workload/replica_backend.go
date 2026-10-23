@@ -3,10 +3,17 @@ package workload
 import "strings"
 
 const (
-	ReplicaBackendTigris       = "tigris"
-	ReplicaBackendMinIOSidecar = "minio-sidecar"
-	ReplicaBackendFile         = "file"
+	ReplicaBackendTigris = "tigris"
+	ReplicaBackendMinIO  = "minio"
+	ReplicaBackendFile   = "file"
+	ReplicaBackendSFTP   = "sftp"
+	ReplicaBackendNATS   = "nats"
+	ReplicaBackendWebDAV = "webdav"
 )
+
+func ReplicaBackends() []string {
+	return []string{ReplicaBackendTigris, ReplicaBackendMinIO, ReplicaBackendFile, ReplicaBackendSFTP, ReplicaBackendNATS, ReplicaBackendWebDAV}
+}
 
 func NormalizeReplicaBackend(backend string) string {
 	backend = strings.ToLower(strings.TrimSpace(backend))
@@ -17,10 +24,12 @@ func NormalizeReplicaBackend(backend string) string {
 }
 
 func ReplicaTypeForBackend(backend string) string {
-	if NormalizeReplicaBackend(backend) == ReplicaBackendFile {
-		return "file"
+	switch backend = NormalizeReplicaBackend(backend); backend {
+	case ReplicaBackendFile, ReplicaBackendSFTP, ReplicaBackendNATS, ReplicaBackendWebDAV:
+		return backend
+	default:
+		return "s3"
 	}
-	return "s3"
 }
 
 func (c Config) ReplicaBackendName() string {

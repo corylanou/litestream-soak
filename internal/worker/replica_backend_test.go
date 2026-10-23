@@ -10,19 +10,32 @@ import (
 	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
-func replicaBackendEnv(dataDir, backend string) map[string]string {
-	return map[string]string{
+func replicaBackendEnv(dataDir, backend string, extra map[string]string) map[string]string {
+	env := map[string]string{
 		"DATA_DIR":               dataDir,
 		"REPLICA_BACKEND":        backend,
 		"REPLICA_TYPE":           workload.ReplicaTypeForBackend(backend),
 		"S3_BUCKET":              "tigris-bucket",
 		"S3_ENDPOINT":            "https://fly.storage.tigris.dev",
-		"S3_PATH":                "soak/worker-main-minio/vol_1",
+		"S3_PATH":                "soak/worker-main/vol_1",
 		"AWS_ACCESS_KEY_ID":      "tigris-access",
 		"AWS_SECRET_ACCESS_KEY":  "tigris-secret",
 		"AWS_REGION":             "auto",
 		"S3_FAULT_PROXY_ENABLED": "true",
 	}
+	for key, value := range extra {
+		env[key] = value
+	}
+	return env
+}
+
+func loadReplicaBackendConfig(t *testing.T, env map[string]string) Config {
+	t.Helper()
+	cfg, err := configFromLookup(func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
 }
 
 func renderLitestreamConfig(t *testing.T, cfg Config) string {
@@ -35,120 +48,210 @@ func renderLitestreamConfig(t *testing.T, cfg Config) string {
 	return out.String()
 }
 
-func TestMinIOSidecarBackendTargetsLoopbackPathStyleReplica(t *testing.T) {
-	t.Parallel()
-
-	dataDir := t.TempDir()
-	env := replicaBackendEnv(dataDir, workload.ReplicaBackendMinIOSidecar)
-	cfg, err := configFromLookup(func(key string) string { return env[key] })
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if cfg.ReplicaType != "s3" {
-		t.Fatalf("ReplicaType = %q, want s3", cfg.ReplicaType)
-	}
-	if cfg.S3Endpoint != "http://127.0.0.1:9100" {
-		t.Fatalf("S3Endpoint = %q, want loopback MinIO endpoint", cfg.S3Endpoint)
-	}
-	if cfg.S3Bucket != minioSidecarBucket {
-		t.Fatalf("S3Bucket = %q, want %q", cfg.S3Bucket, minioSidecarBucket)
-	}
-	if cfg.S3AccessKey != "" || cfg.S3SecretKey != "" {
-		t.Fatal("MinIO replica must not reuse Tigris credentials")
-	}
-	if cfg.S3FaultProxyEnabled {
-		t.Fatal("S3 fault proxy must stay off for the MinIO sidecar backend")
-	}
-	if cfg.MinIODataDir != filepath.Join(dataDir, "minio") {
-		t.Fatalf("MinIODataDir = %q, want it on the worker volume", cfg.MinIODataDir)
-	}
-
-	store, ok := cfg.artifactStore()
-	if !ok || store.Bucket != "tigris-bucket" || store.Endpoint != "https://fly.storage.tigris.dev" || store.AccessKey != "tigris-access" || store.SecretKey != "tigris-secret" {
-		t.Fatalf("artifactStore() = %+v, %v; want Tigris store for profiles", store, ok)
-	}
-
-	config := renderLitestreamConfig(t, cfg)
-	for _, want := range []string{
-		"url: s3://" + minioSidecarBucket + "/soak/worker-main-minio/vol_1",
-		"endpoint: http://127.0.0.1:9100",
-		"force-path-style: true",
-	} {
-		if !strings.Contains(config, want) {
-			t.Errorf("litestream config missing %q:\n%s", want, config)
+func assertConfigContains(t *testing.T, config string, want ...string) {
+	t.Helper()
+	for _, line := range want {
+		if !strings.Contains(config, line) {
+			t.Errorf("litestream config missing %q:\n%s", line, config)
 		}
 	}
-	if strings.Contains(config, "tigris") {
-		t.Fatalf("litestream config must not reference Tigris:\n%s", config)
-	}
+}
 
+func assertConfigOmits(t *testing.T, config string, unwanted ...string) {
+	t.Helper()
+	for _, line := range unwanted {
+		if strings.Contains(config, line) {
+			t.Errorf("litestream config must not contain %q:\n%s", line, config)
+		}
+	}
+}
+
+func assertTigrisArtifactStore(t *testing.T, cfg Config) {
+	t.Helper()
+	store, ok := cfg.artifactStore()
+	if !ok || store.Bucket != "tigris-bucket" || store.Endpoint != "https://fly.storage.tigris.dev" || store.AccessKey != "tigris-access" || store.SecretKey != "tigris-secret" {
+		t.Fatalf("artifactStore() = bucket %q endpoint %q ok %v; want Tigris store for profiles", store.Bucket, store.Endpoint, ok)
+	}
+}
+
+func assertWorkloadBackend(t *testing.T, env map[string]string, want string) {
+	t.Helper()
 	workloadCfg, err := WorkloadFromEnvironment(env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if workloadCfg.ReplicaBackend != workload.ReplicaBackendMinIOSidecar {
-		t.Fatalf("WorkloadFromEnvironment ReplicaBackend = %q, want minio-sidecar", workloadCfg.ReplicaBackend)
+	if workloadCfg.ReplicaBackend != want {
+		t.Fatalf("WorkloadFromEnvironment ReplicaBackend = %q, want %q", workloadCfg.ReplicaBackend, want)
 	}
 	if workloadCfg.S3FaultProxyEnabled {
-		t.Fatal("WorkloadFromEnvironment must not report a fault proxy for the MinIO backend")
+		t.Fatal("WorkloadFromEnvironment must not report a fault proxy for a non-Tigris backend")
 	}
+}
+
+func TestMinIOBackendTargetsPathStyleEndpoint(t *testing.T) {
+	t.Parallel()
+
+	env := replicaBackendEnv(t.TempDir(), workload.ReplicaBackendMinIO, map[string]string{
+		"REPLICA_URL":               "http://127.0.0.1:9000",
+		"REPLICA_BUCKET":            "coverage",
+		"REPLICA_ACCESS_KEY_ID":     "minio-access",
+		"REPLICA_SECRET_ACCESS_KEY": "minio-secret",
+	})
+	cfg := loadReplicaBackendConfig(t, env)
+	if cfg.ReplicaType != "s3" || cfg.S3Endpoint != "http://127.0.0.1:9000" || cfg.S3Bucket != "coverage" {
+		t.Fatalf("MinIO replica = type %q endpoint %q bucket %q", cfg.ReplicaType, cfg.S3Endpoint, cfg.S3Bucket)
+	}
+	if cfg.S3AccessKey != "minio-access" || cfg.S3SecretKey != "minio-secret" {
+		t.Fatal("MinIO replica must use the MinIO credentials, not Tigris")
+	}
+	if cfg.S3FaultProxyEnabled {
+		t.Fatal("S3 fault proxy must stay off for the MinIO backend")
+	}
+	assertTigrisArtifactStore(t, cfg)
+
+	config := renderLitestreamConfig(t, cfg)
+	assertConfigContains(t, config, "- url: s3://coverage/soak/worker-main/vol_1", "endpoint: http://127.0.0.1:9000", "force-path-style: true")
+	assertConfigOmits(t, config, "tigris")
+	assertWorkloadBackend(t, env, workload.ReplicaBackendMinIO)
 }
 
 func TestFileBackendReplicatesToWorkerVolume(t *testing.T) {
 	t.Parallel()
 
 	dataDir := t.TempDir()
-	env := replicaBackendEnv(dataDir, workload.ReplicaBackendFile)
-	cfg, err := configFromLookup(func(key string) string { return env[key] })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.ReplicaType != "file" {
-		t.Fatalf("ReplicaType = %q, want file", cfg.ReplicaType)
-	}
-	if cfg.ReplicaPath != filepath.Join(dataDir, "replicas") {
-		t.Fatalf("ReplicaPath = %q, want it on the worker volume", cfg.ReplicaPath)
+	env := replicaBackendEnv(dataDir, workload.ReplicaBackendFile, nil)
+	cfg := loadReplicaBackendConfig(t, env)
+	if cfg.ReplicaType != "file" || cfg.ReplicaPath != filepath.Join(dataDir, "replicas") {
+		t.Fatalf("file replica = type %q path %q, want file on the worker volume", cfg.ReplicaType, cfg.ReplicaPath)
 	}
 	if cfg.S3FaultProxyEnabled {
 		t.Fatal("S3 fault proxy must stay off for the file backend")
 	}
-	store, ok := cfg.artifactStore()
-	if !ok || store.Bucket != "tigris-bucket" || store.AccessKey != "tigris-access" {
-		t.Fatalf("artifactStore() = %+v, %v; want Tigris store for profiles", store, ok)
+	assertTigrisArtifactStore(t, cfg)
+
+	config := renderLitestreamConfig(t, cfg)
+	assertConfigContains(t, config, "- path: "+filepath.Join(dataDir, "replicas"))
+	assertConfigOmits(t, config, "endpoint:", "url:")
+	assertWorkloadBackend(t, env, workload.ReplicaBackendFile)
+}
+
+func TestSFTPBackendGeneratesSFTPReplica(t *testing.T) {
+	t.Parallel()
+
+	env := replicaBackendEnv(t.TempDir(), workload.ReplicaBackendSFTP, map[string]string{
+		"REPLICA_URL":      "sftp://soak@127.0.0.1:2222/upload",
+		"REPLICA_PASSWORD": "sftp-secret",
+		"REPLICA_KEY_PATH": "/keys/id_ed25519",
+	})
+	cfg := loadReplicaBackendConfig(t, env)
+	if cfg.ReplicaType != "sftp" {
+		t.Fatalf("ReplicaType = %q, want sftp", cfg.ReplicaType)
+	}
+	assertTigrisArtifactStore(t, cfg)
+
+	config := renderLitestreamConfig(t, cfg)
+	assertConfigContains(t, config,
+		"- url: sftp://soak@127.0.0.1:2222/upload/soak/worker-main/vol_1",
+		"type: sftp",
+		"password: ${REPLICA_PASSWORD}",
+		"key-path: /keys/id_ed25519",
+	)
+	assertConfigOmits(t, config, "sftp-secret", "endpoint:", "force-path-style")
+	assertWorkloadBackend(t, env, workload.ReplicaBackendSFTP)
+
+	target, ok, err := litestreamConfigReplicaTarget(writeTestConfig(t, config))
+	if err != nil || !ok || target != "sftp://soak@127.0.0.1:2222/upload/soak/worker-main/vol_1" {
+		t.Fatalf("replica target = %q, %v, %v", target, ok, err)
+	}
+}
+
+func TestNATSBackendGeneratesObjectStoreReplica(t *testing.T) {
+	t.Parallel()
+
+	env := replicaBackendEnv(t.TempDir(), workload.ReplicaBackendNATS, map[string]string{
+		"REPLICA_URL": "nats://127.0.0.1:4222",
+	})
+	cfg := loadReplicaBackendConfig(t, env)
+	if cfg.ReplicaType != "nats" {
+		t.Fatalf("ReplicaType = %q, want nats", cfg.ReplicaType)
+	}
+	if got := cfg.NATSBuckets(); len(got) != 1 || got[0] != "soak-worker-main-vol_1" {
+		t.Fatalf("NATSBuckets() = %v, want the single DB bucket", got)
 	}
 
 	config := renderLitestreamConfig(t, cfg)
-	if !strings.Contains(config, "- path: "+filepath.Join(dataDir, "replicas")) {
-		t.Fatalf("litestream config missing file replica path:\n%s", config)
-	}
-	if strings.Contains(config, "endpoint:") {
-		t.Fatalf("file backend config must not have an S3 endpoint:\n%s", config)
+	assertConfigContains(t, config, "- url: nats://127.0.0.1:4222/soak-worker-main-vol_1", "type: nats")
+	assertConfigOmits(t, config, "password:", "endpoint:")
+	assertWorkloadBackend(t, env, workload.ReplicaBackendNATS)
+}
+
+func TestWebDAVBackendGeneratesWebDAVReplica(t *testing.T) {
+	t.Parallel()
+
+	env := replicaBackendEnv(t.TempDir(), workload.ReplicaBackendWebDAV, map[string]string{
+		"REPLICA_URL":      "webdav://soak@127.0.0.1:8080",
+		"REPLICA_PASSWORD": "webdav-secret",
+	})
+	cfg := loadReplicaBackendConfig(t, env)
+	if cfg.ReplicaType != "webdav" {
+		t.Fatalf("ReplicaType = %q, want webdav", cfg.ReplicaType)
 	}
 
-	workloadCfg, err := WorkloadFromEnvironment(env)
-	if err != nil {
-		t.Fatal(err)
+	config := renderLitestreamConfig(t, cfg)
+	assertConfigContains(t, config,
+		"- url: webdav://soak@127.0.0.1:8080/soak/worker-main/vol_1",
+		"type: webdav",
+		"webdav-password: ${REPLICA_PASSWORD}",
+	)
+	assertConfigOmits(t, config, "webdav-secret", "endpoint:")
+	assertWorkloadBackend(t, env, workload.ReplicaBackendWebDAV)
+}
+
+func TestRemoteBackendsSplitManyDBReplicas(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		backend string
+		url     string
+		want    string
+	}{
+		{backend: workload.ReplicaBackendSFTP, url: "sftp://soak@127.0.0.1:2222", want: "- url: sftp://soak@127.0.0.1:2222/soak/worker-main/vol_1/db-00002.db"},
+		{backend: workload.ReplicaBackendWebDAV, url: "webdav://127.0.0.1:8080", want: "- url: webdav://127.0.0.1:8080/soak/worker-main/vol_1/db-00002.db"},
+		{backend: workload.ReplicaBackendNATS, url: "nats://127.0.0.1:4222", want: "- url: nats://127.0.0.1:4222/soak-worker-main-vol_1-db-00002-db"},
 	}
-	if workloadCfg.ReplicaBackend != workload.ReplicaBackendFile {
-		t.Fatalf("WorkloadFromEnvironment ReplicaBackend = %q, want file", workloadCfg.ReplicaBackend)
+	for _, tt := range tests {
+		env := replicaBackendEnv(t.TempDir(), tt.backend, map[string]string{
+			"REPLICA_URL":   tt.url,
+			"NUM_DATABASES": "2",
+			"CONFIG_MODE":   "list",
+		})
+		cfg := loadReplicaBackendConfig(t, env)
+		assertConfigContains(t, renderLitestreamConfig(t, cfg), tt.want)
+	}
+}
+
+func TestReplicaBackendRequiresRemoteURL(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range []string{workload.ReplicaBackendMinIO, workload.ReplicaBackendSFTP, workload.ReplicaBackendNATS, workload.ReplicaBackendWebDAV} {
+		env := replicaBackendEnv(t.TempDir(), backend, nil)
+		if _, err := configFromLookup(func(key string) string { return env[key] }); err == nil || !strings.Contains(err.Error(), "REPLICA_URL") {
+			t.Errorf("%s configFromLookup() error = %v, want REPLICA_URL required", backend, err)
+		}
 	}
 }
 
 func TestTigrisBackendKeepsReplicaAndArtifactStoreTogether(t *testing.T) {
 	t.Parallel()
 
-	env := replicaBackendEnv(t.TempDir(), "")
-	cfg, err := configFromLookup(func(key string) string { return env[key] })
-	if err != nil {
-		t.Fatal(err)
-	}
+	env := replicaBackendEnv(t.TempDir(), "", nil)
+	cfg := loadReplicaBackendConfig(t, env)
 	if cfg.S3Endpoint != "https://fly.storage.tigris.dev" || cfg.S3Bucket != "tigris-bucket" || !cfg.S3FaultProxyEnabled {
-		t.Fatalf("tigris backend changed replica config: %+v", cfg)
+		t.Fatalf("tigris backend changed replica config: endpoint %q bucket %q", cfg.S3Endpoint, cfg.S3Bucket)
 	}
 	store, ok := cfg.artifactStore()
 	if !ok || store.Bucket != "tigris-bucket" {
-		t.Fatalf("artifactStore() = %+v, %v; want replica bucket", store, ok)
+		t.Fatalf("artifactStore() = %q, %v; want replica bucket", store.Bucket, ok)
 	}
 	workloadCfg, err := WorkloadFromEnvironment(env)
 	if err != nil {
@@ -162,7 +265,7 @@ func TestTigrisBackendKeepsReplicaAndArtifactStoreTogether(t *testing.T) {
 func TestUnknownReplicaBackendIsRejected(t *testing.T) {
 	t.Parallel()
 
-	env := replicaBackendEnv(t.TempDir(), "carrier-pigeon")
+	env := replicaBackendEnv(t.TempDir(), "carrier-pigeon", nil)
 	if _, err := configFromLookup(func(key string) string { return env[key] }); err == nil || !strings.Contains(err.Error(), "REPLICA_BACKEND") {
 		t.Fatalf("configFromLookup() error = %v, want unsupported REPLICA_BACKEND", err)
 	}
@@ -170,10 +273,10 @@ func TestUnknownReplicaBackendIsRejected(t *testing.T) {
 
 func TestProfileUploadUsesArtifactStoreForNonTigrisBackend(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.ReplicaBackend = workload.ReplicaBackendMinIOSidecar
+	cfg.ReplicaBackend = workload.ReplicaBackendMinIO
 	cfg.ReplicaType = "s3"
-	cfg.S3Bucket = minioSidecarBucket
-	cfg.S3Endpoint = "http://127.0.0.1:9100"
+	cfg.S3Bucket = "coverage"
+	cfg.S3Endpoint = "http://127.0.0.1:9000"
 	cfg.S3AccessKey = "minio-access"
 	cfg.S3SecretKey = "minio-secret"
 	cfg.ArtifactS3 = s3Store{Bucket: "tigris-bucket", Endpoint: "https://fly.storage.tigris.dev", AccessKey: "tigris-access", SecretKey: "tigris-secret"}
@@ -195,10 +298,19 @@ func TestProfileUploadUsesArtifactStoreForNonTigrisBackend(t *testing.T) {
 	body := string(raw)
 	for _, want := range []string{"--host=fly.storage.tigris.dev", "s3://tigris-bucket/", "AWS_ACCESS_KEY_ID=tigris-access"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("upload args missing %q: %s", want, body)
+			t.Errorf("upload args missing %q", want)
 		}
 	}
-	if strings.Contains(body, "127.0.0.1:9100") || strings.Contains(body, "minio-access") {
-		t.Fatalf("profile upload must not target MinIO: %s", body)
+	if strings.Contains(body, "127.0.0.1:9000") || strings.Contains(body, "minio-access") {
+		t.Fatal("profile upload must not target MinIO")
 	}
+}
+
+func writeTestConfig(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "litestream.yml")
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

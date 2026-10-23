@@ -24,7 +24,7 @@ func TestWorkerEnvSelectsReplicaBackend(t *testing.T) {
 		wantProxy   bool
 	}{
 		{backend: "", wantBackend: workload.ReplicaBackendTigris, wantType: "s3", wantProxy: true},
-		{backend: workload.ReplicaBackendMinIOSidecar, wantBackend: workload.ReplicaBackendMinIOSidecar, wantType: "s3"},
+		{backend: workload.ReplicaBackendSFTP, wantBackend: workload.ReplicaBackendSFTP, wantType: "sftp"},
 		{backend: workload.ReplicaBackendFile, wantBackend: workload.ReplicaBackendFile, wantType: "file"},
 	}
 	for _, tt := range tests {
@@ -56,7 +56,7 @@ func TestClearWorkerReplicaPrefixSkipsNonTigrisBackends(t *testing.T) {
 	defer server.Close()
 
 	manager := &Manager{replica: ReplicaConfig{Bucket: "bucket", Endpoint: server.URL, AccessKey: "access", SecretKey: "secret"}}
-	for _, backend := range []string{workload.ReplicaBackendMinIOSidecar, workload.ReplicaBackendFile} {
+	for _, backend := range []string{workload.ReplicaBackendSFTP, workload.ReplicaBackendFile} {
 		worker := model.Worker{ID: "worker", Name: "worker", FlyVolumeID: "vol_1", ProfileConfig: workload.Config{ReplicaBackend: backend}.JSON()}
 		if err := manager.clearWorkerReplicaPrefix(t.Context(), worker); err != nil {
 			t.Fatalf("%s clearWorkerReplicaPrefix() error = %v", backend, err)

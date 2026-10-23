@@ -80,6 +80,13 @@ dbs:
 {{- if eq .Replica.Type "file"}}
       - path: {{.Replica.Path}}
         sync-interval: {{.Replica.SyncInterval}}
+{{- else if .Replica.URL}}
+      - url: {{.Replica.URL}}
+        type: {{.Replica.Type}}
+        sync-interval: {{.Replica.SyncInterval}}
+{{- range .Replica.Extra}}
+        {{.}}
+{{- end}}
 {{- else}}
       - url: s3://{{.Replica.S3Bucket}}/{{.Replica.S3Path}}
         sync-interval: {{.Replica.SyncInterval}}
@@ -146,6 +153,8 @@ type litestreamConfigDB struct {
 type litestreamConfigReplica struct {
 	Type          string
 	Path          string
+	URL           string
+	Extra         []string
 	S3Bucket      string
 	S3Path        string
 	SyncInterval  string
@@ -241,6 +250,11 @@ func (m *litestreamManager) litestreamConfigReplica(dbPath string) litestreamCon
 	}
 	if m.cfg.ReplicaType == "file" {
 		replica.Path = strings.TrimPrefix(m.cfg.ReplicaURLForDB(dbPath), "file://")
+		return replica
+	}
+	if m.cfg.remoteReplicaType() {
+		replica.URL = m.cfg.ReplicaURLForDB(dbPath)
+		replica.Extra = m.cfg.remoteReplicaExtra()
 		return replica
 	}
 	replicaURL := strings.TrimPrefix(m.cfg.ReplicaURLForDB(dbPath), "s3://")

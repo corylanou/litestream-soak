@@ -13,8 +13,11 @@ func TestReplicaBackendDefaultsToTigris(t *testing.T) {
 	}{
 		{backend: "", want: ReplicaBackendTigris, replicaType: "s3", usesTigris: true},
 		{backend: " Tigris ", want: ReplicaBackendTigris, replicaType: "s3", usesTigris: true},
-		{backend: "minio-sidecar", want: ReplicaBackendMinIOSidecar, replicaType: "s3", usesTigris: false},
+		{backend: "minio", want: ReplicaBackendMinIO, replicaType: "s3", usesTigris: false},
 		{backend: "file", want: ReplicaBackendFile, replicaType: "file", usesTigris: false},
+		{backend: "sftp", want: ReplicaBackendSFTP, replicaType: "sftp", usesTigris: false},
+		{backend: "nats", want: ReplicaBackendNATS, replicaType: "nats", usesTigris: false},
+		{backend: "webdav", want: ReplicaBackendWebDAV, replicaType: "webdav", usesTigris: false},
 	}
 	for _, tt := range tests {
 		cfg := Config{ReplicaBackend: tt.backend}
@@ -30,15 +33,29 @@ func TestReplicaBackendDefaultsToTigris(t *testing.T) {
 	}
 }
 
+func TestReplicaBackendsListsEveryCoverageBackend(t *testing.T) {
+	t.Parallel()
+
+	got := map[string]bool{}
+	for _, backend := range ReplicaBackends() {
+		got[backend] = true
+	}
+	for _, want := range []string{ReplicaBackendTigris, ReplicaBackendMinIO, ReplicaBackendFile, ReplicaBackendSFTP, ReplicaBackendNATS, ReplicaBackendWebDAV} {
+		if !got[want] {
+			t.Errorf("ReplicaBackends() missing %q", want)
+		}
+	}
+}
+
 func TestReplicaBackendRoundTripsJSON(t *testing.T) {
 	t.Parallel()
 
-	parsed, err := ParseConfig(Config{ReplicaBackend: ReplicaBackendMinIOSidecar}.JSON())
+	parsed, err := ParseConfig(Config{ReplicaBackend: ReplicaBackendSFTP}.JSON())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.ReplicaBackend != ReplicaBackendMinIOSidecar {
-		t.Fatalf("ReplicaBackend = %q, want %q", parsed.ReplicaBackend, ReplicaBackendMinIOSidecar)
+	if parsed.ReplicaBackend != ReplicaBackendSFTP {
+		t.Fatalf("ReplicaBackend = %q, want %q", parsed.ReplicaBackend, ReplicaBackendSFTP)
 	}
 	if body := (Config{}).JSON(); body != "{}" {
 		t.Fatalf("default config JSON = %s, want {} so existing workers do not drift", body)
