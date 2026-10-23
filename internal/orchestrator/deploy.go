@@ -16,7 +16,7 @@ import (
 
 var validSHARe = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 var validImageRefRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`)
-var versionedWorkerImageRe = regexp.MustCompile(`(^|:)sha-([0-9a-fA-F]{7,40})(-pr-([1-9][0-9]*))?-ls-([0-9a-fA-F]{7,40})(@sha256:[0-9a-fA-F]{32,})?$`)
+var versionedWorkerImageRe = regexp.MustCompile(`(^|:)sha-([0-9a-fA-F]{7,40})(-pr-([1-9][0-9]*)|-((?:rc|rcbase)-[0-9a-f]{8}))?-ls-([0-9a-fA-F]{7,40})(@sha256:[0-9a-fA-F]{32,})?$`)
 
 const deploymentBuildTimeout = 10 * time.Minute
 
@@ -151,6 +151,14 @@ func (d *Deployer) recordDeploymentReady(ctx context.Context, source, sha, lites
 
 	if err := ctx.Err(); err != nil {
 		return model.Deployment{}, err
+	}
+	if isGateSource(source) {
+		pinnedImage, err := d.manager.pinRCGateDeployment(source, sha, litestreamSHA, imageRef, time.Now().UTC())
+		if err != nil {
+			return model.Deployment{}, err
+		}
+		imageRef = pinnedImage
+		target.ImageRef = pinnedImage
 	}
 
 	if err := d.db.UpsertReadyDeployment(&target); err != nil {
@@ -294,18 +302,24 @@ func validateReadyDeploymentTarget(deployment model.Deployment) error {
 
 	match := versionedWorkerImageRe.FindStringSubmatch(imageRef)
 	if match == nil {
+		if isGateSource(source) {
+			return fmt.Errorf("rc gate deployment image %s must carry a versioned %s label", imageRef, source)
+		}
 		return nil
 	}
 	if !strings.HasPrefix(strings.ToLower(gitSHA), strings.ToLower(match[2])) {
 		return fmt.Errorf("deployment image git sha %s does not match recorded git sha %s", match[2], gitSHA)
 	}
-	if !strings.HasPrefix(strings.ToLower(litestreamSHA), strings.ToLower(match[5])) {
-		return fmt.Errorf("deployment image litestream sha %s does not match recorded litestream sha %s", match[5], litestreamSHA)
+	if !strings.HasPrefix(strings.ToLower(litestreamSHA), strings.ToLower(match[6])) {
+		return fmt.Errorf("deployment image litestream sha %s does not match recorded litestream sha %s", match[6], litestreamSHA)
 	}
 
 	imageSource := "main"
-	if match[4] != "" {
+	switch {
+	case match[4] != "":
 		imageSource = "pr-" + match[4]
+	case match[5] != "":
+		imageSource = match[5]
 	}
 	if source != imageSource {
 		return fmt.Errorf("deployment image source %s does not match requested source %s", imageSource, source)

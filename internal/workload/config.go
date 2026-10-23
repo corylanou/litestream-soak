@@ -23,6 +23,10 @@ type Config struct {
 	VerifyType                                string  `json:"verify_type,omitempty"`
 	VerifySyncDegradedAfter                   string  `json:"verify_sync_degraded_after,omitempty"`
 	VerifySyncTimeout                         string  `json:"verify_sync_timeout,omitempty"`
+	VerifySourceSnapshotBudget                string  `json:"verify_source_snapshot_budget,omitempty"`
+	VerifyRestoreBudget                       string  `json:"verify_restore_budget,omitempty"`
+	VerifyIntegrityCheckBudget                string  `json:"verify_integrity_check_budget,omitempty"`
+	VerifyCompareBudget                       string  `json:"verify_compare_budget,omitempty"`
 	DiskFullNoProgressWindow                  string  `json:"disk_full_no_progress_window,omitempty"`
 	DiskFullRecoveryReserve                   int64   `json:"disk_full_recovery_reserve_bytes,omitempty"`
 	DiskFullRecoveryTimeout                   string  `json:"disk_full_recovery_timeout,omitempty"`
@@ -65,6 +69,8 @@ type Config struct {
 	TruncatePageN                             *int    `json:"truncate_page_n,omitempty"`
 	PinnedReaderHold                          string  `json:"pinned_reader_hold,omitempty"`
 	PinnedReaderPause                         string  `json:"pinned_reader_pause,omitempty"`
+	StressScenarios                           string  `json:"stress_scenarios,omitempty"`
+	StressScenarioPhase                       string  `json:"stress_scenario_phase,omitempty"`
 	VolumeSizeGB                              int     `json:"volume_size_gb,omitempty"`
 	MemoryMB                                  int     `json:"memory_mb,omitempty"`
 	CPUs                                      int     `json:"cpus,omitempty"`

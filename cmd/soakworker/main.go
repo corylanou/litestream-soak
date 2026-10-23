@@ -58,8 +58,15 @@ func main() {
 		cancel()
 	}()
 
-	runner := worker.NewRunner(cfg)
-	if err := runner.Run(ctx); err != nil {
+	run := func(runCtx context.Context, runCfg worker.Config) error {
+		return worker.NewRunner(runCfg).Run(runCtx)
+	}
+	if len(cfg.StressScenarios) > 0 {
+		err = worker.RunStressScenarioSchedule(ctx, cfg, run)
+	} else {
+		err = run(ctx, cfg)
+	}
+	if err != nil {
 		slog.Error("Worker failed", "error", err)
 		os.Exit(1)
 	}

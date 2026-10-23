@@ -25,6 +25,7 @@ const (
 	sourceTeardownOutcomeDestroyed      = "destroyed"
 	sourceTeardownOutcomeAlreadyStopped = "already_stopped"
 	sourceTeardownOutcomeFailed         = "failed"
+	sourceTeardownOutcomeKept           = "kept"
 )
 
 var (
@@ -452,7 +453,7 @@ func (m *Manager) evaluateSuccessTeardown(ctx context.Context, policy SuccessTea
 	}
 
 	for _, source := range sources {
-		if !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
+		if isGateSource(source) || !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
 			continue
 		}
 
@@ -714,7 +715,7 @@ func (m *Manager) evaluatePRMaxAge(ctx context.Context, policy PRMaxAgePolicy) {
 func successTeardownCandidate(db *model.DB, deployment model.Deployment, policy SuccessTeardownPolicy, now time.Time) (successTeardownEvaluation, bool, error) {
 	policy = normalizeSuccessTeardownPolicy(policy)
 	source := firstNonEmpty(strings.TrimSpace(deployment.Source), "main")
-	if !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
+	if isGateSource(source) || !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
 		return successTeardownEvaluation{}, false, nil
 	}
 	if deployment.StartedAt.IsZero() || now.Sub(deployment.StartedAt.UTC()) < policy.Threshold {
@@ -939,7 +940,7 @@ func failedSourcePauseTargets(db *model.DB, deployment model.Deployment) ([]mode
 func prMaxAgeCandidate(db *model.DB, deployment model.Deployment, policy PRMaxAgePolicy, now time.Time) (prMaxAgeEvaluation, bool, error) {
 	policy = normalizePRMaxAgePolicy(policy)
 	source := firstNonEmpty(strings.TrimSpace(deployment.Source), "main")
-	if !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
+	if isGateSource(source) || !sourceAllowedForPolicy(source, policy.SourceAllowlist) {
 		return prMaxAgeEvaluation{}, false, nil
 	}
 	if deployment.StartedAt.IsZero() || now.Sub(deployment.StartedAt.UTC()) < policy.Threshold {
@@ -1025,6 +1026,10 @@ func (m *Manager) archiveAndDestroyTerminalPRSource(ctx context.Context, reposit
 }
 
 func (m *Manager) archiveAndDestroySourceWithReason(ctx context.Context, source, reason, eventPrefix, summary string) (SourceTeardownResponse, error) {
+	return m.archiveAndDestroySourceWorkers(ctx, source, runArchiveTypeTeardown, reason, eventPrefix, summary, func(model.Worker) bool { return false }, false)
+}
+
+func (m *Manager) archiveAndDestroySourceWorkers(ctx context.Context, source, archiveType, reason, eventPrefix, summary string, keep func(model.Worker) bool, destroyStopped bool) (SourceTeardownResponse, error) {
 	source = strings.TrimSpace(source)
 	if source == "" {
 		return SourceTeardownResponse{}, errSourceRequired
@@ -1058,7 +1063,7 @@ func (m *Manager) archiveAndDestroySourceWithReason(ctx context.Context, source,
 	}
 
 	now := time.Now().UTC()
-	archive, created, err := m.archiveDeploymentRun(runArchiveTypeTeardown, reason, *deployment, &rollout, workers, summary, now)
+	archive, created, err := m.archiveDeploymentRun(archiveType, reason, *deployment, &rollout, workers, summary, now)
 	if err != nil {
 		return SourceTeardownResponse{}, fmt.Errorf("archive source teardown: %w", err)
 	}
@@ -1084,9 +1089,15 @@ func (m *Manager) archiveAndDestroySourceWithReason(ctx context.Context, source,
 			PreviousStatus: worker.Status,
 			Status:         worker.Status,
 		}
-		if worker.Status == model.WorkerStopped {
+		if worker.Status == model.WorkerStopped && !destroyStopped {
 			outcome.Outcome = sourceTeardownOutcomeAlreadyStopped
 			result.AlreadyStoppedWorkers++
+			result.Workers = append(result.Workers, outcome)
+			continue
+		}
+		if keep(worker) {
+			outcome.Outcome = sourceTeardownOutcomeKept
+			result.KeptWorkers++
 			result.Workers = append(result.Workers, outcome)
 			continue
 		}

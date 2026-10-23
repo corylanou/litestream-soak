@@ -66,6 +66,7 @@ func workerIdentity(cfg Config) reporting.WorkerIdentity {
 		AppName:       cfg.AppName,
 		MachineID:     cfg.MachineID,
 		Region:        cfg.Region,
+		Scenario:      cfg.stressScenario,
 	}
 }
 

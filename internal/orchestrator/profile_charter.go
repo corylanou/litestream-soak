@@ -93,6 +93,30 @@ var profileCharters = map[string]ProfileCharter{
 		GuardsAgainst: "Checkpoint starvation, WAL runaway, and wasted passive-checkpoint churn while readers pin the WAL for minutes.",
 		WhyItMatters:  "Guards the litestream#1339 fix and the SnapshotReader lock-release contract: long-lived readers are common in reporting workloads and must not degrade replication or stall writers.",
 	},
+	"gate-stress": {
+		Synopsis:      "RC gate stress lane: sustained overload with truncate-page-n: 0 from 8 writers at 600 writes/s of 2KB rows on a 2 CPU / 2 GB machine with a 10 GB volume.",
+		Stresses:      "WAL growth bounding and backlog drain under overload, run identically against the release candidate and its baseline.",
+		GuardsAgainst: "Release candidates that regress WAL bounding or backlog drain relative to the baseline commit.",
+		WhyItMatters:  "Gives each release candidate a paired overload signal against a pinned baseline instead of an open-ended full-fleet clone.",
+	},
+	"gate-manydb-500": {
+		Synopsis:      "RC gate fan-out lane: 500 databases in directory mode with 2% of them active, rotating the active set every 30 minutes from a fixed seed.",
+		Stresses:      "Directory discovery, per-database replication streams, and active-set rotation at 500-database fan-out.",
+		GuardsAgainst: "Release candidates that leak per-database resources or mishandle rotation at fan-out where the baseline does not.",
+		WhyItMatters:  "Database-per-tenant deployments are common; the gate proves a candidate holds up at fan-out before release.",
+	},
+	"gate-large-db": {
+		Synopsis:      "RC gate large-database lane: seeds a 6 GB database on a 40 GB volume with light steady writes and a 2-hour verification cadence with per-phase budgets.",
+		Stresses:      "Snapshot upload, multi-GB restore, integrity check, and logical compare on a database far larger than the rest of the fleet.",
+		GuardsAgainst: "Memory growth that scales with database size and restore regressions that only appear on multi-GB databases.",
+		WhyItMatters:  "Large-database regressions are invisible on the small default fleet databases; the gate checks them against the baseline before release.",
+	},
+	"gate-remote": {
+		Synopsis:      "RC gate remote lane: low-volume writes at 10 writes/s from ams on a 1 CPU / 1 GB machine.",
+		Stresses:      "Replication and restore across a long round trip to object storage.",
+		GuardsAgainst: "Release candidates that regress latency-sensitive replication paths outside the primary region.",
+		WhyItMatters:  "Users replicate from many regions; the gate keeps one remote pairing in every release decision.",
+	},
 	"many-dbs-100-list": {
 		Synopsis:      "Replicates 100 separate SQLite databases, each declared explicitly in the config (list mode).",
 		Stresses:      "Managing many simultaneous replication streams enumerated one by one.",

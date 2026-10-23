@@ -70,15 +70,19 @@ type Config struct {
 	LogicalMaxValueBytes int
 	LogicalTimeout       time.Duration
 
-	VerifyInterval           time.Duration
-	MonitorInterval          time.Duration
-	ReplicaLevelPollInterval time.Duration // how often replica LTX level counts are listed for metrics; 0 disables
-	VerifyType               string        // quick, integrity, checksum, full
-	VerifySyncDegradedAfter  time.Duration
-	VerifySyncTimeout        time.Duration
-	DiskFullNoProgressWindow time.Duration
-	DiskFullRecoveryReserve  int64
-	DiskFullRecoveryTimeout  time.Duration
+	VerifyInterval             time.Duration
+	MonitorInterval            time.Duration
+	ReplicaLevelPollInterval   time.Duration // how often replica LTX level counts are listed for metrics; 0 disables
+	VerifyType                 string        // quick, integrity, checksum, full
+	VerifySyncDegradedAfter    time.Duration
+	VerifySyncTimeout          time.Duration
+	VerifySourceSnapshotBudget time.Duration
+	VerifyRestoreBudget        time.Duration
+	VerifyIntegrityCheckBudget time.Duration
+	VerifyCompareBudget        time.Duration
+	DiskFullNoProgressWindow   time.Duration
+	DiskFullRecoveryReserve    int64
+	DiskFullRecoveryTimeout    time.Duration
 
 	// Replica config
 	ReplicaType string // "file" or "s3"
@@ -127,6 +131,11 @@ type Config struct {
 	// Pinned reader: long-lived read transactions that pin the WAL
 	PinnedReaderHold  time.Duration
 	PinnedReaderPause time.Duration
+
+	StressScenarios     []string
+	StressScenarioPhase time.Duration
+	stressScenario      string
+	stressBase          *Config
 
 	// Replay
 	LoadMode       string  // "synthetic", "replay", "both"
@@ -605,6 +614,28 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 		}
 		c.VerifySyncTimeout = d
 	}
+	for _, budget := range []struct {
+		key    string
+		target *time.Duration
+	}{
+		{"VERIFY_SOURCE_SNAPSHOT_BUDGET", &c.VerifySourceSnapshotBudget},
+		{"VERIFY_RESTORE_BUDGET", &c.VerifyRestoreBudget},
+		{"VERIFY_INTEGRITY_CHECK_BUDGET", &c.VerifyIntegrityCheckBudget},
+		{"VERIFY_COMPARE_BUDGET", &c.VerifyCompareBudget},
+	} {
+		v := getenv(budget.key)
+		if v == "" {
+			continue
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid %s: %w", budget.key, err)
+		}
+		if d <= 0 {
+			return c, fmt.Errorf("invalid %s: must be positive", budget.key)
+		}
+		*budget.target = d
+	}
 	if v := getenv("DISK_FULL_NO_PROGRESS_WINDOW"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
@@ -835,6 +866,18 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 			return c, fmt.Errorf("invalid PINNED_READER_PAUSE: must be non-negative")
 		}
 		c.PinnedReaderPause = d
+	}
+	if v := getenv("STRESS_SCENARIOS"); strings.TrimSpace(v) != "" {
+		scenarios, err := parseStressScenarios(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid STRESS_SCENARIOS: %w", err)
+		}
+		d, err := time.ParseDuration(getenv("STRESS_SCENARIO_PHASE"))
+		if err != nil || d <= 0 {
+			return c, fmt.Errorf("invalid STRESS_SCENARIO_PHASE: a positive duration is required with STRESS_SCENARIOS")
+		}
+		c.StressScenarios = scenarios
+		c.StressScenarioPhase = d
 	}
 	levelsSet := 0
 	for _, d := range []time.Duration{c.L1CompactionInterval, c.L2CompactionInterval, c.L3CompactionInterval} {
@@ -1080,6 +1123,9 @@ func (c Config) manyDBVerifyChangedLimit() int {
 }
 
 func (c Config) WorkloadConfig() workload.Config {
+	if c.stressBase != nil {
+		return c.stressBase.WorkloadConfig()
+	}
 	cfg := workload.Config{
 		Churn:                    c.Churn,
 		LoadMode:                 c.LoadMode,
@@ -1134,11 +1180,27 @@ func (c Config) WorkloadConfig() workload.Config {
 		n := *c.TruncatePageN
 		cfg.TruncatePageN = &n
 	}
+	if c.VerifySourceSnapshotBudget > 0 {
+		cfg.VerifySourceSnapshotBudget = c.VerifySourceSnapshotBudget.String()
+	}
+	if c.VerifyRestoreBudget > 0 {
+		cfg.VerifyRestoreBudget = c.VerifyRestoreBudget.String()
+	}
+	if c.VerifyIntegrityCheckBudget > 0 {
+		cfg.VerifyIntegrityCheckBudget = c.VerifyIntegrityCheckBudget.String()
+	}
+	if c.VerifyCompareBudget > 0 {
+		cfg.VerifyCompareBudget = c.VerifyCompareBudget.String()
+	}
 	if c.PinnedReaderHold > 0 {
 		cfg.PinnedReaderHold = c.PinnedReaderHold.String()
 	}
 	if c.PinnedReaderPause > 0 {
 		cfg.PinnedReaderPause = c.PinnedReaderPause.String()
+	}
+	if len(c.StressScenarios) > 0 {
+		cfg.StressScenarios = strings.Join(c.StressScenarios, ",")
+		cfg.StressScenarioPhase = c.StressScenarioPhase.String()
 	}
 	if c.ManyDBEnabled() {
 		cfg.MaxRowsPerDatabase = c.manyDBMaxRowsPerDatabase()

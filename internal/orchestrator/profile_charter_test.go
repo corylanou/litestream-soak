@@ -54,6 +54,9 @@ func allFleetProfiles() map[string]struct{} {
 		profiles[w.ProfileName] = struct{}{}
 	}
 	profiles[manyDB1000FleetWorker().ProfileName] = struct{}{}
+	for _, w := range GateFleetForSource("rc-aaaaaaaa", "", "").Workers {
+		profiles[w.ProfileName] = struct{}{}
+	}
 	return profiles
 }
 
