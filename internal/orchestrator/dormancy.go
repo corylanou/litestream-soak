@@ -440,12 +440,11 @@ func (m *Manager) evaluateDormancy(ctx context.Context, policy DormancyPolicy) {
 			continue
 		}
 
-		verifications, err := m.db.ListVerifications(worker.ID, 256)
+		verifications, err := dormancyHistory(m.db, worker)
 		if err != nil {
 			slog.Error("Failed to list worker verifications for dormancy", "worker_id", worker.ID, "error", err)
 			continue
 		}
-		verifications = dormancyVerifications(worker, verifications)
 
 		candidate, ok := detectDormancyCandidate(verifications, now, policy.Threshold, policy.MinFailures)
 		if !ok {
@@ -463,6 +462,14 @@ func (m *Manager) evaluateDormancy(ctx context.Context, policy DormancyPolicy) {
 			slog.Error("Failed to pause dormant worker", "worker_id", worker.ID, "error", err)
 		}
 	}
+}
+
+func dormancyHistory(db *model.DB, worker model.Worker) ([]model.Verification, error) {
+	verifications, err := db.ListVerificationsExcludingMeteringRuns(worker.ID, 256)
+	if err != nil {
+		return nil, err
+	}
+	return dormancyVerifications(worker, verifications), nil
 }
 
 func dormancyVerifications(worker model.Worker, verifications []model.Verification) []model.Verification {

@@ -3,6 +3,8 @@ package model
 import (
 	"testing"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 func TestSyncMeteringWindowsOpensAndClosesPerSource(t *testing.T) {
@@ -41,5 +43,39 @@ func TestSyncMeteringWindowsOpensAndClosesPerSource(t *testing.T) {
 	}
 	if len(other) != 0 {
 		t.Fatalf("pr-1 windows = %+v, want none", other)
+	}
+}
+
+func TestListVerificationsExcludingMeteringRunsSkipsMeteredRows(t *testing.T) {
+	db := seriesTestDB(t)
+	seriesTestWorker(t, db, "w-mixed", "main")
+	base := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	record := func(at time.Time, profileConfig string) {
+		t.Helper()
+		completed := at.Add(time.Second)
+		if err := db.RecordVerification(&Verification{WorkerID: "w-mixed", StartedAt: at, CompletedAt: &completed, Status: "failed", CheckType: "integrity", Run: reporting.WorkerIdentity{WorkerID: "w-mixed", RunID: "run", ProfileConfig: profileConfig}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record(base, `{"load_mode":"synthetic"}`)
+	record(base.Add(time.Minute), `not json`)
+	record(base.Add(2*time.Minute), ``)
+	for i := range 30 {
+		record(base.Add(time.Hour+time.Duration(i)*time.Minute), `{"s3_fault_proxy_mode":"observe","metering_window":true}`)
+	}
+
+	got, err := db.ListVerificationsExcludingMeteringRuns("w-mixed", 2)
+	if err != nil {
+		t.Fatalf("ListVerificationsExcludingMeteringRuns() error = %v", err)
+	}
+	if len(got) != 2 || !got[0].StartedAt.Equal(base.Add(2*time.Minute)) || !got[1].StartedAt.Equal(base.Add(time.Minute)) {
+		t.Fatalf("got %d rows %+v, want the two newest non-metered rows", len(got), got)
+	}
+	all, err := db.ListVerificationsExcludingMeteringRuns("w-mixed", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("got %d rows, want 3 non-metered rows", len(all))
 	}
 }

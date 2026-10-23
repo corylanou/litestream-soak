@@ -379,3 +379,104 @@ func TestCostMeterReportsMeteringWindow(t *testing.T) {
 func workloadWithProxy(enabled bool, mode string) workload.Config {
 	return workload.Config{S3FaultProxyEnabled: enabled, S3FaultProxyMode: mode}
 }
+
+func TestMeteredHistoryDoesNotHideRealPauseFailures(t *testing.T) {
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{GitSHA: "soak-sha", LitestreamSHA: "litestream-sha", ImageRef: "registry.fly.io/litestream-soak:soak-sha", Source: "main", Status: "ready"}); err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	createTestWorker(t, db, model.Worker{ID: "worker-main-low-vol", Name: "worker-main-low-vol", Status: model.WorkerDegraded, Source: "main", GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA, ProfileName: "low-volume", ProfileConfig: "{}"})
+	createTestWorker(t, db, model.Worker{ID: "worker-main-read-heavy", Name: "worker-main-read-heavy", Status: model.WorkerRunning, Source: "main", GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA, ProfileName: "read-heavy", ProfileConfig: "{}"})
+
+	base := time.Now().UTC().Add(time.Minute)
+	syncTimeout := `wait for sync: sync request: Post "http://localhost/sync": context deadline exceeded`
+	for i := range 2 {
+		started := base.Add(time.Duration(i) * time.Second)
+		done := started.Add(500 * time.Millisecond)
+		mustRecordRunFixture(t, db, &model.Verification{WorkerID: "worker-main-low-vol", StartedAt: started, CompletedAt: &done, Status: "failed", CheckType: "integrity", ErrorMessage: syncTimeout}, false)
+	}
+	for i := range 40 {
+		started := base.Add(time.Minute + time.Duration(i)*time.Second)
+		done := started.Add(500 * time.Millisecond)
+		mustRecordRunFixture(t, db, &model.Verification{WorkerID: "worker-main-low-vol", StartedAt: started, CompletedAt: &done, Status: "failed", CheckType: "integrity", ErrorMessage: "wrong # of entries in index idx_load_test_timestamp"}, true)
+	}
+	passedAt := base.Add(2 * time.Minute)
+	mustRecordRunFixture(t, db, &model.Verification{WorkerID: "worker-main-read-heavy", StartedAt: passedAt.Add(-10 * time.Second), CompletedAt: &passedAt, Status: "passed", CheckType: "integrity", Passed: true}, false)
+
+	evaluation, ok, err := failedSourcePauseCandidate(db, *deployment, FailedSourcePausePolicy{})
+	if err != nil {
+		t.Fatalf("failedSourcePauseCandidate() error = %v", err)
+	}
+	if !ok || evaluation.Signature != "litestream_sync_timeout" {
+		t.Fatalf("failedSourcePauseCandidate() = %v signature %q, want genuine litestream_sync_timeout behind metered history", ok, evaluation.Signature)
+	}
+}
+
+func TestMeteredHistoryDoesNotHideRealScorecardResult(t *testing.T) {
+	db := openTestDB(t)
+	if err := db.UpsertReadyDeployment(&model.Deployment{GitSHA: "soak-sha", LitestreamSHA: "litestream-sha", ImageRef: "registry.fly.io/litestream-soak:soak-sha", Source: "main", Status: "ready"}); err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := db.GetLatestDeployment("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	createTestWorker(t, db, model.Worker{ID: "worker-main-low-vol", Name: "worker-main-low-vol", Status: model.WorkerRunning, Source: "main", GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA, ProfileName: "low-volume", ProfileConfig: "{}"})
+	passedAt := deployment.StartedAt.Add(time.Second).UTC()
+	mustRecordRunFixture(t, db, &model.Verification{WorkerID: "worker-main-low-vol", StartedAt: passedAt, CompletedAt: &passedAt, Status: "passed", CheckType: "integrity", Passed: true}, false)
+	for i := range 260 {
+		started := passedAt.Add(time.Minute + time.Duration(i)*time.Second)
+		mustRecordRunFixture(t, db, &model.Verification{WorkerID: "worker-main-low-vol", StartedAt: started, CompletedAt: &started, Status: "failed", CheckType: "integrity", ErrorMessage: "wrong # of entries in index idx_load_test_timestamp"}, true)
+	}
+
+	scorecard, err := buildDeploymentScorecard(db, *deployment, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scorecard.PassedWorkers != 1 || scorecard.FailedWorkers != 0 || scorecard.MeteringWindowExcluded != 260 {
+		t.Fatalf("passed/failed/excluded = %d/%d/%d, want 1/0/260", scorecard.PassedWorkers, scorecard.FailedWorkers, scorecard.MeteringWindowExcluded)
+	}
+}
+
+func TestMeteredHistoryDoesNotHideRealDormancyFailures(t *testing.T) {
+	db := openTestDB(t)
+	createTestWorker(t, db, model.Worker{ID: "worker-meter-dormancy", Name: "worker-meter-dormancy", Status: model.WorkerRunning, Source: "main", ProfileName: "low-volume", ProfileConfig: "{}"})
+	worker, err := db.GetWorker("worker-meter-dormancy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	worker.CreatedAt = now.Add(-72 * time.Hour)
+	record := func(started time.Time, message string, metering bool) {
+		t.Helper()
+		completed := started.Add(10 * time.Second)
+		run := reporting.WorkerIdentity{WorkerID: worker.ID, RunID: "direct", ProfileConfig: "{}"}
+		if metering {
+			run = meteringRun(run)
+			run.RunID = "metered"
+		}
+		if err := db.RecordVerification(&model.Verification{WorkerID: worker.ID, StartedAt: started, CompletedAt: &completed, Status: "failed", CheckType: "integrity", ErrorMessage: message, Run: run}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refused := `wait for sync: sync request: Post "http://localhost/sync": dial unix /data/litestream.sock: connect: connection refused`
+	for _, age := range []time.Duration{48 * time.Hour, 40 * time.Hour, 30 * time.Hour} {
+		record(now.Add(-age), refused, false)
+	}
+	for i := range 300 {
+		record(now.Add(-20*time.Hour+time.Duration(i)*time.Minute), "wrong # of entries in index idx_load_test_timestamp", true)
+	}
+
+	history, err := dormancyHistory(db, *worker)
+	if err != nil {
+		t.Fatalf("dormancyHistory() error = %v", err)
+	}
+	candidate, ok := detectDormancyCandidate(history, now, 24*time.Hour, 3)
+	if !ok || candidate.Count != 3 {
+		t.Fatalf("dormancy candidate = %+v ok=%v, want the 3 genuine failures behind metered history", candidate, ok)
+	}
+}

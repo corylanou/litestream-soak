@@ -1347,7 +1347,7 @@ const sourcePauseHistoryLimitCap = 1000
 func pauseEvidenceHistory(db *model.DB, workerID string, deployment model.Deployment, initialLimit int) ([]model.Verification, error) {
 	limit := initialLimit
 	for {
-		verifications, err := db.ListVerifications(workerID, limit)
+		verifications, err := db.ListVerificationsExcludingMeteringRuns(workerID, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -1387,7 +1387,6 @@ func releaseQualityActionableAttentionFailures(
 		if err != nil {
 			return nil, err
 		}
-		verifications, _ = excludeMeteringRunVerifications(verifications)
 		environmental := environmentalVerificationIDs(verifications, policy)
 		for _, verification := range verifications {
 			if verification.StartedAt.Before(deployment.StartedAt.UTC()) {
@@ -1469,12 +1468,11 @@ func singleWorkerFailureCorroborated(db *model.DB, failures []actionableAttentio
 	for _, failure := range failures {
 		limit := minConsecutive*5 + 10
 		for {
-			verifications, err := db.ListVerifications(failure.WorkerID, limit)
+			verifications, err := db.ListVerificationsExcludingMeteringRuns(failure.WorkerID, limit)
 			if err != nil {
 				return false, err
 			}
-			scored, _ := excludeMeteringRunVerifications(verifications)
-			corroborated, decided := walkConsecutiveActionable(scored, deployment, policy, minConsecutive)
+			corroborated, decided := walkConsecutiveActionable(verifications, deployment, policy, minConsecutive)
 			if corroborated {
 				return true, nil
 			}
