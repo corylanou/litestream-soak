@@ -227,7 +227,7 @@ func GateFleetForSource(source, gitSHA, litestreamSHA string) FleetSpec {
 		workers[i].Name = workerNameForSource(source, workers[i].Name)
 		workers[i].WorkerID = workers[i].Name
 	}
-	return FleetSpec{Workers: workers}
+	return FleetSpec{Workers: withMeteringWindowObserveProxy(workers)}
 }
 
 func (m *Manager) RegisterRCGate(request RCGateRequest, now time.Time) (model.RCGate, bool, error) {
@@ -437,18 +437,38 @@ func (m *Manager) evaluateRCGates(ctx context.Context, now time.Time) error {
 func (m *Manager) evaluateRCGate(ctx context.Context, gate model.RCGate, now time.Time) error {
 	destroyAll := func(model.Worker) bool { return false }
 	if gate.Status == model.RCGateRunning && gate.PairedReadyAt == nil {
-		ready, err := m.rcGatePairedReady(gate)
-		if err != nil {
-			return err
+		var latest *time.Time
+		paired := true
+		for _, source := range gate.Sources() {
+			readyAt := gate.ReadyAtFor(source)
+			if readyAt == nil {
+				ready, err := m.rcGateSideReady(gate, source)
+				if err != nil {
+					return err
+				}
+				if ready {
+					if err := m.db.MarkRCGateSideReady(gate.ID, source, now); err != nil {
+						return fmt.Errorf("mark rc gate side ready: %w", err)
+					}
+					readyAt = &now
+				}
+			}
+			if readyAt == nil {
+				paired = false
+				continue
+			}
+			if latest == nil || readyAt.After(*latest) {
+				latest = readyAt
+			}
 		}
 		switch {
-		case ready:
-			if err := m.db.MarkRCGatePairedReady(gate.ID, now); err != nil {
+		case paired && latest.Before(gate.ProvisionDeadline) && latest.Before(gate.ExpiresAt):
+			if err := m.db.MarkRCGatePairedReady(gate.ID, *latest); err != nil {
 				return fmt.Errorf("mark rc gate paired ready: %w", err)
 			}
-			gate.PairedReadyAt = &now
-		case !now.Before(gate.ProvisionDeadline):
-			summary := fmt.Sprintf("RC gate %s vs %s did not provision both sides within %s; archiving evidence and destroying all gate workers.", gate.CandidateSource, gate.BaselineSource, rcGateProvisionTimeout)
+			gate.PairedReadyAt = latest
+		case !now.Before(gate.ProvisionDeadline) || !now.Before(gate.ExpiresAt):
+			summary := fmt.Sprintf("RC gate %s vs %s did not have both sides ready before its launch deadline or expiry; archiving evidence and destroying all gate workers.", gate.CandidateSource, gate.BaselineSource)
 			return m.teardownRCGateSources(ctx, gate, runArchiveTypeTeardown, "rc_gate_unpaired", summary, destroyAll, model.RCGateAborted, now)
 		default:
 			return nil
@@ -473,29 +493,27 @@ func (m *Manager) evaluateRCGate(ctx context.Context, gate model.RCGate, now tim
 	}
 }
 
-func (m *Manager) rcGatePairedReady(gate model.RCGate) (bool, error) {
-	for _, source := range gate.Sources() {
-		pinnedImage, pinnedGit := gate.PinnedBuildFor(source)
-		pinnedLitestream, _ := gate.LitestreamSHAFor(source)
-		if pinnedImage == "" {
+func (m *Manager) rcGateSideReady(gate model.RCGate, source string) (bool, error) {
+	pinnedImage, pinnedGit := gate.PinnedBuildFor(source)
+	pinnedLitestream, _ := gate.LitestreamSHAFor(source)
+	if pinnedImage == "" {
+		return false, nil
+	}
+	workers, err := m.db.ListWorkersFiltered("", source)
+	if err != nil {
+		return false, fmt.Errorf("list %s workers: %w", source, err)
+	}
+	for _, desired := range GateFleetForSource(source, pinnedGit, pinnedLitestream).Workers {
+		ready := false
+		for _, worker := range workers {
+			if worker.ProfileName == desired.ProfileName && worker.Status == model.WorkerRunning &&
+				worker.GitSHA == pinnedGit && worker.LitestreamSHA == pinnedLitestream && rcGateOwnsWorker(gate, worker) {
+				ready = true
+				break
+			}
+		}
+		if !ready {
 			return false, nil
-		}
-		workers, err := m.db.ListWorkersFiltered("", source)
-		if err != nil {
-			return false, fmt.Errorf("list %s workers: %w", source, err)
-		}
-		for _, desired := range GateFleetForSource(source, pinnedGit, pinnedLitestream).Workers {
-			ready := false
-			for _, worker := range workers {
-				if worker.ProfileName == desired.ProfileName && worker.Status == model.WorkerRunning &&
-					worker.GitSHA == pinnedGit && worker.LitestreamSHA == pinnedLitestream && rcGateOwnsWorker(gate, worker) {
-					ready = true
-					break
-				}
-			}
-			if !ready {
-				return false, nil
-			}
 		}
 	}
 	return true, nil
@@ -664,7 +682,7 @@ func rcGateSide(db *model.DB, gate model.RCGate, source string, scenario gateSce
 		return side, nil
 	}
 	side.WorkerID = worker.ID
-	verifications, err := db.ListVerifications(worker.ID, rcGateVerificationHistory)
+	verifications, err := db.ListVerificationsExcludingMeteringRuns(worker.ID, rcGateVerificationHistory)
 	if err != nil {
 		return side, err
 	}

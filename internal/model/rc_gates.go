@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS rc_gates (
     expires_at DATETIME NOT NULL,
     tail_expires_at DATETIME,
     provision_deadline DATETIME NOT NULL,
+    candidate_ready_at DATETIME,
+    baseline_ready_at DATETIME,
     paired_ready_at DATETIME,
     completed_at DATETIME,
     resources_json TEXT NOT NULL DEFAULT '[]',
@@ -80,6 +82,8 @@ type RCGate struct {
 	ExpiresAt         time.Time        `json:"expires_at"`
 	TailExpiresAt     *time.Time       `json:"tail_expires_at,omitempty"`
 	ProvisionDeadline time.Time        `json:"provision_deadline"`
+	CandidateReadyAt  *time.Time       `json:"candidate_ready_at,omitempty"`
+	BaselineReadyAt   *time.Time       `json:"baseline_ready_at,omitempty"`
 	PairedReadyAt     *time.Time       `json:"paired_ready_at,omitempty"`
 	CompletedAt       *time.Time       `json:"completed_at,omitempty"`
 	Resources         []RCGateResource `json:"resources"`
@@ -112,13 +116,24 @@ func (g RCGate) PinnedBuildFor(source string) (imageRef, gitSHA string) {
 	}
 }
 
+func (g RCGate) ReadyAtFor(source string) *time.Time {
+	switch source {
+	case g.CandidateSource:
+		return g.CandidateReadyAt
+	case g.BaselineSource:
+		return g.BaselineReadyAt
+	default:
+		return nil
+	}
+}
+
 func (g RCGate) Closed() bool {
 	return g.Status == RCGateCompleted || g.Status == RCGateAborted
 }
 
 const rcGateColumns = `id, repository, candidate_ref, candidate_source, candidate_sha, candidate_image_ref, candidate_git_sha,
 	baseline_source, baseline_sha, baseline_image_ref, baseline_git_sha, duration_seconds, tail, status,
-	started_at, expires_at, tail_expires_at, provision_deadline, paired_ready_at, completed_at, resources_json, results_json`
+	started_at, expires_at, tail_expires_at, provision_deadline, candidate_ready_at, baseline_ready_at, paired_ready_at, completed_at, resources_json, results_json`
 
 const rcGateOpenClause = "status NOT IN ('completed', 'aborted')"
 
@@ -151,11 +166,12 @@ func (d *DB) CreateRCGate(gate *RCGate) error {
 	result, err := tx.Exec(`
 		INSERT INTO rc_gates (repository, candidate_ref, candidate_source, candidate_sha, candidate_image_ref, candidate_git_sha,
 			baseline_source, baseline_sha, baseline_image_ref, baseline_git_sha, duration_seconds, tail, status,
-			started_at, expires_at, tail_expires_at, provision_deadline, paired_ready_at, completed_at, resources_json, results_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			started_at, expires_at, tail_expires_at, provision_deadline, candidate_ready_at, baseline_ready_at, paired_ready_at, completed_at, resources_json, results_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gate.Repository, gate.CandidateRef, gate.CandidateSource, gate.CandidateSHA, gate.CandidateImageRef, gate.CandidateGitSHA,
 		gate.BaselineSource, gate.BaselineSHA, gate.BaselineImageRef, gate.BaselineGitSHA, int64(gate.Duration/time.Second), gate.Tail, gate.Status,
-		gate.StartedAt.UTC(), gate.ExpiresAt.UTC(), utcTimePtr(gate.TailExpiresAt), gate.ProvisionDeadline.UTC(), utcTimePtr(gate.PairedReadyAt),
+		gate.StartedAt.UTC(), gate.ExpiresAt.UTC(), utcTimePtr(gate.TailExpiresAt), gate.ProvisionDeadline.UTC(),
+		utcTimePtr(gate.CandidateReadyAt), utcTimePtr(gate.BaselineReadyAt), utcTimePtr(gate.PairedReadyAt),
 		utcTimePtr(gate.CompletedAt), string(resources), gate.Results,
 	)
 	if err != nil {
@@ -231,6 +247,24 @@ func (d *DB) PinRCGateBuild(id int64, source, imageRef, gitSHA string) (string, 
 	return pinnedImage, pinnedGit, nil
 }
 
+func (d *DB) MarkRCGateSideReady(id int64, source string, at time.Time) error {
+	var candidate, baseline string
+	if err := d.queryRow("SELECT candidate_source, baseline_source FROM rc_gates WHERE id = ?", id).Scan(&candidate, &baseline); err != nil {
+		return err
+	}
+	var column string
+	switch source {
+	case candidate:
+		column = "candidate_ready_at"
+	case baseline:
+		column = "baseline_ready_at"
+	default:
+		return fmt.Errorf("source %s is not part of rc gate %d", source, id)
+	}
+	_, err := d.exec("UPDATE rc_gates SET "+column+" = ? WHERE id = ? AND "+column+" IS NULL", at.UTC(), id)
+	return err
+}
+
 func (d *DB) MarkRCGatePairedReady(id int64, at time.Time) error {
 	_, err := d.exec("UPDATE rc_gates SET paired_ready_at = ? WHERE id = ? AND paired_ready_at IS NULL", at.UTC(), id)
 	return err
@@ -257,6 +291,8 @@ func (d *DB) listRCGates(query string, args ...any) ([]RCGate, error) {
 			gate            RCGate
 			durationSeconds int64
 			tailExpiresAt   sql.NullTime
+			candidateReady  sql.NullTime
+			baselineReady   sql.NullTime
 			pairedReadyAt   sql.NullTime
 			completedAt     sql.NullTime
 			resources       string
@@ -264,7 +300,7 @@ func (d *DB) listRCGates(query string, args ...any) ([]RCGate, error) {
 		if err := rows.Scan(
 			&gate.ID, &gate.Repository, &gate.CandidateRef, &gate.CandidateSource, &gate.CandidateSHA, &gate.CandidateImageRef, &gate.CandidateGitSHA,
 			&gate.BaselineSource, &gate.BaselineSHA, &gate.BaselineImageRef, &gate.BaselineGitSHA, &durationSeconds, &gate.Tail, &gate.Status,
-			&gate.StartedAt, &gate.ExpiresAt, &tailExpiresAt, &gate.ProvisionDeadline, &pairedReadyAt, &completedAt, &resources, &gate.Results,
+			&gate.StartedAt, &gate.ExpiresAt, &tailExpiresAt, &gate.ProvisionDeadline, &candidateReady, &baselineReady, &pairedReadyAt, &completedAt, &resources, &gate.Results,
 		); err != nil {
 			return nil, err
 		}
@@ -275,7 +311,13 @@ func (d *DB) listRCGates(query string, args ...any) ([]RCGate, error) {
 		for _, value := range []struct {
 			source sql.NullTime
 			target **time.Time
-		}{{tailExpiresAt, &gate.TailExpiresAt}, {pairedReadyAt, &gate.PairedReadyAt}, {completedAt, &gate.CompletedAt}} {
+		}{
+			{tailExpiresAt, &gate.TailExpiresAt},
+			{candidateReady, &gate.CandidateReadyAt},
+			{baselineReady, &gate.BaselineReadyAt},
+			{pairedReadyAt, &gate.PairedReadyAt},
+			{completedAt, &gate.CompletedAt},
+		} {
 			if value.source.Valid {
 				*value.target = new(value.source.Time.UTC())
 			}

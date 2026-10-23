@@ -369,7 +369,7 @@ The workflow resolves both refs to full 40-character SHAs before it builds anyth
 
 The same check runs again whenever a gate worker is created, replaced, rolled, resumed from dormancy, or recovered from pending provisioning, under the source lock that teardown also holds. Provisioning is refused once a gate is closed, after a worker's deadline (the gate expiry, or the tail expiry for `gate-stress` with `tail`), for any profile other than `gate-stress` during the tail, and for any build other than the pinned one.
 
-If both sides do not have all four workers running on the pinned builds within 2 hours of registration, the gate is aborted: both sources are archived and every gate worker is destroyed, including partially provisioned ones, and the gate closes with status `aborted`.
+The gate loop records when each side is first observed with all four workers running on its pinned build (`candidate_ready_at`, `baseline_ready_at`). The gate counts as paired only if both were observed ready before the 2-hour launch deadline and before the gate expires. If the deadline or the expiry passes first, including for a gate shorter than 2 hours, the gate is aborted: both sources are archived, every gate worker is destroyed, including partially provisioned ones, and the gate closes with status `aborted`. Readiness is observed every 5 minutes, so a side that becomes ready in the last few minutes before the deadline can still be aborted.
 
 | Worker | Region | CPU / memory | Volume | Workload |
 | --- | --- | --- | --- | --- |
@@ -387,7 +387,7 @@ curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
   "https://litestream-soak-ctl.fly.dev/api/rc-gates" | jq .
 ```
 
-The read-only ledger lists every gate with its pinned SHAs and images, start, expiry, tail expiry, launch deadline, status (`running`, `tail`, `completed`, or `aborted`), and every machine with its size, volume GB, start, and expiry. Each gate also reports candidate-versus-baseline results per scenario. Only verifications attributed to the pinned deployment, reported by workers created for this gate, started inside the gate window, and carrying the scenario's identity count. A scenario passes only when both sides have coverage and the candidate has no failures. Missing coverage is `incomplete`, never a pass. When a gate closes, its results are saved, and later evidence or retention does not change them.
+The read-only ledger lists every gate with its pinned SHAs and images, start, expiry, tail expiry, launch deadline, status (`running`, `tail`, `completed`, or `aborted`), and every machine with its size, volume GB, start, and expiry. Each gate also reports candidate-versus-baseline results per scenario. Only verifications attributed to the pinned deployment, reported by workers created for this gate, started inside the gate window, and carrying the scenario's identity count. Metering-window runs are excluded as they are everywhere else, and a gate source only joins a metering window when `SOAK_METERING_WINDOW_SOURCES` lists it. A scenario passes only when both sides have coverage and the candidate has no failures. Missing coverage is `incomplete`, never a pass. When a gate closes, its results are saved, and later evidence or retention does not change them.
 
 ## Upstream PR Retirement
 

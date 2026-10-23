@@ -303,6 +303,9 @@ func TestRCGateTTLArchivesThenTearsDownBothSources(t *testing.T) {
 			}, "", "")
 			ctx := context.Background()
 
+			if err := manager.evaluateRCGates(ctx, gate.StartedAt.Add(time.Minute)); err != nil {
+				t.Fatalf("evaluateRCGates(launch) error = %v", err)
+			}
 			if err := manager.evaluateRCGates(ctx, gate.ExpiresAt.Add(-time.Minute)); err != nil {
 				t.Fatalf("evaluateRCGates(before expiry) error = %v", err)
 			}
@@ -535,13 +538,18 @@ func recordGateVerification(t *testing.T, db *model.DB, source, profile, scenari
 
 func registerTestGate(t *testing.T, db *model.DB, tail bool, started time.Time) model.RCGate {
 	t.Helper()
+	return registerTestGateFor(t, db, "72h", tail, started)
+}
+
+func registerTestGateFor(t *testing.T, db *model.DB, duration string, tail bool, started time.Time) model.RCGate {
+	t.Helper()
 	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
 	gate, _, err := manager.RegisterRCGate(RCGateRequest{
 		Repository:   "benbjohnson/litestream",
 		CandidateRef: "v0.5.0-rc1",
 		CandidateSHA: testGateCandidateSHA,
 		BaselineSHA:  testGateBaselineSHA,
-		Duration:     "72h",
+		Duration:     duration,
 		Tail:         tail,
 	}, started)
 	if err != nil {
