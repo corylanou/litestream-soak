@@ -69,6 +69,8 @@ type Config struct {
 	TruncatePageN                             *int    `json:"truncate_page_n,omitempty"`
 	PinnedReaderHold                          string  `json:"pinned_reader_hold,omitempty"`
 	PinnedReaderPause                         string  `json:"pinned_reader_pause,omitempty"`
+	StressScenarios                           string  `json:"stress_scenarios,omitempty"`
+	StressScenarioPhase                       string  `json:"stress_scenario_phase,omitempty"`
 	VolumeSizeGB                              int     `json:"volume_size_gb,omitempty"`
 	MemoryMB                                  int     `json:"memory_mb,omitempty"`
 	CPUs                                      int     `json:"cpus,omitempty"`

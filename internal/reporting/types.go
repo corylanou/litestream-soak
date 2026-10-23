@@ -55,6 +55,7 @@ type WorkerIdentity struct {
 	AppName       string `json:"app_name,omitempty"`
 	MachineID     string `json:"machine_id,omitempty"`
 	Region        string `json:"region,omitempty"`
+	Scenario      string `json:"scenario,omitempty"`
 }
 
 type ProcessObservation struct {

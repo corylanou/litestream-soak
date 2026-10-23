@@ -132,6 +132,11 @@ type Config struct {
 	PinnedReaderHold  time.Duration
 	PinnedReaderPause time.Duration
 
+	StressScenarios     []string
+	StressScenarioPhase time.Duration
+	stressScenario      string
+	stressBase          *Config
+
 	// Replay
 	LoadMode       string  // "synthetic", "replay", "both"
 	ReplayDataset  string  // "taxi", "gharchive", "orders"
@@ -862,6 +867,18 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 		}
 		c.PinnedReaderPause = d
 	}
+	if v := getenv("STRESS_SCENARIOS"); strings.TrimSpace(v) != "" {
+		scenarios, err := parseStressScenarios(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid STRESS_SCENARIOS: %w", err)
+		}
+		d, err := time.ParseDuration(getenv("STRESS_SCENARIO_PHASE"))
+		if err != nil || d <= 0 {
+			return c, fmt.Errorf("invalid STRESS_SCENARIO_PHASE: a positive duration is required with STRESS_SCENARIOS")
+		}
+		c.StressScenarios = scenarios
+		c.StressScenarioPhase = d
+	}
 	levelsSet := 0
 	for _, d := range []time.Duration{c.L1CompactionInterval, c.L2CompactionInterval, c.L3CompactionInterval} {
 		if d != 0 {
@@ -1106,6 +1123,9 @@ func (c Config) manyDBVerifyChangedLimit() int {
 }
 
 func (c Config) WorkloadConfig() workload.Config {
+	if c.stressBase != nil {
+		return c.stressBase.WorkloadConfig()
+	}
 	cfg := workload.Config{
 		Churn:                    c.Churn,
 		LoadMode:                 c.LoadMode,
@@ -1177,6 +1197,10 @@ func (c Config) WorkloadConfig() workload.Config {
 	}
 	if c.PinnedReaderPause > 0 {
 		cfg.PinnedReaderPause = c.PinnedReaderPause.String()
+	}
+	if len(c.StressScenarios) > 0 {
+		cfg.StressScenarios = strings.Join(c.StressScenarios, ",")
+		cfg.StressScenarioPhase = c.StressScenarioPhase.String()
 	}
 	if c.ManyDBEnabled() {
 		cfg.MaxRowsPerDatabase = c.manyDBMaxRowsPerDatabase()
