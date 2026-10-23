@@ -1,0 +1,9 @@
+{{define "metering_banner"}}{{range .}}
+    <div class="attention-item att-warn metering-banner" role="status">
+      <span class="attention-icon">!</span>
+      <div class="attention-body">
+        <span class="attention-title">Metering window: not test evidence</span>
+        <span class="attention-detail">{{sourceLabel .Source}} runs every worker through the S3 observe proxy to meter object-store requests since {{formatTime .StartedAt}}. Results from this window are excluded from release-quality scoring and comparisons.</span>
+      </div>
+    </div>
+{{end}}{{end}}

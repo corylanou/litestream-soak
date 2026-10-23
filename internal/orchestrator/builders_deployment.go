@@ -321,12 +321,19 @@ func buildDeploymentScorecard(db *model.DB, deployment model.Deployment, windowE
 		Outcomes:     make([]DeploymentWorkerOutcome, 0, len(workers)),
 	}
 
+	meteringWindows, err := db.ListMeteringWindows(deploymentScorecardSource(deployment))
+	if err != nil {
+		return DeploymentScorecard{}, err
+	}
 	failureCounts := make(map[string]DeploymentFailureCount)
 	for _, worker := range workers {
 		verifications, err := db.ListVerifications(worker.ID, 256)
 		if err != nil {
 			return DeploymentScorecard{}, err
 		}
+		var excluded int
+		verifications, excluded = excludeMeteringWindowVerifications(verifications, meteringWindows)
+		scorecard.MeteringWindowExcluded += excluded
 		outcome, verified := scoreDeploymentWorker(worker, deployment, verifications, windowEnd)
 		countDeploymentScorecardOutcome(&scorecard, failureCounts, outcome, verified)
 	}

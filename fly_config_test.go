@@ -119,6 +119,26 @@ func TestControlFlyConfigDeclaresEnvironmentalFailurePolicy(t *testing.T) {
 	}
 }
 
+func TestControlFlyConfigDeclaresMeteringWindowOff(t *testing.T) {
+	t.Parallel()
+
+	contents, err := os.ReadFile("fly.control.toml")
+	if err != nil {
+		t.Fatalf("read fly.control.toml: %v", err)
+	}
+	env, ok := tomlTable(string(contents), "[env]")
+	if !ok {
+		t.Fatal("fly.control.toml is missing [env]")
+	}
+	got, ok := tomlValue(env, "SOAK_METERING_WINDOW_SOURCES")
+	if !ok {
+		t.Fatal("fly.control.toml [env] is missing SOAK_METERING_WINDOW_SOURCES")
+	}
+	if got != "" {
+		t.Fatalf("fly.control.toml [env] SOAK_METERING_WINDOW_SOURCES = %q, want empty", got)
+	}
+}
+
 func tomlTable(contents, header string) (string, bool) {
 	lines := strings.Split(contents, "\n")
 	for i, line := range lines {

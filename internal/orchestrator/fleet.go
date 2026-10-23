@@ -34,6 +34,10 @@ type FleetSpec struct {
 const maxConfigDriftReplacementsPerCycle = 1
 
 func DefaultMainFleet() FleetSpec {
+	return FleetSpec{Workers: withMeteringWindowObserveProxy(baseMainFleet().Workers)}
+}
+
+func baseMainFleet() FleetSpec {
 	workers := []DesiredWorker{
 		{
 			WorkerID:    "worker-main-low-vol",
@@ -619,7 +623,7 @@ func manyDB1000FleetWorker() DesiredWorker {
 }
 
 func DefaultFleetForSource(source, gitSHA, litestreamSHA string) FleetSpec {
-	spec := DefaultMainFleet()
+	spec := baseMainFleet()
 	normalizedSource := firstNonEmpty(source, "main")
 	prNumber := sourcePRNumber(normalizedSource)
 	workers := make([]DesiredWorker, 0, len(spec.Workers))
@@ -637,7 +641,7 @@ func DefaultFleetForSource(source, gitSHA, litestreamSHA string) FleetSpec {
 		rewritten.Name = workerNameForSource(normalizedSource, desired.Name)
 		workers = append(workers, rewritten)
 	}
-	return FleetSpec{Workers: workers}
+	return FleetSpec{Workers: withMeteringWindowObserveProxy(workers)}
 }
 
 func (m *Manager) RunFleetReconciler(ctx context.Context, spec FleetSpec, interval time.Duration) {

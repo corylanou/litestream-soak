@@ -92,6 +92,10 @@ func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Ti
 	if err != nil {
 		return nil, err
 	}
+	meteringWindows, err := db.ListMeteringWindows(deploymentScorecardSource(deployment))
+	if err != nil {
+		return nil, err
+	}
 	byWorker := make(map[string]*WorkerRunEvidence)
 	ensure := func(id, profile, region string) *WorkerRunEvidence {
 		if profile == "" && region == "" {
@@ -130,6 +134,9 @@ func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Ti
 			at = *v.CompletedAt
 		}
 		if v.Run.DeploymentID == 0 && (at.Before(deployment.StartedAt) || (end != nil && at.After(*end))) {
+			continue
+		}
+		if meteringWindowsContain(meteringWindows, at) {
 			continue
 		}
 		e := ensure(v.WorkerID, v.Run.ProfileName, v.Run.Region)
@@ -221,6 +228,9 @@ func buildRunReliability(db *model.DB, deployment model.Deployment, end *time.Ti
 		}
 		_ = json.Unmarshal([]byte(event.Details), &payload)
 		if payload.DeploymentID == 0 && (event.CreatedAt.Before(deployment.StartedAt) || (end != nil && event.CreatedAt.After(*end))) {
+			continue
+		}
+		if meteringWindowsContain(meteringWindows, event.CreatedAt) {
 			continue
 		}
 		eventID := firstNonEmpty(payload.WorkloadEventID, payload.IncidentEventID)

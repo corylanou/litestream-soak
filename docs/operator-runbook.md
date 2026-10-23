@@ -357,6 +357,10 @@ curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
 
 `since` accepts a duration (`6h`, `7d`) or an RFC3339 timestamp and defaults to 24 hours; the window starts at the top of the hour containing `since`. Omit `source` for every source. Each source reports summed totals, the largest single-worker peak disk, `worker_peak_disk_used_bytes_sum`, and per-worker totals. Prometheus series: `soak_control_source_object_store_requests_total{origin="replica"|"restore"}`, `soak_control_source_object_store_request_bytes_total{direction="sent"|"received"}`, `soak_control_source_litestream_object_operations_total`, `soak_control_source_litestream_object_bytes_total`, `soak_control_source_evidence_object_uploads_total`, and `soak_control_source_evidence_upload_payload_bytes_total`. Stopped workers keep their identity, status, verification, failure, and platform-event series (the Compute State panel still shows them as stopped) but stop exporting resource measurements such as disk, sizes, lag, and process stats.
 
+### Metering Window
+
+`SOAK_METERING_WINDOW_SOURCES` (control-plane env, comma-separated source names, empty by default) runs a scoped metering window. Every fleet-spec worker of a listed source gets the observe-mode S3 proxy; profiles that already use a fault-injection mode keep it. Unlisted sources are untouched, and with the setting empty the fleet spec is unchanged. On startup the control plane records a window start for each newly listed source and closes the window of any source no longer listed, in the `metering_windows` table. Verifications, incidents, and runtime evidence observed inside a window are excluded from release-quality scoring and RC-versus-main comparison (scorecards report `metering_window_excluded`), and the dashboard home and worker pages show a "Metering window: not test evidence" banner for that source. `/api/cost-meter` reports each source's `metering_window` with `active`, `started_at`, and `ended_at`. Clearing the setting returns workers to direct replication at the next roll.
+
 ## Upstream PR Retirement
 
 The control plane polls GitHub for every `pr-N` source with a live worker and

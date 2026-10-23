@@ -65,6 +65,7 @@ h1, h2, h3, p { margin: 0; }
 .attention-icon { flex-shrink: 0; font-weight: 700; font-size: 13px; width: 18px; text-align: center; }
 .att-bad .attention-icon { color: var(--red); }
 .att-warn .attention-icon { color: var(--amber); }
+.metering-banner { margin-bottom: 16px; }
 .att-info .attention-icon { color: var(--blue); }
 .attention-body { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .attention-title { font-weight: 600; font-size: 13px; }

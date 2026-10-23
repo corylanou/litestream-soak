@@ -11,6 +11,8 @@
       {{template "info" "How to read this page, top to bottom: the banner is what needs action now, the KPI band is current state, the charts are the 24h trend, and the table is per-worker detail. Color rules: red = act now (PR regressions, new failures), amber = attention (main-fleet baseline failures, stalled rollouts), quiet green/gray = healthy. Each tab is a fleet running a different build - main is the baseline, PR tabs are candidate builds; a red count on a tab means workers there need attention."}}
     </div>
 
+    {{template "metering_banner" .MeteringWindows}}
+
     {{if .Attention}}
     <div class="attention-stack" aria-label="Needs attention">
       {{range .Attention}}
