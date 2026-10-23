@@ -87,7 +87,7 @@ case "$shard" in
       "PAYLOAD_SIZE=512"
       "INITIAL_SIZE=1MB"
     )
-    check_args=(-min-passed 3 -databases "$databases" -require-log "Rotated many database active set=3" -min-resource-samples 10)
+    check_args=(-min-passed 3 -count-batches -databases "$databases" -require-log "Rotated many database active set=3" -min-resource-samples 10)
     ;;
   large-db)
     duration=9000

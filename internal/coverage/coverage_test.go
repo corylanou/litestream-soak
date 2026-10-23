@@ -87,6 +87,30 @@ func TestCheckFailsIncompleteCoverage(t *testing.T) {
 	}
 }
 
+func TestCheckCountsVerifiedManyDBBatches(t *testing.T) {
+	t.Parallel()
+
+	batch := func(errorMessage string) string {
+		body, _ := json.Marshal(map[string]any{"backend": "file", "databases": 100, "result": map[string]any{"Passed": false, "Status": "pending", "ErrorMessage": errorMessage}})
+		return string(body)
+	}
+	results := lines(batch(""), batch(""), batch("source boundary unavailable: acquire writer reservation: context deadline exceeded"))
+
+	if _, err := Check(Input{Results: strings.NewReader(results)}, Requirements{Backend: "file", MinPassed: 2, Databases: 100}); err == nil {
+		t.Fatal("pending batches must not count without CountBatches")
+	}
+	summary, err := Check(Input{Results: strings.NewReader(results)}, Requirements{Backend: "file", MinPassed: 2, Databases: 100, CountBatches: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Passed != 0 || summary.Batches != 2 || summary.Aborted != 1 {
+		t.Fatalf("summary = %+v, want 2 verified batches and 1 inconclusive", summary)
+	}
+	if _, err := Check(Input{Results: strings.NewReader(results)}, Requirements{Backend: "file", MinPassed: 3, Databases: 100, CountBatches: true}); err == nil || !strings.Contains(err.Error(), "2 passed verification cycles") {
+		t.Fatalf("Check() error = %v, want too few verified batches", err)
+	}
+}
+
 func TestCheckRecordsResourcePeaks(t *testing.T) {
 	t.Parallel()
 

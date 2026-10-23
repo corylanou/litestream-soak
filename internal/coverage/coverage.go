@@ -18,6 +18,7 @@ type Requirements struct {
 	RestoreModes       []string
 	LogPatterns        map[string]int
 	MinResourceSamples int
+	CountBatches       bool
 }
 
 type Input struct {
@@ -29,6 +30,7 @@ type Input struct {
 type Summary struct {
 	Passed          int            `json:"passed"`
 	Failed          int            `json:"failed"`
+	Batches         int            `json:"batches,omitempty"`
 	Aborted         int            `json:"aborted"`
 	RestoreModes    map[string]int `json:"restore_modes,omitempty"`
 	ResourceSamples int            `json:"resource_samples"`
@@ -91,6 +93,8 @@ func Check(input Input, req Requirements) (Summary, error) {
 			if record.Result.RestoreMode != nil {
 				summary.RestoreModes[*record.Result.RestoreMode]++
 			}
+		case req.CountBatches && record.Result.Status == "pending" && record.Result.ErrorMessage == "":
+			summary.Batches++
 		case record.Result.Status == "aborted" || record.Result.Status == "pending":
 			summary.Aborted++
 		default:
@@ -106,8 +110,8 @@ func Check(input Input, req Requirements) (Summary, error) {
 	if summary.Failed > 0 {
 		problems = append(problems, fmt.Errorf("%d failed verification cycle(s)", summary.Failed))
 	}
-	if summary.Passed < req.MinPassed {
-		problems = append(problems, fmt.Errorf("%d passed verification cycles, want at least %d", summary.Passed, req.MinPassed))
+	if verified := summary.Passed + summary.Batches; verified < req.MinPassed {
+		problems = append(problems, fmt.Errorf("%d passed verification cycles, want at least %d", verified, req.MinPassed))
 	}
 	if len(req.RestoreModes) > 0 {
 		if !modeReported {
