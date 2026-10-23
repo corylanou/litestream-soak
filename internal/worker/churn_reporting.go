@@ -64,7 +64,7 @@ func (r *Runner) recordChurnAttempt(_ context.Context, op string, n int64, d tim
 		kind = "busy"
 	}
 	event := reporting.WorkerEventPayload{
-		WorkerIdentity: workerIdentity(r.cfg), EventType: "workload_error", Message: fmt.Sprintf("%s %s failed: %v", r.cfg.LoadMode, op, attemptErr), SentAt: time.Now().UTC(),
+		WorkerIdentity: r.identity, EventType: "workload_error", Message: fmt.Sprintf("%s %s failed: %v", r.cfg.LoadMode, op, attemptErr), SentAt: time.Now().UTC(),
 		RuntimePayload: reporting.RuntimePayload{WorkloadCounters: *counters},
 		WorkloadEvent:  reporting.WorkloadEvent{WorkloadEventID: fmt.Sprintf("%s:%d", counters.WorkloadCounterEpoch, counters.WorkloadAttemptsTotal), WorkloadMode: r.cfg.LoadMode, WorkloadOperation: op, WorkloadErrorKind: kind, WorkloadLatencySeconds: d.Seconds()},
 	}
