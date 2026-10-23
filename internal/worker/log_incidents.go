@@ -25,7 +25,7 @@ func (r *Runner) observeLogIncidents(cancelRun context.CancelCauseFunc) {
 	r.litestreamLog.onIncomplete = cancelRun
 	r.litestreamLog.onIncident = func(line string, evidence reporting.MaintenanceEvidence) error {
 		event := reporting.WorkerEventPayload{
-			WorkerIdentity: workerIdentity(r.cfg), EventType: "litestream_log_error", Message: redactLogIncident(line), SentAt: time.Now().UTC(),
+			WorkerIdentity: r.identity, EventType: "litestream_log_error", Message: redactLogIncident(line), SentAt: time.Now().UTC(),
 			RuntimePayload: reporting.RuntimePayload{MaintenanceEvidence: evidence},
 			WorkloadEvent:  reporting.WorkloadEvent{WorkloadEventID: fmt.Sprintf("log:%s:%d", evidence.Epoch, evidence.Errors)},
 		}

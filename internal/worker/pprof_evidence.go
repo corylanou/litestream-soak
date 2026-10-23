@@ -126,7 +126,7 @@ func (c *pprofCapturer) newRecord(label, kind, artifact string) *profileRecord {
 	if c.cfg.ReplicaType == "s3" {
 		upload = "pending"
 	}
-	workloadConfig := c.cfg.WorkloadConfig()
+	workloadConfig := c.workload
 	workloadHash := profileHash(workloadConfig.JSON())
 	if workloadConfig.ReplayDataURL != "" {
 		workloadConfig.ReplayDataURL = "redacted"

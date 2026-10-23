@@ -9,11 +9,14 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 type Runner struct {
 	profileEvidence profileEvidenceState
 	cfg             Config
+	identity        reporting.WorkerIdentity
 	profiles        *pprofCapturer
 
 	litestreamManager
@@ -32,7 +35,8 @@ type Runner struct {
 
 func NewRunner(cfg Config) *Runner {
 	runner := &Runner{
-		cfg: cfg,
+		cfg:      cfg,
+		identity: workerIdentity(cfg),
 	}
 	runner.profiles = newPprofCapturer(&runner.cfg)
 	runner.litestreamManager = newLitestreamManager(&runner.cfg)
@@ -55,6 +59,8 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	SetWorkerInfo(r.cfg)
 	startTime := time.Now()
+	r.identity = workerIdentity(r.cfg)
+	r.profiles.workload = r.cfg.WorkloadConfig()
 	r.reporter = NewReporter(r.cfg)
 	r.observeLogIncidents(cancelRun)
 	r.observeProfiling(cancelRun)

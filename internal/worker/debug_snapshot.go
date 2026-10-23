@@ -29,7 +29,7 @@ func (r *Runner) captureFailureDebugSnapshot(reason string, steps []reporting.Ve
 	snapshot := &reporting.FailureDebugSnapshot{
 		CapturedAt:            time.Now().UTC(),
 		Reason:                reason,
-		Run:                   r.debugIdentity(),
+		Run:                   r.identity,
 		FailureClassification: classification,
 		ProcessTable:          collectProcessTable(),
 		SocketSummary:         collectSocketSummary(r.cfg.SocketPath),
@@ -52,27 +52,6 @@ func (r *Runner) captureFailureDebugSnapshot(reason string, steps []reporting.Ve
 		snapshot.ObjectStoragePrefix = collectObjectStoragePrefix(r.cfg)
 	}
 	return snapshot
-}
-
-func (r *Runner) debugIdentity() reporting.WorkerIdentity {
-	profileConfig := r.cfg.WorkloadConfig().JSON()
-	return reporting.WorkerIdentity{
-		WorkerID:      r.cfg.WorkerID,
-		Name:          r.cfg.WorkerName,
-		Source:        r.cfg.Source,
-		GitSHA:        r.cfg.GitSHA,
-		LitestreamSHA: r.cfg.LitestreamSHA,
-		RunID:         r.cfg.RunID,
-		ImageRef:      r.cfg.ImageRef,
-		VolumeID:      r.cfg.VolumeID,
-		VolumeSizeGB:  r.cfg.VolumeSizeGB,
-		ProfileName:   r.cfg.ProfileName,
-		ProfileConfig: profileConfig,
-		ProfileHash:   profileHash(profileConfig),
-		AppName:       r.cfg.AppName,
-		MachineID:     r.cfg.MachineID,
-		Region:        r.cfg.Region,
-	}
 }
 
 func collectProcessTable() []reporting.ProcessSnapshot {

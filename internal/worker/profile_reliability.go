@@ -59,7 +59,7 @@ func (r *Runner) observeProfiling(cancelRun context.CancelCauseFunc) {
 		body, _ := json.Marshal(record)
 		var evidence reporting.ProfileRecordEvidence
 		_ = json.Unmarshal(body, &evidence)
-		identity := workerIdentity(r.cfg)
+		identity := r.identity
 		identity.RunID = record.RunID
 		identity.MachineID = record.MachineID
 		identity.WorkerID = record.WorkerID
@@ -76,7 +76,7 @@ func (r *Runner) observeProfiling(cancelRun context.CancelCauseFunc) {
 		if strings.Contains(reason, "failed") {
 			kind = "profile_capture_error"
 		}
-		emit("profile:"+state.epoch+":"+uuid.NewString(), kind, phase+": "+reason, time.Now().UTC(), workerIdentity(r.cfg))
+		emit("profile:"+state.epoch+":"+uuid.NewString(), kind, phase+": "+reason, time.Now().UTC(), r.identity)
 	}
 }
 
