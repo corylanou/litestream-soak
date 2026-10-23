@@ -311,6 +311,7 @@ func SetLoadRunning(running bool) {
 		value = 1
 	}
 	loadRunning.WithLabelValues(currentMetricLabels()...).Set(value)
+	harnessWriters.setActive("load", "", running)
 }
 
 func IncLoadRestart(kind string) {

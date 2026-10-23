@@ -326,7 +326,7 @@ func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) e
 		args = append(args, "--region="+c.cfg.S3Region)
 	}
 	args = append(args, "put", filePath, target)
-	uploadCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	uploadCtx, cancel := context.WithTimeout(ctx, profileUploadTimeout(fileSize(filePath)))
 	defer cancel()
 	cmd := exec.CommandContext(uploadCtx, "s3cmd", args...)
 	cmd.WaitDelay = time.Second
@@ -342,6 +342,18 @@ func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) e
 		return &profileUploadError{cause: errors.Join(uploadCtx.Err(), err), diagnostic: diagnostic.sanitized(c.cfg)}
 	}
 	return nil
+}
+
+const profileUploadMinTimeout = 15 * time.Second
+const profileUploadMaxTimeout = 2 * time.Minute
+const profileUploadMinBytesPerSecond = 256 << 10
+
+func profileUploadTimeout(size int64) time.Duration {
+	if size <= 0 {
+		return profileUploadMinTimeout
+	}
+	transfer := time.Duration(float64(size) / profileUploadMinBytesPerSecond * float64(time.Second))
+	return min(profileUploadMinTimeout+transfer, profileUploadMaxTimeout)
 }
 
 type profileUploadError struct {

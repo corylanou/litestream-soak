@@ -29,6 +29,10 @@ func (r *Runner) observeLogIncidents(cancelRun context.CancelCauseFunc) {
 			RuntimePayload: reporting.RuntimePayload{MaintenanceEvidence: evidence},
 			WorkloadEvent:  reporting.WorkloadEvent{WorkloadEventID: fmt.Sprintf("log:%s:%d", evidence.Epoch, evidence.Errors)},
 		}
+		if sqliteBusyLog.MatchString(line) {
+			event.SQLiteBusy = true
+			event.ActiveHarnessWriters = r.harnessWriters.snapshot()
+		}
 		if err := r.persistRunEvidence(event); err != nil {
 			cancelRun(fmt.Errorf("preserve Litestream log incident: %w", err))
 			return err

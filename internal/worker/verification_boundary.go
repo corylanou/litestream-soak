@@ -40,6 +40,7 @@ func (v *Verifier) captureVerificationBoundary(ctx context.Context, path string,
 		return verificationBoundary{}, err
 	}
 	defer func() { _ = conn.Close() }()
+	defer harnessWriters.begin("verifier_reservation", path)()
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
