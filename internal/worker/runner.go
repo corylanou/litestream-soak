@@ -60,6 +60,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	SetWorkerInfo(r.cfg)
 	startTime := time.Now()
 	r.identity = workerIdentity(r.cfg)
+	r.profiles.workload = r.cfg.WorkloadConfig()
 	r.reporter = NewReporter(r.cfg)
 	r.observeLogIncidents(cancelRun)
 	r.observeProfiling(cancelRun)

@@ -3,8 +3,10 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/corylanou/litestream-soak/internal/model"
@@ -82,15 +84,32 @@ func TestReplaySetupKeepsEvidenceIdentityAttributed(t *testing.T) {
 	if _, err := r.litestreamLog.Write([]byte("level=ERROR msg=replay-failure\n")); err != nil {
 		t.Fatal(err)
 	}
+	record := r.profiles.newRecord("baseline", "heap", "sample.pprof")
+	if record.WorkloadHash != expected.ProfileHash {
+		t.Fatalf("manifest workload hash = %s, want %s", record.WorkloadHash, expected.ProfileHash)
+	}
+	if manifest := string(record.WorkloadConfig); strings.Contains(manifest, "replay_data_path") || strings.Contains(manifest, "data.invalid") || !strings.Contains(manifest, `"replay_data_url":"redacted"`) {
+		t.Fatalf("manifest workload config = %s", manifest)
+	}
+	dir := filepath.Join(r.cfg.DataDir, "profiles")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	record.UploadAttempts = 1
+	record.addUploadFailure("artifact", errors.New("upload exited 75"))
+	r.profiles.saveRecord(context.Background(), filepath.Join(dir, "sample.pprof.json"), record)
 	incidents := r.profilingSnapshot().ProfileIncidents
-	if len(incidents) != 1 {
+	if len(incidents) != 2 {
 		t.Fatalf("incidents = %+v", incidents)
 	}
 	identities := outboxIdentities(t, r.cfg.DataDir)
-	if len(identities) != 2 {
+	if len(identities) != 3 {
 		t.Fatalf("outbox identities = %+v", identities)
 	}
-	identities["profile_incident"] = incidents[0].Run
+	for _, incident := range incidents {
+		identities["profile_incident:"+incident.Kind] = incident.Run
+	}
+	identities["debug_snapshot"] = r.captureFailureDebugSnapshot("replay", nil, nil, 0).Run
 	for name, identity := range identities {
 		if identity != expected {
 			t.Fatalf("%s identity diverged from reporter:\n got %+v\nwant %+v", name, identity, expected)

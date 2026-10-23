@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
 const (
@@ -29,6 +31,7 @@ type pprofCapturer struct {
 	onStatus       func(string, string)
 	availableBytes func(string) (uint64, error)
 	cfg            *Config
+	workload       workload.Config
 	gate           chan struct{}
 	statusMu       sync.Mutex
 	uploadWake     chan struct{}
@@ -39,7 +42,7 @@ type pprofCapturer struct {
 }
 
 func newPprofCapturer(cfg *Config) *pprofCapturer {
-	return &pprofCapturer{cfg: cfg, events: make(chan string, 16), gate: make(chan struct{}, 1), uploadWake: make(chan struct{}, 1)}
+	return &pprofCapturer{cfg: cfg, workload: cfg.WorkloadConfig(), events: make(chan string, 16), gate: make(chan struct{}, 1), uploadWake: make(chan struct{}, 1)}
 }
 
 // Run captures Litestream pprof profiles for every worker profile (the
