@@ -340,6 +340,23 @@ curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
 
 The list returns archive metadata and summaries only. Add `&payload=true` to include each archive's full evidence payload (often over 1 MB each), or fetch one archive with `/api/run-archives/{id}`.
 
+## Object-Store Cost Meter
+
+Workers report cumulative object-store counters in every heartbeat. The meter keeps three kinds of numbers apart because they mean different things:
+
+- Real replica HTTP requests and body bytes (`replica_requests`, `replica_request_bytes_sent`, `replica_response_bytes_received`) come from the S3 observe proxy, which sees every request Litestream's replicate process sends, with ListObjects counted as `LIST`. They are only present for workers that opt in with `S3_OBSERVE_PROXY_ENABLED` (or the fleet-wide `SOAK_ENABLE_S3_OBSERVE_PROXY`). The observe proxy re-signs forwarded requests for the target host, and if it cannot start (for example, missing signing credentials or region) the worker logs a warning and replicates directly instead of failing. Fail-open covers startup only; once the proxy is running, an upstream failure reaches Litestream as a 502. The re-signing path does not support signed aws-chunked payloads (current Litestream disables them for custom endpoints). In observe mode the verifier restore, pprof/evidence uploads, and the s3cmd replica-level and debug-snapshot listings go straight to the target endpoint, so the proxy only sees replicate traffic and every request is counted once; those diagnostic listings are not metered.
+- Logical object operations (`litestream_object_operations`, `litestream_object_bytes`) come from `litestream_replica_operation_total` and `litestream_replica_operation_bytes`. Litestream increments these per uploaded or deleted object, not per HTTP request: GET and LIST never appear, a multipart upload counts once, and a batch delete counts every object. Use them for trends on workers without the observe proxy, not for request billing.
+- Verifier restore requests (`restore_requests`) are parsed from the restore's `s3 request` debug lines. Evidence uploads (`evidence_object_uploads`, `evidence_upload_payload_bytes`) count successful pprof/evidence `s3cmd put` calls and their payload bytes; failed attempts and multipart part requests are not counted.
+
+The control plane turns the counters into deltas. Each worker process sends a counter epoch, and Litestream counters carry their own epoch (`process_start_time_seconds`, or the Litestream PID when that series is absent), so a restarted worker or Litestream process starts a new baseline even if its first scrape is late. Data is stored as hourly per-worker buckets plus peak `data_disk_used_bytes`. Buckets older than 30 days are pruned on the hourly retention pass.
+
+```bash
+curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  "https://litestream-soak-ctl.fly.dev/api/cost-meter?source=main&since=7d" | jq .
+```
+
+`since` accepts a duration (`6h`, `7d`) or an RFC3339 timestamp and defaults to 24 hours; the window starts at the top of the hour containing `since`. Omit `source` for every source. Each source reports summed totals, the largest single-worker peak disk, `worker_peak_disk_used_bytes_sum`, and per-worker totals. Prometheus series: `soak_control_source_object_store_requests_total{origin="replica"|"restore"}`, `soak_control_source_object_store_request_bytes_total{direction="sent"|"received"}`, `soak_control_source_litestream_object_operations_total`, `soak_control_source_litestream_object_bytes_total`, `soak_control_source_evidence_object_uploads_total`, and `soak_control_source_evidence_upload_payload_bytes_total`. Stopped workers keep their identity, status, verification, failure, and platform-event series (the Compute State panel still shows them as stopped) but stop exporting resource measurements such as disk, sizes, lag, and process stats.
+
 ## Upstream PR Retirement
 
 The control plane polls GitHub for every `pr-N` source with a live worker and

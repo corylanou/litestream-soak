@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -70,6 +72,15 @@ type s3FaultProxy struct {
 	observedSourceGET      int
 	observedSourceRangeGET int
 	listRequests           int64
+	requests               map[string]uint64
+	bytesSent              map[string]uint64
+	bytesReceived          map[string]uint64
+}
+
+type s3ProxyRequestCounters struct {
+	Requests      map[string]uint64
+	BytesSent     map[string]uint64
+	BytesReceived map[string]uint64
 }
 
 func newS3FaultProxy(cfg s3FaultProxyConfig) *s3FaultProxy {
@@ -165,6 +176,14 @@ func (p *s3FaultProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if isS3ListRequest(r) {
 		p.recordListRequest()
 	}
+	if p.cfg.Mode == s3FaultProxyModeObserve {
+		body := &countingReadCloser{ReadCloser: r.Body}
+		r.Body = body
+		counted := &countingResponseWriter{ResponseWriter: w}
+		w = counted
+		operation := s3RequestOperation(r)
+		defer func() { p.recordRequest(operation, body.n.Load(), counted.n.Load()) }()
+	}
 	if p.shouldInjectProviderHTTP408(r) {
 		p.injectProviderHTTP408(w, r)
 		return
@@ -226,6 +245,86 @@ func (p *s3FaultProxy) ListRequests() int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.listRequests
+}
+
+func (p *s3FaultProxy) RequestCounters() s3ProxyRequestCounters {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return s3ProxyRequestCounters{
+		Requests:      maps.Clone(p.requests),
+		BytesSent:     maps.Clone(p.bytesSent),
+		BytesReceived: maps.Clone(p.bytesReceived),
+	}
+}
+
+func (p *s3FaultProxy) recordRequest(operation string, sent, received int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.requests == nil {
+		p.requests = make(map[string]uint64)
+	}
+	p.requests[operation]++
+	if sent > 0 {
+		if p.bytesSent == nil {
+			p.bytesSent = make(map[string]uint64)
+		}
+		p.bytesSent[operation] += uint64(sent)
+	}
+	if received > 0 {
+		if p.bytesReceived == nil {
+			p.bytesReceived = make(map[string]uint64)
+		}
+		p.bytesReceived[operation] += uint64(received)
+	}
+}
+
+func s3RequestOperation(r *http.Request) string {
+	if isS3ListRequest(r) {
+		return "LIST"
+	}
+	return strings.ToUpper(r.Method)
+}
+
+type countingReadCloser struct {
+	io.ReadCloser
+	n atomic.Int64
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	if c.ReadCloser == nil {
+		return 0, io.EOF
+	}
+	n, err := c.ReadCloser.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c *countingReadCloser) Close() error {
+	if c.ReadCloser == nil {
+		return nil
+	}
+	return c.ReadCloser.Close()
+}
+
+type countingResponseWriter struct {
+	http.ResponseWriter
+	n atomic.Int64
+}
+
+func (c *countingResponseWriter) Write(p []byte) (int, error) {
+	n, err := c.ResponseWriter.Write(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c *countingResponseWriter) Flush() {
+	if flusher, ok := c.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (c *countingResponseWriter) Unwrap() http.ResponseWriter {
+	return c.ResponseWriter
 }
 
 func (p *s3FaultProxy) ResetCycle() {
@@ -547,9 +646,8 @@ func normalizeS3FaultProxyMode(mode string) string {
 
 func s3FaultProxyModeRequiresSigning(mode string) (bool, error) {
 	switch normalizeS3FaultProxyMode(mode) {
-	case s3FaultProxyModeObserve:
-		return false, nil
-	case s3FaultProxyModeUploadPartReset,
+	case s3FaultProxyModeObserve,
+		s3FaultProxyModeUploadPartReset,
 		s3FaultProxyModeSourceGETReset,
 		s3FaultProxyModeProviderHTTP408,
 		s3FaultProxyModeProviderRequestCanceled,
@@ -655,6 +753,10 @@ func (r *Runner) startS3FaultProxy(ctx context.Context) error {
 		Region:            r.cfg.S3Region,
 	})
 	if err := proxy.Start(ctx); err != nil {
+		if proxy.cfg.Mode == s3FaultProxyModeObserve && ctx.Err() == nil {
+			slog.Warn("S3 observe proxy unavailable; replicating directly", "error", safeS3FaultProxyError(err))
+			return nil
+		}
 		return err
 	}
 	r.s3FaultProxy = proxy

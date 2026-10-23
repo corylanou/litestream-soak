@@ -38,6 +38,7 @@ type statsPoller struct {
 	prevAllocAt                          time.Time
 	litestreamMetricsLastSuccessAt       time.Time
 	litestreamMetricsConsecutiveFailures int
+	litestreamObjectOperations           reporting.ObjectStoreCounters
 }
 
 func newStatsPoller(cfg *Config) statsPoller {
@@ -335,6 +336,20 @@ func (p *statsPoller) recordLitestreamMetricsScrape(collectedAt time.Time, snaps
 	runtime := reporting.RuntimePayload{
 		LitestreamMetricsScrapeAttemptedAt: collectedAt,
 	}
+	if err == nil && snapshot.LitestreamObjectOperationTotals != nil {
+		epoch := snapshot.LitestreamCounterEpoch
+		if epoch == "" {
+			if pid := p.currentLitestreamPID(); pid > 0 {
+				epoch = "pid:" + strconv.Itoa(pid)
+			}
+		}
+		p.litestreamObjectOperations = reporting.ObjectStoreCounters{
+			LitestreamCounterEpoch:          epoch,
+			LitestreamObjectOperationTotals: snapshot.LitestreamObjectOperationTotals,
+			LitestreamObjectOperationBytes:  snapshot.LitestreamObjectOperationBytes,
+		}
+	}
+	setLitestreamObjectOperations(&runtime, p.litestreamObjectOperations)
 	if err != nil {
 		p.litestreamMetricsConsecutiveFailures++
 		runtime.LitestreamMetricsScrapeStatus = reporting.LitestreamMetricsScrapeStatusFailed
@@ -363,6 +378,13 @@ func applyLitestreamMetricsRuntime(snapshot *reporting.RuntimePayload, metrics r
 	snapshot.LitestreamDiskFullMetricPresent = metrics.LitestreamDiskFullMetricPresent
 	snapshot.LitestreamDiskFull = metrics.LitestreamDiskFull
 	snapshot.LitestreamMemStatsMetricsPresent = metrics.LitestreamMemStatsMetricsPresent
+	setLitestreamObjectOperations(snapshot, metrics.ObjectStoreCounters)
+}
+
+func setLitestreamObjectOperations(snapshot *reporting.RuntimePayload, counters reporting.ObjectStoreCounters) {
+	snapshot.LitestreamCounterEpoch = counters.LitestreamCounterEpoch
+	snapshot.LitestreamObjectOperationTotals = counters.LitestreamObjectOperationTotals
+	snapshot.LitestreamObjectOperationBytes = counters.LitestreamObjectOperationBytes
 }
 
 func (p *statsPoller) currentS3ListRequests() uint64 {
@@ -611,6 +633,7 @@ func (p *statsPoller) setLitestreamSnapshot(snapshot reporting.RuntimePayload) {
 	p.snapshot.LitestreamDiskFullMetricPresent = snapshot.LitestreamDiskFullMetricPresent
 	p.snapshot.LitestreamDiskFull = snapshot.LitestreamDiskFull
 	p.snapshot.LitestreamMemStatsMetricsPresent = snapshot.LitestreamMemStatsMetricsPresent
+	setLitestreamObjectOperations(&p.snapshot.RuntimePayload, snapshot.ObjectStoreCounters)
 	p.snapshot.LitestreamGoroutines = snapshot.LitestreamGoroutines
 	p.snapshot.DiskPressureNoProgress = snapshot.DiskPressureNoProgress
 	p.snapshot.DiskPressureNoProgressSeconds = snapshot.DiskPressureNoProgressSeconds

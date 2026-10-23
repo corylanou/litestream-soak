@@ -896,7 +896,7 @@ func TestDefaultMainFleetIncludesManyDBProfilesWhenEnabled(t *testing.T) {
 
 	for profile, worker := range many {
 		if worker.Workload.S3FaultProxyEnabled {
-			t.Fatalf("%s S3FaultProxyEnabled = true, want false by default until the proxy re-signs requests (issue #146)", profile)
+			t.Fatalf("%s S3FaultProxyEnabled = true, want false by default: the observe proxy is opt-in", profile)
 		}
 	}
 

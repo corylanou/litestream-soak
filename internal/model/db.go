@@ -219,6 +219,10 @@ func Open(path string) (*DB, error) {
 		_ = writer.Close()
 		return nil, fmt.Errorf("ensure provisioning journal: %w", err)
 	}
+	if _, err := writer.Exec(costMeterSchema); err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("ensure cost meter: %w", err)
+	}
 	if err := ensureEvidenceJournal(writer); err != nil {
 		_ = writer.Close()
 		return nil, fmt.Errorf("ensure evidence journal: %w", err)

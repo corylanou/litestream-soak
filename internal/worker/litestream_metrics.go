@@ -2,6 +2,8 @@ package worker
 
 import (
 	"io"
+	"math"
+	"strconv"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
@@ -9,9 +11,12 @@ import (
 )
 
 const (
-	litestreamHeapInuseMetricName  = "go_memstats_heap_inuse_bytes"
-	litestreamStackInuseMetricName = "go_memstats_stack_inuse_bytes"
-	litestreamAllocTotalMetricName = "go_memstats_alloc_bytes_total"
+	litestreamHeapInuseMetricName    = "go_memstats_heap_inuse_bytes"
+	litestreamStackInuseMetricName   = "go_memstats_stack_inuse_bytes"
+	litestreamAllocTotalMetricName   = "go_memstats_alloc_bytes_total"
+	litestreamReplicaOpsMetricName   = "litestream_replica_operation_total"
+	litestreamReplicaBytesMetricName = "litestream_replica_operation_bytes"
+	litestreamProcessStartMetricName = "process_start_time_seconds"
 )
 
 type litestreamMetricsSnapshot struct {
@@ -21,6 +26,10 @@ type litestreamMetricsSnapshot struct {
 	StackInuseBytes float64
 	AllocBytesTotal float64
 	MemStatsPresent bool
+
+	LitestreamObjectOperationTotals map[string]uint64
+	LitestreamObjectOperationBytes  map[string]uint64
+	LitestreamCounterEpoch          string
 }
 
 func parseLitestreamMetrics(r io.Reader, dbPath string) (litestreamMetricsSnapshot, error) {
@@ -42,7 +51,44 @@ func parseLitestreamMetrics(r io.Reader, dbPath string) (litestreamMetricsSnapsh
 		snapshot.AllocBytesTotal = alloc
 		snapshot.MemStatsPresent = true
 	}
+	snapshot.LitestreamObjectOperationTotals = sumCountersByLabel(families[litestreamReplicaOpsMetricName], "operation")
+	snapshot.LitestreamObjectOperationBytes = sumCountersByLabel(families[litestreamReplicaBytesMetricName], "operation")
+	if start, ok := extractSingleMetricValue(families[litestreamProcessStartMetricName]); ok && start > 0 {
+		snapshot.LitestreamCounterEpoch = "start:" + strconv.FormatFloat(start, 'f', -1, 64)
+	}
 	return snapshot, nil
+}
+
+func sumCountersByLabel(family *dto.MetricFamily, label string) map[string]uint64 {
+	if family == nil {
+		return nil
+	}
+	var totals map[string]uint64
+	for _, metric := range family.GetMetric() {
+		var value float64
+		switch {
+		case metric.GetCounter() != nil:
+			value = metric.GetCounter().GetValue()
+		case metric.GetUntyped() != nil:
+			value = metric.GetUntyped().GetValue()
+		default:
+			continue
+		}
+		key := ""
+		for _, pair := range metric.GetLabel() {
+			if pair.GetName() == label {
+				key = pair.GetValue()
+			}
+		}
+		if key == "" || value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+			continue
+		}
+		if totals == nil {
+			totals = make(map[string]uint64)
+		}
+		totals[key] += uint64(value)
+	}
+	return totals
 }
 
 func extractDiskFullMetric(family *dto.MetricFamily, dbPath string) (bool, bool) {

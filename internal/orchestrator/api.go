@@ -337,4 +337,5 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/events", a.handleListEvents)
 	mux.HandleFunc("GET /api/failures", a.handleListFailures)
 	mux.HandleFunc("GET /api/alerts", a.handleListAlerts)
+	mux.HandleFunc("GET /api/cost-meter", a.handleCostMeter)
 }

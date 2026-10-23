@@ -30,7 +30,7 @@ const (
 	testS3SigningScope = "s3"
 )
 
-func TestS3FaultProxyWithoutResigningForwardsIncomingHost(t *testing.T) {
+func TestS3ObserveProxyResignsForTargetHost(t *testing.T) {
 	upstreamHost := make(chan string, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHost <- r.Host
@@ -38,11 +38,11 @@ func TestS3FaultProxyWithoutResigningForwardsIncomingHost(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	proxy := newS3FaultProxy(s3FaultProxyConfig{
+	proxy := newS3FaultProxy(withTestS3SigningConfig(s3FaultProxyConfig{
 		TargetEndpoint: upstream.URL,
 		ListenAddr:     "127.0.0.1:0",
 		Mode:           s3FaultProxyModeObserve,
-	})
+	}))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := proxy.Start(ctx); err != nil {
@@ -63,12 +63,12 @@ func TestS3FaultProxyWithoutResigningForwardsIncomingHost(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = resp.Body.Close() })
 
-	proxyURL, err := url.Parse(proxy.Endpoint())
+	upstreamURL, err := url.Parse(upstream.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := <-upstreamHost; got != proxyURL.Host {
-		t.Fatalf("upstream Host = %q, want incoming proxy host %q", got, proxyURL.Host)
+	if got := <-upstreamHost; got != upstreamURL.Host {
+		t.Fatalf("upstream Host = %q, want target host %q", got, upstreamURL.Host)
 	}
 }
 
@@ -949,7 +949,7 @@ func TestS3FaultProxyObserveModeNeverInjectsFaults(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	proxy := newS3FaultProxy(s3FaultProxyConfig{
+	proxy := newS3FaultProxy(withTestS3SigningConfig(s3FaultProxyConfig{
 		TargetEndpoint:    upstream.URL,
 		ListenAddr:        "127.0.0.1:0",
 		Mode:              "observe",
@@ -957,7 +957,7 @@ func TestS3FaultProxyObserveModeNeverInjectsFaults(t *testing.T) {
 		ResetAfterBytes:   4,
 		FailFirstAttempts: 3,
 		MaxFailures:       5,
-	})
+	}))
 	if proxy.cfg.FailFirstAttempts != 0 {
 		t.Fatalf("observe mode FailFirstAttempts = %d, want 0", proxy.cfg.FailFirstAttempts)
 	}
@@ -971,7 +971,7 @@ func TestS3FaultProxyObserveModeNeverInjectsFaults(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = proxy.Close(context.Background()) })
 
-	client := &http.Client{Timeout: time.Second}
+	client := testS3HTTPClient(time.Second)
 	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, proxy.Endpoint()+"/bucket/key?partNumber=1&uploadId=test-upload", bytes.NewReader(bytes.Repeat([]byte("x"), 32)))
 	if err != nil {
 		t.Fatal(err)
@@ -1012,11 +1012,11 @@ func TestS3FaultProxyCountsListRequests(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	proxy := newS3FaultProxy(s3FaultProxyConfig{
+	proxy := newS3FaultProxy(withTestS3SigningConfig(s3FaultProxyConfig{
 		TargetEndpoint: upstream.URL,
 		ListenAddr:     "127.0.0.1:0",
 		Mode:           "observe",
-	})
+	}))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := proxy.Start(ctx); err != nil {
@@ -1024,7 +1024,7 @@ func TestS3FaultProxyCountsListRequests(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = proxy.Close(context.Background()) })
 
-	client := &http.Client{Timeout: time.Second}
+	client := testS3HTTPClient(time.Second)
 
 	listResp, err := client.Get(proxy.Endpoint() + "/bucket?list-type=2&prefix=db/")
 	if err != nil {

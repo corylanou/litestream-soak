@@ -101,13 +101,14 @@ func (p *replicaLevelPoller) poll(ctx context.Context) {
 // four-digit level directory. Credentials come from the AWS_* environment that
 // s3cmd reads itself, so they never appear on the command line.
 func listReplicaLevels(ctx context.Context, cfg Config) ([]replicaLevel, error) {
-	host := endpointHost(cfg.S3Endpoint)
+	endpoint := cfg.directS3Endpoint()
+	host := endpointHost(endpoint)
 	if host == "" {
-		return nil, fmt.Errorf("replica endpoint %q has no host", cfg.S3Endpoint)
+		return nil, fmt.Errorf("replica endpoint %q has no host", endpoint)
 	}
 	prefixURL := fmt.Sprintf("s3://%s/%s/", cfg.S3Bucket, strings.Trim(strings.TrimPrefix(cfg.S3Path, "/"), "/"))
 	args := []string{"--host=" + host}
-	if strings.HasPrefix(strings.ToLower(cfg.S3Endpoint), "http://") {
+	if strings.HasPrefix(strings.ToLower(endpoint), "http://") {
 		// Plain-http endpoints are the local fault proxy or MinIO: no TLS
 		// and path-style addressing, since %(bucket)s.127.0.0.1 never
 		// resolves.

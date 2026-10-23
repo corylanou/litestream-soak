@@ -356,7 +356,7 @@ func TestConfigFromEnvReadsManyDBProfiles(t *testing.T) {
 				t.Fatalf("ConfigMode = %q, want %q", cfg.ConfigMode, tc.configMode)
 			}
 			if cfg.S3FaultProxyEnabled {
-				t.Fatal("S3FaultProxyEnabled = true, want false by default until the proxy re-signs requests (issue #146)")
+				t.Fatal("S3FaultProxyEnabled = true, want false by default: the observe proxy is opt-in")
 			}
 			if cfg.S3FaultProxyFailFirstAttempts != 0 {
 				t.Fatalf("S3FaultProxyFailFirstAttempts = %d, want 0", cfg.S3FaultProxyFailFirstAttempts)

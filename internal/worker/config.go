@@ -266,9 +266,8 @@ func applyManyDBProfileBase(c *Config, numDatabases, workers int, configMode str
 	c.ActivePercent = 2
 	c.ConfigMode = configMode
 	c.VerifySampleSize = 5
-	// The S3 observe proxy is opt-in until it re-signs forwarded requests:
-	// it currently forwards litestream's Host header, which Tigris resolves
-	// as bucket "127.0.0.1" (NoSuchBucket) — see issue #146.
+	// The S3 observe proxy re-signs forwarded requests (issue #146) but stays
+	// opt-in: it puts every replica request on the worker's proxy path.
 	c.S3FaultProxyFailFirstAttempts = 0
 }
 
@@ -1052,6 +1051,14 @@ func (c Config) manyDBMaxRowsPerDatabase() int {
 		return c.MaxRowsPerDatabase
 	}
 	return workload.DefaultMaxRowsPerDatabase(c.NumDatabases)
+}
+
+func (c Config) directS3Endpoint() string {
+	target := strings.TrimSpace(c.S3FaultProxyTargetEndpoint)
+	if c.S3FaultProxyEnabled && c.ReplicaType == "s3" && c.s3FaultProxyObserveMode() && target != "" {
+		return target
+	}
+	return c.S3Endpoint
 }
 
 func (c Config) s3FaultProxyObserveMode() bool {

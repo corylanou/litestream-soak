@@ -524,7 +524,9 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 		controlWorkerLitestreamMetricsStatus.WithLabelValues(previousLitestreamMetrics.labels...).Set(0)
 	}
 	controlWorkerLitestreamMetricsStatus.WithLabelValues(litestreamMetricsLabels...).Set(1)
-	if runtime := reportedRuntime; runtime != nil {
+	if workerMeasurementsRetired(worker) {
+		forgetWorkerMeasurements(worker.ID)
+	} else if runtime := reportedRuntime; runtime != nil {
 		controlWorkerDataDiskTotalSize.WithLabelValues(labels...).Set(float64(runtime.DataDiskTotalBytes))
 		controlWorkerDataDiskUsedSize.WithLabelValues(labels...).Set(float64(runtime.DataDiskUsedBytes))
 		controlWorkerDataDiskFreeSize.WithLabelValues(labels...).Set(float64(runtime.DataDiskFreeBytes))
@@ -548,7 +550,9 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 		controlWorkerLitestreamAllocRateBytesPerSecond.WithLabelValues(labels...).Set(runtime.LitestreamAllocRateBytesPerSec)
 	}
 
-	publishControlResourceMetrics(labels, reportedRuntime)
+	if !workerMeasurementsRetired(worker) {
+		publishControlResourceMetrics(labels, reportedRuntime)
+	}
 
 	if previousStatus != "" && previousStatus != string(worker.Status) {
 		controlWorkerStatus.WithLabelValues(append(labels, previousStatus)...).Set(0)
