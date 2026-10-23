@@ -122,7 +122,7 @@ func TestStressScenarioScheduleAlternatesNonOverlappingPhases(t *testing.T) {
 		mu.Unlock()
 		return context.Cause(phaseCtx)
 	}
-	if err := RunStressScenarioSchedule(ctx, cfg, run); err != nil {
+	if err := runStressScenarioSchedule(ctx, cfg, steppingClock(cfg.StressScenarioPhase), run); err != nil {
 		t.Fatalf("RunStressScenarioSchedule() error = %v", err)
 	}
 	if len(order) != 5 {
@@ -137,6 +137,62 @@ func TestStressScenarioScheduleAlternatesNonOverlappingPhases(t *testing.T) {
 	failing := func(context.Context, Config) error { return errors.New("litestream crashed") }
 	if err := RunStressScenarioSchedule(context.Background(), cfg, failing); err == nil || !strings.Contains(err.Error(), "litestream crashed") {
 		t.Fatalf("phase failure err = %v", err)
+	}
+}
+
+func steppingClock(phase time.Duration) func() time.Time {
+	base := time.Unix(0, 0).Add(1000 * phase)
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	return func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			return base.Add(phase / 2)
+		}
+		return base.Add(time.Duration(calls-1) * phase)
+	}
+}
+
+func TestStressScenarioScheduleAdvancesWhenClockReadsJustBeforeBoundary(t *testing.T) {
+	cfg := stressScheduleConfig(t)
+	cfg.StressScenarioPhase = 20 * time.Millisecond
+	base := time.Unix(0, 0).Add(1000 * cfg.StressScenarioPhase)
+	var (
+		mu    sync.Mutex
+		calls int
+		order []string
+	)
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			return base.Add(cfg.StressScenarioPhase / 2)
+		}
+		return base.Add(time.Duration(calls-1)*cfg.StressScenarioPhase - time.Microsecond)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	run := func(phaseCtx context.Context, phase Config) error {
+		mu.Lock()
+		order = append(order, phase.StressScenario())
+		if len(order) == 4 {
+			cancel()
+		}
+		mu.Unlock()
+		<-phaseCtx.Done()
+		return context.Cause(phaseCtx)
+	}
+	if err := runStressScenarioSchedule(ctx, cfg, clock, run); err != nil {
+		t.Fatalf("runStressScenarioSchedule() error = %v", err)
+	}
+	want := []string{"overload-truncate0", "pinned-reader", "overload-truncate0", "pinned-reader"}
+	if strings.Join(order, ",") != strings.Join(want, ",") {
+		t.Fatalf("phases = %v, want %v", order, want)
 	}
 }
 
