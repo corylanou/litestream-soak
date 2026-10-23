@@ -258,13 +258,11 @@ func TestVerificationReservationTracksWaitThenHold(t *testing.T) {
 	if _, err := blocker.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
 		t.Fatal(err)
 	}
-	reserver := logicalTestDB(t, dbPath, "SELECT 1")
-	conn, err := reserver.Conn(context.Background())
+	reservation, err := openVerificationReservation(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = conn.Close() }()
-	reservation := &verificationReservation{conn: conn, path: dbPath}
+	defer reservation.close()
 	done := make(chan error, 1)
 	go func() { done <- reservation.acquire(context.Background()) }()
 	if !waitUntil(2*time.Second, time.Millisecond, func() bool { return harnessWriterActive("verifier_reservation_wait", dbPath) }) {
@@ -287,6 +285,37 @@ func TestVerificationReservationTracksWaitThenHold(t *testing.T) {
 	}
 	if names := harnessWritersFor(dbPath); len(names) != 0 {
 		t.Fatalf("released reservation writers=%v", names)
+	}
+}
+
+func TestVerificationReservationFailedReleaseStaysTrackedUntilClose(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "source.db")
+	db := logicalTestDB(t, dbPath, "PRAGMA journal_mode=WAL; CREATE TABLE t(id)")
+	reservation, err := openVerificationReservation(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reservation.close()
+	if err := reservation.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := reservation.release(canceled); err == nil {
+		t.Fatal("canceled rollback reported success")
+	}
+	if !harnessWriterActive("verifier_reservation", dbPath) {
+		t.Fatalf("still-held reservation not tracked: %v", harnessWritersFor(dbPath))
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=50; INSERT INTO t VALUES(1)"); err == nil {
+		t.Fatal("reservation released despite failed rollback")
+	}
+	reservation.close()
+	if names := harnessWritersFor(dbPath); len(names) != 0 {
+		t.Fatalf("closed reservation writers=%v", names)
+	}
+	if _, err := db.Exec("INSERT INTO t VALUES(2)"); err != nil {
+		t.Fatalf("closed reservation still holds lock: %v", err)
 	}
 }
 

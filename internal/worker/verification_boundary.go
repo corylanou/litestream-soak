@@ -29,18 +29,11 @@ func (v *Verifier) captureVerificationBoundary(ctx context.Context, path string,
 	if txid == 0 {
 		return verificationBoundary{}, fmt.Errorf("source boundary unavailable: zero TXID")
 	}
-	uri := url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw"}
-	db, err := sql.Open("sqlite", uri.String())
+	reservation, err := openVerificationReservation(ctx, path)
 	if err != nil {
 		return verificationBoundary{}, err
 	}
-	defer func() { _ = db.Close() }()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return verificationBoundary{}, err
-	}
-	defer func() { _ = conn.Close() }()
-	reservation := &verificationReservation{conn: conn, path: path}
+	defer reservation.close()
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -75,9 +68,37 @@ func (v *Verifier) captureVerificationBoundary(ctx context.Context, path string,
 }
 
 type verificationReservation struct {
+	db      *sql.DB
 	conn    *sql.Conn
 	path    string
 	endHeld func()
+}
+
+func openVerificationReservation(ctx context.Context, path string) (*verificationReservation, error) {
+	uri := url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw"}
+	db, err := sql.Open("sqlite", uri.String())
+	if err != nil {
+		return nil, err
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &verificationReservation{db: db, conn: conn, path: path}, nil
+}
+
+func (r *verificationReservation) close() {
+	_ = r.conn.Close()
+	_ = r.db.Close()
+	r.endHeldTracking()
+}
+
+func (r *verificationReservation) endHeldTracking() {
+	if r.endHeld != nil {
+		r.endHeld()
+		r.endHeld = nil
+	}
 }
 
 func (r *verificationReservation) acquire(ctx context.Context) error {
@@ -91,12 +112,11 @@ func (r *verificationReservation) acquire(ctx context.Context) error {
 }
 
 func (r *verificationReservation) release(ctx context.Context) error {
-	_, err := r.conn.ExecContext(ctx, "ROLLBACK")
-	if r.endHeld != nil {
-		r.endHeld()
-		r.endHeld = nil
+	if _, err := r.conn.ExecContext(ctx, "ROLLBACK"); err != nil {
+		return err
 	}
-	return err
+	r.endHeldTracking()
+	return nil
 }
 
 func acquireVerificationReservation(ctx context.Context, conn *sql.Conn) error {
