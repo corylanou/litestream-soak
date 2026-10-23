@@ -1,0 +1,274 @@
+name: soak-rc
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: Release candidate ref (tag, branch, or commit SHA) to gate
+        required: true
+        type: string
+      repo_full_name:
+        description: Upstream GitHub repo in owner/name form
+        required: false
+        type: string
+        default: benbjohnson/litestream
+      baseline_sha:
+        description: Baseline commit SHA or ref (defaults to the current upstream main head)
+        required: false
+        type: string
+      duration:
+        description: Gate duration in whole hours, such as 72h (maximum 168h)
+        required: false
+        type: string
+        default: 72h
+      tail:
+        description: Keep gate-stress running in both sources until 7 days
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: soak-rc-${{ github.event.inputs.candidate_ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-request:
+    runs-on: ubuntu-latest
+    outputs:
+      repo_full_name: ${{ steps.resolve.outputs.repo_full_name }}
+      candidate_ref: ${{ steps.resolve.outputs.candidate_ref }}
+      candidate_sha: ${{ steps.resolve.outputs.candidate_sha }}
+      baseline_sha: ${{ steps.resolve.outputs.baseline_sha }}
+      candidate_source: ${{ steps.resolve.outputs.candidate_source }}
+      baseline_source: ${{ steps.resolve.outputs.baseline_source }}
+      duration: ${{ steps.resolve.outputs.duration }}
+      tail: ${{ steps.resolve.outputs.tail }}
+    steps:
+      - id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOAK_PR_REPO_ALLOWLIST: ${{ vars.SOAK_PR_REPO_ALLOWLIST }}
+          CANDIDATE_REF: ${{ github.event.inputs.candidate_ref }}
+          REPO_FULL_NAME: ${{ github.event.inputs.repo_full_name || 'benbjohnson/litestream' }}
+          BASELINE_REF: ${{ github.event.inputs.baseline_sha || '' }}
+          DURATION: ${{ github.event.inputs.duration || '72h' }}
+          TAIL: ${{ github.event.inputs.tail || 'false' }}
+        run: |
+          set -euo pipefail
+
+          repo_full_name="${REPO_FULL_NAME}"
+          candidate_ref="${CANDIDATE_REF}"
+          baseline_ref="${BASELINE_REF:-main}"
+          duration="${DURATION}"
+          tail="${TAIL}"
+          allowed_repos="${SOAK_PR_REPO_ALLOWLIST:-benbjohnson/litestream}"
+          upstream_repo="benbjohnson/litestream"
+
+          if [[ ! "${repo_full_name}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "repo_full_name must use owner/name format" >&2
+            exit 1
+          fi
+          case ",${allowed_repos}," in
+            *,"${repo_full_name}",*) ;;
+            *)
+              echo "repo ${repo_full_name} is not in SOAK_PR_REPO_ALLOWLIST (${allowed_repos})" >&2
+              exit 1
+              ;;
+          esac
+          for ref in "${candidate_ref}" "${baseline_ref}"; do
+            if [[ ! "${ref}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+              echo "refs must be a tag, branch, or commit SHA" >&2
+              exit 1
+            fi
+          done
+          if [[ ! "${duration}" =~ ^[1-9][0-9]*h$ ]] || [ "${duration%h}" -gt 168 ]; then
+            echo "duration must be whole hours between 1h and 168h" >&2
+            exit 1
+          fi
+          if [ "${tail}" != "true" ] && [ "${tail}" != "false" ]; then
+            echo "tail must be true or false" >&2
+            exit 1
+          fi
+
+          resolve_sha() {
+            local repo="$1"
+            local ref="$2"
+            local sha
+            sha="$(gh api "repos/${repo}/commits/${ref}" --jq .sha | tr '[:upper:]' '[:lower:]')"
+            if [[ ! "${sha}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "failed to resolve ${repo}@${ref} to a 40-character commit SHA" >&2
+              return 1
+            fi
+            printf '%s\n' "${sha}"
+          }
+
+          candidate_sha="$(resolve_sha "${repo_full_name}" "${candidate_ref}")"
+          baseline_sha="$(resolve_sha "${upstream_repo}" "${baseline_ref}")"
+          if [ "${candidate_sha}" = "${baseline_sha}" ]; then
+            echo "candidate and baseline resolve to the same commit ${candidate_sha}" >&2
+            exit 1
+          fi
+
+          {
+            echo "repo_full_name=${repo_full_name}"
+            echo "candidate_ref=${candidate_ref}"
+            echo "candidate_sha=${candidate_sha}"
+            echo "baseline_sha=${baseline_sha}"
+            echo "candidate_source=rc-${candidate_sha::8}"
+            echo "baseline_source=rcbase-${baseline_sha::8}"
+            echo "duration=${duration}"
+            echo "tail=${tail}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "### RC gate request"
+            echo "Candidate: ${repo_full_name}@${candidate_ref} -> ${candidate_sha}"
+            echo "Baseline: ${upstream_repo}@${baseline_ref} -> ${baseline_sha}"
+            echo "Duration: ${duration} (tail: ${tail})"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+  build-worker-images:
+    needs: resolve-request
+    runs-on: ubuntu-latest
+    outputs:
+      candidate_image_ref: ${{ steps.build.outputs.candidate_image_ref }}
+      baseline_image_ref: ${{ steps.build.outputs.baseline_image_ref }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup-flyctl
+
+      - id: build
+        shell: bash
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          CANDIDATE_SHA: ${{ needs.resolve-request.outputs.candidate_sha }}
+          BASELINE_SHA: ${{ needs.resolve-request.outputs.baseline_sha }}
+          CANDIDATE_SOURCE: ${{ needs.resolve-request.outputs.candidate_source }}
+          BASELINE_SOURCE: ${{ needs.resolve-request.outputs.baseline_source }}
+        run: |
+          set -euo pipefail
+
+          parse_flyctl_image_ref() {
+            local log_file="$1"
+            local image_label="$2"
+            local image_ref
+
+            image_ref="$(awk '$1 == "image:" && $2 ~ "^registry[.]fly[.]io/litestream-soak:" {print $2}' "${log_file}" | tail -n 1 || true)"
+            if [ -z "${image_ref}" ]; then
+              echo "failed to parse image ref from flyctl output" >&2
+              echo "expected a line matching: image: registry.fly.io/litestream-soak:${image_label}" >&2
+              echo "last 40 lines of flyctl output:" >&2
+              tail -n 40 "${log_file}" >&2
+              return 1
+            fi
+            if [[ "${image_ref}" != "registry.fly.io/litestream-soak:${image_label}"* ]]; then
+              echo "parsed flyctl image ref ${image_ref} does not match expected label ${image_label}" >&2
+              echo "last 40 lines of flyctl output:" >&2
+              tail -n 40 "${log_file}" >&2
+              return 1
+            fi
+
+            printf '%s\n' "${image_ref}"
+          }
+
+          build_gate_image() {
+            local source_name="$1"
+            local litestream_sha="$2"
+            local output_name="$3"
+            local image_label="sha-${GITHUB_SHA::12}-${source_name}-ls-${litestream_sha::12}"
+            local log_file
+            local image_ref
+            log_file="$(mktemp)"
+
+            flyctl deploy \
+              --remote-only \
+              --app litestream-soak \
+              --config fly.toml \
+              --image-label "${image_label}" \
+              --build-arg "LITESTREAM_SHA=${litestream_sha}" \
+              --build-only \
+              --push 2>&1 | tee "${log_file}"
+
+            image_ref="$(parse_flyctl_image_ref "${log_file}" "${image_label}")"
+            echo "${output_name}=${image_ref}" >> "${GITHUB_OUTPUT}"
+          }
+
+          build_gate_image "${CANDIDATE_SOURCE}" "${CANDIDATE_SHA}" candidate_image_ref
+          build_gate_image "${BASELINE_SOURCE}" "${BASELINE_SHA}" baseline_image_ref
+
+  launch-gate:
+    needs:
+      - resolve-request
+      - build-worker-images
+    if: needs.build-worker-images.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Verify candidate compatibility before launching the gate
+        timeout-minutes: 15
+        env:
+          CANDIDATE_SHA: ${{ needs.resolve-request.outputs.candidate_sha }}
+        run: bash scripts/test-compatibility.sh "$CANDIDATE_SHA"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compatibility-rc-${{ needs.resolve-request.outputs.candidate_sha }}
+          include-hidden-files: true
+          path: |
+            .local/compatibility/**/run.log
+            .local/compatibility/**/*.buildinfo
+            .local/compatibility/**/replication-*/
+          if-no-files-found: error
+
+      - shell: bash
+        env:
+          CONTROL_BASE_URL: ${{ vars.SOAK_CONTROL_BASE_URL }}
+          SOAK_ADMIN_BEARER_TOKEN: ${{ secrets.SOAK_ADMIN_BEARER_TOKEN }}
+          REPO_FULL_NAME: ${{ needs.resolve-request.outputs.repo_full_name }}
+          CANDIDATE_REF: ${{ needs.resolve-request.outputs.candidate_ref }}
+          CANDIDATE_SHA: ${{ needs.resolve-request.outputs.candidate_sha }}
+          BASELINE_SHA: ${{ needs.resolve-request.outputs.baseline_sha }}
+          CANDIDATE_SOURCE: ${{ needs.resolve-request.outputs.candidate_source }}
+          BASELINE_SOURCE: ${{ needs.resolve-request.outputs.baseline_source }}
+          CANDIDATE_IMAGE_REF: ${{ needs.build-worker-images.outputs.candidate_image_ref }}
+          BASELINE_IMAGE_REF: ${{ needs.build-worker-images.outputs.baseline_image_ref }}
+          DURATION: ${{ needs.resolve-request.outputs.duration }}
+          TAIL: ${{ needs.resolve-request.outputs.tail }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CONTROL_BASE_URL}" ]; then
+            export CONTROL_BASE_URL="https://litestream-soak-ctl.fly.dev"
+          fi
+
+          chmod +x scripts/register-rc-gate.sh scripts/notify-deployment-ready.sh
+          ./scripts/register-rc-gate.sh \
+            "${REPO_FULL_NAME}" \
+            "${CANDIDATE_REF}" \
+            "${CANDIDATE_SHA}" \
+            "${BASELINE_SHA}" \
+            "${DURATION}" \
+            "${TAIL}"
+          ./scripts/notify-deployment-ready.sh \
+            "${GITHUB_SHA}" \
+            "${CANDIDATE_SOURCE}" \
+            "rc_gate" \
+            "${CANDIDATE_IMAGE_REF}" \
+            "${CANDIDATE_SHA}"
+          ./scripts/notify-deployment-ready.sh \
+            "${GITHUB_SHA}" \
+            "${BASELINE_SOURCE}" \
+            "rc_gate" \
+            "${BASELINE_IMAGE_REF}" \
+            "${BASELINE_SHA}"

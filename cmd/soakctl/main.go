@@ -193,6 +193,7 @@ func main() {
 	go mgr.RunDBRetentionLoop(ctx, intEnvOrDefault("SOAK_DB_RETENTION_DAYS", 30))
 	go mgr.RunHeartbeatMonitor(ctx, 5*time.Minute)
 	go mgr.RunDormantFleetAlertLoop(ctx, dormantFleetAlertPolicy)
+	go mgr.RunRCGateLoop(ctx, 5*time.Minute)
 	if fleetEnabled {
 		go mgr.RunFleetReconciler(ctx, orchestrator.DefaultMainFleet(), 10*time.Minute)
 	}

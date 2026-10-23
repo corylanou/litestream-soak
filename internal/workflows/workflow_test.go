@@ -12,6 +12,7 @@ import (
 var workflowFiles = []string{
 	"deploy-main.yml",
 	"soak-pr.yml",
+	"soak-rc.yml",
 	"sync-upstream-main.yml",
 }
 

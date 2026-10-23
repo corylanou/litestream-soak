@@ -831,7 +831,11 @@ func (m *Manager) resumeDeploymentDormantWorkers(ctx context.Context, deployment
 }
 
 func (m *Manager) EnsureSourceFleet(ctx context.Context, source, gitSHA, litestreamSHA, imageRef string) error {
-	if !supportsDefaultFleetSource(source) {
+	fleetForSource := DefaultFleetForSource
+	switch {
+	case isGateSource(source):
+		fleetForSource = GateFleetForSource
+	case !supportsDefaultFleetSource(source):
 		return nil
 	}
 	deployment, err := resolveReadyDeploymentTarget(m.db, source, imageRef, gitSHA, litestreamSHA)
@@ -840,7 +844,7 @@ func (m *Manager) EnsureSourceFleet(ctx context.Context, source, gitSHA, litestr
 	}
 	if err := m.ensureFleetSpec(
 		ctx,
-		DefaultFleetForSource(source, deployment.GitSHA, deployment.LitestreamSHA),
+		fleetForSource(source, deployment.GitSHA, deployment.LitestreamSHA),
 		deployment.ImageRef,
 	); err != nil {
 		return fmt.Errorf("ensure source fleet: %w", err)

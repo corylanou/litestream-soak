@@ -361,6 +361,28 @@ curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
 
 `SOAK_METERING_WINDOW_SOURCES` (control-plane env, comma-separated source names, empty by default) runs a scoped metering window. Every fleet-spec worker of a listed source gets the observe-mode S3 proxy and a `metering_window` marker in its workload config (passed to the worker as `SOAK_METERING_WINDOW=true`, so it is part of the attested run identity); profiles that already use a fault-injection mode keep their mode. Unlisted sources are untouched, and with the setting empty the fleet spec is unchanged. Exclusion follows the run, not the clock: verifications, incidents, and runtime evidence from a run whose profile carries the marker are excluded from release-quality scoring, RC-versus-main comparison, failed-source pause, and dormancy, whenever they arrive (scorecards report `metering_window_excluded`). Runs started before the window opens or after it closes count normally. Separately, on startup the control plane records a window start for each newly listed source and closes the window of any source no longer listed, in the `metering_windows` table; that table drives the dashboard home and worker page "Metering window: not test evidence" banner and the cost-meter report. `/api/cost-meter` reports each source's `metering_window` with `active`, `started_at`, and `ended_at`. Clearing the setting returns workers to direct replication at the next roll.
 
+## Release Candidate Gate
+
+A release candidate gate is a bounded, paired soak: the candidate commit runs as source `rc-<cand8>` and the baseline commit runs as `rcbase-<base8>`, each with the same 4-worker gate fleet. Launch it with the manual `.github/workflows/soak-rc.yml` workflow. Inputs: `candidate_ref` (tag, branch, or SHA), `repo_full_name` (defaults to `benbjohnson/litestream` and must be in `SOAK_PR_REPO_ALLOWLIST`), `baseline_sha` (defaults to the current upstream `main` head), `duration` (whole hours, default `72h`, maximum `168h`), and `tail`.
+
+The workflow resolves both refs to full 40-character SHAs before it builds anything, builds one worker image per side labelled `sha-<soak12>-<source>-ls-<litestream12>`, registers the gate with `POST /api/admin/rc-gates`, then sends a deployment-ready notification for each source. The control plane rejects a gate deployment that has no registered gate, a Litestream SHA other than the pinned one, or an image other than the first one accepted for that gate, so a gate never rolls to a new soak build mid-run.
+
+| Worker | Region | CPU / memory | Volume | Workload |
+| --- | --- | --- | --- | --- |
+| `gate-stress` | ord | 2 shared / 2 GB | 10 GB | overload with `truncate-page-n: 0` |
+| `gate-manydb-500` | ord | 2 shared / 3 GB | 15 GB | 500 databases, directory mode, rotating active set |
+| `gate-large-db` | ord | 2 shared / 4 GB | 40 GB | 6 GB seed with per-phase verifier budgets |
+| `gate-remote` | ams | 1 shared / 1 GB | 10 GB | low volume |
+
+Gate sources are excluded from the 24-hour success teardown, PR max age, the upstream PR poller, and main and PR fleet reconciliation. Dormancy still applies. When the gate expires, the control plane archives the evidence for both sources and destroys their workers through the same path as operator source teardown (archive type `teardown`, reason `rc_gate_ttl`). With `tail` enabled, `gate-stress` keeps running in both sources until 7 days after launch, and its final archive uses type `rc_gate_tail`.
+
+```bash
+curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  "https://litestream-soak-ctl.fly.dev/api/rc-gates" | jq .
+```
+
+The read-only ledger lists every gate with its pinned SHAs and images, start, expiry, tail expiry, status (`running`, `tail`, or `completed`), and every machine with its size, volume GB, start, and expiry. Each gate also reports candidate-versus-baseline results per scenario. A scenario passes only when both sides have verification coverage since the gate started and the candidate has no failures. Missing coverage is `incomplete`, never a pass. The `pinned-reader` scenario stays `incomplete` until `gate-stress` schedules it as its own scenario.
+
 ## Upstream PR Retirement
 
 The control plane polls GitHub for every `pr-N` source with a live worker and
