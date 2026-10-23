@@ -19,18 +19,19 @@ func openRCGateTestDB(t *testing.T) *DB {
 
 func testRCGate(started time.Time) RCGate {
 	return RCGate{
-		Repository:      "benbjohnson/litestream",
-		CandidateRef:    "v0.5.0-rc1",
-		CandidateSource: "rc-aaaaaaaa",
-		CandidateSHA:    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		BaselineSource:  "rcbase-bbbbbbbb",
-		BaselineSHA:     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		Duration:        72 * time.Hour,
-		Tail:            true,
-		Status:          RCGateRunning,
-		StartedAt:       started,
-		ExpiresAt:       started.Add(72 * time.Hour),
-		TailExpiresAt:   new(started.Add(7 * 24 * time.Hour)),
+		Repository:        "benbjohnson/litestream",
+		CandidateRef:      "v0.5.0-rc1",
+		CandidateSource:   "rc-aaaaaaaa",
+		CandidateSHA:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		BaselineSource:    "rcbase-bbbbbbbb",
+		BaselineSHA:       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Duration:          72 * time.Hour,
+		Tail:              true,
+		Status:            RCGateRunning,
+		StartedAt:         started,
+		ExpiresAt:         started.Add(72 * time.Hour),
+		ProvisionDeadline: started.Add(2 * time.Hour),
+		TailExpiresAt:     new(started.Add(7 * 24 * time.Hour)),
 		Resources: []RCGateResource{{
 			Source:     "rc-aaaaaaaa",
 			WorkerName: "worker-rc-aaaaaaaa-gate-stress",
@@ -98,7 +99,7 @@ func TestRCGateRejectsOverlappingActiveSource(t *testing.T) {
 		t.Fatalf("overlapping CreateRCGate() error = %v, want ErrRCGateSourceActive", err)
 	}
 
-	if err := db.UpdateRCGateStatus(first.ID, RCGateCompleted, new(started)); err != nil {
+	if err := db.UpdateRCGateStatus(first.ID, RCGateCompleted, new(started), `{"verdict":"pass"}`); err != nil {
 		t.Fatalf("UpdateRCGateStatus() error = %v", err)
 	}
 	if err := db.CreateRCGate(&second); err != nil {
@@ -113,25 +114,35 @@ func TestRCGateRejectsOverlappingActiveSource(t *testing.T) {
 	}
 }
 
-func TestRCGatePinImageIsWriteOnce(t *testing.T) {
+func TestRCGatePinBuildIsWriteOnceWhileOpen(t *testing.T) {
 	db := openRCGateTestDB(t)
 	gate := testRCGate(time.Now().UTC())
 	if err := db.CreateRCGate(&gate); err != nil {
 		t.Fatalf("CreateRCGate() error = %v", err)
 	}
-	pinned, err := db.PinRCGateImage(gate.ID, gate.CandidateSource, "registry.fly.io/litestream-soak:first")
-	if err != nil || pinned != "registry.fly.io/litestream-soak:first" {
-		t.Fatalf("first pin = %q, %v", pinned, err)
+	image, soak, err := db.PinRCGateBuild(gate.ID, gate.CandidateSource, "registry.fly.io/litestream-soak:first", "soak-1")
+	if err != nil || image != "registry.fly.io/litestream-soak:first" || soak != "soak-1" {
+		t.Fatalf("first pin = %q %q, %v", image, soak, err)
 	}
-	pinned, err = db.PinRCGateImage(gate.ID, gate.CandidateSource, "registry.fly.io/litestream-soak:second")
-	if err != nil || pinned != "registry.fly.io/litestream-soak:first" {
-		t.Fatalf("second pin = %q, %v; want original image kept", pinned, err)
+	image, soak, err = db.PinRCGateBuild(gate.ID, gate.CandidateSource, "registry.fly.io/litestream-soak:second", "soak-2")
+	if err != nil || image != "registry.fly.io/litestream-soak:first" || soak != "soak-1" {
+		t.Fatalf("second pin = %q %q, %v; want original build kept", image, soak, err)
 	}
-	pinned, err = db.PinRCGateImage(gate.ID, gate.BaselineSource, "registry.fly.io/litestream-soak:baseline")
-	if err != nil || pinned != "registry.fly.io/litestream-soak:baseline" {
-		t.Fatalf("baseline pin = %q, %v", pinned, err)
-	}
-	if _, err := db.PinRCGateImage(gate.ID, "pr-1", "registry.fly.io/litestream-soak:x"); err == nil {
+	if _, _, err := db.PinRCGateBuild(gate.ID, "pr-1", "registry.fly.io/litestream-soak:x", "soak"); err == nil {
 		t.Fatal("pin for unrelated source succeeded")
+	}
+	if err := db.UpdateRCGateStatus(gate.ID, RCGateAborted, new(time.Now().UTC()), `{"verdict":"incomplete"}`); err != nil {
+		t.Fatal(err)
+	}
+	image, _, err = db.PinRCGateBuild(gate.ID, gate.BaselineSource, "registry.fly.io/litestream-soak:late", "soak-3")
+	if err != nil || image != "" {
+		t.Fatalf("closed gate pin = %q, %v; want no pin", image, err)
+	}
+	stored, err := db.GetRCGate(gate.ID)
+	if err != nil || !stored.Closed() || stored.Results != `{"verdict":"incomplete"}` || stored.CompletedAt == nil {
+		t.Fatalf("closed gate = %+v, %v", stored, err)
+	}
+	if active, err := db.ActiveRCGateForSource(gate.CandidateSource); err != nil || active != nil {
+		t.Fatalf("aborted gate still active: %+v, %v", active, err)
 	}
 }

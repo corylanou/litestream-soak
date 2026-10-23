@@ -40,7 +40,7 @@ func runSoakRCResolve(t *testing.T, env map[string]string) (map[string]string, s
 	dir := t.TempDir()
 	mock := `#!/bin/bash
 case "$*" in
-  "api repos/benbjohnson/litestream/commits/v0.5.0-rc1 --jq .sha") echo "$CANDIDATE_RESPONSE" ;;
+  "api repos/"*"/commits/v0.5.0-rc1 --jq .sha") echo "$CANDIDATE_RESPONSE" ;;
   "api repos/benbjohnson/litestream/commits/main --jq .sha") echo "$BASELINE_RESPONSE" ;;
   "api repos/benbjohnson/litestream/commits/1234567 --jq .sha") echo "$BASELINE_RESPONSE" ;;
   *) echo "unexpected gh call: $*" >&2; exit 2 ;;
@@ -115,14 +115,15 @@ func TestSoakRCResolvesRefsToPinnedFullSHAs(t *testing.T) {
 func TestSoakRCRejectsUnpinnableRequests(t *testing.T) {
 	t.Parallel()
 	for name, env := range map[string]map[string]string{
-		"short sha response":   {"CANDIDATE_RESPONSE": "abcdef0"},
-		"empty sha response":   {"BASELINE_RESPONSE": ""},
-		"same commit":          {"BASELINE_RESPONSE": strings.ToLower(rcCandidateSHA)},
-		"duration too long":    {"DURATION": "169h"},
-		"duration not hours":   {"DURATION": "3d"},
-		"invalid tail":         {"TAIL": "yes"},
-		"repo not allowlisted": {"REPO_FULL_NAME": "someone/litestream"},
-		"ref injection":        {"CANDIDATE_REF": "main;echo"},
+		"short sha response":       {"CANDIDATE_RESPONSE": "abcdef0"},
+		"empty sha response":       {"BASELINE_RESPONSE": ""},
+		"same commit":              {"BASELINE_RESPONSE": strings.ToLower(rcCandidateSHA)},
+		"duration too long":        {"DURATION": "169h"},
+		"duration not hours":       {"DURATION": "3d"},
+		"invalid tail":             {"TAIL": "yes"},
+		"repo not allowlisted":     {"REPO_FULL_NAME": "someone/litestream"},
+		"fork even if allowlisted": {"REPO_FULL_NAME": "someone/litestream", "SOAK_PR_REPO_ALLOWLIST": "benbjohnson/litestream,someone/litestream"},
+		"ref injection":            {"CANDIDATE_REF": "main;echo"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

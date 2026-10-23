@@ -363,25 +363,31 @@ curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
 
 ## Release Candidate Gate
 
-A release candidate gate is a bounded, paired soak: the candidate commit runs as source `rc-<cand8>` and the baseline commit runs as `rcbase-<base8>`, each with the same 4-worker gate fleet. Launch it with the manual `.github/workflows/soak-rc.yml` workflow. Inputs: `candidate_ref` (tag, branch, or SHA), `repo_full_name` (defaults to `benbjohnson/litestream` and must be in `SOAK_PR_REPO_ALLOWLIST`), `baseline_sha` (defaults to the current upstream `main` head), `duration` (whole hours, default `72h`, maximum `168h`), and `tail`.
+A release candidate gate is a bounded, paired soak: the candidate commit runs as source `rc-<cand8>` and the baseline commit runs as `rcbase-<base8>`, each with the same 4-worker gate fleet. Launch it with the manual `.github/workflows/soak-rc.yml` workflow. Inputs: `candidate_ref` (tag, branch, or SHA in `benbjohnson/litestream`; worker images and the compatibility check only fetch from that repository, so `repo_full_name` accepts nothing else), `baseline_sha` (defaults to the current upstream `main` head), `duration` (whole hours, default `72h`, maximum `168h`), and `tail`.
 
-The workflow resolves both refs to full 40-character SHAs before it builds anything, builds one worker image per side labelled `sha-<soak12>-<source>-ls-<litestream12>`, registers the gate with `POST /api/admin/rc-gates`, then sends a deployment-ready notification for each source. The control plane rejects a gate deployment that has no registered gate, a Litestream SHA other than the pinned one, or an image other than the first one accepted for that gate, so a gate never rolls to a new soak build mid-run.
+The workflow resolves both refs to full 40-character SHAs before it builds anything, builds one worker image per side labelled `sha-<soak12>-<source>-ls-<litestream12>`, registers the gate with `POST /api/admin/rc-gates`, then sends a deployment-ready notification for each source. Registration is idempotent: repeating an identical request returns the open gate, and re-sending a side's notification for the same soak and Litestream SHAs reuses the build pinned first. The control plane rejects a gate deployment that has no open gate, a Litestream SHA other than the pinned one, or a different soak build, so a gate never rolls to a new soak build mid-run.
+
+The same check runs again whenever a gate worker is created, replaced, rolled, resumed from dormancy, or recovered from pending provisioning, under the source lock that teardown also holds. Provisioning is refused once a gate is closed, after a worker's deadline (the gate expiry, or the tail expiry for `gate-stress` with `tail`), for any profile other than `gate-stress` during the tail, and for any build other than the pinned one.
+
+If both sides do not have all four workers running on the pinned builds within 2 hours of registration, the gate is aborted: both sources are archived and every gate worker is destroyed, including partially provisioned ones, and the gate closes with status `aborted`.
 
 | Worker | Region | CPU / memory | Volume | Workload |
 | --- | --- | --- | --- | --- |
-| `gate-stress` | ord | 2 shared / 2 GB | 10 GB | overload with `truncate-page-n: 0` |
+| `gate-stress` | ord | 2 shared / 2 GB | 10 GB | alternating 6-hour phases of `overload-truncate0` and `pinned-reader` |
 | `gate-manydb-500` | ord | 2 shared / 3 GB | 15 GB | 500 databases, directory mode, rotating active set |
 | `gate-large-db` | ord | 2 shared / 4 GB | 40 GB | 6 GB seed with per-phase verifier budgets |
 | `gate-remote` | ams | 1 shared / 1 GB | 10 GB | low volume |
 
-Gate sources are excluded from the 24-hour success teardown, PR max age, the upstream PR poller, and main and PR fleet reconciliation. Dormancy still applies. When the gate expires, the control plane archives the evidence for both sources and destroys their workers through the same path as operator source teardown (archive type `teardown`, reason `rc_gate_ttl`). With `tail` enabled, `gate-stress` keeps running in both sources until 7 days after launch, and its final archive uses type `rc_gate_tail`.
+`gate-stress` never merges its stressors. The worker runs one scenario at a time in wall-clock-aligned phases (`STRESS_SCENARIOS`, `STRESS_SCENARIO_PHASE`), so the candidate and baseline machines run the same scenario at the same time. Each scenario has its own database directory and replica prefix under `scenarios/<name>`, Litestream restarts between phases, and every report carries the scenario in its run identity.
+
+Gate sources are excluded from the 24-hour success teardown, PR max age, the upstream PR poller, and main and PR fleet reconciliation. Dormancy still applies. When the gate expires, the control plane archives the evidence for both sources and destroys every gate worker, including ones already marked stopped, through the same path as operator source teardown (archive type `teardown`, reason `rc_gate_ttl`). The gate closes only after every machine, volume, provisioning resource, and replica prefix is gone; otherwise the loop retries every 5 minutes. With `tail` enabled, `gate-stress` keeps running in both sources until 7 days after launch, and its final archive uses type `rc_gate_tail`.
 
 ```bash
 curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
   "https://litestream-soak-ctl.fly.dev/api/rc-gates" | jq .
 ```
 
-The read-only ledger lists every gate with its pinned SHAs and images, start, expiry, tail expiry, status (`running`, `tail`, or `completed`), and every machine with its size, volume GB, start, and expiry. Each gate also reports candidate-versus-baseline results per scenario. A scenario passes only when both sides have verification coverage since the gate started and the candidate has no failures. Missing coverage is `incomplete`, never a pass. The `pinned-reader` scenario stays `incomplete` until `gate-stress` schedules it as its own scenario.
+The read-only ledger lists every gate with its pinned SHAs and images, start, expiry, tail expiry, launch deadline, status (`running`, `tail`, `completed`, or `aborted`), and every machine with its size, volume GB, start, and expiry. Each gate also reports candidate-versus-baseline results per scenario. Only verifications attributed to the pinned deployment, reported by workers created for this gate, started inside the gate window, and carrying the scenario's identity count. A scenario passes only when both sides have coverage and the candidate has no failures. Missing coverage is `incomplete`, never a pass. When a gate closes, its results are saved, and later evidence or retention does not change them.
 
 ## Upstream PR Retirement
 

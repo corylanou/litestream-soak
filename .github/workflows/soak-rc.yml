@@ -8,9 +8,11 @@ on:
         required: true
         type: string
       repo_full_name:
-        description: Upstream GitHub repo in owner/name form
+        description: Candidate repository (only benbjohnson/litestream; worker builds clone it)
         required: false
-        type: string
+        type: choice
+        options:
+          - benbjohnson/litestream
         default: benbjohnson/litestream
       baseline_sha:
         description: Baseline commit SHA or ref (defaults to the current upstream main head)
@@ -51,7 +53,6 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SOAK_PR_REPO_ALLOWLIST: ${{ vars.SOAK_PR_REPO_ALLOWLIST }}
           CANDIDATE_REF: ${{ github.event.inputs.candidate_ref }}
           REPO_FULL_NAME: ${{ github.event.inputs.repo_full_name || 'benbjohnson/litestream' }}
           BASELINE_REF: ${{ github.event.inputs.baseline_sha || '' }}
@@ -65,20 +66,12 @@ jobs:
           baseline_ref="${BASELINE_REF:-main}"
           duration="${DURATION}"
           tail="${TAIL}"
-          allowed_repos="${SOAK_PR_REPO_ALLOWLIST:-benbjohnson/litestream}"
           upstream_repo="benbjohnson/litestream"
 
-          if [[ ! "${repo_full_name}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
-            echo "repo_full_name must use owner/name format" >&2
+          if [ "${repo_full_name}" != "${upstream_repo}" ]; then
+            echo "repo_full_name must be ${upstream_repo}: worker builds and compatibility checks only fetch from it" >&2
             exit 1
           fi
-          case ",${allowed_repos}," in
-            *,"${repo_full_name}",*) ;;
-            *)
-              echo "repo ${repo_full_name} is not in SOAK_PR_REPO_ALLOWLIST (${allowed_repos})" >&2
-              exit 1
-              ;;
-          esac
           for ref in "${candidate_ref}" "${baseline_ref}"; do
             if [[ ! "${ref}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
               echo "refs must be a tag, branch, or commit SHA" >&2

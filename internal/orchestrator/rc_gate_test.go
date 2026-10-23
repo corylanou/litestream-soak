@@ -97,8 +97,8 @@ func TestGateFleetSpecHasFourSizedWorkersPerSource(t *testing.T) {
 		t.Fatalf("large-db budgets %s exceed verify interval %q (%v)", total, large.VerifyInterval, err)
 	}
 	stress := gateWorker(t, GateFleetForSource(testGateCandidate, testGateSoakSHA, testGateCandidateSHA), gateStressProfile).Workload
-	if stress.PinnedReaderHold != "" {
-		t.Fatal("gate-stress merges pinned-reader into the overload stressor")
+	if stress.PinnedReaderHold != "" || stress.StressScenarios != "overload-truncate0,pinned-reader" || stress.StressScenarioPhase == "" {
+		t.Fatalf("gate-stress must schedule separate scenarios, got %+v", stress)
 	}
 	manyDB := gateWorker(t, GateFleetForSource(testGateCandidate, testGateSoakSHA, testGateCandidateSHA), gateManyDB500Profile).Workload
 	if manyDB.NumDatabases != 500 || manyDB.ActiveRotateInterval == "" || manyDB.ActiveSetSeed == 0 {
@@ -253,6 +253,10 @@ func TestGateDeploymentReadyPinsImmutableBuild(t *testing.T) {
 	if _, err := deployer.recordDeploymentReady(ctx, testGateCandidate, testGateSoakSHA, testGateCandidateSHA, image, "rc_gate", "", ""); err != nil {
 		t.Fatalf("repeated identical gate deployment error = %v", err)
 	}
+	relaunched, err := deployer.recordDeploymentReady(ctx, testGateCandidate, testGateSoakSHA, testGateCandidateSHA, image+"@sha256:"+strings.Repeat("f", 64), "rc_gate", "", "")
+	if err != nil || relaunched.ImageRef != image {
+		t.Fatalf("relaunched same build = %q, %v; want pinned image %q", relaunched.ImageRef, err, image)
+	}
 	newer := "registry.fly.io/litestream-soak:sha-" + strings.Repeat("e", 12) + "-" + testGateCandidate + "-ls-" + testGateCandidateSHA[:12]
 	if _, err := deployer.recordDeploymentReady(ctx, testGateCandidate, strings.Repeat("e", 40), testGateCandidateSHA, newer, "rc_gate", "", ""); !errors.Is(err, errRCGatePinned) {
 		t.Fatalf("mid-run rebuild err = %v, want errRCGatePinned", err)
@@ -388,6 +392,7 @@ func TestRCGateLedgerEndpoint(t *testing.T) {
 		Tail:         true,
 	})
 	for _, invalid := range []RCGateRequest{
+		{Repository: "someone/litestream", CandidateSHA: testGateCandidateSHA, BaselineSHA: testGateBaselineSHA, Duration: "72h"},
 		{Repository: "benbjohnson/litestream", CandidateSHA: "aaaaaaa", BaselineSHA: testGateBaselineSHA, Duration: "72h"},
 		{Repository: "benbjohnson/litestream", CandidateSHA: testGateCandidateSHA, BaselineSHA: testGateBaselineSHA, Duration: "200h"},
 		{Repository: "benbjohnson/litestream", CandidateSHA: testGateCandidateSHA, BaselineSHA: testGateCandidateSHA, Duration: "72h"},
@@ -406,8 +411,14 @@ func TestRCGateLedgerEndpoint(t *testing.T) {
 	}
 	recorder = httptest.NewRecorder()
 	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/admin/rc-gates", bytes.NewReader(body)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("repeated identical register status = %d, want 200", recorder.Code)
+	}
+	conflicting, _ := json.Marshal(RCGateRequest{Repository: "benbjohnson/litestream", CandidateSHA: testGateCandidateSHA, BaselineSHA: testGateBaselineSHA, Duration: "24h"})
+	recorder = httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/admin/rc-gates", bytes.NewReader(conflicting)))
 	if recorder.Code != http.StatusConflict {
-		t.Fatalf("duplicate register status = %d, want 409", recorder.Code)
+		t.Fatalf("conflicting register status = %d, want 409", recorder.Code)
 	}
 
 	gates, err := db.ListRCGates()
@@ -460,23 +471,23 @@ func TestRCGateScenarioVerdicts(t *testing.T) {
 	db := openTestDB(t)
 	gate := registerTestGate(t, db, false, time.Now().UTC().Add(-2*time.Hour))
 	createTestGateFleet(t, db, gate)
-	record := func(source, profile string, passed bool) {
-		at := gate.StartedAt.Add(time.Hour)
-		status := "passed"
-		if !passed {
-			status = "failed"
-		}
-		mustRecordVerification(t, db, &model.Verification{
-			WorkerID: "worker-" + source + "-" + profile, StartedAt: at, CompletedAt: &at, Status: status, Passed: passed, CheckType: "integrity",
-		})
-	}
-	record(testGateCandidate, gateStressProfile, true)
-	record(testGateBaseline, gateStressProfile, true)
-	record(testGateCandidate, gateLargeDBProfile, false)
-	record(testGateBaseline, gateLargeDBProfile, true)
-	record(testGateCandidate, gateRemoteProfile, true)
+	at := gate.StartedAt.Add(time.Hour)
+	recordGateVerification(t, db, testGateCandidate, gateStressProfile, "overload-truncate0", true, at)
+	recordGateVerification(t, db, testGateBaseline, gateStressProfile, "overload-truncate0", true, at)
+	recordGateVerification(t, db, testGateCandidate, gateStressProfile, "pinned-reader", true, at)
+	recordGateVerification(t, db, testGateBaseline, gateStressProfile, "", true, at)
+	recordGateVerification(t, db, testGateCandidate, gateLargeDBProfile, "", false, at)
+	recordGateVerification(t, db, testGateBaseline, gateLargeDBProfile, "", true, at)
+	recordGateVerification(t, db, testGateBaseline, gateLargeDBProfile, "", false, gate.StartedAt.Add(-time.Minute))
+	recordGateVerification(t, db, testGateCandidate, gateRemoteProfile, "", true, at)
+	unattributed := model.Verification{WorkerID: "worker-" + testGateBaseline + "-" + gateRemoteProfile, StartedAt: at, CompletedAt: &at, Status: "passed", Passed: true, CheckType: "integrity"}
+	mustRecordVerification(t, db, &unattributed)
 
-	entry, err := buildRCGateLedgerEntry(db, gate)
+	stored, err := db.GetRCGate(gate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := buildRCGateLedgerEntry(db, *stored, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,10 +512,31 @@ func TestRCGateScenarioVerdicts(t *testing.T) {
 	}
 }
 
+func recordGateVerification(t *testing.T, db *model.DB, source, profile, scenario string, passed bool, at time.Time) {
+	t.Helper()
+	worker, err := db.GetWorker("worker-" + source + "-" + profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := db.GetDeploymentByVersion(source, worker.GitSHA, worker.LitestreamSHA)
+	if err != nil || deployment == nil {
+		t.Fatalf("deployment for %s: %v", source, err)
+	}
+	run := fixtureRun(*worker, *deployment)
+	run.Scenario = scenario
+	status := "passed"
+	if !passed {
+		status = "failed"
+	}
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID: worker.ID, StartedAt: at, CompletedAt: &at, Status: status, Passed: passed, CheckType: "integrity", Run: run, Attributed: true,
+	})
+}
+
 func registerTestGate(t *testing.T, db *model.DB, tail bool, started time.Time) model.RCGate {
 	t.Helper()
 	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
-	gate, err := manager.RegisterRCGate(RCGateRequest{
+	gate, _, err := manager.RegisterRCGate(RCGateRequest{
 		Repository:   "benbjohnson/litestream",
 		CandidateRef: "v0.5.0-rc1",
 		CandidateSHA: testGateCandidateSHA,
@@ -530,6 +562,9 @@ func createTestGateFleet(t *testing.T, db *model.DB, gate model.RCGate) {
 			Status:        "ready",
 		}); err != nil {
 			t.Fatalf("UpsertReadyDeployment() error = %v", err)
+		}
+		if _, _, err := db.PinRCGateBuild(gate.ID, source, testGateImage(source, litestreamSHA), testGateSoakSHA); err != nil {
+			t.Fatalf("PinRCGateBuild() error = %v", err)
 		}
 		for _, desired := range GateFleetForSource(source, testGateSoakSHA, litestreamSHA).Workers {
 			cfg := normalizeWorkloadConfig(desired.Workload)
@@ -575,7 +610,7 @@ func assertGateStatus(t *testing.T, db *model.DB, id int64, want model.RCGateSta
 			if gate.Status != want {
 				t.Fatalf("gate status = %s, want %s", gate.Status, want)
 			}
-			if (want == model.RCGateCompleted) != (gate.CompletedAt != nil) {
+			if gate.Closed() != (gate.CompletedAt != nil) {
 				t.Fatalf("gate completed_at = %v for status %s", gate.CompletedAt, gate.Status)
 			}
 			return

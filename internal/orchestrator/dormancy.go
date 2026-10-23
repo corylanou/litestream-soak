@@ -254,6 +254,10 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	if strings.TrimSpace(workloadCfg.PinnedReaderPause) != "" {
 		env["PINNED_READER_PAUSE"] = workloadCfg.PinnedReaderPause
 	}
+	if strings.TrimSpace(workloadCfg.StressScenarios) != "" {
+		env["STRESS_SCENARIOS"] = workloadCfg.StressScenarios
+		env["STRESS_SCENARIO_PHASE"] = workloadCfg.StressScenarioPhase
+	}
 	if workloadCfg.ReplayDataset != "" {
 		env["REPLAY_DATASET"] = workloadCfg.ReplayDataset
 	}
@@ -621,6 +625,13 @@ func (m *Manager) PauseSourceWorkers(ctx context.Context, source, reason, signat
 
 func (m *Manager) ResumeDormantWorkers(ctx context.Context, source, imageRef, gitSHA, litestreamSHA, resumeTrigger string) error {
 	source = firstNonEmpty(strings.TrimSpace(source), "main")
+	if isGateSource(source) {
+		unlock, err := m.lockSource(ctx, source)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
 	workers, err := m.db.ListDormantWorkers(source)
 	if err != nil {
 		return fmt.Errorf("list dormant workers: %w", err)
@@ -671,6 +682,9 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 }
 
 func (m *Manager) resumeDormantWorkerLocked(ctx context.Context, worker model.Worker, imageRef, gitSHA, litestreamSHA, resumeTrigger string) error {
+	if err := m.checkRCGateProvisioning(worker.Source, worker.ProfileName, strings.TrimSpace(imageRef), litestreamSHA, time.Now().UTC()); err != nil {
+		return err
+	}
 	imageRef = strings.TrimSpace(imageRef)
 	if imageRef == "" {
 		return fmt.Errorf("worker %s resume image is required", worker.ID)

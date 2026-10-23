@@ -153,9 +153,12 @@ func (d *Deployer) recordDeploymentReady(ctx context.Context, source, sha, lites
 		return model.Deployment{}, err
 	}
 	if isGateSource(source) {
-		if err := d.manager.pinRCGateDeployment(source, litestreamSHA, imageRef); err != nil {
+		pinnedImage, err := d.manager.pinRCGateDeployment(source, sha, litestreamSHA, imageRef, time.Now().UTC())
+		if err != nil {
 			return model.Deployment{}, err
 		}
+		imageRef = pinnedImage
+		target.ImageRef = pinnedImage
 	}
 
 	if err := d.db.UpsertReadyDeployment(&target); err != nil {

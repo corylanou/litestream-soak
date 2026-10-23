@@ -89,7 +89,7 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 	target, err := a.deployer.recordDeploymentReady(r.Context(), source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger, request.Repository, request.WorkloadSHA)
 	if err != nil {
 		status := http.StatusInternalServerError
-		if errors.Is(err, errRCGateNotRegistered) || errors.Is(err, errRCGatePinned) {
+		if errors.Is(err, errRCGateNotRegistered) || errors.Is(err, errRCGatePinned) || errors.Is(err, errRCGateClosed) {
 			status = http.StatusConflict
 		}
 		respondError(w, r, status, err, "record ready deployment")

@@ -188,6 +188,9 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 }
 
 func (m *Manager) createWorker(ctx context.Context, req WorkerRequest) (*model.Worker, error) {
+	if err := m.checkRCGateProvisioning(req.Source, req.ProfileName, req.ImageRef, req.LitestreamSHA, time.Now().UTC()); err != nil {
+		return nil, err
+	}
 	workloadCfg := normalizeWorkloadConfig(req.Workload)
 	profileConfig, err := marshalWorkloadConfig(workloadCfg)
 	if err != nil {
@@ -699,6 +702,17 @@ func deploymentMatchesTarget(deployment model.Deployment, imageRef, gitSHA, lite
 }
 
 func (m *Manager) RollWorker(ctx context.Context, workerID, newImageRef, newSHA, newLitestreamSHA string) (*model.Worker, error) {
+	listed, err := m.db.GetWorker(workerID)
+	if err != nil {
+		return nil, fmt.Errorf("get worker: %w", err)
+	}
+	if isGateSource(listed.Source) {
+		unlockSource, err := m.lockSource(ctx, listed.Source)
+		if err != nil {
+			return nil, err
+		}
+		defer unlockSource()
+	}
 	unlock, err := m.lockWorker(ctx, workerID)
 	if err != nil {
 		return nil, err
@@ -725,6 +739,9 @@ func (m *Manager) replaceWorker(ctx context.Context, w model.Worker, newImageRef
 }
 
 func (m *Manager) replaceWorkerWithRequest(ctx context.Context, w model.Worker, request WorkerRequest) (*model.Worker, error) {
+	if err := m.checkRCGateProvisioning(firstNonEmpty(request.Source, w.Source), firstNonEmpty(request.ProfileName, w.ProfileName), request.ImageRef, request.LitestreamSHA, time.Now().UTC()); err != nil {
+		return nil, err
+	}
 	attempt, err := m.db.ActiveProvisioning(w.ID)
 	if err != nil {
 		return nil, err

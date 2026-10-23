@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
@@ -223,6 +224,9 @@ func (m *Manager) recoverPendingWorker(ctx context.Context, workerID, image stri
 	}
 	if worker.Status != model.WorkerPending && a == nil {
 		return nil
+	}
+	if err := m.checkRCGateProvisioning(worker.Source, worker.ProfileName, image, worker.LitestreamSHA, time.Now().UTC()); err != nil {
+		return err
 	}
 	report := model.ProvisioningAttempt{WorkerID: workerID, Phase: "legacy_pending"}
 	if a != nil {
