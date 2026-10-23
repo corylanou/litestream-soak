@@ -343,7 +343,7 @@ func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) e
 	if err := cmd.Run(); err != nil {
 		return &profileUploadError{cause: errors.Join(uploadCtx.Err(), err), diagnostic: diagnostic.sanitized(c.cfg)}
 	}
-	c.objectStore.recordUpload(size)
+	c.objectStore.recordObjectUpload(size)
 	return nil
 }
 

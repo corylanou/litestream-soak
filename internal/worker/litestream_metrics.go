@@ -3,6 +3,7 @@ package worker
 import (
 	"io"
 	"math"
+	"strconv"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
@@ -15,6 +16,7 @@ const (
 	litestreamAllocTotalMetricName   = "go_memstats_alloc_bytes_total"
 	litestreamReplicaOpsMetricName   = "litestream_replica_operation_total"
 	litestreamReplicaBytesMetricName = "litestream_replica_operation_bytes"
+	litestreamProcessStartMetricName = "process_start_time_seconds"
 )
 
 type litestreamMetricsSnapshot struct {
@@ -25,8 +27,9 @@ type litestreamMetricsSnapshot struct {
 	AllocBytesTotal float64
 	MemStatsPresent bool
 
-	ReplicaOperationTotals map[string]uint64
-	ReplicaOperationBytes  map[string]uint64
+	LitestreamObjectOperationTotals map[string]uint64
+	LitestreamObjectOperationBytes  map[string]uint64
+	LitestreamCounterEpoch          string
 }
 
 func parseLitestreamMetrics(r io.Reader, dbPath string) (litestreamMetricsSnapshot, error) {
@@ -48,8 +51,11 @@ func parseLitestreamMetrics(r io.Reader, dbPath string) (litestreamMetricsSnapsh
 		snapshot.AllocBytesTotal = alloc
 		snapshot.MemStatsPresent = true
 	}
-	snapshot.ReplicaOperationTotals = sumCountersByLabel(families[litestreamReplicaOpsMetricName], "operation")
-	snapshot.ReplicaOperationBytes = sumCountersByLabel(families[litestreamReplicaBytesMetricName], "operation")
+	snapshot.LitestreamObjectOperationTotals = sumCountersByLabel(families[litestreamReplicaOpsMetricName], "operation")
+	snapshot.LitestreamObjectOperationBytes = sumCountersByLabel(families[litestreamReplicaBytesMetricName], "operation")
+	if start, ok := extractSingleMetricValue(families[litestreamProcessStartMetricName]); ok && start > 0 {
+		snapshot.LitestreamCounterEpoch = "start:" + strconv.FormatFloat(start, 'f', -1, 64)
+	}
 	return snapshot, nil
 }
 

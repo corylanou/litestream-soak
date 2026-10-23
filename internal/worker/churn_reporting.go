@@ -30,8 +30,15 @@ func (r *Runner) currentSnapshot() runtimeSnapshot {
 	snapshot := r.statsPoller.currentSnapshot()
 	snapshot.ProfilingEvidence = r.profilingSnapshot()
 	counters := r.objectStore.snapshot()
-	counters.ReplicaOperationTotals = snapshot.ReplicaOperationTotals
-	counters.ReplicaOperationBytes = snapshot.ReplicaOperationBytes
+	counters.LitestreamCounterEpoch = snapshot.LitestreamCounterEpoch
+	counters.LitestreamObjectOperationTotals = snapshot.LitestreamObjectOperationTotals
+	counters.LitestreamObjectOperationBytes = snapshot.LitestreamObjectOperationBytes
+	if r.s3FaultProxy != nil && r.s3FaultProxy.cfg.Mode == s3FaultProxyModeObserve {
+		requests := r.s3FaultProxy.RequestCounters()
+		counters.ReplicaRequestTotals = requests.Requests
+		counters.ReplicaRequestBytesSent = requests.BytesSent
+		counters.ReplicaResponseBytesReceived = requests.BytesReceived
+	}
 	snapshot.ObjectStoreCounters = counters
 	if r.cfg.churnEnabled() {
 		r.churnEvidence.mu.Lock()

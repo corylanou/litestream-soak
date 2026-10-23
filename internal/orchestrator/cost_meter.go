@@ -23,13 +23,33 @@ const (
 var (
 	controlSourceObjectStoreRequests = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "soak_control_source_object_store_requests_total",
-		Help: "Object-store requests reported by workers, summed per source from counter deltas.",
+		Help: "Object-store HTTP requests measured by the worker observe proxy (origin=replica) or the verifier restore log (origin=restore), summed per source from counter deltas.",
 	}, []string{"source", "origin", "operation"})
 
-	controlSourceObjectStoreBytes = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "soak_control_source_object_store_bytes_total",
-		Help: "Object-store bytes reported by workers, summed per source from counter deltas.",
-	}, []string{"source", "origin", "operation"})
+	controlSourceObjectStoreRequestBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_control_source_object_store_request_bytes_total",
+		Help: "Object-store HTTP body bytes measured by the worker observe proxy, by direction, summed per source from counter deltas.",
+	}, []string{"source", "origin", "operation", "direction"})
+
+	controlSourceLitestreamObjectOperations = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_control_source_litestream_object_operations_total",
+		Help: "Logical object operations from litestream_replica_operation_total (uploaded and deleted objects, not HTTP requests), summed per source.",
+	}, []string{"source", "operation"})
+
+	controlSourceLitestreamObjectBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_control_source_litestream_object_bytes_total",
+		Help: "Logical object bytes from litestream_replica_operation_bytes, summed per source.",
+	}, []string{"source", "operation"})
+
+	controlSourceEvidenceObjectUploads = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_control_source_evidence_object_uploads_total",
+		Help: "Successful pprof and evidence object uploads (one per s3cmd put, not per HTTP request), summed per source.",
+	}, []string{"source"})
+
+	controlSourceEvidenceUploadPayloadBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_control_source_evidence_upload_payload_bytes_total",
+		Help: "Payload bytes of successful pprof and evidence object uploads, summed per source.",
+	}, []string{"source"})
 )
 
 type CostMeterResponse struct {
@@ -96,43 +116,38 @@ func (a *API) recordCostMeter(worker model.Worker, observedAt time.Time, runtime
 
 func observeCostMeterDelta(source string, delta model.CostMeterTotals) {
 	source = metricValueOrUnknown(source)
+	for operation, count := range delta.LitestreamObjectOperations {
+		controlSourceLitestreamObjectOperations.WithLabelValues(source, operation).Add(float64(count))
+	}
+	for operation, bytes := range delta.LitestreamObjectBytes {
+		controlSourceLitestreamObjectBytes.WithLabelValues(source, operation).Add(float64(bytes))
+	}
 	for operation, count := range delta.ReplicaRequests {
 		controlSourceObjectStoreRequests.WithLabelValues(source, "replica", operation).Add(float64(count))
 	}
-	for operation, bytes := range delta.ReplicaBytes {
-		controlSourceObjectStoreBytes.WithLabelValues(source, "replica", operation).Add(float64(bytes))
+	for operation, bytes := range delta.ReplicaRequestBytesSent {
+		controlSourceObjectStoreRequestBytes.WithLabelValues(source, "replica", operation, "sent").Add(float64(bytes))
+	}
+	for operation, bytes := range delta.ReplicaResponseBytesReceived {
+		controlSourceObjectStoreRequestBytes.WithLabelValues(source, "replica", operation, "received").Add(float64(bytes))
 	}
 	for operation, count := range delta.RestoreRequests {
 		controlSourceObjectStoreRequests.WithLabelValues(source, "restore", operation).Add(float64(count))
 	}
-	if delta.Uploads > 0 {
-		controlSourceObjectStoreRequests.WithLabelValues(source, "evidence", "PUT").Add(float64(delta.Uploads))
+	if delta.EvidenceObjectUploads > 0 {
+		controlSourceEvidenceObjectUploads.WithLabelValues(source).Add(float64(delta.EvidenceObjectUploads))
 	}
-	if delta.UploadBytes > 0 {
-		controlSourceObjectStoreBytes.WithLabelValues(source, "evidence", "PUT").Add(float64(delta.UploadBytes))
+	if delta.EvidenceUploadPayloadBytes > 0 {
+		controlSourceEvidenceUploadPayloadBytes.WithLabelValues(source).Add(float64(delta.EvidenceUploadPayloadBytes))
 	}
 }
 
-func workerMetricsRetired(worker model.Worker) bool {
+func workerMeasurementsRetired(worker model.Worker) bool {
 	return worker.Status == model.WorkerStopped
 }
 
-func workerSeriesCollectors() []interface {
-	DeletePartialMatch(prometheus.Labels) int
-} {
-	return []interface {
-		DeletePartialMatch(prometheus.Labels) int
-	}{
-		controlWorkerInfo,
-		controlWorkerVersionInfo,
-		controlWorkerStatus,
-		controlWorkerWorkloadInfo,
-		controlWorkerLastHeartbeat,
-		controlWorkerLastVerificationResult,
-		controlWorkerLastVerificationDuration,
-		controlWorkerLastVerificationCompleted,
-		controlWorkerRuntimeSnapshotStatus,
-		controlWorkerLitestreamMetricsStatus,
+func workerMeasurementCollectors() []*prometheus.GaugeVec {
+	return []*prometheus.GaugeVec{
 		controlWorkerDataDiskTotalSize,
 		controlWorkerDataDiskUsedSize,
 		controlWorkerDataDiskFreeSize,
@@ -161,32 +176,14 @@ func workerSeriesCollectors() []interface {
 		controlWorkerFDs,
 		controlWorkerLitestreamLocalStateSize,
 		controlWorkerLitestreamLocalLTXSize,
-		controlWorkerLatestPlatformEventInfo,
-		controlWorkerLatestPlatformEventUnixTime,
-		controlWorkerLatestPlatformEventWindowCount,
-		controlWorkerFailureInfo,
-		controlWorkerLastFailureInfo,
-		controlWorkerLastFailure,
 		controlResourceObservationStatus,
 		controlResourceObservationTime,
-		controlWorkerLastAlert,
-		controlAlertTotal,
 	}
 }
 
-func (m *controlMetrics) forgetWorker(workerID string) {
-	m.mu.Lock()
-	delete(m.statusByWorker, workerID)
-	delete(m.infoByWorker, workerID)
-	delete(m.workloadByWorker, workerID)
-	delete(m.runtimeByWorker, workerID)
-	delete(m.litestreamMetricsByWorker, workerID)
-	delete(m.platformByWorker, workerID)
-	delete(m.failureByWorker, workerID)
-	delete(m.lastFailureByWorker, workerID)
+func forgetWorkerMeasurements(workerID string) {
 	labels := prometheus.Labels{"worker_id": workerID}
-	for _, collector := range workerSeriesCollectors() {
+	for _, collector := range workerMeasurementCollectors() {
 		collector.DeletePartialMatch(labels)
 	}
-	m.mu.Unlock()
 }

@@ -34,7 +34,7 @@ func (m *objectStoreMeter) recordRestoreRequests(requests map[string]uint64) {
 	}
 }
 
-func (m *objectStoreMeter) recordUpload(bytes int64) {
+func (m *objectStoreMeter) recordObjectUpload(bytes int64) {
 	if m == nil {
 		return
 	}
@@ -53,9 +53,9 @@ func (m *objectStoreMeter) snapshot() reporting.ObjectStoreCounters {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	counters := reporting.ObjectStoreCounters{
-		ObjectStoreCounterEpoch:  m.epoch,
-		EvidenceUploadsTotal:     m.uploads,
-		EvidenceUploadBytesTotal: m.uploadBytes,
+		ObjectStoreCounterEpoch:         m.epoch,
+		EvidenceObjectUploadsTotal:      m.uploads,
+		EvidenceUploadPayloadBytesTotal: m.uploadBytes,
 	}
 	if len(m.restore) > 0 {
 		counters.RestoreRequestTotals = maps.Clone(m.restore)

@@ -33,12 +33,15 @@ CREATE INDEX IF NOT EXISTS idx_cost_meter_state_observed ON cost_meter_state(obs
 `
 
 type CostMeterTotals struct {
-	ReplicaRequests   map[string]uint64 `json:"replica_requests,omitempty"`
-	ReplicaBytes      map[string]uint64 `json:"replica_bytes,omitempty"`
-	RestoreRequests   map[string]uint64 `json:"restore_requests,omitempty"`
-	Uploads           uint64            `json:"uploads"`
-	UploadBytes       uint64            `json:"upload_bytes"`
-	PeakDiskUsedBytes uint64            `json:"peak_disk_used_bytes"`
+	LitestreamObjectOperations   map[string]uint64 `json:"litestream_object_operations,omitempty"`
+	LitestreamObjectBytes        map[string]uint64 `json:"litestream_object_bytes,omitempty"`
+	ReplicaRequests              map[string]uint64 `json:"replica_requests,omitempty"`
+	ReplicaRequestBytesSent      map[string]uint64 `json:"replica_request_bytes_sent,omitempty"`
+	ReplicaResponseBytesReceived map[string]uint64 `json:"replica_response_bytes_received,omitempty"`
+	RestoreRequests              map[string]uint64 `json:"restore_requests,omitempty"`
+	EvidenceObjectUploads        uint64            `json:"evidence_object_uploads"`
+	EvidenceUploadPayloadBytes   uint64            `json:"evidence_upload_payload_bytes"`
+	PeakDiskUsedBytes            uint64            `json:"peak_disk_used_bytes"`
 }
 
 type CostMeterWorker struct {
@@ -54,15 +57,20 @@ type CostMeterSource struct {
 }
 
 func (t CostMeterTotals) IsZero() bool {
-	return len(t.ReplicaRequests) == 0 && len(t.ReplicaBytes) == 0 && len(t.RestoreRequests) == 0 && t.Uploads == 0 && t.UploadBytes == 0 && t.PeakDiskUsedBytes == 0
+	return len(t.LitestreamObjectOperations) == 0 && len(t.LitestreamObjectBytes) == 0 &&
+		len(t.ReplicaRequests) == 0 && len(t.ReplicaRequestBytesSent) == 0 && len(t.ReplicaResponseBytesReceived) == 0 &&
+		len(t.RestoreRequests) == 0 && t.EvidenceObjectUploads == 0 && t.EvidenceUploadPayloadBytes == 0 && t.PeakDiskUsedBytes == 0
 }
 
 func (t *CostMeterTotals) Add(other CostMeterTotals) {
+	t.LitestreamObjectOperations = addCounterMap(t.LitestreamObjectOperations, other.LitestreamObjectOperations)
+	t.LitestreamObjectBytes = addCounterMap(t.LitestreamObjectBytes, other.LitestreamObjectBytes)
 	t.ReplicaRequests = addCounterMap(t.ReplicaRequests, other.ReplicaRequests)
-	t.ReplicaBytes = addCounterMap(t.ReplicaBytes, other.ReplicaBytes)
+	t.ReplicaRequestBytesSent = addCounterMap(t.ReplicaRequestBytesSent, other.ReplicaRequestBytesSent)
+	t.ReplicaResponseBytesReceived = addCounterMap(t.ReplicaResponseBytesReceived, other.ReplicaResponseBytesReceived)
 	t.RestoreRequests = addCounterMap(t.RestoreRequests, other.RestoreRequests)
-	t.Uploads += other.Uploads
-	t.UploadBytes += other.UploadBytes
+	t.EvidenceObjectUploads += other.EvidenceObjectUploads
+	t.EvidenceUploadPayloadBytes += other.EvidenceUploadPayloadBytes
 	t.PeakDiskUsedBytes = max(t.PeakDiskUsedBytes, other.PeakDiskUsedBytes)
 }
 
@@ -79,10 +87,54 @@ func addCounterMap(dst, src map[string]uint64) map[string]uint64 {
 	return dst
 }
 
-func counterDeltas(previous, current map[string]uint64, reset bool) map[string]uint64 {
+type counterLifetime int
+
+const (
+	counterLifetimeUnknown counterLifetime = iota
+	counterLifetimeContinued
+	counterLifetimeRestarted
+)
+
+func classifyCounterLifetime(previousEpoch, currentEpoch string) counterLifetime {
+	switch {
+	case previousEpoch == "" || currentEpoch == "":
+		return counterLifetimeUnknown
+	case previousEpoch == currentEpoch:
+		return counterLifetimeContinued
+	default:
+		return counterLifetimeRestarted
+	}
+}
+
+func advanceCounter(previous, current uint64, lifetime counterLifetime) (uint64, uint64) {
+	switch {
+	case lifetime == counterLifetimeRestarted:
+		return current, current
+	case current >= previous:
+		return current - previous, current
+	case lifetime == counterLifetimeUnknown:
+		return current, current
+	default:
+		return 0, previous
+	}
+}
+
+func advanceCounterMap(previous, current map[string]uint64, lifetime counterLifetime) (map[string]uint64, map[string]uint64) {
+	next := maps.Clone(previous)
+	if lifetime == counterLifetimeRestarted {
+		next = nil
+	}
 	var deltas map[string]uint64
 	for key, value := range current {
-		delta := counterDelta(previous[key], value, reset)
+		base := uint64(0)
+		if lifetime != counterLifetimeRestarted {
+			base = previous[key]
+		}
+		delta, advanced := advanceCounter(base, value, lifetime)
+		if next == nil {
+			next = make(map[string]uint64, len(current))
+		}
+		next[key] = advanced
 		if delta == 0 {
 			continue
 		}
@@ -91,61 +143,41 @@ func counterDeltas(previous, current map[string]uint64, reset bool) map[string]u
 		}
 		deltas[key] = delta
 	}
-	return deltas
-}
-
-func counterDelta(previous, current uint64, reset bool) uint64 {
-	if reset || current < previous {
-		return current
-	}
-	return current - previous
-}
-
-func mergeCounterMap(previous, current map[string]uint64, reset bool) map[string]uint64 {
-	if reset {
-		return maps.Clone(current)
-	}
-	merged := maps.Clone(previous)
-	if len(current) > 0 && merged == nil {
-		merged = make(map[string]uint64, len(current))
-	}
-	maps.Copy(merged, current)
-	return merged
+	return deltas, next
 }
 
 func costMeterDelta(previous *reporting.ObjectStoreCounters, current reporting.ObjectStoreCounters) (CostMeterTotals, reporting.ObjectStoreCounters) {
 	if previous == nil {
 		previous = &reporting.ObjectStoreCounters{}
 	}
-	workerReset := previous.ObjectStoreCounterEpoch != "" && current.ObjectStoreCounterEpoch != "" && previous.ObjectStoreCounterEpoch != current.ObjectStoreCounterEpoch
-	delta := CostMeterTotals{
-		ReplicaRequests: counterDeltas(previous.ReplicaOperationTotals, current.ReplicaOperationTotals, false),
-		ReplicaBytes:    counterDeltas(previous.ReplicaOperationBytes, current.ReplicaOperationBytes, false),
-		RestoreRequests: counterDeltas(previous.RestoreRequestTotals, current.RestoreRequestTotals, workerReset),
+	var delta CostMeterTotals
+	next := *previous
+	workerLifetime := classifyCounterLifetime(previous.ObjectStoreCounterEpoch, current.ObjectStoreCounterEpoch)
+	if workerLifetime == counterLifetimeRestarted {
+		next.LitestreamCounterEpoch = ""
+		next.LitestreamObjectOperationTotals = nil
+		next.LitestreamObjectOperationBytes = nil
 	}
-	next := reporting.ObjectStoreCounters{
-		ObjectStoreCounterEpoch: current.ObjectStoreCounterEpoch,
-		ReplicaOperationTotals:  mergeCounterMap(previous.ReplicaOperationTotals, current.ReplicaOperationTotals, false),
-		ReplicaOperationBytes:   mergeCounterMap(previous.ReplicaOperationBytes, current.ReplicaOperationBytes, false),
-		RestoreRequestTotals:    mergeCounterMap(previous.RestoreRequestTotals, current.RestoreRequestTotals, workerReset),
+
+	if current.LitestreamObjectOperationTotals != nil || current.LitestreamObjectOperationBytes != nil {
+		lifetime := classifyCounterLifetime(next.LitestreamCounterEpoch, current.LitestreamCounterEpoch)
+		delta.LitestreamObjectOperations, next.LitestreamObjectOperationTotals = advanceCounterMap(next.LitestreamObjectOperationTotals, current.LitestreamObjectOperationTotals, lifetime)
+		delta.LitestreamObjectBytes, next.LitestreamObjectOperationBytes = advanceCounterMap(next.LitestreamObjectOperationBytes, current.LitestreamObjectOperationBytes, lifetime)
+		if current.LitestreamCounterEpoch != "" {
+			next.LitestreamCounterEpoch = current.LitestreamCounterEpoch
+		}
 	}
-	if next.ObjectStoreCounterEpoch == "" {
-		next.ObjectStoreCounterEpoch = previous.ObjectStoreCounterEpoch
-	}
+
 	if current.ObjectStoreCounterEpoch == "" {
-		next.EvidenceUploadsTotal = previous.EvidenceUploadsTotal
-		next.EvidenceUploadBytesTotal = previous.EvidenceUploadBytesTotal
 		return delta, next
 	}
-	if workerReset || current.EvidenceUploadsTotal < previous.EvidenceUploadsTotal {
-		delta.Uploads = current.EvidenceUploadsTotal
-		delta.UploadBytes = current.EvidenceUploadBytesTotal
-	} else {
-		delta.Uploads = current.EvidenceUploadsTotal - previous.EvidenceUploadsTotal
-		delta.UploadBytes = counterDelta(previous.EvidenceUploadBytesTotal, current.EvidenceUploadBytesTotal, false)
-	}
-	next.EvidenceUploadsTotal = current.EvidenceUploadsTotal
-	next.EvidenceUploadBytesTotal = current.EvidenceUploadBytesTotal
+	next.ObjectStoreCounterEpoch = current.ObjectStoreCounterEpoch
+	delta.ReplicaRequests, next.ReplicaRequestTotals = advanceCounterMap(previous.ReplicaRequestTotals, current.ReplicaRequestTotals, workerLifetime)
+	delta.ReplicaRequestBytesSent, next.ReplicaRequestBytesSent = advanceCounterMap(previous.ReplicaRequestBytesSent, current.ReplicaRequestBytesSent, workerLifetime)
+	delta.ReplicaResponseBytesReceived, next.ReplicaResponseBytesReceived = advanceCounterMap(previous.ReplicaResponseBytesReceived, current.ReplicaResponseBytesReceived, workerLifetime)
+	delta.RestoreRequests, next.RestoreRequestTotals = advanceCounterMap(previous.RestoreRequestTotals, current.RestoreRequestTotals, workerLifetime)
+	delta.EvidenceObjectUploads, next.EvidenceObjectUploadsTotal = advanceCounter(previous.EvidenceObjectUploadsTotal, current.EvidenceObjectUploadsTotal, workerLifetime)
+	delta.EvidenceUploadPayloadBytes, next.EvidenceUploadPayloadBytesTotal = advanceCounter(previous.EvidenceUploadPayloadBytesTotal, current.EvidenceUploadPayloadBytesTotal, workerLifetime)
 	return delta, next
 }
 

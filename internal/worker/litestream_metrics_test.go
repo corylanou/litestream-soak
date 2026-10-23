@@ -101,20 +101,26 @@ litestream_replica_operation_total{operation="GET",replica_type="s3"} 18
 litestream_replica_operation_total{operation="LIST",replica_type="s3"} 977
 litestream_replica_operation_total{operation="PUT",replica_type="s3"} 1532
 litestream_replica_operation_total{operation="PUT",replica_type="file"} 4
+# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.
+# TYPE process_start_time_seconds gauge
+process_start_time_seconds 1.76118002456e+09
 `
 
-func TestParseLitestreamMetricsExtractsReplicaOperations(t *testing.T) {
+func TestParseLitestreamMetricsExtractsLogicalObjectOperations(t *testing.T) {
 	snapshot, err := parseLitestreamMetrics(strings.NewReader(litestreamMetricsExpositionWithReplicaOperations), "/data/test.db")
 	if err != nil {
 		t.Fatalf("parseLitestreamMetrics() error = %v", err)
 	}
 	wantTotals := map[string]uint64{"DELETE": 210, "GET": 18, "LIST": 977, "PUT": 1536}
-	if !reflect.DeepEqual(snapshot.ReplicaOperationTotals, wantTotals) {
-		t.Fatalf("ReplicaOperationTotals = %v, want %v", snapshot.ReplicaOperationTotals, wantTotals)
+	if !reflect.DeepEqual(snapshot.LitestreamObjectOperationTotals, wantTotals) {
+		t.Fatalf("ReplicaOperationTotals = %v, want %v", snapshot.LitestreamObjectOperationTotals, wantTotals)
 	}
 	wantBytes := map[string]uint64{"GET": 4194304, "PUT": 12583936}
-	if !reflect.DeepEqual(snapshot.ReplicaOperationBytes, wantBytes) {
-		t.Fatalf("ReplicaOperationBytes = %v, want %v", snapshot.ReplicaOperationBytes, wantBytes)
+	if !reflect.DeepEqual(snapshot.LitestreamObjectOperationBytes, wantBytes) {
+		t.Fatalf("ReplicaOperationBytes = %v, want %v", snapshot.LitestreamObjectOperationBytes, wantBytes)
+	}
+	if snapshot.LitestreamCounterEpoch != "start:1761180024.56" {
+		t.Fatalf("LitestreamCounterEpoch = %q", snapshot.LitestreamCounterEpoch)
 	}
 }
 
@@ -123,7 +129,7 @@ func TestParseLitestreamMetricsWithoutReplicaOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseLitestreamMetrics() error = %v", err)
 	}
-	if snapshot.ReplicaOperationTotals != nil || snapshot.ReplicaOperationBytes != nil {
-		t.Fatalf("replica operations = %v / %v, want nil", snapshot.ReplicaOperationTotals, snapshot.ReplicaOperationBytes)
+	if snapshot.LitestreamObjectOperationTotals != nil || snapshot.LitestreamObjectOperationBytes != nil || snapshot.LitestreamCounterEpoch != "" {
+		t.Fatalf("replica operations = %v / %v, want nil", snapshot.LitestreamObjectOperationTotals, snapshot.LitestreamObjectOperationBytes)
 	}
 }

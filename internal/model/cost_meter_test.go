@@ -10,57 +10,31 @@ import (
 	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
-func costMeterRuntime(epoch string, replica map[string]uint64, replicaBytes map[string]uint64, restore map[string]uint64, uploads, uploadBytes, diskUsed uint64) reporting.RuntimePayload {
+func costMeterRuntime(epoch string, logical map[string]uint64, logicalBytes map[string]uint64, restore map[string]uint64, uploads, uploadBytes, diskUsed uint64) reporting.RuntimePayload {
 	return reporting.RuntimePayload{
 		ObjectStoreCounters: reporting.ObjectStoreCounters{
-			ObjectStoreCounterEpoch:  epoch,
-			ReplicaOperationTotals:   replica,
-			ReplicaOperationBytes:    replicaBytes,
-			RestoreRequestTotals:     restore,
-			EvidenceUploadsTotal:     uploads,
-			EvidenceUploadBytesTotal: uploadBytes,
+			ObjectStoreCounterEpoch:         epoch,
+			LitestreamObjectOperationTotals: logical,
+			LitestreamObjectOperationBytes:  logicalBytes,
+			RestoreRequestTotals:            restore,
+			EvidenceObjectUploadsTotal:      uploads,
+			EvidenceUploadPayloadBytesTotal: uploadBytes,
 		},
 		DataDiskUsedBytes: diskUsed,
 	}
 }
 
-func TestRecordCostMeterSumsDeltasAcrossCounterResets(t *testing.T) {
-	db := seriesTestDB(t)
-	base := time.Date(2026, 10, 22, 10, 5, 0, 0, time.UTC)
+type costMeterStep struct {
+	at       time.Time
+	counters reporting.ObjectStoreCounters
+	disk     uint64
+	want     CostMeterTotals
+}
 
-	steps := []struct {
-		at      time.Time
-		runtime reporting.RuntimePayload
-		want    CostMeterTotals
-	}{
-		{
-			at:      base,
-			runtime: costMeterRuntime("worker-a", map[string]uint64{"PUT": 100, "LIST": 40}, map[string]uint64{"PUT": 4096}, map[string]uint64{"GET": 5}, 1, 512, 1000),
-			want:    CostMeterTotals{ReplicaRequests: map[string]uint64{"PUT": 100, "LIST": 40}, ReplicaBytes: map[string]uint64{"PUT": 4096}, RestoreRequests: map[string]uint64{"GET": 5}, Uploads: 1, UploadBytes: 512},
-		},
-		{
-			at:      base.Add(15 * time.Second),
-			runtime: costMeterRuntime("worker-a", map[string]uint64{"PUT": 130, "LIST": 40}, map[string]uint64{"PUT": 5096}, map[string]uint64{"GET": 8}, 2, 1024, 3000),
-			want:    CostMeterTotals{ReplicaRequests: map[string]uint64{"PUT": 30}, ReplicaBytes: map[string]uint64{"PUT": 1000}, RestoreRequests: map[string]uint64{"GET": 3}, Uploads: 1, UploadBytes: 512},
-		},
-		{
-			at:      base.Add(30 * time.Second),
-			runtime: costMeterRuntime("worker-a", map[string]uint64{"PUT": 7, "LIST": 2}, map[string]uint64{"PUT": 70}, map[string]uint64{"GET": 8}, 2, 1024, 2000),
-			want:    CostMeterTotals{ReplicaRequests: map[string]uint64{"PUT": 7, "LIST": 2}, ReplicaBytes: map[string]uint64{"PUT": 70}},
-		},
-		{
-			at:      base.Add(45 * time.Second),
-			runtime: costMeterRuntime("worker-b", map[string]uint64{"PUT": 9, "LIST": 2}, map[string]uint64{"PUT": 90}, map[string]uint64{"GET": 2}, 1, 64, 1500),
-			want:    CostMeterTotals{ReplicaRequests: map[string]uint64{"PUT": 2}, ReplicaBytes: map[string]uint64{"PUT": 20}, RestoreRequests: map[string]uint64{"GET": 2}, Uploads: 1, UploadBytes: 64},
-		},
-		{
-			at:      base.Add(10 * time.Second),
-			runtime: costMeterRuntime("worker-a", map[string]uint64{"PUT": 500}, nil, nil, 0, 0, 9000),
-			want:    CostMeterTotals{},
-		},
-	}
+func runCostMeterSteps(t *testing.T, db *DB, workerID string, steps []costMeterStep) {
+	t.Helper()
 	for i, step := range steps {
-		delta, err := db.RecordCostMeter("w-meter", "main", step.at, step.runtime)
+		delta, err := db.RecordCostMeter(workerID, "main", step.at, reporting.RuntimePayload{ObjectStoreCounters: step.counters, DataDiskUsedBytes: step.disk})
 		if err != nil {
 			t.Fatalf("step %d: RecordCostMeter() error = %v", i, err)
 		}
@@ -68,6 +42,60 @@ func TestRecordCostMeterSumsDeltasAcrossCounterResets(t *testing.T) {
 			t.Fatalf("step %d: delta = %+v, want %+v", i, delta, step.want)
 		}
 	}
+}
+
+func TestRecordCostMeterSumsDeltasAcrossCounterResets(t *testing.T) {
+	db := seriesTestDB(t)
+	base := time.Date(2026, 10, 22, 10, 5, 0, 0, time.UTC)
+	runCostMeterSteps(t, db, "w-meter", []costMeterStep{
+		{
+			at: base,
+			counters: reporting.ObjectStoreCounters{
+				ObjectStoreCounterEpoch: "worker-a", LitestreamCounterEpoch: "start:1",
+				LitestreamObjectOperationTotals: map[string]uint64{"PUT": 100, "DELETE": 40}, LitestreamObjectOperationBytes: map[string]uint64{"PUT": 4096},
+				ReplicaRequestTotals: map[string]uint64{"PUT": 120, "LIST": 30}, ReplicaRequestBytesSent: map[string]uint64{"PUT": 5000}, ReplicaResponseBytesReceived: map[string]uint64{"LIST": 900},
+				RestoreRequestTotals: map[string]uint64{"GET": 5}, EvidenceObjectUploadsTotal: 1, EvidenceUploadPayloadBytesTotal: 512,
+			},
+			disk: 1000,
+			want: CostMeterTotals{
+				LitestreamObjectOperations: map[string]uint64{"PUT": 100, "DELETE": 40}, LitestreamObjectBytes: map[string]uint64{"PUT": 4096},
+				ReplicaRequests: map[string]uint64{"PUT": 120, "LIST": 30}, ReplicaRequestBytesSent: map[string]uint64{"PUT": 5000}, ReplicaResponseBytesReceived: map[string]uint64{"LIST": 900},
+				RestoreRequests: map[string]uint64{"GET": 5}, EvidenceObjectUploads: 1, EvidenceUploadPayloadBytes: 512,
+			},
+		},
+		{
+			at: base.Add(15 * time.Second),
+			counters: reporting.ObjectStoreCounters{
+				ObjectStoreCounterEpoch: "worker-a", LitestreamCounterEpoch: "start:1",
+				LitestreamObjectOperationTotals: map[string]uint64{"PUT": 130, "DELETE": 40}, LitestreamObjectOperationBytes: map[string]uint64{"PUT": 5096},
+				ReplicaRequestTotals: map[string]uint64{"PUT": 150, "LIST": 31}, ReplicaRequestBytesSent: map[string]uint64{"PUT": 6000}, ReplicaResponseBytesReceived: map[string]uint64{"LIST": 930},
+				RestoreRequestTotals: map[string]uint64{"GET": 8}, EvidenceObjectUploadsTotal: 2, EvidenceUploadPayloadBytesTotal: 1024,
+			},
+			disk: 3000,
+			want: CostMeterTotals{
+				LitestreamObjectOperations: map[string]uint64{"PUT": 30}, LitestreamObjectBytes: map[string]uint64{"PUT": 1000},
+				ReplicaRequests: map[string]uint64{"PUT": 30, "LIST": 1}, ReplicaRequestBytesSent: map[string]uint64{"PUT": 1000}, ReplicaResponseBytesReceived: map[string]uint64{"LIST": 30},
+				RestoreRequests: map[string]uint64{"GET": 3}, EvidenceObjectUploads: 1, EvidenceUploadPayloadBytes: 512,
+			},
+		},
+		{
+			at: base.Add(30 * time.Second),
+			counters: reporting.ObjectStoreCounters{
+				ObjectStoreCounterEpoch: "worker-a", LitestreamCounterEpoch: "start:2",
+				LitestreamObjectOperationTotals: map[string]uint64{"PUT": 140}, LitestreamObjectOperationBytes: map[string]uint64{"PUT": 7000},
+				ReplicaRequestTotals: map[string]uint64{"PUT": 150, "LIST": 31}, ReplicaRequestBytesSent: map[string]uint64{"PUT": 6000}, ReplicaResponseBytesReceived: map[string]uint64{"LIST": 930},
+				RestoreRequestTotals: map[string]uint64{"GET": 8}, EvidenceObjectUploadsTotal: 2, EvidenceUploadPayloadBytesTotal: 1024,
+			},
+			disk: 2000,
+			want: CostMeterTotals{LitestreamObjectOperations: map[string]uint64{"PUT": 140}, LitestreamObjectBytes: map[string]uint64{"PUT": 7000}},
+		},
+		{
+			at:       base.Add(10 * time.Second),
+			counters: reporting.ObjectStoreCounters{ObjectStoreCounterEpoch: "worker-a", LitestreamCounterEpoch: "start:2", LitestreamObjectOperationTotals: map[string]uint64{"PUT": 500}},
+			disk:     9000,
+			want:     CostMeterTotals{},
+		},
+	})
 
 	report, err := db.CostMeter("", base.Add(-time.Hour))
 	if err != nil {
@@ -77,12 +105,15 @@ func TestRecordCostMeterSumsDeltasAcrossCounterResets(t *testing.T) {
 		t.Fatalf("report = %+v", report)
 	}
 	want := CostMeterTotals{
-		ReplicaRequests:   map[string]uint64{"PUT": 139, "LIST": 42},
-		ReplicaBytes:      map[string]uint64{"PUT": 5186},
-		RestoreRequests:   map[string]uint64{"GET": 10},
-		Uploads:           3,
-		UploadBytes:       1088,
-		PeakDiskUsedBytes: 3000,
+		LitestreamObjectOperations:   map[string]uint64{"PUT": 270, "DELETE": 40},
+		LitestreamObjectBytes:        map[string]uint64{"PUT": 12096},
+		ReplicaRequests:              map[string]uint64{"PUT": 150, "LIST": 31},
+		ReplicaRequestBytesSent:      map[string]uint64{"PUT": 6000},
+		ReplicaResponseBytesReceived: map[string]uint64{"LIST": 930},
+		RestoreRequests:              map[string]uint64{"GET": 8},
+		EvidenceObjectUploads:        2,
+		EvidenceUploadPayloadBytes:   1024,
+		PeakDiskUsedBytes:            3000,
 	}
 	if got := report[0].Workers[0].Totals; !reflect.DeepEqual(got, want) {
 		t.Fatalf("worker totals = %+v, want %+v", got, want)
@@ -90,6 +121,78 @@ func TestRecordCostMeterSumsDeltasAcrossCounterResets(t *testing.T) {
 	if !reflect.DeepEqual(report[0].Totals, want) || report[0].WorkerPeakDiskUsedBytesSum != 3000 {
 		t.Fatalf("source totals = %+v sum=%d", report[0].Totals, report[0].WorkerPeakDiskUsedBytesSum)
 	}
+}
+
+func TestRecordCostMeterResetsLitestreamBaselineOnWorkerRestart(t *testing.T) {
+	base := time.Date(2026, 10, 22, 10, 5, 0, 0, time.UTC)
+	first := costMeterStep{
+		at: base,
+		counters: reporting.ObjectStoreCounters{
+			ObjectStoreCounterEpoch: "worker-a", LitestreamCounterEpoch: "pid:10",
+			LitestreamObjectOperationTotals: map[string]uint64{"PUT": 100}, ReplicaRequestTotals: map[string]uint64{"PUT": 110},
+			RestoreRequestTotals: map[string]uint64{"GET": 9}, EvidenceObjectUploadsTotal: 4, EvidenceUploadPayloadBytesTotal: 400,
+		},
+		want: CostMeterTotals{
+			LitestreamObjectOperations: map[string]uint64{"PUT": 100}, ReplicaRequests: map[string]uint64{"PUT": 110},
+			RestoreRequests: map[string]uint64{"GET": 9}, EvidenceObjectUploads: 4, EvidenceUploadPayloadBytes: 400,
+		},
+	}
+	restarted := reporting.ObjectStoreCounters{
+		ObjectStoreCounterEpoch: "worker-b", LitestreamCounterEpoch: "pid:10",
+		LitestreamObjectOperationTotals: map[string]uint64{"PUT": 120}, ReplicaRequestTotals: map[string]uint64{"PUT": 130},
+		RestoreRequestTotals: map[string]uint64{"GET": 1}, EvidenceObjectUploadsTotal: 5, EvidenceUploadPayloadBytesTotal: 500,
+	}
+	restartedDelta := CostMeterTotals{
+		LitestreamObjectOperations: map[string]uint64{"PUT": 120}, ReplicaRequests: map[string]uint64{"PUT": 130},
+		RestoreRequests: map[string]uint64{"GET": 1}, EvidenceObjectUploads: 5, EvidenceUploadPayloadBytes: 500,
+	}
+
+	t.Run("immediate first scrape", func(t *testing.T) {
+		runCostMeterSteps(t, seriesTestDB(t), "w-immediate", []costMeterStep{first, {at: base.Add(15 * time.Second), counters: restarted, want: restartedDelta}})
+	})
+	t.Run("delayed first scrape", func(t *testing.T) {
+		runCostMeterSteps(t, seriesTestDB(t), "w-delayed", []costMeterStep{
+			first,
+			{
+				at:       base.Add(15 * time.Second),
+				counters: reporting.ObjectStoreCounters{ObjectStoreCounterEpoch: "worker-b"},
+				want:     CostMeterTotals{},
+			},
+			{
+				at: base.Add(30 * time.Second),
+				counters: reporting.ObjectStoreCounters{
+					ObjectStoreCounterEpoch: "worker-b", LitestreamCounterEpoch: "pid:10",
+					LitestreamObjectOperationTotals: map[string]uint64{"PUT": 120}, ReplicaRequestTotals: map[string]uint64{"PUT": 130},
+				},
+				want: CostMeterTotals{LitestreamObjectOperations: map[string]uint64{"PUT": 120}, ReplicaRequests: map[string]uint64{"PUT": 130}},
+			},
+		})
+	})
+	t.Run("litestream restart without worker restart", func(t *testing.T) {
+		runCostMeterSteps(t, seriesTestDB(t), "w-litestream", []costMeterStep{
+			first,
+			{
+				at: base.Add(15 * time.Second),
+				counters: reporting.ObjectStoreCounters{
+					ObjectStoreCounterEpoch: "worker-a", LitestreamCounterEpoch: "pid:11",
+					LitestreamObjectOperationTotals: map[string]uint64{"PUT": 120}, ReplicaRequestTotals: map[string]uint64{"PUT": 140},
+					RestoreRequestTotals: map[string]uint64{"GET": 9}, EvidenceObjectUploadsTotal: 4, EvidenceUploadPayloadBytesTotal: 400,
+				},
+				want: CostMeterTotals{LitestreamObjectOperations: map[string]uint64{"PUT": 120}, ReplicaRequests: map[string]uint64{"PUT": 30}},
+			},
+		})
+	})
+	t.Run("missing scrape keeps baseline", func(t *testing.T) {
+		runCostMeterSteps(t, seriesTestDB(t), "w-missing", []costMeterStep{
+			first,
+			{at: base.Add(15 * time.Second), counters: reporting.ObjectStoreCounters{ObjectStoreCounterEpoch: "worker-a"}, want: CostMeterTotals{}},
+			{
+				at:       base.Add(30 * time.Second),
+				counters: reporting.ObjectStoreCounters{ObjectStoreCounterEpoch: "worker-a", LitestreamCounterEpoch: "pid:10", LitestreamObjectOperationTotals: map[string]uint64{"PUT": 104}},
+				want:     CostMeterTotals{LitestreamObjectOperations: map[string]uint64{"PUT": 4}},
+			},
+		})
+	})
 }
 
 func TestCostMeterAggregatesPerSourceAndWindow(t *testing.T) {
@@ -115,13 +218,13 @@ func TestCostMeterAggregatesPerSourceAndWindow(t *testing.T) {
 	if len(report) != 2 || report[0].Source != "main" || report[1].Source != "pr-1584" {
 		t.Fatalf("sources = %+v", report)
 	}
-	if got := report[0].Totals.ReplicaRequests["PUT"]; got != 30 {
+	if got := report[0].Totals.LitestreamObjectOperations["PUT"]; got != 30 {
 		t.Fatalf("main PUT in window = %d, want 30", got)
 	}
 	if report[0].Totals.PeakDiskUsedBytes != 200 || report[0].WorkerPeakDiskUsedBytesSum != 300 {
 		t.Fatalf("main peak = %d sum = %d", report[0].Totals.PeakDiskUsedBytes, report[0].WorkerPeakDiskUsedBytesSum)
 	}
-	if len(report[0].Workers) != 2 || report[0].Workers[0].WorkerID != "w-main-1" || report[0].Workers[0].Totals.ReplicaRequests["PUT"] != 10 {
+	if len(report[0].Workers) != 2 || report[0].Workers[0].WorkerID != "w-main-1" || report[0].Workers[0].Totals.LitestreamObjectOperations["PUT"] != 10 {
 		t.Fatalf("main workers = %+v", report[0].Workers)
 	}
 
@@ -129,7 +232,7 @@ func TestCostMeterAggregatesPerSourceAndWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CostMeter(source) error = %v", err)
 	}
-	if len(filtered) != 1 || filtered[0].Totals.ReplicaRequests["PUT"] != 5 {
+	if len(filtered) != 1 || filtered[0].Totals.LitestreamObjectOperations["PUT"] != 5 {
 		t.Fatalf("filtered = %+v", filtered)
 	}
 
@@ -137,7 +240,7 @@ func TestCostMeterAggregatesPerSourceAndWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CostMeter(all) error = %v", err)
 	}
-	if all[0].Totals.ReplicaRequests["PUT"] != 1030 || all[0].Totals.PeakDiskUsedBytes != 9000 {
+	if all[0].Totals.LitestreamObjectOperations["PUT"] != 1030 || all[0].Totals.PeakDiskUsedBytes != 9000 {
 		t.Fatalf("all-time main = %+v", all[0].Totals)
 	}
 }
@@ -168,7 +271,7 @@ func TestCostMeterSurvivesReopenAndPrunes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if delta.ReplicaRequests["PUT"] != 5 {
+	if delta.LitestreamObjectOperations["PUT"] != 5 {
 		t.Fatalf("delta after reopen = %+v, want PUT 5", delta)
 	}
 
@@ -183,7 +286,7 @@ func TestCostMeterSurvivesReopenAndPrunes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report) != 1 || report[0].Totals.ReplicaRequests["PUT"] != 35 {
+	if len(report) != 1 || report[0].Totals.LitestreamObjectOperations["PUT"] != 35 {
 		t.Fatalf("report after prune = %+v", report)
 	}
 }
