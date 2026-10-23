@@ -340,6 +340,17 @@ curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
 
 The list returns archive metadata and summaries only. Add `&payload=true` to include each archive's full evidence payload (often over 1 MB each), or fetch one archive with `/api/run-archives/{id}`.
 
+## Object-Store Cost Meter
+
+Workers report cumulative object-store counters in every heartbeat: Litestream replica requests and bytes per operation (from `litestream_replica_operation_total` and `litestream_replica_operation_bytes`), verifier restore requests per method (parsed from the restore's `s3 request` debug lines, with ListObjects counted as `LIST`), and pprof/evidence uploads. The control plane turns them into deltas, treating a lower value or a new worker counter epoch as a counter reset, and stores hourly per-worker buckets plus peak `data_disk_used_bytes`. Buckets older than 30 days are pruned on the hourly retention pass.
+
+```bash
+curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  "https://litestream-soak-ctl.fly.dev/api/cost-meter?source=main&since=7d" | jq .
+```
+
+`since` accepts a duration (`6h`, `7d`) or an RFC3339 timestamp and defaults to 24 hours; the window starts at the top of the hour containing `since`. Omit `source` for every source. Each source reports summed totals, the largest single-worker peak disk, `worker_peak_disk_used_bytes_sum`, and per-worker totals. The same deltas are exported as `soak_control_source_object_store_requests_total` and `soak_control_source_object_store_bytes_total` with `source`, `origin` (`replica`, `restore`, `evidence`), and `operation` labels. Stopped workers no longer export per-worker `soak_control_worker_*` series.
+
 ## Upstream PR Retirement
 
 The control plane polls GitHub for every `pr-N` source with a live worker and

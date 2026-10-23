@@ -42,6 +42,9 @@ func (m *Manager) pruneDBOnce(ctx context.Context, retentionDays int) {
 		slog.Error("Failed to compact profile snapshots", "rows_processed", snapshots, "error", err)
 	}
 	compacted += snapshots
+	if meter, err := m.db.PruneCostMeterBefore(ctx, time.Now().UTC().Add(-costMeterRetention)); err != nil && ctx.Err() == nil {
+		slog.Error("Failed to prune cost meter", "deleted_before_error", meter, "error", err)
+	}
 	blobs, err := m.db.PruneProfileBlobs(ctx)
 	if err != nil && ctx.Err() == nil {
 		slog.Error("Failed to prune profile blobs", "deleted", blobs, "error", err)

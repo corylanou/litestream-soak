@@ -32,6 +32,7 @@ type Runner struct {
 	reporter                *Reporter
 	s3FaultProxy            *s3FaultProxy
 	harnessWriters          *harnessWriterTracker
+	objectStore             *objectStoreMeter
 }
 
 func NewRunner(cfg Config) *Runner {
@@ -39,8 +40,10 @@ func NewRunner(cfg Config) *Runner {
 		cfg:            cfg,
 		identity:       workerIdentity(cfg),
 		harnessWriters: harnessWriters,
+		objectStore:    newObjectStoreMeter(),
 	}
 	runner.profiles = newPprofCapturer(&runner.cfg)
+	runner.profiles.objectStore = runner.objectStore
 	runner.litestreamManager = newLitestreamManager(&runner.cfg)
 	runner.statsPoller = newStatsPoller(&runner.cfg)
 	runner.maintenanceEvidence = runner.litestreamLog.MaintenanceEvidence
@@ -209,6 +212,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		pausers = append(pausers, pinned)
 	}
 	r.verifier = NewVerifier(r.cfg, pausers...)
+	r.verifier.objectStore = r.objectStore
 	r.verifier.SetStartHook(r.sendVerificationStarted)
 	r.verifier.onProfileIncident = r.triggerProfile
 

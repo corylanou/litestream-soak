@@ -84,6 +84,7 @@ type Verifier struct {
 	manyDBChanges      manyDBChangeTracker
 	httpClient         *http.Client
 	onStart            func(context.Context, VerificationResult)
+	objectStore        *objectStoreMeter
 
 	checkpointAttempts    int
 	checkpointRetryDelay  time.Duration
@@ -702,6 +703,7 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		cmd.WaitDelay = time.Second
 		err := cmd.Run()
 		output := []byte(restoreEvidence.text())
+		v.objectStore.recordRestoreRequests(restoreEvidence.requests)
 		slog.Info("Validate output", "output", string(output), "restore_replan_count", restoreEvidence.replans)
 		if err == nil {
 			v.logicalEvidence += " restore_boundary=pinned"

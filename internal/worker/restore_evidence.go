@@ -19,6 +19,7 @@ type restoreOutput struct {
 	finalError   string
 	matchTail    string
 	replans      int
+	requests     map[string]uint64
 	truncated    bool
 	dropping     bool
 }
@@ -55,6 +56,12 @@ func (b *restoreOutput) Write(p []byte) (int, error) {
 func (b *restoreOutput) flushLine() {
 	if len(b.pending) == 0 {
 		return
+	}
+	if method, ok := restoreRequestMethod(string(b.pending)); ok {
+		if b.requests == nil {
+			b.requests = make(map[string]uint64)
+		}
+		b.requests[method]++
 	}
 	line := []byte(redactLogIncident(string(b.pending)))
 	b.pending = nil

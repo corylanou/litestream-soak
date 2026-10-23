@@ -29,6 +29,10 @@ type churnEvidence struct {
 func (r *Runner) currentSnapshot() runtimeSnapshot {
 	snapshot := r.statsPoller.currentSnapshot()
 	snapshot.ProfilingEvidence = r.profilingSnapshot()
+	counters := r.objectStore.snapshot()
+	counters.ReplicaOperationTotals = snapshot.ReplicaOperationTotals
+	counters.ReplicaOperationBytes = snapshot.ReplicaOperationBytes
+	snapshot.ObjectStoreCounters = counters
 	if r.cfg.churnEnabled() {
 		r.churnEvidence.mu.Lock()
 		r.initializeChurnCounters()

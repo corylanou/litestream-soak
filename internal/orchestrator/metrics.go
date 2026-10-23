@@ -421,6 +421,9 @@ func (m *controlMetrics) syncFromDB(ctx context.Context, db *model.DB) error {
 
 	for _, worker := range workers {
 		m.observeWorker(worker)
+		if workerMetricsRetired(worker) {
+			continue
+		}
 		events, err := db.ListWorkerEvents(worker.ID, 20)
 		if err == nil {
 			m.observePlatformEvent(worker, latestPlatformEvent(coalesceEventFeed(events)))
@@ -448,6 +451,10 @@ func (m *controlMetrics) syncFromDB(ctx context.Context, db *model.DB) error {
 }
 
 func (m *controlMetrics) observeWorker(worker model.Worker) {
+	if workerMetricsRetired(worker) {
+		m.forgetWorker(worker.ID)
+		return
+	}
 	labels := workerMetricLabels(worker)
 	infoLabels := []string{
 		worker.ID,
@@ -561,6 +568,9 @@ func (m *controlMetrics) observeWorker(worker model.Worker) {
 }
 
 func (m *controlMetrics) observePlatformEvent(worker model.Worker, event *model.Event) {
+	if workerMetricsRetired(worker) {
+		return
+	}
 	baseLabels := workerMetricLabels(worker)
 
 	m.mu.Lock()
@@ -594,6 +604,9 @@ func (m *controlMetrics) observePlatformEvent(worker model.Worker, event *model.
 }
 
 func (m *controlMetrics) observeVerification(worker model.Worker, verification model.Verification) {
+	if workerMetricsRetired(worker) {
+		return
+	}
 	labels := workerMetricLabels(worker)
 
 	if verification.Succeeded() {
@@ -641,6 +654,9 @@ func (m *controlMetrics) clearFailure(workerID string) {
 }
 
 func (m *controlMetrics) observeLastFailure(worker model.Worker, verification model.Verification) {
+	if workerMetricsRetired(worker) {
+		return
+	}
 	labels := workerMetricLabels(worker)
 	stage := inferFailureStage(&verification)
 	signature := inferFailureSignature(&verification)

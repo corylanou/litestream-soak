@@ -2,6 +2,7 @@ package worker
 
 import (
 	"io"
+	"math"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
@@ -9,9 +10,11 @@ import (
 )
 
 const (
-	litestreamHeapInuseMetricName  = "go_memstats_heap_inuse_bytes"
-	litestreamStackInuseMetricName = "go_memstats_stack_inuse_bytes"
-	litestreamAllocTotalMetricName = "go_memstats_alloc_bytes_total"
+	litestreamHeapInuseMetricName    = "go_memstats_heap_inuse_bytes"
+	litestreamStackInuseMetricName   = "go_memstats_stack_inuse_bytes"
+	litestreamAllocTotalMetricName   = "go_memstats_alloc_bytes_total"
+	litestreamReplicaOpsMetricName   = "litestream_replica_operation_total"
+	litestreamReplicaBytesMetricName = "litestream_replica_operation_bytes"
 )
 
 type litestreamMetricsSnapshot struct {
@@ -21,6 +24,9 @@ type litestreamMetricsSnapshot struct {
 	StackInuseBytes float64
 	AllocBytesTotal float64
 	MemStatsPresent bool
+
+	ReplicaOperationTotals map[string]uint64
+	ReplicaOperationBytes  map[string]uint64
 }
 
 func parseLitestreamMetrics(r io.Reader, dbPath string) (litestreamMetricsSnapshot, error) {
@@ -42,7 +48,41 @@ func parseLitestreamMetrics(r io.Reader, dbPath string) (litestreamMetricsSnapsh
 		snapshot.AllocBytesTotal = alloc
 		snapshot.MemStatsPresent = true
 	}
+	snapshot.ReplicaOperationTotals = sumCountersByLabel(families[litestreamReplicaOpsMetricName], "operation")
+	snapshot.ReplicaOperationBytes = sumCountersByLabel(families[litestreamReplicaBytesMetricName], "operation")
 	return snapshot, nil
+}
+
+func sumCountersByLabel(family *dto.MetricFamily, label string) map[string]uint64 {
+	if family == nil {
+		return nil
+	}
+	var totals map[string]uint64
+	for _, metric := range family.GetMetric() {
+		var value float64
+		switch {
+		case metric.GetCounter() != nil:
+			value = metric.GetCounter().GetValue()
+		case metric.GetUntyped() != nil:
+			value = metric.GetUntyped().GetValue()
+		default:
+			continue
+		}
+		key := ""
+		for _, pair := range metric.GetLabel() {
+			if pair.GetName() == label {
+				key = pair.GetValue()
+			}
+		}
+		if key == "" || value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+			continue
+		}
+		if totals == nil {
+			totals = make(map[string]uint64)
+		}
+		totals[key] += uint64(value)
+	}
+	return totals
 }
 
 func extractDiskFullMetric(family *dto.MetricFamily, dbPath string) (bool, bool) {

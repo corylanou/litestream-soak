@@ -59,6 +59,7 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if worker, err := a.db.GetWorker(workerID); err == nil {
+		a.recordCostMeter(*worker, payload.SentAt, payload.RuntimePayload)
 		a.metrics.observeWorker(*worker)
 		if events, err := a.db.ListWorkerEvents(workerID, 20); err == nil {
 			a.metrics.observePlatformEvent(*worker, latestPlatformEvent(coalesceEventFeed(events)))

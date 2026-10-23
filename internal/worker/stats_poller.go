@@ -38,6 +38,8 @@ type statsPoller struct {
 	prevAllocAt                          time.Time
 	litestreamMetricsLastSuccessAt       time.Time
 	litestreamMetricsConsecutiveFailures int
+	replicaOperationTotals               map[string]uint64
+	replicaOperationBytes                map[string]uint64
 }
 
 func newStatsPoller(cfg *Config) statsPoller {
@@ -335,6 +337,12 @@ func (p *statsPoller) recordLitestreamMetricsScrape(collectedAt time.Time, snaps
 	runtime := reporting.RuntimePayload{
 		LitestreamMetricsScrapeAttemptedAt: collectedAt,
 	}
+	if err == nil && snapshot.ReplicaOperationTotals != nil {
+		p.replicaOperationTotals = snapshot.ReplicaOperationTotals
+		p.replicaOperationBytes = snapshot.ReplicaOperationBytes
+	}
+	runtime.ReplicaOperationTotals = p.replicaOperationTotals
+	runtime.ReplicaOperationBytes = p.replicaOperationBytes
 	if err != nil {
 		p.litestreamMetricsConsecutiveFailures++
 		runtime.LitestreamMetricsScrapeStatus = reporting.LitestreamMetricsScrapeStatusFailed
@@ -363,6 +371,8 @@ func applyLitestreamMetricsRuntime(snapshot *reporting.RuntimePayload, metrics r
 	snapshot.LitestreamDiskFullMetricPresent = metrics.LitestreamDiskFullMetricPresent
 	snapshot.LitestreamDiskFull = metrics.LitestreamDiskFull
 	snapshot.LitestreamMemStatsMetricsPresent = metrics.LitestreamMemStatsMetricsPresent
+	snapshot.ReplicaOperationTotals = metrics.ReplicaOperationTotals
+	snapshot.ReplicaOperationBytes = metrics.ReplicaOperationBytes
 }
 
 func (p *statsPoller) currentS3ListRequests() uint64 {
@@ -611,6 +621,8 @@ func (p *statsPoller) setLitestreamSnapshot(snapshot reporting.RuntimePayload) {
 	p.snapshot.LitestreamDiskFullMetricPresent = snapshot.LitestreamDiskFullMetricPresent
 	p.snapshot.LitestreamDiskFull = snapshot.LitestreamDiskFull
 	p.snapshot.LitestreamMemStatsMetricsPresent = snapshot.LitestreamMemStatsMetricsPresent
+	p.snapshot.ReplicaOperationTotals = snapshot.ReplicaOperationTotals
+	p.snapshot.ReplicaOperationBytes = snapshot.ReplicaOperationBytes
 	p.snapshot.LitestreamGoroutines = snapshot.LitestreamGoroutines
 	p.snapshot.DiskPressureNoProgress = snapshot.DiskPressureNoProgress
 	p.snapshot.DiskPressureNoProgressSeconds = snapshot.DiskPressureNoProgressSeconds

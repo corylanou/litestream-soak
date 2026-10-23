@@ -39,6 +39,7 @@ type pprofCapturer struct {
 	identityOnce   sync.Once
 	binaries       map[string]profileBinary
 	lastCPU        time.Time
+	objectStore    *objectStoreMeter
 }
 
 func newPprofCapturer(cfg *Config) *pprofCapturer {
@@ -326,7 +327,8 @@ func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) e
 		args = append(args, "--region="+c.cfg.S3Region)
 	}
 	args = append(args, "put", filePath, target)
-	uploadCtx, cancel := context.WithTimeout(ctx, profileUploadTimeout(fileSize(filePath)))
+	size := fileSize(filePath)
+	uploadCtx, cancel := context.WithTimeout(ctx, profileUploadTimeout(size))
 	defer cancel()
 	cmd := exec.CommandContext(uploadCtx, "s3cmd", args...)
 	cmd.WaitDelay = time.Second
@@ -341,6 +343,7 @@ func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) e
 	if err := cmd.Run(); err != nil {
 		return &profileUploadError{cause: errors.Join(uploadCtx.Err(), err), diagnostic: diagnostic.sanitized(c.cfg)}
 	}
+	c.objectStore.recordUpload(size)
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -72,5 +73,57 @@ func TestParseLitestreamMetricsWithoutMemStatsFamilies(t *testing.T) {
 	}
 	if snapshot.HeapInuseBytes != 0 || snapshot.StackInuseBytes != 0 || snapshot.AllocBytesTotal != 0 {
 		t.Fatalf("memstats values = %f/%f/%f, want all zero", snapshot.HeapInuseBytes, snapshot.StackInuseBytes, snapshot.AllocBytesTotal)
+	}
+}
+
+const litestreamMetricsExpositionWithReplicaOperations = `
+# HELP litestream_disk_full Whether replication is paused because the local disk is full
+# TYPE litestream_disk_full gauge
+litestream_disk_full{db="/data/test.db"} 0
+# HELP litestream_replica_operation_bytes The number of bytes used by replica operations
+# TYPE litestream_replica_operation_bytes counter
+litestream_replica_operation_bytes{operation="GET",replica_type="s3"} 4.194304e+06
+litestream_replica_operation_bytes{operation="PUT",replica_type="s3"} 1.2582912e+07
+litestream_replica_operation_bytes{operation="PUT",replica_type="file"} 1024
+# HELP litestream_replica_operation_duration_seconds Duration of replica operations by type and operation
+# TYPE litestream_replica_operation_duration_seconds histogram
+litestream_replica_operation_duration_seconds_bucket{operation="PUT",replica_type="s3",le="0.01"} 3
+litestream_replica_operation_duration_seconds_bucket{operation="PUT",replica_type="s3",le="+Inf"} 1532
+litestream_replica_operation_duration_seconds_sum{operation="PUT",replica_type="s3"} 91.2
+litestream_replica_operation_duration_seconds_count{operation="PUT",replica_type="s3"} 1532
+# HELP litestream_replica_operation_errors_total Number of replica operation errors by type, operation, and error code
+# TYPE litestream_replica_operation_errors_total counter
+litestream_replica_operation_errors_total{code="SlowDown",operation="PUT",replica_type="s3"} 2
+# HELP litestream_replica_operation_total The number of replica operations performed
+# TYPE litestream_replica_operation_total counter
+litestream_replica_operation_total{operation="DELETE",replica_type="s3"} 210
+litestream_replica_operation_total{operation="GET",replica_type="s3"} 18
+litestream_replica_operation_total{operation="LIST",replica_type="s3"} 977
+litestream_replica_operation_total{operation="PUT",replica_type="s3"} 1532
+litestream_replica_operation_total{operation="PUT",replica_type="file"} 4
+`
+
+func TestParseLitestreamMetricsExtractsReplicaOperations(t *testing.T) {
+	snapshot, err := parseLitestreamMetrics(strings.NewReader(litestreamMetricsExpositionWithReplicaOperations), "/data/test.db")
+	if err != nil {
+		t.Fatalf("parseLitestreamMetrics() error = %v", err)
+	}
+	wantTotals := map[string]uint64{"DELETE": 210, "GET": 18, "LIST": 977, "PUT": 1536}
+	if !reflect.DeepEqual(snapshot.ReplicaOperationTotals, wantTotals) {
+		t.Fatalf("ReplicaOperationTotals = %v, want %v", snapshot.ReplicaOperationTotals, wantTotals)
+	}
+	wantBytes := map[string]uint64{"GET": 4194304, "PUT": 12583936}
+	if !reflect.DeepEqual(snapshot.ReplicaOperationBytes, wantBytes) {
+		t.Fatalf("ReplicaOperationBytes = %v, want %v", snapshot.ReplicaOperationBytes, wantBytes)
+	}
+}
+
+func TestParseLitestreamMetricsWithoutReplicaOperations(t *testing.T) {
+	snapshot, err := parseLitestreamMetrics(strings.NewReader(litestreamMetricsExpositionWithoutMemStats), "/data/test.db")
+	if err != nil {
+		t.Fatalf("parseLitestreamMetrics() error = %v", err)
+	}
+	if snapshot.ReplicaOperationTotals != nil || snapshot.ReplicaOperationBytes != nil {
+		t.Fatalf("replica operations = %v / %v, want nil", snapshot.ReplicaOperationTotals, snapshot.ReplicaOperationBytes)
 	}
 }
