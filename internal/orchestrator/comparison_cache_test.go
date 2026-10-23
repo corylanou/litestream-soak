@@ -103,24 +103,31 @@ func TestDeploymentComparisonKeepsStaleAfterFailedRefresh(t *testing.T) {
 	api := NewAPIWithContext(ctx, openTestDB(t), nil, nil, nil, nil, nil)
 	stale := &DeploymentComparisonResponse{HeadSource: "stale"}
 	key := comparisonCacheKey{source: "main", deployments: "main=none"}
-	entry := &comparisonCacheEntry{cached: stale, cachedAt: time.Now().Add(-2 * comparisonCacheTTL)}
+	cachedAt := time.Now().Add(-2 * comparisonCacheTTL)
+	entry := &comparisonCacheEntry{cached: stale, cachedAt: cachedAt}
 	api.comparisons.entries = map[comparisonCacheKey]*comparisonCacheEntry{key: entry}
 
 	if got, err := api.deploymentComparison(context.Background(), "main", "", ""); err != nil || got != stale {
 		t.Fatalf("deploymentComparison() = %+v, %v; want stale", got, err)
 	}
-	api.comparisons.mu.Lock()
-	flight := entry.flight
-	api.comparisons.mu.Unlock()
-	<-flight.done
-	if flight.err == nil {
-		t.Fatal("expected refresh to fail under a canceled context")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		api.comparisons.mu.Lock()
+		inFlight := entry.flight != nil
+		api.comparisons.mu.Unlock()
+		if !inFlight {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("refresh did not finish")
+		}
+		time.Sleep(time.Millisecond)
 	}
 
 	api.comparisons.mu.Lock()
 	defer api.comparisons.mu.Unlock()
-	if entry.cached != stale {
-		t.Fatalf("failed refresh dropped stale result, cached = %+v", entry.cached)
+	if entry.cached != stale || !entry.cachedAt.Equal(cachedAt) {
+		t.Fatalf("failed refresh replaced stale result, cached = %+v at %v", entry.cached, entry.cachedAt)
 	}
 }
 
