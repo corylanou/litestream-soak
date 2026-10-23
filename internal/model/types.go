@@ -64,6 +64,7 @@ type Verification struct {
 	DurationMS            int                              `json:"duration_ms,omitempty"`
 	ErrorMessage          string                           `json:"error_message,omitempty"`
 	FailureClassification *reporting.FailureClassification `json:"failure_classification,omitempty"`
+	RestoreMode           string                           `json:"restore_mode,omitempty"`
 }
 
 func (v Verification) Aborted() bool {

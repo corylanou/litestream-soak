@@ -86,9 +86,9 @@ type Verifier struct {
 	manyDBChanges      manyDBChangeTracker
 	httpClient         *http.Client
 	onStart            func(context.Context, VerificationResult)
+	clock              func() time.Time
 	objectStore        *objectStoreMeter
 
-	restoreCycles         int
 	checkpointAttempts    int
 	checkpointRetryDelay  time.Duration
 	checkpointBusyTimeout time.Duration
@@ -116,7 +116,7 @@ func NewVerifier(cfg Config, pausers ...loadPauser) *Verifier {
 		logicalWorkloadSHA:    workloadSHA,
 		cfg:                   cfg,
 		pausers:               pausers,
-		restoreCycles:         restoreModeOffset(cfg.ProfileName),
+		clock:                 time.Now,
 		httpClient:            newIPCClient(cfg.SocketPath, cfg.verifySyncTimeout()+30*time.Second),
 		checkpointAttempts:    3,
 		checkpointRetryDelay:  2 * time.Second,
@@ -149,7 +149,7 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 		StartedAt:   start.UTC(),
 		CheckType:   v.cfg.VerifyType,
 		Status:      "running",
-		RestoreMode: v.nextRestoreMode(),
+		RestoreMode: v.restoreModeAt(v.clock()),
 	}
 	defer func() {
 		RecordVerificationOutcome(result.Status, time.Since(start).Seconds())
@@ -681,6 +681,19 @@ func (v *Verifier) validateDB(ctx context.Context, sourcePath, restoredPath stri
 func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPath string, result *VerificationResult) (bool, error) {
 	result.BoundaryTXID = 0
 	v.validationSteps = nil
+	mode := result.RestoreMode
+	if mode == "" {
+		mode = restoreModeTXID
+	}
+	var marker int64
+	if mode == restoreModeLatest {
+		marker = v.clock().UnixNano()
+		if err := writeRestoreMarker(ctx, sourcePath, marker, result.SyncTXID); err != nil {
+			slog.Warn("Latest restore marker unavailable; restoring by txid", "error", err)
+			mode = restoreModeTXID
+			result.RestoreModeFallback = restoreModeFallbackNoMarker
+		}
+	}
 	sourceSize := fileSize(sourcePath) + fileSize(sourcePath+"-wal")
 	var source verificationBoundary
 	if err := v.runValidationPhase(ctx, "source_snapshot", v.cfg.verificationPhaseBudget("source_snapshot", sourceSize), func(phaseCtx context.Context) error {
@@ -691,10 +704,6 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		return false, err
 	}
 	result.BoundaryTXID = source.txid
-	mode := result.RestoreMode
-	if mode == "" {
-		mode = restoreModeTXID
-	}
 	var target time.Time
 	if mode == restoreModeTimestamp {
 		boundaryAt, ok := boundaryLTXTimestamp(sourcePath, source.txid)
@@ -709,6 +718,9 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 	v.logicalEvidence += " restore_mode=" + mode
 	if result.RestoreModeFallback != "" {
 		v.logicalEvidence += " restore_mode_fallback=" + result.RestoreModeFallback
+	}
+	if mode == restoreModeLatest {
+		v.logicalEvidence += fmt.Sprintf(" restore_marker=%d", marker)
 	}
 	configPath, cleanupConfig, err := v.validateConfigPath(sourcePath)
 	if err != nil {
@@ -764,7 +776,10 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		return false, err
 	}
 	if mode == restoreModeLatest {
-		if err := v.runValidationPhase(ctx, "latest_txid", v.cfg.verificationPhaseBudget("latest_txid", sourceSize), func(context.Context) error {
+		if err := v.runValidationPhase(ctx, "latest_marker", v.cfg.verificationPhaseBudget("latest_marker", sourceSize), func(phaseCtx context.Context) error {
+			if err := checkRestoreMarker(phaseCtx, restoredPath, marker); err != nil {
+				return err
+			}
 			return checkLatestRestoreTXID(restoreEvidence.planTXID, source.txid)
 		}); err != nil {
 			return false, err

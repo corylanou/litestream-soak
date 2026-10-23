@@ -89,6 +89,9 @@ func readLogicalSnapshotMode(ctx context.Context, path string, limits logicalLim
 			_ = rows.Close()
 			return snapshot, err
 		}
+		if table == restoreMarkerTable {
+			continue
+		}
 		objects++
 		if len(name) > 1024 {
 			_ = rows.Close()

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -69,12 +70,20 @@ type RCGateSideResult struct {
 	Failed   int    `json:"failed"`
 }
 
-type RCGateScenarioResult struct {
-	Scenario  string           `json:"scenario"`
-	Profile   string           `json:"profile"`
+type RCGateModeResult struct {
+	Mode      string           `json:"mode"`
 	Candidate RCGateSideResult `json:"candidate"`
 	Baseline  RCGateSideResult `json:"baseline"`
 	Verdict   string           `json:"verdict"`
+}
+
+type RCGateScenarioResult struct {
+	Scenario  string             `json:"scenario"`
+	Profile   string             `json:"profile"`
+	Candidate RCGateSideResult   `json:"candidate"`
+	Baseline  RCGateSideResult   `json:"baseline"`
+	Modes     []RCGateModeResult `json:"modes,omitempty"`
+	Verdict   string             `json:"verdict"`
 }
 
 type RCGateLedgerEntry struct {
@@ -622,11 +631,11 @@ func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateR
 	results := rcGateResults{ClosedAt: end.UTC()}
 	failing, incomplete := false, false
 	for _, scenario := range gateScenarios {
-		candidate, err := rcGateSide(db, gate, gate.CandidateSource, scenario, end)
+		candidate, candidateModes, err := rcGateSide(db, gate, gate.CandidateSource, scenario, end)
 		if err != nil {
 			return rcGateResults{}, err
 		}
-		baseline, err := rcGateSide(db, gate, gate.BaselineSource, scenario, end)
+		baseline, baselineModes, err := rcGateSide(db, gate, gate.BaselineSource, scenario, end)
 		if err != nil {
 			return rcGateResults{}, err
 		}
@@ -635,7 +644,11 @@ func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateR
 			Profile:   scenario.profile,
 			Candidate: candidate,
 			Baseline:  baseline,
+			Modes:     rcGateModeResults(candidate, baseline, candidateModes, baselineModes),
 			Verdict:   rcGateScenarioVerdict(candidate.Status, baseline.Status),
+		}
+		if result.Verdict != rcGateVerdictIncomplete && len(result.Modes) > 0 {
+			result.Verdict = rcGateModesVerdict(result.Modes)
 		}
 		switch result.Verdict {
 		case rcGateVerdictRegression, rcGateVerdictBothFailing:
@@ -656,20 +669,21 @@ func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateR
 	return results, nil
 }
 
-func rcGateSide(db *model.DB, gate model.RCGate, source string, scenario gateScenario, end time.Time) (RCGateSideResult, error) {
+func rcGateSide(db *model.DB, gate model.RCGate, source string, scenario gateScenario, end time.Time) (RCGateSideResult, map[string]*RCGateSideResult, error) {
 	side := RCGateSideResult{Source: source, Status: rcGateSideMissing}
+	modes := make(map[string]*RCGateSideResult)
 	pinnedImage, pinnedGit := gate.PinnedBuildFor(source)
 	pinnedLitestream, _ := gate.LitestreamSHAFor(source)
 	if pinnedImage == "" {
-		return side, nil
+		return side, modes, nil
 	}
 	deployment, err := db.GetDeploymentByVersion(source, pinnedGit, pinnedLitestream)
 	if err != nil || deployment == nil || deployment.ImageRef != pinnedImage {
-		return side, nil
+		return side, modes, nil
 	}
 	workers, err := db.ListWorkersFiltered("", source)
 	if err != nil {
-		return side, err
+		return side, modes, err
 	}
 	var worker *model.Worker
 	for i := range workers {
@@ -679,34 +693,90 @@ func rcGateSide(db *model.DB, gate model.RCGate, source string, scenario gateSce
 		}
 	}
 	if worker == nil {
-		return side, nil
+		return side, modes, nil
 	}
 	side.WorkerID = worker.ID
 	verifications, err := db.ListVerificationsExcludingMeteringRuns(worker.ID, rcGateVerificationHistory)
 	if err != nil {
-		return side, err
+		return side, modes, err
 	}
 	for _, verification := range verifications {
 		if verification.StartedAt.Before(gate.StartedAt) || verification.StartedAt.After(end) ||
 			verification.Run.Scenario != scenario.identity || !verification.MatchesDeployment(*worker, *deployment) {
 			continue
 		}
+		mode := strings.TrimSpace(verification.RestoreMode)
+		if mode == "" {
+			mode = "txid"
+		}
+		if modes[mode] == nil {
+			modes[mode] = &RCGateSideResult{Source: source, WorkerID: worker.ID}
+		}
 		switch {
 		case verification.Succeeded():
 			side.Passed++
+			modes[mode].Passed++
 		case verification.Failed():
 			side.Failed++
+			modes[mode].Failed++
 		}
 	}
+	side.Status = rcGateSideStatus(side)
+	for _, mode := range modes {
+		mode.Status = rcGateSideStatus(*mode)
+	}
+	return side, modes, nil
+}
+
+func rcGateSideStatus(side RCGateSideResult) string {
 	switch {
 	case side.Failed > 0:
-		side.Status = rcGateSideFailing
+		return rcGateSideFailing
 	case side.Passed > 0:
-		side.Status = rcGateSidePassing
+		return rcGateSidePassing
 	default:
-		side.Status = rcGateSideNoCoverage
+		return rcGateSideNoCoverage
 	}
-	return side, nil
+}
+
+func rcGateModeResults(candidate, baseline RCGateSideResult, candidateModes, baselineModes map[string]*RCGateSideResult) []RCGateModeResult {
+	var names []string
+	for _, modes := range []map[string]*RCGateSideResult{candidateModes, baselineModes} {
+		for name := range modes {
+			if !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		}
+	}
+	slices.Sort(names)
+	results := make([]RCGateModeResult, 0, len(names))
+	for _, name := range names {
+		side := func(base RCGateSideResult, modes map[string]*RCGateSideResult) RCGateSideResult {
+			if mode := modes[name]; mode != nil {
+				return *mode
+			}
+			status := rcGateSideNoCoverage
+			if base.Status == rcGateSideMissing {
+				status = rcGateSideMissing
+			}
+			return RCGateSideResult{Source: base.Source, WorkerID: base.WorkerID, Status: status}
+		}
+		result := RCGateModeResult{Mode: name, Candidate: side(candidate, candidateModes), Baseline: side(baseline, baselineModes)}
+		result.Verdict = rcGateScenarioVerdict(result.Candidate.Status, result.Baseline.Status)
+		results = append(results, result)
+	}
+	return results
+}
+
+func rcGateModesVerdict(modes []RCGateModeResult) string {
+	for _, verdict := range []string{rcGateVerdictRegression, rcGateVerdictBothFailing, rcGateVerdictIncomplete} {
+		for _, mode := range modes {
+			if mode.Verdict == verdict {
+				return verdict
+			}
+		}
+	}
+	return rcGateVerdictPass
 }
 
 func rcGateOwnsWorker(gate model.RCGate, worker model.Worker) bool {

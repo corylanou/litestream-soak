@@ -1,10 +1,14 @@
 package worker
 
 import (
+	"context"
+	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +22,9 @@ const (
 	restoreModeTimestamp             = "timestamp"
 	restoreModeLatest                = "latest"
 	restoreModeFallbackNoLTXBoundary = "timestamp_no_ltx_boundary"
+	restoreModeFallbackNoMarker      = "latest_marker_unavailable"
+	restoreMarkerTable               = "_soak_restore_marker"
+	restoreMarkerRetained            = 16
 	ltxHeaderTimestampEnd            = 40
 )
 
@@ -32,10 +39,76 @@ func restoreModeOffset(profileName string) int {
 	return int(hash.Sum32() % uint32(len(restoreModeRotation)))
 }
 
-func (v *Verifier) nextRestoreMode() string {
-	mode := restoreModeRotation[v.restoreCycles%len(restoreModeRotation)]
-	v.restoreCycles++
-	return mode
+func (v *Verifier) restoreModeAt(at time.Time) string {
+	if !v.cfg.VerifyRestoreRotation {
+		return restoreModeTXID
+	}
+	interval := v.cfg.VerifyInterval
+	if interval <= 0 {
+		interval = DefaultConfig().VerifyInterval
+	}
+	slot := at.UnixNano() / int64(interval)
+	return restoreModeRotation[(int(slot%int64(len(restoreModeRotation)))+restoreModeOffset(v.cfg.ProfileName))%len(restoreModeRotation)]
+}
+
+type restoreEvidenceInconclusiveError struct {
+	err error
+}
+
+func (e *restoreEvidenceInconclusiveError) Error() string {
+	return e.err.Error()
+}
+
+func (e *restoreEvidenceInconclusiveError) Unwrap() error {
+	return e.err
+}
+
+func writeRestoreMarker(ctx context.Context, path string, marker int64, txidHint uint64) error {
+	defer harnessWriters.begin("verifier_restore_marker", path)()
+	uri := url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw&_pragma=busy_timeout(5000)"}
+	db, err := sql.Open("sqlite", uri.String())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{query: "CREATE TABLE IF NOT EXISTS " + restoreMarkerTable + " (cycle INTEGER PRIMARY KEY, txid_hint INTEGER NOT NULL, created_at TEXT NOT NULL)"},
+		{query: "INSERT INTO " + restoreMarkerTable + " (cycle, txid_hint, created_at) VALUES (?, ?, ?)", args: []any{marker, int64(txidHint), time.Now().UTC().Format(time.RFC3339Nano)}},
+		{query: "DELETE FROM " + restoreMarkerTable + " WHERE cycle NOT IN (SELECT cycle FROM " + restoreMarkerTable + " ORDER BY cycle DESC LIMIT ?)", args: []any{restoreMarkerRetained}},
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			return fmt.Errorf("write restore marker: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+func checkRestoreMarker(ctx context.Context, path string, marker int64) error {
+	uri := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}
+	db, err := sql.Open("sqlite", uri.String())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	var found int
+	err = db.QueryRowContext(ctx, "SELECT 1 FROM "+restoreMarkerTable+" WHERE cycle = ?", marker).Scan(&found)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "no such table") {
+		return fmt.Errorf("restore failed: latest restore behind boundary: marker=%d missing", marker)
+	}
+	return fmt.Errorf("restore failed: latest restore marker: %w", err)
 }
 
 func restoreArgs(configPath, mode string, txid uint64, timestamp time.Time, restoredPath, sourcePath string) []string {
@@ -126,7 +199,7 @@ func readLTXHeaderTimestamp(path string, minTXID, maxTXID uint64) (time.Time, er
 
 func checkLatestRestoreTXID(restored, boundary uint64) error {
 	if restored == 0 {
-		return fmt.Errorf("restore failed: latest restore txid unavailable: boundary=%016x", boundary)
+		return &restoreEvidenceInconclusiveError{err: fmt.Errorf("latest restore txid unavailable: no restore plan evidence in litestream output: boundary=%016x", boundary)}
 	}
 	if restored < boundary {
 		return fmt.Errorf("restore failed: latest restore behind boundary: restored=%016x boundary=%016x", restored, boundary)

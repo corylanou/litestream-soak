@@ -16,23 +16,23 @@ import (
 )
 
 func TestVerifierRestoreModeRotation(t *testing.T) {
+	interval := 30 * time.Minute
+	base := time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC)
 	starts := make(map[string]bool)
-	for _, profile := range []string{"low-volume", "high-volume", "many-dbs-100-dir", "gharchive", "fts"} {
+	for _, profile := range []string{"low-volume", "high-volume", "gate-stress", "gate-large-db", "gate-remote"} {
 		var first []string
-		for _, source := range []string{"worker-main-" + profile, "worker-pr-1585-" + profile} {
+		for _, source := range []string{"worker-rc-aaaaaaaa-" + profile, "worker-rcbase-bbbbbbbb-" + profile} {
 			cfg := DefaultConfig()
 			cfg.ProfileName = profile
 			cfg.WorkerID = source
 			cfg.WorkerName = source
+			cfg.VerifyInterval = interval
+			cfg.VerifyRestoreRotation = true
 			v := NewVerifier(cfg)
 			var got []string
-			for range 6 {
-				got = append(got, v.nextRestoreMode())
-			}
-			for i, mode := range got {
-				if want := restoreModeRotation[(restoreModeOffset(profile)+i)%3]; mode != want {
-					t.Fatalf("%s cycle %d mode = %q, want %q (%v)", source, i, mode, want, got)
-				}
+			for i := range 6 {
+				at := base.Add(time.Duration(i)*interval + time.Duration(i+1)*time.Minute)
+				got = append(got, v.restoreModeAt(at))
 			}
 			if first == nil {
 				first = got
@@ -40,10 +40,39 @@ func TestVerifierRestoreModeRotation(t *testing.T) {
 				t.Fatalf("%s modes %v differ from paired source %v", source, got, first)
 			}
 		}
+		for i := 1; i < len(first); i++ {
+			if slices.Index(restoreModeRotation, first[i]) != (slices.Index(restoreModeRotation, first[i-1])+1)%len(restoreModeRotation) {
+				t.Fatalf("%s modes %v do not rotate per verify interval", profile, first)
+			}
+		}
 		starts[first[0]] = true
 	}
 	if len(starts) < 2 {
 		t.Fatalf("every profile starts on the same mode: %v", starts)
+	}
+
+	cfg := DefaultConfig()
+	if cfg.VerifyRestoreRotation {
+		t.Fatal("DefaultConfig enables restore rotation")
+	}
+	v := NewVerifier(cfg)
+	for i := range 6 {
+		if mode := v.restoreModeAt(base.Add(time.Duration(i) * cfg.VerifyInterval)); mode != "txid" {
+			t.Fatalf("rotation disabled mode = %q", mode)
+		}
+	}
+	env, err := configFromLookup(func(string) string { return "" })
+	if err != nil || !env.VerifyRestoreRotation {
+		t.Fatalf("worker environment rotation = %v, %v", env.VerifyRestoreRotation, err)
+	}
+	env, err = configFromLookup(func(key string) string {
+		if key == "SOAK_VERIFY_RESTORE_ROTATION" {
+			return "false"
+		}
+		return ""
+	})
+	if err != nil || env.VerifyRestoreRotation {
+		t.Fatalf("disabled worker environment rotation = %v, %v", env.VerifyRestoreRotation, err)
 	}
 }
 
@@ -214,32 +243,63 @@ func TestVerifierTimestampModeFallsBackToTXIDWithoutLTXBoundary(t *testing.T) {
 	}
 }
 
+func copyFile(t *testing.T, from, to string) {
+	t.Helper()
+	data, err := os.ReadFile(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(to, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const restoreFromScript = `
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    cp "$RESTORE_FROM" "$2"
+  fi
+  shift
+done
+`
+
 func TestVerifierLatestMode(t *testing.T) {
 	plan := func(txid string) string {
-		return fmt.Sprintf("echo 'time=2026-10-23T12:00:00Z level=DEBUG msg=\"restore plan\" n=2 txid=%s'\nexit 0\n", txid)
+		return restoreFromScript + fmt.Sprintf("echo 'time=2026-10-23T12:00:00Z level=DEBUG msg=\"restore plan\" n=2 txid=%s'\nexit 0\n", txid)
 	}
 	tests := []struct {
-		name      string
-		script    string
-		corrupt   bool
-		wantPass  bool
-		signature string
+		name         string
+		script       string
+		stale        bool
+		corrupt      bool
+		wantPass     bool
+		inconclusive bool
+		signature    string
 	}{
 		{name: "restored at boundary", script: plan("0000000000000042"), wantPass: true},
 		{name: "restored past boundary", script: plan("0000000000000050"), wantPass: true},
-		{name: "restored behind boundary", script: plan("0000000000000041"), signature: "latest_restore_behind_boundary"},
-		{name: "restored txid unknown", script: "exit 0\n", signature: "latest_restore_txid_unavailable"},
+		{name: "stale data with new plan", script: plan("0000000000000050"), stale: true, signature: "latest_restore_behind_boundary"},
+		{name: "planned behind boundary", script: plan("0000000000000041"), signature: "latest_restore_behind_boundary"},
+		{name: "plan line missing", script: restoreFromScript + "exit 0\n", inconclusive: true},
+		{name: "stale data without plan line", script: restoreFromScript + "exit 0\n", stale: true, signature: "latest_restore_behind_boundary"},
 		{name: "integrity failure", script: plan("0000000000000050"), corrupt: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, argsPath := restoreModeFixture(t, tt.script)
+			logicalTestDB(t, cfg.DBPath, "INSERT INTO t VALUES (1)")
+			restoreFrom := cfg.DBPath
+			if tt.stale {
+				restoreFrom = filepath.Join(cfg.DataDir, "stale.db")
+				copyFile(t, cfg.DBPath, restoreFrom)
+			}
 			if tt.corrupt {
-				if err := os.WriteFile(cfg.DBPath+".restored", []byte("not a database"), 0o644); err != nil {
+				restoreFrom = filepath.Join(cfg.DataDir, "corrupt.db")
+				if err := os.WriteFile(restoreFrom, []byte("not a database"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
-			logicalTestDB(t, cfg.DBPath, "INSERT INTO t VALUES (1)")
+			t.Setenv("RESTORE_FROM", restoreFrom)
 			startBoundarySyncFixture(t, &cfg, 0x42)
 			v := NewVerifier(cfg)
 			result := VerificationResult{SyncTXID: 0x42, RestoreMode: "latest"}
@@ -251,6 +311,9 @@ func TestVerifierLatestMode(t *testing.T) {
 			if result.RestoreMode != "latest" {
 				t.Fatalf("restore mode = %q", result.RestoreMode)
 			}
+			if !strings.Contains(v.logicalEvidence, "restore_marker=") {
+				t.Fatalf("evidence missing marker: %s", v.logicalEvidence)
+			}
 			if tt.wantPass {
 				if err != nil || !passed {
 					t.Fatalf("validateDBResult() = %v, %v", passed, err)
@@ -259,6 +322,16 @@ func TestVerifierLatestMode(t *testing.T) {
 			}
 			if err == nil || passed {
 				t.Fatalf("validateDBResult() = %v, %v; want failure", passed, err)
+			}
+			v.failValidationResult(context.Background(), &result, err)
+			if tt.inconclusive {
+				if result.Status != "aborted" || !strings.HasPrefix(result.Summary, "verification inconclusive:") {
+					t.Fatalf("status = %q summary %q, want inconclusive", result.Status, result.Summary)
+				}
+				return
+			}
+			if result.Status != "failed" {
+				t.Fatalf("status = %q, want failed", result.Status)
 			}
 			if tt.signature != "" {
 				if got := reporting.ClassifyVerificationFailure("restore_validate", err.Error()); got.Signature != tt.signature || got.Stage != "restore" {
@@ -269,21 +342,65 @@ func TestVerifierLatestMode(t *testing.T) {
 	}
 }
 
+func TestVerifierLatestModeFallsBackWhenMarkerUnwritable(t *testing.T) {
+	cfg, argsPath := restoreModeFixture(t, "exit 0\n")
+	logicalTestDB(t, cfg.DBPath, "CREATE TABLE _soak_restore_marker (x)")
+	logicalTestDB(t, cfg.DBPath+".restored", "CREATE TABLE _soak_restore_marker (x)")
+	startBoundarySyncFixture(t, &cfg, 0x42)
+	v := NewVerifier(cfg)
+	result := VerificationResult{SyncTXID: 0x42, RestoreMode: "latest"}
+	passed, err := v.validateDBResult(context.Background(), cfg.DBPath, cfg.DBPath+".restored", &result)
+	if err != nil || !passed {
+		t.Fatalf("validateDBResult() = %v, %v", passed, err)
+	}
+	assertContains(t, readLines(t, argsPath), "-txid")
+	if result.RestoreMode != "txid" || result.RestoreModeFallback != restoreModeFallbackNoMarker {
+		t.Fatalf("restore mode = %q fallback %q", result.RestoreMode, result.RestoreModeFallback)
+	}
+}
+
+func TestRestoreMarkerExcludedFromLogicalCompare(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	restored := filepath.Join(dir, "restored.db")
+	logicalTestDB(t, source, "CREATE TABLE t (id INTEGER PRIMARY KEY); INSERT INTO t VALUES (1)")
+	logicalTestDB(t, restored, "CREATE TABLE t (id INTEGER PRIMARY KEY); INSERT INTO t VALUES (1)")
+	if err := writeRestoreMarker(context.Background(), source, 7, 0x42); err != nil {
+		t.Fatal(err)
+	}
+	if err := CompareLogicalDatabases(context.Background(), source, restored); err != nil {
+		t.Fatalf("marker table changed the logical compare: %v", err)
+	}
+	if err := checkRestoreMarker(context.Background(), source, 7); err != nil {
+		t.Fatalf("checkRestoreMarker(source) = %v", err)
+	}
+	if err := checkRestoreMarker(context.Background(), restored, 7); err == nil {
+		t.Fatal("checkRestoreMarker(restored) accepted a database without the marker")
+	}
+}
+
 func TestRunCycleRecordsRestoreMode(t *testing.T) {
 	cfg, _ := restoreModeFixture(t, `
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-o" ]; then
     cp "$SOURCE_PATH" "$2"
+    if [ -f "$SOURCE_PATH-wal" ]; then
+      cp "$SOURCE_PATH-wal" "$2-wal"
+    fi
   fi
   shift
 done
 echo 'level=DEBUG msg="restore plan" n=1 txid=0000000000000042'
 `)
 	t.Setenv("SOURCE_PATH", cfg.DBPath)
+	cfg.VerifyRestoreRotation = true
 	startBoundarySyncFixture(t, &cfg, 0x42)
 	v := NewVerifier(cfg, &fakePauser{})
+	base := time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC)
 	for i := range restoreModeRotation {
-		want := restoreModeRotation[(restoreModeOffset(cfg.ProfileName)+i)%len(restoreModeRotation)]
+		at := base.Add(time.Duration(i) * cfg.VerifyInterval)
+		v.clock = func() time.Time { return at }
+		want := v.restoreModeAt(at)
 		result, err := v.RunCycle(context.Background())
 		if err != nil || !result.Passed {
 			t.Fatalf("%s cycle: %+v %v", want, result, err)

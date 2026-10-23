@@ -111,6 +111,9 @@ func TestHandleVerificationRecordsRestoreMode(t *testing.T) {
 			if err != nil || len(verifications) != 1 {
 				t.Fatalf("ListVerifications() = %+v, %v", verifications, err)
 			}
+			if verifications[0].RestoreMode != "latest" {
+				t.Fatalf("stored restore mode = %q", verifications[0].RestoreMode)
+			}
 			classification := verifications[0].FailureClassification
 			if tt.passed {
 				if classification != nil {
@@ -122,5 +125,90 @@ func TestHandleVerificationRecordsRestoreMode(t *testing.T) {
 				t.Fatalf("stored classification = %+v", classification)
 			}
 		})
+	}
+}
+
+func TestRCGateModeVerdictSeparatesFailuresByMode(t *testing.T) {
+	failing := RCGateSideResult{Status: rcGateSideFailing}
+	modes := rcGateModeResults(failing, failing,
+		map[string]*RCGateSideResult{"txid": {Passed: 1, Status: rcGateSidePassing}, "latest": {Failed: 1, Status: rcGateSideFailing}},
+		map[string]*RCGateSideResult{"txid": {Failed: 1, Status: rcGateSideFailing}, "latest": {Passed: 1, Status: rcGateSidePassing}},
+	)
+	if got := rcGateModesVerdict(modes); got != rcGateVerdictRegression {
+		t.Fatalf("verdict = %q, want regression for candidate-only latest failure (%+v)", got, modes)
+	}
+}
+
+func recordGateModeVerification(t *testing.T, db *model.DB, source, profile, mode string, passed bool, at time.Time) {
+	t.Helper()
+	worker, err := db.GetWorker("worker-" + source + "-" + profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := db.GetDeploymentByVersion(source, worker.GitSHA, worker.LitestreamSHA)
+	if err != nil || deployment == nil {
+		t.Fatalf("deployment for %s: %v", source, err)
+	}
+	status := "passed"
+	if !passed {
+		status = "failed"
+	}
+	mustRecordVerification(t, db, &model.Verification{
+		WorkerID: worker.ID, StartedAt: at, CompletedAt: &at, Status: status, Passed: passed, CheckType: "integrity",
+		Run: fixtureRun(*worker, *deployment), Attributed: true, RestoreMode: mode,
+	})
+}
+
+func TestRCGateScoresPerRestoreMode(t *testing.T) {
+	db := openTestDB(t)
+	gate := registerTestGate(t, db, false, time.Now().UTC().Add(-2*time.Hour))
+	createTestGateFleet(t, db, gate)
+	at := gate.StartedAt.Add(time.Hour)
+	for _, source := range []string{testGateCandidate, testGateBaseline} {
+		recordGateModeVerification(t, db, source, gateLargeDBProfile, "txid", true, at)
+		recordGateModeVerification(t, db, source, gateRemoteProfile, "txid", true, at)
+		recordGateModeVerification(t, db, source, gateRemoteProfile, "latest", true, at)
+		recordGateModeVerification(t, db, source, gateManyDB500Profile, "", true, at)
+	}
+	recordGateModeVerification(t, db, testGateCandidate, gateLargeDBProfile, "latest", true, at)
+	recordGateModeVerification(t, db, testGateCandidate, gateRemoteProfile, "timestamp", false, at)
+	recordGateModeVerification(t, db, testGateBaseline, gateRemoteProfile, "timestamp", true, at)
+
+	stored, err := db.GetRCGate(gate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := buildRCGateLedgerEntry(db, *stored, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarios := map[string]RCGateScenarioResult{}
+	for _, scenario := range entry.Scenarios {
+		scenarios[scenario.Scenario] = scenario
+	}
+	modes := func(scenario string) map[string]string {
+		got := map[string]string{}
+		for _, mode := range scenarios[scenario].Modes {
+			got[mode.Mode] = mode.Verdict
+		}
+		return got
+	}
+	if got := scenarios["large-db"]; got.Verdict != rcGateVerdictIncomplete {
+		t.Fatalf("large-db verdict = %q, want incomplete when baseline lacks latest (%+v)", got.Verdict, got.Modes)
+	}
+	if got := modes("large-db"); got["txid"] != rcGateVerdictPass || got["latest"] != rcGateVerdictIncomplete {
+		t.Fatalf("large-db modes = %v", got)
+	}
+	if got := scenarios["remote"]; got.Verdict != rcGateVerdictRegression {
+		t.Fatalf("remote verdict = %q, want regression (%+v)", got.Verdict, got.Modes)
+	}
+	if got := modes("remote"); got["txid"] != rcGateVerdictPass || got["latest"] != rcGateVerdictPass || got["timestamp"] != rcGateVerdictRegression {
+		t.Fatalf("remote modes = %v", got)
+	}
+	if got := scenarios["manydb-500"]; got.Verdict != rcGateVerdictPass || modes("manydb-500")["txid"] != rcGateVerdictPass {
+		t.Fatalf("manydb-500 = %+v, want legacy unlabeled runs scored as txid", got)
+	}
+	if entry.Verdict != rcGateVerdictFail {
+		t.Fatalf("gate verdict = %q, want fail", entry.Verdict)
 	}
 }
