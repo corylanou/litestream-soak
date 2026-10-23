@@ -168,6 +168,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 		ErrorMessage:          payload.ErrorMessage,
 		FailureClassification: payload.FailureClassification,
 		RestoreMode:           payload.RestoreMode,
+		RestoreModeFallback:   payload.RestoreModeFallback,
 	}
 	if !completedAt.IsZero() {
 		verification.CompletedAt = &completedAt

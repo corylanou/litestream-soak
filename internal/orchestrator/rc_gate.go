@@ -63,11 +63,12 @@ type RCGateRequest struct {
 }
 
 type RCGateSideResult struct {
-	Source   string `json:"source"`
-	WorkerID string `json:"worker_id,omitempty"`
-	Status   string `json:"status"`
-	Passed   int    `json:"passed"`
-	Failed   int    `json:"failed"`
+	Source          string `json:"source"`
+	WorkerID        string `json:"worker_id,omitempty"`
+	Status          string `json:"status"`
+	Passed          int    `json:"passed"`
+	Failed          int    `json:"failed"`
+	RotationEnabled bool   `json:"rotation_enabled,omitempty"`
 }
 
 type RCGateModeResult struct {
@@ -103,15 +104,19 @@ type gateScenario struct {
 	name     string
 	profile  string
 	identity string
+	txidOnly bool
 }
 
-var gateScenarios = []gateScenario{
-	{name: "overload-truncate0", profile: gateStressProfile, identity: "overload-truncate0"},
-	{name: "pinned-reader", profile: gateStressProfile, identity: "pinned-reader"},
-	{name: "manydb-500", profile: gateManyDB500Profile},
-	{name: "large-db", profile: gateLargeDBProfile},
-	{name: "remote", profile: gateRemoteProfile},
-}
+var (
+	gateScenarios = []gateScenario{
+		{name: "overload-truncate0", profile: gateStressProfile, identity: "overload-truncate0"},
+		{name: "pinned-reader", profile: gateStressProfile, identity: "pinned-reader"},
+		{name: "manydb-500", profile: gateManyDB500Profile, txidOnly: true},
+		{name: "large-db", profile: gateLargeDBProfile},
+		{name: "remote", profile: gateRemoteProfile},
+	}
+	gateRotatingRestoreModes = []string{"txid", "timestamp", "latest"}
+)
 
 func isGateSource(source string) bool {
 	return gateSourceRe.MatchString(strings.TrimSpace(source))
@@ -644,7 +649,7 @@ func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateR
 			Profile:   scenario.profile,
 			Candidate: candidate,
 			Baseline:  baseline,
-			Modes:     rcGateModeResults(candidate, baseline, candidateModes, baselineModes),
+			Modes:     rcGateModeResults(rcGateRequiredModes(scenario, candidate, baseline), candidate, baseline, candidateModes, baselineModes),
 			Verdict:   rcGateScenarioVerdict(candidate.Status, baseline.Status),
 		}
 		if result.Verdict != rcGateVerdictIncomplete && len(result.Modes) > 0 {
@@ -709,6 +714,9 @@ func rcGateSide(db *model.DB, gate model.RCGate, source string, scenario gateSce
 		if mode == "" {
 			mode = "txid"
 		}
+		if strings.TrimSpace(verification.RestoreMode) != "" && verification.RestoreModeFallback != "rotation_disabled" {
+			side.RotationEnabled = true
+		}
 		if modes[mode] == nil {
 			modes[mode] = &RCGateSideResult{Source: source, WorkerID: worker.ID}
 		}
@@ -739,8 +747,15 @@ func rcGateSideStatus(side RCGateSideResult) string {
 	}
 }
 
-func rcGateModeResults(candidate, baseline RCGateSideResult, candidateModes, baselineModes map[string]*RCGateSideResult) []RCGateModeResult {
-	var names []string
+func rcGateRequiredModes(scenario gateScenario, candidate, baseline RCGateSideResult) []string {
+	if scenario.txidOnly || (!candidate.RotationEnabled && !baseline.RotationEnabled) {
+		return []string{"txid"}
+	}
+	return gateRotatingRestoreModes
+}
+
+func rcGateModeResults(required []string, candidate, baseline RCGateSideResult, candidateModes, baselineModes map[string]*RCGateSideResult) []RCGateModeResult {
+	names := slices.Clone(required)
 	for _, modes := range []map[string]*RCGateSideResult{candidateModes, baselineModes} {
 		for name := range modes {
 			if !slices.Contains(names, name) {

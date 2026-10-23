@@ -74,7 +74,7 @@ func TestHandleVerificationRecordsRestoreMode(t *testing.T) {
 				ErrorMessage:          tt.errorMessage,
 				FailureClassification: tt.classification,
 				RestoreMode:           "latest",
-				RestoreModeFallback:   "",
+				RestoreModeFallback:   "timestamp_no_ltx_boundary",
 			}
 			body, err := json.Marshal(payload)
 			if err != nil {
@@ -111,8 +111,8 @@ func TestHandleVerificationRecordsRestoreMode(t *testing.T) {
 			if err != nil || len(verifications) != 1 {
 				t.Fatalf("ListVerifications() = %+v, %v", verifications, err)
 			}
-			if verifications[0].RestoreMode != "latest" {
-				t.Fatalf("stored restore mode = %q", verifications[0].RestoreMode)
+			if verifications[0].RestoreMode != "latest" || verifications[0].RestoreModeFallback != "timestamp_no_ltx_boundary" {
+				t.Fatalf("stored restore mode = %q fallback %q", verifications[0].RestoreMode, verifications[0].RestoreModeFallback)
 			}
 			classification := verifications[0].FailureClassification
 			if tt.passed {
@@ -130,7 +130,7 @@ func TestHandleVerificationRecordsRestoreMode(t *testing.T) {
 
 func TestRCGateModeVerdictSeparatesFailuresByMode(t *testing.T) {
 	failing := RCGateSideResult{Status: rcGateSideFailing}
-	modes := rcGateModeResults(failing, failing,
+	modes := rcGateModeResults([]string{"txid", "latest"}, failing, failing,
 		map[string]*RCGateSideResult{"txid": {Passed: 1, Status: rcGateSidePassing}, "latest": {Failed: 1, Status: rcGateSideFailing}},
 		map[string]*RCGateSideResult{"txid": {Failed: 1, Status: rcGateSideFailing}, "latest": {Passed: 1, Status: rcGateSidePassing}},
 	)
@@ -140,6 +140,11 @@ func TestRCGateModeVerdictSeparatesFailuresByMode(t *testing.T) {
 }
 
 func recordGateModeVerification(t *testing.T, db *model.DB, source, profile, mode string, passed bool, at time.Time) {
+	t.Helper()
+	recordGateFallbackVerification(t, db, source, profile, mode, "", passed, at)
+}
+
+func recordGateFallbackVerification(t *testing.T, db *model.DB, source, profile, mode, fallback string, passed bool, at time.Time) {
 	t.Helper()
 	worker, err := db.GetWorker("worker-" + source + "-" + profile)
 	if err != nil {
@@ -155,8 +160,93 @@ func recordGateModeVerification(t *testing.T, db *model.DB, source, profile, mod
 	}
 	mustRecordVerification(t, db, &model.Verification{
 		WorkerID: worker.ID, StartedAt: at, CompletedAt: &at, Status: status, Passed: passed, CheckType: "integrity",
-		Run: fixtureRun(*worker, *deployment), Attributed: true, RestoreMode: mode,
+		Run: fixtureRun(*worker, *deployment), Attributed: true, RestoreMode: mode, RestoreModeFallback: fallback,
 	})
+}
+
+func TestRCGateRequiresEveryRestoreMode(t *testing.T) {
+	db := openTestDB(t)
+	gate := registerTestGate(t, db, false, time.Now().UTC().Add(-2*time.Hour))
+	createTestGateFleet(t, db, gate)
+	at := gate.StartedAt.Add(time.Hour)
+	for _, source := range []string{testGateCandidate, testGateBaseline} {
+		recordGateModeVerification(t, db, source, gateLargeDBProfile, "txid", true, at)
+		recordGateFallbackVerification(t, db, source, gateRemoteProfile, "txid", "timestamp_no_ltx_boundary", true, at)
+		recordGateFallbackVerification(t, db, source, gateRemoteProfile, "txid", "latest_marker_unavailable", true, at)
+		recordGateModeVerification(t, db, source, gateRemoteProfile, "txid", true, at)
+		recordGateModeVerification(t, db, source, gateManyDB500Profile, "txid", true, at)
+	}
+
+	stored, err := db.GetRCGate(gate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := buildRCGateLedgerEntry(db, *stored, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarios := map[string]RCGateScenarioResult{}
+	for _, scenario := range entry.Scenarios {
+		scenarios[scenario.Scenario] = scenario
+	}
+	for _, name := range []string{"large-db", "remote"} {
+		got := scenarios[name]
+		modes := map[string]RCGateModeResult{}
+		for _, mode := range got.Modes {
+			modes[mode.Mode] = mode
+		}
+		if got.Verdict != rcGateVerdictIncomplete {
+			t.Fatalf("%s verdict = %q, want incomplete without timestamp/latest coverage (%+v)", name, got.Verdict, got.Modes)
+		}
+		for _, mode := range []string{"timestamp", "latest"} {
+			result, ok := modes[mode]
+			if !ok || result.Verdict != rcGateVerdictIncomplete || result.Candidate.Status != rcGateSideNoCoverage || result.Baseline.Status != rcGateSideNoCoverage {
+				t.Fatalf("%s %s = %+v, want required and uncovered on both sides", name, mode, result)
+			}
+		}
+		if modes["txid"].Verdict != rcGateVerdictPass {
+			t.Fatalf("%s txid = %+v", name, modes["txid"])
+		}
+	}
+	if got := scenarios["manydb-500"]; got.Verdict != rcGateVerdictPass || len(got.Modes) != 1 {
+		t.Fatalf("manydb-500 = %+v, want txid-only pass", got)
+	}
+	if entry.Verdict != rcGateVerdictIncomplete {
+		t.Fatalf("gate verdict = %q, want incomplete", entry.Verdict)
+	}
+}
+
+func TestRCGateRotationDisabledRequiresTXIDOnly(t *testing.T) {
+	db := openTestDB(t)
+	gate := registerTestGate(t, db, false, time.Now().UTC().Add(-2*time.Hour))
+	createTestGateFleet(t, db, gate)
+	at := gate.StartedAt.Add(time.Hour)
+	for _, source := range []string{testGateCandidate, testGateBaseline} {
+		recordGateFallbackVerification(t, db, source, gateLargeDBProfile, "txid", "rotation_disabled", true, at)
+	}
+	recordGateFallbackVerification(t, db, testGateCandidate, gateRemoteProfile, "txid", "rotation_disabled", true, at)
+	recordGateModeVerification(t, db, testGateBaseline, gateRemoteProfile, "txid", true, at)
+
+	stored, err := db.GetRCGate(gate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := buildRCGateLedgerEntry(db, *stored, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range entry.Scenarios {
+		switch scenario.Scenario {
+		case "large-db":
+			if scenario.Verdict != rcGateVerdictPass || len(scenario.Modes) != 1 {
+				t.Fatalf("large-db = %+v, want txid-only pass with rotation disabled on both sides", scenario)
+			}
+		case "remote":
+			if scenario.Verdict != rcGateVerdictIncomplete {
+				t.Fatalf("remote = %+v, want incomplete when only one side disabled rotation", scenario)
+			}
+		}
+	}
 }
 
 func TestRCGateScoresPerRestoreMode(t *testing.T) {

@@ -154,6 +154,9 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 	defer func() {
 		RecordVerificationOutcome(result.Status, time.Since(start).Seconds())
 	}()
+	if !v.cfg.VerifyRestoreRotation {
+		result.RestoreModeFallback = restoreModeFallbackRotationDisabled
+	}
 	slog.Info("Starting verification cycle", "restore_mode", result.RestoreMode)
 	if v.onStart != nil {
 		v.onStart(ctx, result)

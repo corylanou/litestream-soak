@@ -18,14 +18,15 @@ import (
 )
 
 const (
-	restoreModeTXID                  = "txid"
-	restoreModeTimestamp             = "timestamp"
-	restoreModeLatest                = "latest"
-	restoreModeFallbackNoLTXBoundary = "timestamp_no_ltx_boundary"
-	restoreModeFallbackNoMarker      = "latest_marker_unavailable"
-	restoreMarkerTable               = "_soak_restore_marker"
-	restoreMarkerRetained            = 16
-	ltxHeaderTimestampEnd            = 40
+	restoreModeTXID                     = "txid"
+	restoreModeTimestamp                = "timestamp"
+	restoreModeLatest                   = "latest"
+	restoreModeFallbackNoLTXBoundary    = "timestamp_no_ltx_boundary"
+	restoreModeFallbackNoMarker         = "latest_marker_unavailable"
+	restoreModeFallbackRotationDisabled = "rotation_disabled"
+	restoreMarkerTable                  = "_soak_restore_marker"
+	restoreMarkerRetained               = 16
+	ltxHeaderTimestampEnd               = 40
 )
 
 var (

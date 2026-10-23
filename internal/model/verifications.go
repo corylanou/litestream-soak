@@ -147,9 +147,9 @@ func (d *DB) RecordVerification(v *Verification) error {
 		return err
 	}
 	result, err := d.exec(`
-		INSERT INTO verifications (worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message, failure_classification_json, run_identity_json, attributed, restore_mode)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		v.WorkerID, v.StartedAt, v.CompletedAt, v.Status, v.CheckType, v.SourceChecksum, v.RestoredChecksum, v.Passed, v.DurationMS, v.ErrorMessage, failureClassificationJSON, string(runJSON), v.Attributed, v.RestoreMode,
+		INSERT INTO verifications (worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message, failure_classification_json, run_identity_json, attributed, restore_mode, restore_mode_fallback)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		v.WorkerID, v.StartedAt, v.CompletedAt, v.Status, v.CheckType, v.SourceChecksum, v.RestoredChecksum, v.Passed, v.DurationMS, v.ErrorMessage, failureClassificationJSON, string(runJSON), v.Attributed, v.RestoreMode, v.RestoreModeFallback,
 	)
 	if err != nil {
 		return err
@@ -189,7 +189,7 @@ func (d *DB) CountMeteringRunVerifications(workerID string, deploymentID int) (i
 
 func (d *DB) listVerifications(workerID string, limit int, filter string) ([]Verification, error) {
 	rows, err := d.query(`
-		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message, failure_classification_json, run_identity_json, attributed, restore_mode
+		SELECT id, worker_id, started_at, completed_at, status, check_type, source_checksum, restored_checksum, passed, duration_ms, error_message, failure_classification_json, run_identity_json, attributed, restore_mode, restore_mode_fallback
 		FROM verifications WHERE worker_id = ?`+filter+` ORDER BY started_at DESC LIMIT ?`,
 		workerID, limit,
 	)
@@ -204,7 +204,7 @@ func (d *DB) listVerifications(workerID string, limit int, filter string) ([]Ver
 		var completedAt sql.NullTime
 		var failureClassificationJSON string
 		var runJSON string
-		if err := rows.Scan(&v.ID, &v.WorkerID, &v.StartedAt, &completedAt, &v.Status, &v.CheckType, &v.SourceChecksum, &v.RestoredChecksum, &v.Passed, &v.DurationMS, &v.ErrorMessage, &failureClassificationJSON, &runJSON, &v.Attributed, &v.RestoreMode); err != nil {
+		if err := rows.Scan(&v.ID, &v.WorkerID, &v.StartedAt, &completedAt, &v.Status, &v.CheckType, &v.SourceChecksum, &v.RestoredChecksum, &v.Passed, &v.DurationMS, &v.ErrorMessage, &failureClassificationJSON, &runJSON, &v.Attributed, &v.RestoreMode, &v.RestoreModeFallback); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(runJSON), &v.Run); err != nil {

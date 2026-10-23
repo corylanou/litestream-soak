@@ -415,6 +415,21 @@ echo 'level=DEBUG msg="restore plan" n=1 txid=0000000000000042'
 	}
 }
 
+func TestRunCycleRecordsRotationDisabled(t *testing.T) {
+	cfg, args := restoreModeFixture(t, restoreFromScript)
+	t.Setenv("RESTORE_FROM", cfg.DBPath)
+	startBoundarySyncFixture(t, &cfg, 0x42)
+	v := NewVerifier(cfg, &fakePauser{})
+	result, err := v.RunCycle(context.Background())
+	if err != nil || !result.Passed {
+		t.Fatalf("cycle: %+v %v", result, err)
+	}
+	assertContains(t, readLines(t, args), "-txid")
+	if result.RestoreMode != "txid" || result.RestoreModeFallback != restoreModeFallbackRotationDisabled {
+		t.Fatalf("mode = %q fallback %q", result.RestoreMode, result.RestoreModeFallback)
+	}
+}
+
 func TestRunnerFailureClassificationIncludesRestoreMode(t *testing.T) {
 	runner := NewRunner(DefaultConfig())
 	classification := runner.failureClassification(VerificationResult{
