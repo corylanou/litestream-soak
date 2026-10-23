@@ -1026,10 +1026,10 @@ func (m *Manager) archiveAndDestroyTerminalPRSource(ctx context.Context, reposit
 }
 
 func (m *Manager) archiveAndDestroySourceWithReason(ctx context.Context, source, reason, eventPrefix, summary string) (SourceTeardownResponse, error) {
-	return m.archiveAndDestroySourceWorkers(ctx, source, runArchiveTypeTeardown, reason, eventPrefix, summary, func(model.Worker) bool { return false })
+	return m.archiveAndDestroySourceWorkers(ctx, source, runArchiveTypeTeardown, reason, eventPrefix, summary, func(model.Worker) bool { return false }, false)
 }
 
-func (m *Manager) archiveAndDestroySourceWorkers(ctx context.Context, source, archiveType, reason, eventPrefix, summary string, keep func(model.Worker) bool) (SourceTeardownResponse, error) {
+func (m *Manager) archiveAndDestroySourceWorkers(ctx context.Context, source, archiveType, reason, eventPrefix, summary string, keep func(model.Worker) bool, destroyStopped bool) (SourceTeardownResponse, error) {
 	source = strings.TrimSpace(source)
 	if source == "" {
 		return SourceTeardownResponse{}, errSourceRequired
@@ -1089,7 +1089,7 @@ func (m *Manager) archiveAndDestroySourceWorkers(ctx context.Context, source, ar
 			PreviousStatus: worker.Status,
 			Status:         worker.Status,
 		}
-		if worker.Status == model.WorkerStopped {
+		if worker.Status == model.WorkerStopped && !destroyStopped {
 			outcome.Outcome = sourceTeardownOutcomeAlreadyStopped
 			result.AlreadyStoppedWorkers++
 			result.Workers = append(result.Workers, outcome)

@@ -375,7 +375,7 @@ func (m *Manager) teardownRCGateSources(ctx context.Context, gate model.RCGate, 
 	complete := true
 	var teardownErrors []error
 	for _, source := range gate.Sources() {
-		result, err := m.archiveAndDestroySourceWorkers(ctx, source, archiveType, reason, "rc_gate", summary, keep)
+		result, err := m.archiveAndDestroySourceWorkers(ctx, source, archiveType, reason, "rc_gate", summary, keep, true)
 		switch {
 		case errors.Is(err, errSourceNotFound), errors.Is(err, errSourceDeploymentNotFound):
 			continue
