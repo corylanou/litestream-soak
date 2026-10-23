@@ -641,7 +641,7 @@ func DefaultFleetForSource(source, gitSHA, litestreamSHA string) FleetSpec {
 }
 
 func (m *Manager) RunFleetReconciler(ctx context.Context, spec FleetSpec, interval time.Duration) {
-	m.reconcileFleet(ctx, spec)
+	m.reconcileFleets(ctx, spec)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -651,8 +651,50 @@ func (m *Manager) RunFleetReconciler(ctx context.Context, spec FleetSpec, interv
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.reconcileFleet(ctx, spec)
+			m.reconcileFleets(ctx, spec)
 		}
+	}
+}
+
+func (m *Manager) reconcileFleets(ctx context.Context, spec FleetSpec) {
+	m.reconcileFleet(ctx, spec)
+	m.reconcilePRFleets(ctx)
+}
+
+func (m *Manager) reconcilePRFleets(ctx context.Context) {
+	sources, err := m.db.ListActiveWorkerSources()
+	if err != nil {
+		slog.Error("Failed to list active sources for PR fleet reconciliation", "error", err)
+		return
+	}
+	for _, source := range sources {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		if sourcePRNumber(source) == 0 {
+			continue
+		}
+		m.reconcilePRSourceRollout(ctx, source)
+	}
+}
+
+func (m *Manager) reconcilePRSourceRollout(ctx context.Context, source string) {
+	unlock, err := m.lockSource(ctx, source)
+	if err != nil {
+		return
+	}
+	defer unlock()
+
+	deployment, err := resolveReadyDeploymentTarget(m.db, source, "", "", "")
+	if err != nil {
+		slog.Warn("Skipping PR fleet reconciliation without a ready source deployment", "source", source, "error", err)
+		return
+	}
+	if err := m.rollingUpdateSourceLocked(ctx, source, deployment.ImageRef, deployment.GitSHA, deployment.LitestreamSHA); err != nil {
+		slog.Error("Failed to reconcile PR fleet rollout", "source", source, "error", err)
+	}
+	if err := m.resumeDeploymentDormantWorkers(ctx, *deployment, "fleet_reconcile", true); err != nil {
+		slog.Error("Failed to resume outdated dormant workers", "source", source, "error", err)
 	}
 }
 
@@ -797,7 +839,7 @@ func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef 
 				continue
 			}
 		}
-		if ok && (current.Status == model.WorkerPending || activeAttempt != nil) {
+		if ok && (current.Status == model.WorkerPending || activeAttempt != nil) && !supersededProvisioning(current, activeAttempt, imageRef, desired.GitSHA, desired.LitestreamSHA) {
 			recoveryImage := imageRef
 			if activeAttempt != nil {
 				recoveryImage = activeAttempt.ImageRef

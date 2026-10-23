@@ -652,6 +652,7 @@ type deployTestFlyServer struct {
 	machines        int
 	volumes         int
 	readyBeforeFly  bool
+	machineState    string
 }
 
 func newDeployTestFlyServer(t *testing.T, db *model.DB, source, sha, litestreamSHA, imageRef string) *deployTestFlyServer {
@@ -713,8 +714,9 @@ func (f *deployTestFlyServer) handle(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.machines++
 		id := fmt.Sprintf("machine-%03d", f.machines)
+		state := firstNonEmpty(f.machineState, "started")
 		f.mu.Unlock()
-		f.writeJSON(w, flyapi.Machine{ID: id, Name: req.Name, State: "started", Config: req.Config, UpdatedAt: time.Now().UTC()})
+		f.writeJSON(w, flyapi.Machine{ID: id, Name: req.Name, State: state, Config: req.Config, UpdatedAt: time.Now().UTC()})
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/apps/litestream-soak/machines/"):
 		id := strings.TrimPrefix(r.URL.Path, "/apps/litestream-soak/machines/")
 		f.writeJSON(w, flyapi.Machine{
@@ -1015,6 +1017,163 @@ func testReconcileFleetResumesVersionRolloutAfterRestart(t *testing.T, dormant b
 		t.Fatalf("recovered worker status = %s", worker.Status)
 	}
 	restartedFly.assertNoErrors(t)
+}
+
+func TestFleetReconcilerRollsOutdatedPRSourceWorkers(t *testing.T) {
+	testFleetReconcilerRollsOutdatedPRSourceWorkers(t, false)
+}
+
+func TestFleetReconcilerSupersedesStaleProvisioningForPRSource(t *testing.T) {
+	testFleetReconcilerRollsOutdatedPRSourceWorkers(t, true)
+}
+
+func testFleetReconcilerRollsOutdatedPRSourceWorkers(t *testing.T, staleAttempt bool) {
+	t.Helper()
+	db := openTestDB(t)
+	const source = "pr-1483"
+	old := model.Deployment{Source: source, GitSHA: "1111111", LitestreamSHA: "aaaaaaa", ImageRef: "registry.fly.io/app:old", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&old); err != nil {
+		t.Fatal(err)
+	}
+	spec := FleetSpec{Workers: []DesiredWorker{
+		{WorkerID: "worker-pr-1483-one", Name: "worker-pr-1483-one", Source: source, GitSHA: old.GitSHA, LitestreamSHA: old.LitestreamSHA, ProfileName: "low-volume", Region: "ord", Workload: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}},
+		{WorkerID: "worker-pr-1483-two", Name: "worker-pr-1483-two", Source: source, GitSHA: old.GitSHA, LitestreamSHA: old.LitestreamSHA, ProfileName: "low-volume", Region: "ord", Workload: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}},
+	}}
+	oldFly := newDeployTestFlyServer(t, db, source, old.GitSHA, old.LitestreamSHA, old.ImageRef)
+	if staleAttempt {
+		oldFly.machineState = "created"
+	}
+	manager := NewManager(oldFly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	if err := manager.ensureFleetSpec(context.Background(), spec, old.ImageRef); err != nil {
+		t.Fatal(err)
+	}
+	if staleAttempt {
+		for _, desired := range spec.Workers {
+			attempt, err := db.ActiveProvisioning(desired.WorkerID)
+			if err != nil || attempt == nil || attempt.Phase != "machine_ready" {
+				t.Fatalf("%s attempt = %+v, %v; want machine_ready", desired.WorkerID, attempt, err)
+			}
+			if err := db.UpdateWorkerVerificationState(desired.WorkerID, true, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	latest := model.Deployment{Source: source, GitSHA: "2222222", LitestreamSHA: "bbbbbbb", ImageRef: "registry.fly.io/app:new", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&latest); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordEvent("", "deploy_ready_received", "ready", latest.ImageRef); err != nil {
+		t.Fatal(err)
+	}
+
+	nextFly := newDeployTestFlyServer(t, db, source, latest.GitSHA, latest.LitestreamSHA, latest.ImageRef)
+	nextFly.machines = 2
+	nextFly.volumes = 2
+	restarted := NewManager(nextFly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	restarted.reconcileFleets(context.Background(), FleetSpec{})
+
+	for _, desired := range spec.Workers {
+		worker := mustWorker(t, db, desired.WorkerID)
+		if worker.GitSHA != latest.GitSHA || worker.LitestreamSHA != latest.LitestreamSHA || worker.Status != model.WorkerRunning {
+			t.Fatalf("%s = soak %s / litestream %s status %s; want rolled to %s / %s running", worker.ID, worker.GitSHA, worker.LitestreamSHA, worker.Status, latest.GitSHA, latest.LitestreamSHA)
+		}
+		attempt, err := db.ActiveProvisioning(desired.WorkerID)
+		if err != nil || attempt != nil {
+			t.Fatalf("%s active attempt = %+v, %v; want none", desired.WorkerID, attempt, err)
+		}
+	}
+	rollout, err := buildLatestDeploymentRollout(db, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rollout.UpdatedWorkers != 2 || rollout.OutdatedWorkers != 0 {
+		t.Fatalf("pr rollout: updated=%d outdated=%d", rollout.UpdatedWorkers, rollout.OutdatedWorkers)
+	}
+	nextFly.assertCreateCounts(t, 4, 4)
+	nextFly.assertNoErrors(t)
+	if staleAttempt {
+		events, err := db.ListEvents(500)
+		if err != nil {
+			t.Fatal(err)
+		}
+		superseded := 0
+		for _, event := range events {
+			if event.EventType == "worker_provisioning_superseded" {
+				superseded++
+			}
+		}
+		if superseded != 2 {
+			t.Fatalf("superseded provisioning events=%d want 2", superseded)
+		}
+	}
+}
+
+func TestEnsureFleetSpecSupersedesStaleProvisioningForNewDeployment(t *testing.T) {
+	db := openTestDB(t)
+	const source = "pr-1483"
+	old := model.Deployment{Source: source, GitSHA: "1111111", LitestreamSHA: "aaaaaaa", ImageRef: "registry.fly.io/app:old", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&old); err != nil {
+		t.Fatal(err)
+	}
+	desired := DesiredWorker{WorkerID: "worker-pr-1483-one", Name: "worker-pr-1483-one", Source: source, GitSHA: old.GitSHA, LitestreamSHA: old.LitestreamSHA, ProfileName: "low-volume", Region: "ord", Workload: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}}
+	oldFly := newDeployTestFlyServer(t, db, source, old.GitSHA, old.LitestreamSHA, old.ImageRef)
+	oldFly.machineState = "created"
+	manager := NewManager(oldFly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	if err := manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, old.ImageRef); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateWorkerVerificationState(desired.WorkerID, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	latest := model.Deployment{Source: source, GitSHA: "2222222", LitestreamSHA: "bbbbbbb", ImageRef: "registry.fly.io/app:new", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&latest); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordEvent("", "deploy_ready_received", "ready", latest.ImageRef); err != nil {
+		t.Fatal(err)
+	}
+	nextFly := newDeployTestFlyServer(t, db, source, latest.GitSHA, latest.LitestreamSHA, latest.ImageRef)
+	nextFly.machines = 1
+	nextFly.volumes = 1
+	manager = NewManager(nextFly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	desired.GitSHA = latest.GitSHA
+	desired.LitestreamSHA = latest.LitestreamSHA
+	if err := manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, latest.ImageRef); err != nil {
+		t.Fatal(err)
+	}
+	worker := mustWorker(t, db, desired.WorkerID)
+	if worker.GitSHA != latest.GitSHA || worker.Status != model.WorkerRunning {
+		t.Fatalf("worker = soak %s status %s; want %s running", worker.GitSHA, worker.Status, latest.GitSHA)
+	}
+	nextFly.assertCreateCounts(t, 2, 2)
+	nextFly.assertNoErrors(t)
+}
+
+func TestReplaceWorkerKeepsCurrentDeploymentProvisioningBlocked(t *testing.T) {
+	db := openTestDB(t)
+	const source = "pr-1483"
+	deployment := model.Deployment{Source: source, GitSHA: "1111111", LitestreamSHA: "aaaaaaa", ImageRef: "registry.fly.io/app:old", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&deployment); err != nil {
+		t.Fatal(err)
+	}
+	fly := newDeployTestFlyServer(t, db, source, deployment.GitSHA, deployment.LitestreamSHA, deployment.ImageRef)
+	fly.machineState = "created"
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	desired := DesiredWorker{WorkerID: "worker-pr-1483-one", Name: "worker-pr-1483-one", Source: source, GitSHA: deployment.GitSHA, LitestreamSHA: deployment.LitestreamSHA, ProfileName: "low-volume", Region: "ord", Workload: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}}
+	if err := manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, deployment.ImageRef); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateWorkerVerificationState(desired.WorkerID, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	worker := mustWorker(t, db, desired.WorkerID)
+	if _, err := manager.replaceWorker(context.Background(), *worker, deployment.ImageRef, deployment.GitSHA, deployment.LitestreamSHA); err == nil || !strings.Contains(err.Error(), "reconcile unresolved provisioning") {
+		t.Fatalf("replaceWorker() error = %v; want unresolved provisioning refusal", err)
+	}
+	attempt, err := db.ActiveProvisioning(desired.WorkerID)
+	if err != nil || attempt == nil || attempt.Phase != "machine_ready" {
+		t.Fatalf("attempt = %+v, %v; want machine_ready retained", attempt, err)
+	}
 }
 
 func TestDeploymentDormantResumeStopsWhenSuperseded(t *testing.T) {
