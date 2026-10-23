@@ -690,6 +690,9 @@ func (m *Manager) reconcilePRSourceRollout(ctx context.Context, source string) {
 		slog.Warn("Skipping PR fleet reconciliation without a ready source deployment", "source", source, "error", err)
 		return
 	}
+	if err := m.recoverSourcePendingWorkers(ctx, source, *deployment); err != nil {
+		slog.Error("Failed to recover pending PR fleet workers", "source", source, "error", err)
+	}
 	if err := m.rollingUpdateSourceLocked(ctx, source, deployment.ImageRef, deployment.GitSHA, deployment.LitestreamSHA); err != nil {
 		slog.Error("Failed to reconcile PR fleet rollout", "source", source, "error", err)
 	}
@@ -745,6 +748,46 @@ func (m *Manager) reconcileSourceFleet(ctx context.Context, source string, desir
 	if err := m.resumeDeploymentDormantWorkers(ctx, *deployment, "fleet_reconcile", true); err != nil {
 		slog.Error("Failed to resume outdated dormant workers", "source", source, "error", err)
 	}
+}
+
+func (m *Manager) recoverSourcePendingWorkers(ctx context.Context, source string, deployment model.Deployment) error {
+	workers, err := m.db.ListWorkersForSource(source)
+	if err != nil {
+		return fmt.Errorf("list %s workers: %w", source, err)
+	}
+	var recoveryErrors []error
+	for _, worker := range workers {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(recoveryErrors, err)...)
+		}
+		attempt, err := m.db.ActiveProvisioning(worker.ID)
+		if err != nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("%s: %w", worker.Name, err))
+			continue
+		}
+		if worker.Status != model.WorkerPending && attempt == nil {
+			continue
+		}
+		if supersededProvisioning(worker, attempt, deployment.ImageRef, deployment.GitSHA, deployment.LitestreamSHA) {
+			continue
+		}
+		recoveryImage := deployment.ImageRef
+		if attempt != nil {
+			recoveryImage = attempt.ImageRef
+		} else if !workerMatchesDeployment(worker, deployment) {
+			original, err := resolveReadyDeploymentTarget(m.db, worker.Source, "", worker.GitSHA, worker.LitestreamSHA)
+			if err != nil {
+				report := model.ProvisioningAttempt{WorkerID: worker.ID, Phase: "legacy_pending"}
+				recoveryErrors = append(recoveryErrors, m.provisioningUnavailable(worker, report, "Original pending deployment image is unavailable", err))
+				continue
+			}
+			recoveryImage = original.ImageRef
+		}
+		if err := m.recoverPendingWorker(ctx, worker.ID, recoveryImage); err != nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("%s: %w", worker.Name, err))
+		}
+	}
+	return errors.Join(recoveryErrors...)
 }
 
 func (m *Manager) resumeDeploymentDormantWorkers(ctx context.Context, deployment model.Deployment, trigger string, onlyOutdated bool) error {

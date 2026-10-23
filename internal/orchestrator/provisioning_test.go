@@ -64,6 +64,7 @@ type provisioningFly struct {
 	readFailure                        bool
 	rejectVolume                       bool
 	allowDeletes                       bool
+	allowStops                         bool
 }
 
 func (f *provisioningFly) serve(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +89,8 @@ func (f *provisioningFly) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && r.URL.Path == "/apps/app/volumes" && f.rejectVolume:
 		f.volumePosts++
 		http.Error(w, `{"error":"rejected"}`, http.StatusBadRequest)
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/stop") && f.allowStops:
+		w.WriteHeader(http.StatusOK)
 	case r.Method == http.MethodDelete && f.allowDeletes:
 		f.deletes++
 		id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
@@ -842,5 +845,46 @@ func TestTeardownDestroysUnboundAttemptMachine(t *testing.T) {
 	}
 	if attempt, err := db.ActiveProvisioning(request.WorkerID); err != nil || attempt != nil {
 		t.Fatalf("ActiveProvisioning() = %+v, %v; want closed attempt", attempt, err)
+	}
+}
+
+func TestFleetReconcilerRecoversInterruptedPRReplacement(t *testing.T) {
+	fake := &provisioningFly{allowDeletes: true, allowStops: true}
+	db, manager, _, _ := provisioningFixture(t, fake)
+	const source = "pr-1483"
+	old := model.Deployment{Source: source, GitSHA: "1111111", LitestreamSHA: "aaaaaaa", ImageRef: "image-old", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&old); err != nil {
+		t.Fatal(err)
+	}
+	desired := DesiredWorker{WorkerID: "worker-pr-1483-one", Name: "worker-pr-1483-one", Source: source, GitSHA: old.GitSHA, LitestreamSHA: old.LitestreamSHA, ProfileName: "low-volume", Region: "ord", Workload: workload.Config{LoadMode: "synthetic"}}
+	if err := manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, old.ImageRef); err != nil {
+		t.Fatal(err)
+	}
+	latest := model.Deployment{Source: source, GitSHA: "2222222", LitestreamSHA: "bbbbbbb", ImageRef: "image-new", Status: "ready"}
+	if err := db.UpsertReadyDeployment(&latest); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	fake.loseMachine = true
+	fake.mu.Unlock()
+	manager.reconcileFleets(context.Background(), FleetSpec{})
+	interrupted := mustWorker(t, db, desired.WorkerID)
+	if interrupted.Status != model.WorkerPending || interrupted.GitSHA != latest.GitSHA {
+		t.Fatalf("interrupted replacement = soak %s status %s; want pending %s", interrupted.GitSHA, interrupted.Status, latest.GitSHA)
+	}
+	fake.mu.Lock()
+	fake.loseMachine = false
+	fake.mu.Unlock()
+	manager.reconcileFleets(context.Background(), FleetSpec{})
+	worker := mustWorker(t, db, desired.WorkerID)
+	if worker.Status != model.WorkerRunning || worker.GitSHA != latest.GitSHA || worker.FlyMachineID != "machine-2" || worker.FlyVolumeID != "volume-2" {
+		t.Fatalf("not recovered: %+v", worker)
+	}
+	attempt, err := db.ActiveProvisioning(desired.WorkerID)
+	if err != nil || attempt != nil {
+		t.Fatalf("active attempt = %+v, %v; want none", attempt, err)
+	}
+	if fake.volumePosts != 2 || fake.machinePosts != 2 {
+		t.Fatalf("unsafe mutation counts: volumes=%d machines=%d", fake.volumePosts, fake.machinePosts)
 	}
 }
