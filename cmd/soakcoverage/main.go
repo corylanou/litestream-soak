@@ -64,6 +64,7 @@ func runCheck(args []string, stdout io.Writer) error {
 	databases := fs.Int("databases", 0, "expected database count")
 	restoreModes := fs.String("restore-modes", "", "comma-separated restore modes that must pass")
 	minResources := fs.Int("min-resource-samples", 0, "minimum resource samples")
+	minDBSize := fs.Int64("min-db-size-bytes", 0, "minimum measured source database size for every passed cycle")
 	countBatches := fs.Bool("count-batches", false, "count error-free many-db pending batches as verified cycles")
 	patterns := logPatterns{}
 	fs.Var(patterns, "require-log", "log substring=minimum count (repeatable)")
@@ -81,6 +82,7 @@ func runCheck(args []string, stdout io.Writer) error {
 		LogPatterns:        patterns,
 		MinResourceSamples: *minResources,
 		CountBatches:       *countBatches,
+		MinDBSizeBytes:     *minDBSize,
 	}
 	if *restoreModes != "" {
 		req.RestoreModes = strings.Split(*restoreModes, ",")

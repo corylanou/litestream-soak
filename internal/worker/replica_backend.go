@@ -2,6 +2,7 @@ package worker
 
 import (
 	"fmt"
+	"net/url"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -66,6 +67,13 @@ func applyReplicaBackend(c *Config, getenv func(string) string) error {
 	}
 	if c.ReplicaBaseURL == "" {
 		return fmt.Errorf("REPLICA_URL is required when REPLICA_BACKEND=%s", c.ReplicaBackend)
+	}
+	parsed, err := url.Parse(c.ReplicaBaseURL)
+	if err != nil {
+		return fmt.Errorf("invalid REPLICA_URL for REPLICA_BACKEND=%s", c.ReplicaBackend)
+	}
+	if _, hasPassword := parsed.User.Password(); hasPassword {
+		return fmt.Errorf("REPLICA_URL must not embed a password; set REPLICA_PASSWORD instead")
 	}
 	return nil
 }

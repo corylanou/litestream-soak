@@ -111,6 +111,32 @@ func TestCheckCountsVerifiedManyDBBatches(t *testing.T) {
 	}
 }
 
+func TestCheckRequiresMeasuredDatabaseSize(t *testing.T) {
+	t.Parallel()
+
+	sized := func(size int64) string {
+		body, _ := json.Marshal(map[string]any{"backend": "file", "databases": 1, "result": map[string]any{"Passed": true, "Status": "passed", "DBSizeBytes": size}})
+		return string(body)
+	}
+	req := Requirements{Backend: "file", MinPassed: 2, Databases: 1, MinDBSizeBytes: 6_000_000_000}
+
+	summary, err := Check(Input{Results: strings.NewReader(lines(sized(8_700_000_000), sized(8_800_000_000)))}, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.MinDBSizeBytes != 8_700_000_000 {
+		t.Fatalf("MinDBSizeBytes = %d, want smallest passed source size", summary.MinDBSizeBytes)
+	}
+	for name, results := range map[string]string{
+		"too small":  lines(sized(8_700_000_000), sized(20_000_000)),
+		"unmeasured": lines(record("file", 1, true, "passed", ""), sized(8_700_000_000)),
+	} {
+		if _, err := Check(Input{Results: strings.NewReader(results)}, req); err == nil || !strings.Contains(err.Error(), "below the required 6000000000 bytes") {
+			t.Errorf("%s: Check() error = %v, want source size failure", name, err)
+		}
+	}
+}
+
 func TestCheckRecordsResourcePeaks(t *testing.T) {
 	t.Parallel()
 

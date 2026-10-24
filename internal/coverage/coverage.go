@@ -19,6 +19,7 @@ type Requirements struct {
 	LogPatterns        map[string]int
 	MinResourceSamples int
 	CountBatches       bool
+	MinDBSizeBytes     int64
 }
 
 type Input struct {
@@ -36,6 +37,7 @@ type Summary struct {
 	ResourceSamples int            `json:"resource_samples"`
 	MaxFD           int            `json:"max_fd"`
 	MaxRSSKB        int64          `json:"max_rss_kb"`
+	MinDBSizeBytes  int64          `json:"min_db_size_bytes,omitempty"`
 }
 
 type ShardReport struct {
@@ -53,6 +55,7 @@ type resultRecord struct {
 		Status       string
 		ErrorMessage string
 		RestoreMode  *string
+		DBSizeBytes  int64
 	} `json:"result"`
 }
 
@@ -65,6 +68,7 @@ func Check(input Input, req Requirements) (Summary, error) {
 	summary := Summary{RestoreModes: map[string]int{}}
 	var problems []error
 	modeReported := false
+	undersized := 0
 	records := 0
 	scanner := bufio.NewScanner(input.Results)
 	scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
@@ -90,6 +94,12 @@ func Check(input Input, req Requirements) (Summary, error) {
 		switch {
 		case record.Result.Passed:
 			summary.Passed++
+			if summary.Passed == 1 || record.Result.DBSizeBytes < summary.MinDBSizeBytes {
+				summary.MinDBSizeBytes = record.Result.DBSizeBytes
+			}
+			if record.Result.DBSizeBytes < req.MinDBSizeBytes {
+				undersized++
+			}
 			if record.Result.RestoreMode != nil {
 				summary.RestoreModes[*record.Result.RestoreMode]++
 			}
@@ -112,6 +122,9 @@ func Check(input Input, req Requirements) (Summary, error) {
 	}
 	if verified := summary.Passed + summary.Batches; verified < req.MinPassed {
 		problems = append(problems, fmt.Errorf("%d passed verification cycles, want at least %d", verified, req.MinPassed))
+	}
+	if undersized > 0 {
+		problems = append(problems, fmt.Errorf("%d passed cycle(s) measured a source database below the required %d bytes", undersized, req.MinDBSizeBytes))
 	}
 	if len(req.RestoreModes) > 0 {
 		if !modeReported {

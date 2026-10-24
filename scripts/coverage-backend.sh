@@ -57,8 +57,8 @@ start_minio() {
     nohup minio server "$state/minio" --address 127.0.0.1:9000 --console-address 127.0.0.1:9001 >"$state/minio.log" 2>&1 &
   printf '%s\n' "$!" >"$state/minio.pid"
   wait_for MinIO curl -fsS http://127.0.0.1:9000/minio/health/live
-  MC_CONFIG_DIR="$state/mc" mc alias set coverage http://127.0.0.1:9000 "$user" "$secret" >/dev/null
-  MC_CONFIG_DIR="$state/mc" mc mb --ignore-existing coverage/litestream-soak
+  MC_CONFIG_DIR="$state/mc" MC_HOST_coverage="http://$user:$secret@127.0.0.1:9000" \
+    mc mb --ignore-existing coverage/litestream-soak
 }
 
 start_sftp() {

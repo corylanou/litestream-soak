@@ -56,6 +56,42 @@ func TestCoverageMatrixCoversEveryScenario(t *testing.T) {
 	}
 }
 
+func TestCoverageSummaryRequiresSuccessfulJobs(t *testing.T) {
+	t.Parallel()
+
+	workflow := string(readFile(t, coverageWorkflow))
+	for _, want := range []string{
+		"BUILD_RESULT: ${{ needs.build.result }}",
+		"SHARD_RESULT: ${{ needs.shard.result }}",
+		`[ "$BUILD_RESULT" != success ] || [ "$SHARD_RESULT" != success ]`,
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Errorf("coverage summary must gate on job results: missing %q", want)
+		}
+	}
+}
+
+func TestCoverageBackendsKeepCredentialsOutOfFiles(t *testing.T) {
+	t.Parallel()
+
+	backend := string(readFile(t, "scripts/coverage-backend.sh"))
+	if strings.Contains(backend, "mc alias set") {
+		t.Fatal("mc alias set persists MinIO credentials to config.json; use MC_HOST_<alias>")
+	}
+	if !strings.Contains(backend, "MC_HOST_coverage=") {
+		t.Fatal("MinIO bucket creation must use an environment-only mc alias")
+	}
+}
+
+func TestLargeDBShardRequiresMeasuredSize(t *testing.T) {
+	t.Parallel()
+
+	shard := string(readFile(t, "scripts/coverage-shard.sh"))
+	if !regexp.MustCompile(`check_args=\(-min-passed 3 -databases 1 -min-db-size-bytes 6000000000\)`).MatchString(shard) {
+		t.Fatal("large-db shard must require a measured source database of at least 6 GB")
+	}
+}
+
 func TestCoverageMatrixPinsEveryBackendVersion(t *testing.T) {
 	t.Parallel()
 

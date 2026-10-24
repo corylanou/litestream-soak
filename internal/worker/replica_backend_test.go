@@ -241,6 +241,26 @@ func TestReplicaBackendRequiresRemoteURL(t *testing.T) {
 	}
 }
 
+func TestReplicaBackendRejectsEmbeddedPassword(t *testing.T) {
+	t.Parallel()
+
+	for backend, replicaURL := range map[string]string{
+		workload.ReplicaBackendSFTP:   "sftp://soak:sftp-secret@127.0.0.1:2222/upload",
+		workload.ReplicaBackendWebDAV: "webdav://soak:webdav-secret@127.0.0.1:8080",
+		workload.ReplicaBackendNATS:   "nats://soak:nats-secret@127.0.0.1:4222",
+		workload.ReplicaBackendMinIO:  "http://minio:minio-secret@127.0.0.1:9000",
+	} {
+		env := replicaBackendEnv(t.TempDir(), backend, map[string]string{"REPLICA_URL": replicaURL})
+		_, err := configFromLookup(func(key string) string { return env[key] })
+		if err == nil || !strings.Contains(err.Error(), "REPLICA_PASSWORD") {
+			t.Errorf("%s configFromLookup() error = %v, want embedded password rejected", backend, err)
+		}
+		if err != nil && strings.Contains(err.Error(), "secret") {
+			t.Errorf("%s error leaks the embedded password: %v", backend, err)
+		}
+	}
+}
+
 func TestTigrisBackendKeepsReplicaAndArtifactStoreTogether(t *testing.T) {
 	t.Parallel()
 

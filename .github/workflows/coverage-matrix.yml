@@ -184,7 +184,15 @@ jobs:
       - name: Require every shard to report complete coverage
         env:
           LITESTREAM_SHA: ${{ needs.build.outputs.litestream_sha }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          SHARD_RESULT: ${{ needs.shard.result }}
         run: |
           chmod +x "$RUNNER_TEMP/bin/soakcoverage"
-          echo "litestream_sha=$LITESTREAM_SHA"
-          "$RUNNER_TEMP/bin/soakcoverage" shards -dir "$RUNNER_TEMP/reports" -expect "$(scripts/coverage-shard.sh list)"
+          echo "litestream_sha=$LITESTREAM_SHA build=$BUILD_RESULT shard=$SHARD_RESULT"
+          status=0
+          "$RUNNER_TEMP/bin/soakcoverage" shards -dir "$RUNNER_TEMP/reports" -expect "$(scripts/coverage-shard.sh list)" || status=1
+          if [ "$BUILD_RESULT" != success ] || [ "$SHARD_RESULT" != success ]; then
+            echo "coverage incomplete: build=$BUILD_RESULT shard=$SHARD_RESULT" >&2
+            status=1
+          fi
+          exit "$status"
