@@ -119,7 +119,7 @@ func TestControlFlyConfigDeclaresEnvironmentalFailurePolicy(t *testing.T) {
 	}
 }
 
-func TestControlFlyConfigDeclaresMeteringWindowOff(t *testing.T) {
+func TestControlFlyConfigDeclaresMeteringWindowMainOnly(t *testing.T) {
 	t.Parallel()
 
 	contents, err := os.ReadFile("fly.control.toml")
@@ -134,8 +134,8 @@ func TestControlFlyConfigDeclaresMeteringWindowOff(t *testing.T) {
 	if !ok {
 		t.Fatal("fly.control.toml [env] is missing SOAK_METERING_WINDOW_SOURCES")
 	}
-	if got != "" {
-		t.Fatalf("fly.control.toml [env] SOAK_METERING_WINDOW_SOURCES = %q, want empty", got)
+	if got != "main" {
+		t.Fatalf("fly.control.toml [env] SOAK_METERING_WINDOW_SOURCES = %q, want %q", got, "main")
 	}
 }
 
