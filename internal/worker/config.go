@@ -446,7 +446,6 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 		case "many-dbs-500-dir":
 			applyManyDBProfileBase(&c, 500, 3, "dir")
 		case "many-dbs-500-dir-lowfreq":
-			// Values must stay in sync with manyDB500FleetWorkers in internal/orchestrator/fleet.go.
 			applyManyDBProfileBase(&c, 500, 3, "dir")
 			c.SnapshotInterval = time.Hour
 			c.L1CompactionInterval = 5 * time.Minute

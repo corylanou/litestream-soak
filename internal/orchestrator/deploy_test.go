@@ -287,15 +287,15 @@ func TestNotifyDeploymentReadyRecordsReadyDeploymentBeforeRolloutAndIsIdempotent
 	workloadSHA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 	createTestWorker(t, db, model.Worker{
-		ID:            "worker-pr-1228-low-vol",
+		ID:            "worker-pr-1228-sentinel-single",
 		AppName:       "litestream-soak",
-		Name:          "worker-pr-1228-low-vol",
+		Name:          "worker-pr-1228-sentinel-single",
 		Status:        model.WorkerRunning,
 		Source:        source,
 		GitSHA:        oldSHA,
 		LitestreamSHA: oldLitestreamSHA,
 		PRNumber:      1228,
-		ProfileName:   "low-volume",
+		ProfileName:   "sentinel-single",
 		ProfileConfig: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}.JSON(),
 		FlyMachineID:  "old-machine-low",
 		FlyVolumeID:   "old-volume-low",
@@ -486,19 +486,19 @@ func TestNotifyDeploymentReadySkipsSupersededDeployment(t *testing.T) {
 		t.Fatalf("UpdateDeployment(latest) error = %v", err)
 	}
 	createTestWorker(t, db, model.Worker{
-		ID:            "worker-pr-1228-low-vol",
+		ID:            "worker-pr-1228-sentinel-single",
 		AppName:       "litestream-soak",
-		Name:          "worker-pr-1228-low-vol",
+		Name:          "worker-pr-1228-sentinel-single",
 		Status:        model.WorkerRunning,
 		Source:        source,
 		GitSHA:        latestSHA,
 		LitestreamSHA: latestLitestreamSHA,
 		PRNumber:      1228,
-		ProfileName:   "low-volume",
+		ProfileName:   "sentinel-single",
 		ProfileConfig: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}.JSON(),
 		FlyVolumeID:   "latest-dormant-volume",
 	})
-	if err := db.MarkWorkerDormant("worker-pr-1228-low-vol", "stale failure", "same_failure", "test"); err != nil {
+	if err := db.MarkWorkerDormant("worker-pr-1228-sentinel-single", "stale failure", "same_failure", "test"); err != nil {
 		t.Fatalf("MarkWorkerDormant() error = %v", err)
 	}
 
@@ -538,7 +538,7 @@ func TestNotifyDeploymentReadySkipsSupersededDeployment(t *testing.T) {
 	if len(workers) != 1 {
 		t.Fatalf("len(workers) = %d, want 1", len(workers))
 	}
-	dormant := mustWorker(t, db, "worker-pr-1228-low-vol")
+	dormant := mustWorker(t, db, "worker-pr-1228-sentinel-single")
 	if dormant.Status != model.WorkerDormant {
 		t.Fatalf("dormant.Status = %q, want dormant", dormant.Status)
 	}

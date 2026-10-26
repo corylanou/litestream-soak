@@ -40,20 +40,11 @@ func TestFleetRowRendersProfileSynopsis(t *testing.T) {
 	}
 }
 
-// allFleetProfiles returns every profile name the fleet can deploy, including
-// the many-db lanes that are gated behind env flags at runtime.
 func allFleetProfiles() map[string]struct{} {
 	profiles := map[string]struct{}{}
 	for _, w := range DefaultMainFleet().Workers {
 		profiles[w.ProfileName] = struct{}{}
 	}
-	for _, w := range manyDB100FleetWorkers() {
-		profiles[w.ProfileName] = struct{}{}
-	}
-	for _, w := range manyDB500FleetWorkers() {
-		profiles[w.ProfileName] = struct{}{}
-	}
-	profiles[manyDB1000FleetWorker().ProfileName] = struct{}{}
 	for _, w := range GateFleetForSource("rc-aaaaaaaa", "", "").Workers {
 		profiles[w.ProfileName] = struct{}{}
 	}

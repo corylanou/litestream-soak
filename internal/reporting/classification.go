@@ -80,7 +80,7 @@ func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassifi
 
 func ClassifyVerificationFailureWithRuntime(checkType, errorMessage, profileName string, runtime *RuntimePayload, observedAt time.Time) FailureClassification {
 	classification := ClassifyVerificationFailure(checkType, errorMessage)
-	if !strings.HasPrefix(strings.TrimSpace(profileName), "many-dbs-") {
+	if !IsManyDBProfile(profileName) {
 		return classification
 	}
 	if classification.Signature != "disk_capacity_full" && !strings.Contains(strings.ToLower(errorMessage), "disk full") {
@@ -92,6 +92,11 @@ func ClassifyVerificationFailureWithRuntime(checkType, errorMessage, profileName
 		classification.Signature = "soak_fixture_disk_exhausted"
 	}
 	return classification
+}
+
+func IsManyDBProfile(profileName string) bool {
+	profileName = strings.TrimSpace(profileName)
+	return profileName == "sentinel-manydb" || strings.HasPrefix(profileName, "many-dbs-")
 }
 
 func soakFixtureExhaustedDisk(runtime *RuntimePayload, observedAt time.Time) bool {

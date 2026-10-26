@@ -296,7 +296,7 @@ func TestResumeDormantPRWorkerAppliesDesiredConfigWithoutReplacingVolume(t *test
 		t.Fatalf("UpsertReadyDeployment() error = %v", err)
 	}
 
-	const workerID = "worker-pr-149-low-vol"
+	const workerID = "worker-pr-149-sentinel-single"
 	createTestWorker(t, db, model.Worker{
 		ID:            workerID,
 		AppName:       "litestream-soak",
@@ -306,7 +306,7 @@ func TestResumeDormantPRWorkerAppliesDesiredConfigWithoutReplacingVolume(t *test
 		GitSHA:        "old-sha",
 		LitestreamSHA: "old-litestream",
 		PRNumber:      149,
-		ProfileName:   "low-volume",
+		ProfileName:   "sentinel-single",
 		ProfileConfig: normalizeWorkloadConfig(workload.Config{
 			LoadMode:         "synthetic",
 			WriteRate:        1,
@@ -376,7 +376,7 @@ func TestResumeDormantPRWorkerRecreatesDesiredPhysicalResources(t *testing.T) {
 		t.Fatalf("UpsertReadyDeployment() error = %v", err)
 	}
 
-	const workerID = "worker-pr-149-low-vol"
+	const workerID = "worker-pr-149-sentinel-single"
 	createTestWorker(t, db, model.Worker{
 		ID:            workerID,
 		AppName:       "litestream-soak",
@@ -386,7 +386,7 @@ func TestResumeDormantPRWorkerRecreatesDesiredPhysicalResources(t *testing.T) {
 		GitSHA:        "old-sha",
 		LitestreamSHA: "old-litestream",
 		PRNumber:      149,
-		ProfileName:   "low-volume",
+		ProfileName:   "sentinel-single",
 		ProfileConfig: normalizeWorkloadConfig(workload.Config{
 			LoadMode:         "synthetic",
 			WriteRate:        10,

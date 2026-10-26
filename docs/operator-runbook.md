@@ -1217,15 +1217,15 @@ That reporting contract lives in `internal/reporting/types.go`.
 
 ## Many-DB Scaling Tiers
 
-The many-DB tier ladder is flag-gated in `internal/orchestrator/fleet.go`:
-
-- `SOAK_ENABLE_MANY_DB_FLEET=true` enables `many-dbs-100-list` and
-  `many-dbs-100-dir` (2 load workers, 10 GB volume, 2048 MB, 1 CPU each).
-- `SOAK_ENABLE_MANY_DB_500=true` (nested, inert without the base flag) adds
-  `many-dbs-500-list`, `many-dbs-500-dir`, and `many-dbs-500-dir-lowfreq`
-  (3 load workers, 15 GB volume, 3072 MB, 2 CPUs each — three machines).
-- `SOAK_ENABLE_MANY_DB_1000=true` (nested) adds `many-dbs-1000-dir`
-  (4 load workers, 20 GB volume, 4096 MB, 2 CPUs).
+The many-DB tier ladder is no longer part of any default fleet. The
+`SOAK_ENABLE_MANY_DB_FLEET`, `SOAK_ENABLE_MANY_DB_500`, and
+`SOAK_ENABLE_MANY_DB_1000` flags are no longer read by the control plane, so
+setting them does not add workers to `main` or PR fleets. The only always-on
+many-DB lane is `sentinel-manydb` (`worker-main-sentinel-manydb`): 100
+directory-discovered databases, 2 load workers, 10 GB volume, 2048 MB, 1 CPU,
+with L0 retention checked every 2m and L1/L2/L3 compaction at 5m/15m/1h to
+cut per-database S3 LIST traffic. The tier profile names below remain known to
+the worker (`PROFILE=many-dbs-500-dir` and so on) for manual runs.
 
 `many-dbs-500-dir-lowfreq` is the reduced-frequency control for
 `many-dbs-500-dir`: same workload with snapshot 1h, L1/L2/L3 compaction
@@ -1327,8 +1327,8 @@ Useful follow-up docs:
 ## Scenario inventory
 
 This inventory describes configured behavior, not executed results. Default fleet
-reconciliation activates the 13 profiles below for `main` and supported `pr-N`
-sources. Explicit worker environment overrides can differ from fleet defaults;
+reconciliation activates the two sentinel profiles below for `main` and supported
+`pr-N` sources. Explicit worker environment overrides can differ from fleet defaults;
 retain the effective configuration and hash with every result. A profile name or
 UI charter expresses intent and does not prove throughput, contention, fault
 engagement, or a clean historical run.
@@ -1345,6 +1345,13 @@ limits below supplement this shared contract.
 
 | Default profile | Configured trigger/work and actual evidence to inspect | Assertions and limitations beyond the shared restore check | Additional capabilities |
 | --- | --- | --- | --- |
+| `sentinel-single` | Constant synthetic target 10, one generator worker, 1 KiB payload, Litestream default compaction and retention; inspect completed work and errors. | Baseline restore correctness and drift in default Litestream behavior; low offered load does not isolate every platform or harness failure. | Synthetic generator. |
+| `sentinel-manydb` | 100 directory-discovered databases, two writer workers, rotating 2% active set; L0 retention check 2m and L1/L2/L3 compaction 5m/15m/1h. Inspect committed work, pending database count/age and restore outcomes. | Excluded from the legacy release score; relaxed maintenance intervals mean it does not cover default-cadence compaction at fan-out. | Directory discovery support; candidate interval support. |
+
+The rows below were default profiles before the main fleet was reduced to the
+two sentinels. They are no longer reconciled; they remain here to interpret
+historical runs.
+
 | `low-volume` | Constant synthetic target 10, one generator worker, 1 KiB payload; inspect completed work and errors. | Baseline restore correctness; low offered load does not isolate every platform or harness failure. | Synthetic generator. |
 | `high-volume` | Wave target 500, eight workers, 4 KiB payload; inspect actual writes, lag, WAL and resource samples. | No automatic proof of saturation or sustained 500 writes/s; 100 GB volume is capacity, not database size. | Synthetic wave load; multipart configuration. |
 | `burst-volume` | Burst target 1000, four workers, 2 KiB payload; inspect burst work and subsequent lag/WAL drain. | Sampled maxima can miss spikes; configured bursts do not prove a backlog formed or drained. | Synthetic burst load. |
@@ -1359,7 +1366,7 @@ limits below supplement this shared contract.
 | `overload-truncate0` | Constant target 600, eight workers, 2 KiB payload, `truncate-page-n: 0`; inspect WAL/backlog and completed work. Litestream maps zero to its default TRUNCATE backstop (121,359 pages, about 500 MB at 4 KiB/page), as changed in [Litestream #1348](https://github.com/benbjohnson/litestream/pull/1348). | Restore check does not assert WAL boundedness or prove overload engaged; the profile checks the zero sentinel retains the default backstop under overload. | Candidate accepts `truncate-page-n: 0`; adequate disk. |
 | `pinned-reader` | Constant target 200, four workers; companion transaction holds 4m with 45s pauses; inspect reader events and WAL/checkpoint observations. | Require actual reader engagement before attributing checkpoint effects; no query-latency guarantee. | Companion SQLite reader. |
 
-Many-database profiles are opt-in and excluded from the legacy release score;
+Many-database profiles are excluded from the legacy release score;
 they participate in retained complete-run reliability. All seed a
 fixed set, rotate a 2% active subset, and use an in-process writer. Inspect
 committed work, pending database count/age, individual restore outcomes, and
@@ -1369,7 +1376,7 @@ exercise dynamic tenant creation/removal. Directory mode requires candidate
 directory discovery support; list mode requires explicit database configuration.
 Neither mode supplies native passive S3 LIST counts.
 
-| Opt-in profile | Activation | Actual workload and assertion | Specific limitation/capability |
+| Retired tier profile | Former activation (flags no longer read) | Actual workload and assertion | Specific limitation/capability |
 | --- | --- | --- | --- |
 | `many-dbs-100-list` | `SOAK_ENABLE_MANY_DB_FLEET=true` | 100 configured databases, two writer workers; rotating restore coverage. | Explicit list support; aggregate metrics cannot locate a per-DB leak. |
 | `many-dbs-100-dir` | Same base flag | 100 directory-discovered databases, two writer workers; rotating restore coverage. | Directory support; verify discovery rather than infer it from configuration. |

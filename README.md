@@ -53,29 +53,23 @@ is unsupported.
 
 | Profile | Worker | What It Exercises |
 | --- | --- | --- |
-| `low-volume` | `worker-main-low-vol` | Constant synthetic writes at low rate with a small initial database. |
-| `high-volume` | `worker-main-high-vol` | Higher-rate wave synthetic writes, larger payloads, more load workers, and a 100 GB volume. |
-| `burst-volume` | `worker-main-burst-vol` | Burst-pattern synthetic writes against a 100 GB volume. |
-| `overload-truncate0` | `worker-main-overload-truncate0` | Sustained synthetic overload with `truncate-page-n: 0`, which Litestream maps to its default TRUNCATE backstop (121,359 pages, about 500 MB at 4 KiB/page); checks that the zero sentinel keeps the backstop engaged under overload. See [Litestream #1348](https://github.com/benbjohnson/litestream/pull/1348). |
-| `pinned-reader` | `worker-main-pinned-reader` | Synthetic writes with a companion read transaction held for 4m, separated by 45s pauses; observe checkpoint and WAL behavior. |
-| `read-heavy` | `worker-main-read-heavy` | Constant synthetic writes with a high read ratio to exercise read-heavy contention. |
-| `gharchive-replay` | `worker-main-gharchive` | Replays GH Archive events from `https://data.gharchive.org/2025-01-01-0.json.gz`. |
-| `gharchive-mixed` | `worker-main-gharchive-mixed` | Combines wave synthetic load with looping GH Archive replay. |
-| `taxi-replay` | `worker-main-taxi-replay` | Replays `datasets/taxi_sample.csv`. |
-| `taxi-mixed` | `worker-main-taxi-mixed` | Combines wave synthetic load with looping taxi replay. |
-| `orders-replay` | `worker-main-orders-replay` | Replays `datasets/orders_sample.jsonl`. |
-| `low-vol-syd` | `worker-main-low-vol-syd` | Low-volume synthetic workload in `syd` for cross-region lag signal. |
-| `high-vol-ams` | `worker-main-high-vol-ams` | High-volume wave workload in `ams` for cross-region lag signal. |
+| `sentinel-single` | `worker-main-sentinel-single` | Single-database drift sentinel: constant synthetic writes at 10/s, 1 KiB payload, one writer, 5 MB initial database, Litestream default compaction and retention. |
+| `sentinel-manydb` | `worker-main-sentinel-manydb` | Many-database lifecycle sentinel: 100 directory-discovered databases with a rotating 2% active set, L0 retention check 2m and L1/L2/L3 compaction 5m/15m/1h to cut S3 LIST volume. |
+
+Both sentinels run in `ord` on a shared 1 CPU / 2048 MB machine with a 10 GB
+volume. The main fleet used to reconcile fifteen profiles (low/high/burst volume,
+read-heavy, replay mixes, regional `syd`/`ams` lanes, overload and pinned-reader,
+plus the many-db 100 pair); those were retired from the default fleet to keep
+soak spend low, with S3 request volume as the main cost driver.
 
 These are configured workload shapes, not achieved throughput or proof of a
 particular regression. For each profile’s trigger, measured work, assertions,
 capabilities, and limitations, see the [scenario inventory](docs/operator-runbook.md#scenario-inventory).
 
-Regional workers measure cross-region behavior. The legacy release score only
-scores `ord` workers and excludes `low-vol-syd` and `high-vol-ams`; retained
-complete-run reliability includes these regions and many-database profiles.
-See [run reliability](docs/run-reliability.md) for measured coverage, incident
-retention and comparison eligibility.
+The legacy release score only scores `ord` workers and excludes many-database
+profiles (`many-dbs-*` and `sentinel-manydb`); retained complete-run reliability
+includes them. See [run reliability](docs/run-reliability.md) for measured
+coverage, incident retention and comparison eligibility.
 
 The `fts-maintenance` profile is opt-in through `PROFILE=fts-maintenance`
 (or `LOAD_MODE=fts`); it is not added to any default fleet. It uses the worker's
@@ -118,13 +112,10 @@ Profile overhead is excluded from phase duration metrics. Use immutable binary
 identities and the same corpus/rate for candidate versus baseline comparisons;
 no fleet activation is implied by selecting this profile locally.
 
-Many-database profiles are opt-in with `SOAK_ENABLE_MANY_DB_FLEET=true`.
-When enabled, the main and PR fleets also reconcile `many-dbs-100-list` and
-`many-dbs-100-dir`. Two nested flags extend the tier ladder: with
-`SOAK_ENABLE_MANY_DB_500=true` the fleets add `many-dbs-500-list`,
-`many-dbs-500-dir`, and `many-dbs-500-dir-lowfreq`; with
-`SOAK_ENABLE_MANY_DB_1000=true` they add `many-dbs-1000-dir`. Both nested
-flags are inert unless the base flag is also set. These profiles seed
+Default fleets no longer reconcile the `many-dbs-*` tier profiles, and the
+`SOAK_ENABLE_MANY_DB_FLEET`, `SOAK_ENABLE_MANY_DB_500`, and
+`SOAK_ENABLE_MANY_DB_1000` flags are no longer read; `sentinel-manydb` is the
+only always-on many-database lane. Many-database profiles seed
 databases under `/data/dbs`, drive writes into the configured active subset
 with an in-process writer, rotate active membership on a deterministic
 interval, report aggregate runtime/process metrics only, and verify changed

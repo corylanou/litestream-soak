@@ -1227,7 +1227,7 @@ func TestRollingUpdateSourceReplacesSameDeploymentConfigDriftOnce(t *testing.T) 
 		t.Fatalf("UpsertReadyDeployment() error = %v", err)
 	}
 
-	const workerID = "worker-main-low-vol"
+	const workerID = "worker-main-sentinel-single"
 	createTestWorker(t, db, model.Worker{
 		ID:            workerID,
 		AppName:       "litestream-soak",
@@ -1236,7 +1236,7 @@ func TestRollingUpdateSourceReplacesSameDeploymentConfigDriftOnce(t *testing.T) 
 		Source:        "main",
 		GitSHA:        sha,
 		LitestreamSHA: litestreamSHA,
-		ProfileName:   "low-volume",
+		ProfileName:   "sentinel-single",
 		ProfileConfig: normalizeWorkloadConfig(workload.Config{
 			LoadMode:         "synthetic",
 			WriteRate:        1,
@@ -1303,7 +1303,7 @@ func TestRollingUpdateSourceCapsConfigOnlyDriftReplacements(t *testing.T) {
 	}
 
 	desiredSpec := DefaultFleetForSource("main", sha, litestreamSHA)
-	for i, desired := range desiredSpec.Workers[:3] {
+	for i, desired := range desiredSpec.Workers[:2] {
 		applied := desired.Workload
 		applied.SnapshotInterval = "1h"
 		createTestWorker(t, db, model.Worker{
@@ -1349,7 +1349,7 @@ func TestRollingUpdateSourceDoesNotCapDeploymentReplacements(t *testing.T) {
 	}
 
 	desiredSpec := DefaultFleetForSource("main", newSHA, litestreamSHA)
-	for i, desired := range desiredSpec.Workers[:3] {
+	for i, desired := range desiredSpec.Workers {
 		createTestWorker(t, db, model.Worker{
 			ID:            desired.WorkerID,
 			AppName:       "litestream-soak",
@@ -1371,8 +1371,8 @@ func TestRollingUpdateSourceDoesNotCapDeploymentReplacements(t *testing.T) {
 	if err := manager.RollingUpdateSource(context.Background(), "main", imageRef, newSHA, litestreamSHA); err != nil {
 		t.Fatalf("RollingUpdateSource() error = %v", err)
 	}
-	if got := len(fly.machineRequests()); got != 3 {
-		t.Fatalf("deployment machine replacements = %d, want 3", got)
+	if got := len(fly.machineRequests()); got != len(desiredSpec.Workers) {
+		t.Fatalf("deployment machine replacements = %d, want %d", got, len(desiredSpec.Workers))
 	}
 }
 

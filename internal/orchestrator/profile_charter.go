@@ -15,6 +15,18 @@ type ProfileCharter struct {
 }
 
 var profileCharters = map[string]ProfileCharter{
+	"sentinel-single": {
+		Synopsis:      "Always-on single-database sentinel: one writer at 10 writes/s of 1KB rows in the primary region on Litestream's default compaction and retention.",
+		Stresses:      "Steady-state replication, snapshots, and restore verification with stock Litestream settings.",
+		GuardsAgainst: "Drift in Litestream's default behavior and fundamental correctness regressions that have nothing to do with load or scale.",
+		WhyItMatters:  "It is the cheap always-on control lane. A failure here is unambiguous, and keeping defaults untouched means it notices when upstream defaults change.",
+	},
+	"sentinel-manydb": {
+		Synopsis:      "Always-on many-database sentinel: 100 databases auto-discovered from a directory (dir mode) with a rotating 2% active set and relaxed L0 retention checks and compaction intervals.",
+		Stresses:      "Directory discovery, per-database lifecycle, and replication fan-out at a request rate tuned to keep S3 cost low.",
+		GuardsAgainst: "Discovery, scheduling, and per-database resource regressions that only appear with many databases in one Litestream process.",
+		WhyItMatters:  "Database-per-tenant is a common deployment shape. This keeps continuous fan-out coverage on main without paying for default-cadence S3 LIST traffic across 100 databases.",
+	},
 	"low-volume": {
 		Synopsis:      "The calm baseline: a single writer at 10 writes/s of 1KB rows in the primary region.",
 		Stresses:      "Steady-state replication correctness with almost no load on the system.",
