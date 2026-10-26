@@ -1,0 +1,198 @@
+name: coverage-matrix
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/coverage-matrix.yml
+      - scripts/coverage-*.sh
+      - cmd/soakcoverage/**
+      - internal/coverage/**
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+    inputs:
+      litestream_ref:
+        description: Litestream ref or SHA to build
+        default: main
+        required: false
+      duration_seconds:
+        description: Override every shard's run duration in seconds (blank keeps shard defaults)
+        default: ""
+        required: false
+      verify_interval:
+        description: Override the verification interval, for example 1m (blank keeps 2m)
+        default: ""
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOTOOLCHAIN: local
+  WORKLOAD_SHA: ae88b164dd6304bcbb654a681df767ee59042eed
+  MINIO_COMMIT: 01ce918d8279a20e4706b96a64396146894adee4
+  MINIO_RELEASE: RELEASE.2025-09-07T16-13-09Z
+  MINIO_VERSION: 2025-09-07T16:13:09Z
+  MC_COMMIT: 7394ce0dd2a80935aded936b09fa12cbb3cb8096
+  MC_RELEASE: RELEASE.2025-08-13T08-35-41Z
+  MC_VERSION: 2025-08-13T08:35:41Z
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      litestream_sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: resolve
+        name: Resolve Litestream SHA
+        env:
+          LITESTREAM_REF: ${{ inputs.litestream_ref || 'main' }}
+        run: echo "sha=$(scripts/resolve-litestream-sha.sh "$LITESTREAM_REF")" >> "$GITHUB_OUTPUT"
+
+      - name: Build Litestream and workload generator
+        env:
+          LITESTREAM_SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          for role in candidate workload; do
+            revision="$LITESTREAM_SHA"
+            command_name=litestream
+            if [ "$role" = workload ]; then revision="$WORKLOAD_SHA"; command_name=litestream-test; fi
+            src="$RUNNER_TEMP/src-$role"
+            git init -q "$src"
+            git -C "$src" fetch --depth=1 https://github.com/benbjohnson/litestream.git "$revision"
+            git -C "$src" checkout -q --detach FETCH_HEAD
+            required="$(sed -n 's/^go //p' "$src/go.mod")"
+            toolchain=local
+            if [ "$(printf '%s\n' "$(go env GOVERSION | sed 's/^go//')" "$required" | sort -V | tail -n 1)" != "$(go env GOVERSION | sed 's/^go//')" ]; then
+              toolchain="go$required"
+            fi
+            GOTOOLCHAIN="$toolchain" CGO_CFLAGS=-DSQLITE_DEFAULT_WAL_AUTOCHECKPOINT=0 go -C "$src" build \
+              -ldflags "-s -w -X main.Version=$revision" -o "$RUNNER_TEMP/bin/$command_name" "./cmd/$command_name"
+          done
+          "$RUNNER_TEMP/bin/litestream" version
+
+      - name: Build soak worker and coverage checker
+        run: |
+          go build -o "$RUNNER_TEMP/bin/soakworker" ./cmd/soakworker
+          go build -o "$RUNNER_TEMP/bin/soakcoverage" ./cmd/soakcoverage
+
+      - name: Build pinned MinIO server and client
+        env:
+          CGO_ENABLED: "0"
+          GOBIN: ${{ runner.temp }}/bin
+        run: |
+          go install -trimpath -ldflags "-X github.com/minio/minio/cmd.Version=${MINIO_VERSION} -X github.com/minio/minio/cmd.ReleaseTag=${MINIO_RELEASE} -X github.com/minio/minio/cmd.CommitID=${MINIO_COMMIT}" "github.com/minio/minio@${MINIO_COMMIT}"
+          go install -trimpath -ldflags "-X github.com/minio/mc/cmd.Version=${MC_VERSION} -X github.com/minio/mc/cmd.ReleaseTag=${MC_RELEASE} -X github.com/minio/mc/cmd.CommitID=${MC_COMMIT}" "github.com/minio/mc@${MC_COMMIT}"
+          go version -m "$RUNNER_TEMP/bin/minio" | head -n 3
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-bin
+          path: ${{ runner.temp }}/bin/
+          retention-days: 1
+          if-no-files-found: error
+
+  shard:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [backend-file, backend-minio, backend-sftp, backend-nats, backend-webdav, restore-modes, manydb-100, manydb-500, manydb-1000, large-db]
+    env:
+      COVERAGE_OUT: /mnt/coverage/${{ matrix.shard }}
+      COVERAGE_DURATION: ${{ inputs.duration_seconds }}
+      COVERAGE_VERIFY_INTERVAL: ${{ inputs.verify_interval }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-bin
+          path: ${{ runner.temp }}/bin
+
+      - name: Prepare runner
+        run: |
+          chmod +x "$RUNNER_TEMP"/bin/*
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          sudo mkdir -p /mnt/coverage
+          sudo chown "$(id -u):$(id -g)" /mnt/coverage
+          df -h / /mnt
+
+      - name: Start backend
+        run: scripts/coverage-backend.sh start "${{ matrix.shard }}"
+
+      - name: Run shard
+        run: scripts/coverage-shard.sh run "${{ matrix.shard }}"
+
+      - name: Stop backend
+        if: always()
+        run: scripts/coverage-backend.sh stop "${{ matrix.shard }}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-${{ matrix.shard }}
+          path: |
+            ${{ env.COVERAGE_OUT }}/coverage.json
+            ${{ env.COVERAGE_OUT }}/results.jsonl
+            ${{ env.COVERAGE_OUT }}/resources.jsonl
+          retention-days: 7
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: coverage-${{ matrix.shard }}-logs
+          path: |
+            ${{ env.COVERAGE_OUT }}/worker.log
+            ${{ runner.temp }}/coverage-backend/*.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  summary:
+    needs: [build, shard]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-bin
+          path: ${{ runner.temp }}/bin
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          path: ${{ runner.temp }}/reports
+
+      - name: Require every shard to report complete coverage
+        env:
+          LITESTREAM_SHA: ${{ needs.build.outputs.litestream_sha }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          SHARD_RESULT: ${{ needs.shard.result }}
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/soakcoverage"
+          echo "litestream_sha=$LITESTREAM_SHA build=$BUILD_RESULT shard=$SHARD_RESULT"
+          status=0
+          "$RUNNER_TEMP/bin/soakcoverage" shards -dir "$RUNNER_TEMP/reports" -expect "$(scripts/coverage-shard.sh list)" || status=1
+          if [ "$BUILD_RESULT" != success ] || [ "$SHARD_RESULT" != success ]; then
+            echo "coverage incomplete: build=$BUILD_RESULT shard=$SHARD_RESULT" >&2
+            status=1
+          fi
+          exit "$status"

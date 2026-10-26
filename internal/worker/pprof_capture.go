@@ -306,25 +306,26 @@ func removeOldest(dir string, files []pprofProfileFile, keep int) {
 }
 
 func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) error {
-	if c.cfg.ReplicaType != "s3" {
+	store, ok := c.cfg.artifactStore()
+	if !ok {
 		return nil
 	}
-	if c.cfg.S3Bucket == "" || c.cfg.S3AccessKey == "" || c.cfg.S3SecretKey == "" {
+	if store.Bucket == "" || store.AccessKey == "" || store.SecretKey == "" {
 		return fmt.Errorf("profile upload credentials or bucket unavailable")
 	}
-	endpoint, err := url.Parse(c.cfg.directS3Endpoint())
+	endpoint, err := url.Parse(store.Endpoint)
 	if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") {
 		return fmt.Errorf("invalid profile upload endpoint")
 	}
-	target := "s3://" + c.cfg.S3Bucket + "/" + path.Join(strings.Trim(c.cfg.S3Path, "/"), "profiles", filename)
+	target := "s3://" + store.Bucket + "/" + path.Join(strings.Trim(c.cfg.S3Path, "/"), "profiles", filename)
 	args := []string{"--host=" + endpoint.Host, "--host-bucket=" + endpoint.Host, "--config=/dev/null", "--no-progress"}
 	if endpoint.Scheme == "http" {
 		args = append(args, "--no-ssl")
 	} else {
 		args = append(args, "--ssl")
 	}
-	if c.cfg.S3Region != "" {
-		args = append(args, "--region="+c.cfg.S3Region)
+	if store.Region != "" {
+		args = append(args, "--region="+store.Region)
 	}
 	args = append(args, "put", filePath, target)
 	size := fileSize(filePath)
@@ -339,7 +340,7 @@ func (c *pprofCapturer) upload(ctx context.Context, filePath, filename string) e
 			cmd.Env = append(cmd.Env, value)
 		}
 	}
-	cmd.Env = append(cmd.Env, "AWS_ACCESS_KEY_ID="+c.cfg.S3AccessKey, "AWS_SECRET_ACCESS_KEY="+c.cfg.S3SecretKey, "AWS_SESSION_TOKEN="+c.cfg.S3SessionToken)
+	cmd.Env = append(cmd.Env, "AWS_ACCESS_KEY_ID="+store.AccessKey, "AWS_SECRET_ACCESS_KEY="+store.SecretKey, "AWS_SESSION_TOKEN="+store.SessionToken)
 	if err := cmd.Run(); err != nil {
 		return &profileUploadError{cause: errors.Join(uploadCtx.Err(), err), diagnostic: diagnostic.sanitized(c.cfg)}
 	}
@@ -384,7 +385,7 @@ func (d *profileUploadDiagnostic) Write(p []byte) (int, error) {
 
 func (d *profileUploadDiagnostic) sanitized(cfg *Config) string {
 	text := string(d.body)
-	for _, secret := range []string{cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3SessionToken} {
+	for _, secret := range []string{cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3SessionToken, cfg.ArtifactS3.AccessKey, cfg.ArtifactS3.SecretKey, cfg.ArtifactS3.SessionToken} {
 		if secret == "" {
 			continue
 		}

@@ -282,6 +282,7 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 				r.triggerProfile("verification-failed")
 			}
 			r.sendVerification(context.WithoutCancel(ctx), result)
+			r.recordLocalResult(result)
 			if err != nil {
 				slog.Error("Verification cycle error", "error", err)
 			}

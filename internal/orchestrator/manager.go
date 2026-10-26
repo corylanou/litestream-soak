@@ -389,6 +389,10 @@ func (m *Manager) clearWorkerReplicaPrefix(ctx context.Context, worker model.Wor
 	if bucket == "" {
 		return nil
 	}
+	if cfg, err := workload.ParseConfig(worker.ProfileConfig); err == nil && !cfg.UsesTigrisReplica() {
+		slog.Info("Skipping Tigris replica cleanup for non-Tigris backend", "worker_id", worker.ID, "backend", cfg.ReplicaBackendName())
+		return nil
+	}
 	if strings.TrimSpace(worker.Name) == "" {
 		return errors.New("worker name is required for replica cleanup")
 	}
