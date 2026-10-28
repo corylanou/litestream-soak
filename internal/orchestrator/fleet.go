@@ -38,14 +38,15 @@ func DefaultMainFleet() FleetSpec {
 }
 
 func baseMainFleet() FleetSpec {
-	workers := []DesiredWorker{
+	return FleetSpec{Workers: []DesiredWorker{
 		{
-			WorkerID:    "worker-main-low-vol",
-			Name:        "worker-main-low-vol",
-			Source:      "main",
-			GitSHA:      "main",
-			ProfileName: "low-volume",
-			Region:      "ord",
+			WorkerID:     "worker-main-sentinel-single",
+			Name:         "worker-main-sentinel-single",
+			Source:       "main",
+			GitSHA:       "main",
+			ProfileName:  "sentinel-single",
+			Region:       "ord",
+			VolumeSizeGB: 10,
 			Workload: workload.Config{
 				LoadMode:         "synthetic",
 				WriteRate:        10,
@@ -58,515 +59,31 @@ func baseMainFleet() FleetSpec {
 				VerifyType:       "integrity",
 				SnapshotInterval: "10m",
 				SyncInterval:     "1s",
-				MemoryMB:         1024,
-				CPUs:             1,
-			},
-		},
-		{
-			WorkerID:     "worker-main-high-vol",
-			Name:         "worker-main-high-vol",
-			Source:       "main",
-			GitSHA:       "main",
-			ProfileName:  "high-volume",
-			Region:       "ord",
-			VolumeSizeGB: 100,
-			Workload: workload.Config{
-				LoadMode:         "synthetic",
-				WriteRate:        500,
-				Pattern:          "wave",
-				PayloadSize:      4096,
-				ReadRatio:        0.2,
-				Workers:          8,
-				InitialSize:      "50MB",
-				VerifyInterval:   "30m",
-				VerifyType:       "integrity",
-				SnapshotInterval: "10m",
-				SyncInterval:     "1s",
-				S3PartSize:       "16MB",
-				S3Concurrency:    8,
-				VolumeSizeGB:     100,
-				MemoryMB:         1024,
-				CPUs:             1,
-			},
-		},
-		{
-			WorkerID:    "worker-main-low-vol-syd",
-			Name:        "worker-main-low-vol-syd",
-			Source:      "main",
-			GitSHA:      "main",
-			ProfileName: "low-vol-syd",
-			Region:      "syd",
-			Workload: workload.Config{
-				LoadMode:         "synthetic",
-				WriteRate:        10,
-				Pattern:          "constant",
-				PayloadSize:      1024,
-				ReadRatio:        0.2,
-				Workers:          1,
-				InitialSize:      "5MB",
-				VerifyInterval:   "30m",
-				VerifyType:       "integrity",
-				SnapshotInterval: "10m",
-				SyncInterval:     "1s",
-				MemoryMB:         1024,
-				CPUs:             1,
-			},
-		},
-		{
-			WorkerID:     "worker-main-high-vol-ams",
-			Name:         "worker-main-high-vol-ams",
-			Source:       "main",
-			GitSHA:       "main",
-			ProfileName:  "high-vol-ams",
-			Region:       "ams",
-			VolumeSizeGB: 100,
-			Workload: workload.Config{
-				LoadMode:         "synthetic",
-				WriteRate:        500,
-				Pattern:          "wave",
-				PayloadSize:      4096,
-				ReadRatio:        0.2,
-				Workers:          8,
-				InitialSize:      "50MB",
-				VerifyInterval:   "30m",
-				VerifyType:       "integrity",
-				SnapshotInterval: "10m",
-				SyncInterval:     "1s",
-				S3PartSize:       "16MB",
-				S3Concurrency:    8,
-				VolumeSizeGB:     100,
-				MemoryMB:         1024,
-				CPUs:             1,
-			},
-		},
-		{
-			WorkerID:     "worker-main-burst-vol",
-			Name:         "worker-main-burst-vol",
-			Source:       "main",
-			GitSHA:       "main",
-			ProfileName:  "burst-volume",
-			Region:       "ord",
-			VolumeSizeGB: 100,
-			Workload: workload.Config{
-				LoadMode:         "synthetic",
-				WriteRate:        1000,
-				Pattern:          "burst",
-				PayloadSize:      2048,
-				ReadRatio:        0.2,
-				Workers:          4,
-				InitialSize:      "20MB",
-				VerifyInterval:   "30m",
-				VerifyType:       "integrity",
-				SnapshotInterval: "10m",
-				SyncInterval:     "1s",
-				VolumeSizeGB:     100,
-				MemoryMB:         1024,
-				CPUs:             1,
-			},
-		},
-		{
-			WorkerID:    "worker-main-read-heavy",
-			Name:        "worker-main-read-heavy",
-			Source:      "main",
-			GitSHA:      "main",
-			ProfileName: "read-heavy",
-			Region:      "ord",
-			Workload: workload.Config{
-				LoadMode:         "synthetic",
-				WriteRate:        80,
-				Pattern:          "constant",
-				PayloadSize:      512,
-				ReadRatio:        0.95,
-				Workers:          6,
-				InitialSize:      "10MB",
-				VerifyInterval:   "30m",
-				VerifyType:       "integrity",
-				SnapshotInterval: "10m",
-				SyncInterval:     "1s",
-				MemoryMB:         1024,
-				CPUs:             1,
-			},
-		},
-		{
-			WorkerID:     "worker-main-gharchive",
-			Name:         "worker-main-gharchive",
-			Source:       "main",
-			GitSHA:       "main",
-			ProfileName:  "gharchive-replay",
-			Region:       "ord",
-			VolumeSizeGB: 50,
-			Workload: workload.Config{
-				LoadMode:         "replay",
-				InitialSize:      "5MB",
-				VerifyInterval:   "30m",
-				VerifyType:       "integrity",
-				SnapshotInterval: "10m",
-				SyncInterval:     "1s",
-				ReplayDataset:    "gharchive",
-				ReplayDataURL:    "https://data.gharchive.org/2025-01-01-0.json.gz",
-				ReplaySpeed:      300,
-				ReplayLoop:       true,
-				VolumeSizeGB:     50,
-				MemoryMB:         1024,
-				CPUs:             1,
-			},
-		},
-		{
-			WorkerID:     "worker-main-gharchive-mixed",
-			Name:         "worker-main-gharchive-mixed",
-			Source:       "main",
-			GitSHA:       "main",
-			ProfileName:  "gharchive-mixed",
-			Region:       "ord",
-			VolumeSizeGB: 50,
-			Workload: workload.Config{
-				LoadMode:         "both",
-				WriteRate:        50,
-				Pattern:          "wave",
-				PayloadSize:      1024,
-				ReadRatio:        0.2,
-				Workers:          2,
-				InitialSize:      "10MB",
-				VerifyInterval:   "30m",
-				VerifyType:       "integrity",
-				SnapshotInterval: "10m",
-				SyncInterval:     "1s",
-				ReplayDataset:    "gharchive",
-				ReplayDataURL:    "https://data.gharchive.org/2025-01-01-0.json.gz",
-				ReplaySpeed:      120,
-				ReplayLoop:       true,
-				VolumeSizeGB:     50,
-				MemoryMB:         1024,
-				CPUs:             1,
-			},
-		},
-		{
-			WorkerID:    "worker-main-taxi-mixed",
-			Name:        "worker-main-taxi-mixed",
-			Source:      "main",
-			GitSHA:      "main",
-			ProfileName: "taxi-mixed",
-			Region:      "ord",
-			Workload: workload.Config{
-				LoadMode:         "both",
-				WriteRate:        40,
-				Pattern:          "wave",
-				PayloadSize:      1024,
-				ReadRatio:        0.4,
-				Workers:          2,
-				InitialSize:      "10MB",
-				VerifyInterval:   "30m",
-				VerifyType:       "integrity",
-				SnapshotInterval: "10m",
-				SyncInterval:     "1s",
-				ReplayDataset:    "taxi",
-				ReplayDataPath:   "/opt/soak/datasets/taxi_sample.csv",
-				ReplaySpeed:      60,
-				ReplayLoop:       true,
-				MemoryMB:         1024,
-				CPUs:             1,
-			},
-		},
-		{
-			WorkerID:    "worker-main-taxi-replay",
-			Name:        "worker-main-taxi-replay",
-			Source:      "main",
-			GitSHA:      "main",
-			ProfileName: "taxi-replay",
-			Region:      "ord",
-			Workload: workload.Config{
-				LoadMode:         "replay",
-				InitialSize:      "5MB",
-				VerifyInterval:   "30m",
-				VerifyType:       "integrity",
-				SnapshotInterval: "10m",
-				SyncInterval:     "1s",
-				ReplayDataset:    "taxi",
-				ReplayDataPath:   "/opt/soak/datasets/taxi_sample.csv",
-				ReplaySpeed:      90,
-				ReplayLoop:       true,
-				MemoryMB:         1024,
-				CPUs:             1,
-			},
-		},
-		{
-			WorkerID:    "worker-main-orders-replay",
-			Name:        "worker-main-orders-replay",
-			Source:      "main",
-			GitSHA:      "main",
-			ProfileName: "orders-replay",
-			Region:      "ord",
-			Workload: workload.Config{
-				LoadMode:         "replay",
-				InitialSize:      "5MB",
-				VerifyInterval:   "30m",
-				VerifyType:       "integrity",
-				SnapshotInterval: "10m",
-				SyncInterval:     "1s",
-				ReplayDataset:    "orders",
-				ReplayDataPath:   "/opt/soak/datasets/orders_sample.jsonl",
-				ReplaySpeed:      45,
-				ReplayLoop:       true,
-				MemoryMB:         1024,
-				CPUs:             1,
-			},
-		},
-		{
-			WorkerID:     "worker-main-overload-truncate0",
-			Name:         "worker-main-overload-truncate0",
-			Source:       "main",
-			GitSHA:       "main",
-			ProfileName:  "overload-truncate0",
-			Region:       "ord",
-			VolumeSizeGB: 100,
-			Workload: workload.Config{
-				LoadMode:         "synthetic",
-				WriteRate:        600,
-				Pattern:          "constant",
-				PayloadSize:      2048,
-				ReadRatio:        0.1,
-				Workers:          8,
-				InitialSize:      "50MB",
-				VerifyInterval:   "30m",
-				VerifyType:       "integrity",
-				SnapshotInterval: "10m",
-				SyncInterval:     "1s",
-				S3PartSize:       "16MB",
-				S3Concurrency:    8,
-				TruncatePageN:    intPtr(0),
-				VolumeSizeGB:     100,
+				VolumeSizeGB:     10,
 				MemoryMB:         2048,
-				CPUs:             2,
+				CPUs:             1,
 			},
 		},
-		{
-			WorkerID:     "worker-main-pinned-reader",
-			Name:         "worker-main-pinned-reader",
+		withManyDBObserveProxy(DesiredWorker{
+			WorkerID:     "worker-main-sentinel-manydb",
+			Name:         "worker-main-sentinel-manydb",
 			Source:       "main",
 			GitSHA:       "main",
-			ProfileName:  "pinned-reader",
-			Region:       "ord",
-			VolumeSizeGB: 100,
-			Workload: workload.Config{
-				LoadMode:          "synthetic",
-				WriteRate:         200,
-				Pattern:           "constant",
-				PayloadSize:       2048,
-				ReadRatio:         0.1,
-				Workers:           4,
-				InitialSize:       "20MB",
-				VerifyInterval:    "30m",
-				VerifyType:        "integrity",
-				SnapshotInterval:  "10m",
-				SyncInterval:      "1s",
-				PinnedReaderHold:  "4m",
-				PinnedReaderPause: "45s",
-				VolumeSizeGB:      100,
-				MemoryMB:          2048,
-				CPUs:              2,
-			},
-		},
-	}
-	if manyDBFleetEnabled() {
-		workers = append(workers, manyDB100FleetWorkers()...)
-		if manyDB500FleetEnabled() {
-			workers = append(workers, manyDB500FleetWorkers()...)
-		}
-		if manyDB1000FleetEnabled() {
-			workers = append(workers, manyDB1000FleetWorker())
-		}
-	}
-	return FleetSpec{Workers: workers}
-}
-
-func manyDBFleetEnabled() bool {
-	return envFlagEnabled("SOAK_ENABLE_MANY_DB_FLEET")
-}
-
-func manyDB500FleetEnabled() bool {
-	return envFlagEnabled("SOAK_ENABLE_MANY_DB_500")
-}
-
-func manyDB1000FleetEnabled() bool {
-	return envFlagEnabled("SOAK_ENABLE_MANY_DB_1000")
-}
-
-func withManyDBObserveProxy(workers []DesiredWorker) []DesiredWorker {
-	// Observe mode re-signs forwarded requests (#146) but stays opt-in: it
-	// puts every replica request on the worker's proxy path. This is the
-	// fleet-spec twin of the worker-profile gate from #147; fleet-created
-	// workers take their workload config from here, not from worker profile
-	// defaults.
-	if !envFlagEnabled("SOAK_ENABLE_S3_OBSERVE_PROXY") {
-		return workers
-	}
-	for i := range workers {
-		workers[i].Workload.S3FaultProxyEnabled = true
-		workers[i].Workload.S3FaultProxyMode = "observe"
-	}
-	return workers
-}
-
-func envFlagEnabled(name string) bool {
-	value := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
-	return value == "1" || value == "true" || value == "yes"
-}
-
-func manyDB100FleetWorkers() []DesiredWorker {
-	return withManyDBObserveProxy([]DesiredWorker{
-		{
-			WorkerID:     "worker-main-many-dbs-100-list",
-			Name:         "worker-main-many-dbs-100-list",
-			Source:       "main",
-			GitSHA:       "main",
-			ProfileName:  "many-dbs-100-list",
+			ProfileName:  "sentinel-manydb",
 			Region:       "ord",
 			VolumeSizeGB: 10,
-			Workload: workload.Config{
-				LoadMode:                "many-db",
-				WriteRate:               20,
-				Pattern:                 "constant",
-				PayloadSize:             512,
-				Workers:                 2,
-				InitialSize:             "5MB",
-				VerifyInterval:          "30m",
-				VerifyType:              "integrity",
-				SnapshotInterval:        "10m",
-				SyncInterval:            "1s",
-				NumDatabases:            100,
-				ActivePercent:           2,
-				ActiveRotateInterval:    "30m",
-				ActiveSetSeed:           1,
-				ConfigMode:              "list",
-				VerifySampleSize:        5,
-				VerifyChangedLimit:      100,
-				ReplicationLagThreshold: 0,
-				VolumeSizeGB:            10,
-				MemoryMB:                2048,
-				CPUs:                    1,
-			},
-		},
-		{
-			WorkerID:     "worker-main-many-dbs-100-dir",
-			Name:         "worker-main-many-dbs-100-dir",
-			Source:       "main",
-			GitSHA:       "main",
-			ProfileName:  "many-dbs-100-dir",
-			Region:       "ord",
-			VolumeSizeGB: 10,
-			Workload: workload.Config{
-				LoadMode:                "many-db",
-				WriteRate:               20,
-				Pattern:                 "constant",
-				PayloadSize:             512,
-				Workers:                 2,
-				InitialSize:             "5MB",
-				VerifyInterval:          "30m",
-				VerifyType:              "integrity",
-				SnapshotInterval:        "10m",
-				SyncInterval:            "1s",
-				NumDatabases:            100,
-				ActivePercent:           2,
-				ActiveRotateInterval:    "30m",
-				ActiveSetSeed:           1,
-				ConfigMode:              "dir",
-				VerifySampleSize:        5,
-				VerifyChangedLimit:      100,
-				ReplicationLagThreshold: 0,
-				VolumeSizeGB:            10,
-				MemoryMB:                2048,
-				CPUs:                    1,
-			},
-		},
-	})
-}
-
-func manyDB500FleetWorkers() []DesiredWorker {
-	return withManyDBObserveProxy([]DesiredWorker{
-		{
-			WorkerID:     "worker-main-many-dbs-500-list",
-			Name:         "worker-main-many-dbs-500-list",
-			Source:       "main",
-			GitSHA:       "main",
-			ProfileName:  "many-dbs-500-list",
-			Region:       "ord",
-			VolumeSizeGB: 15,
-			Workload: workload.Config{
-				LoadMode:                "many-db",
-				WriteRate:               20,
-				Pattern:                 "constant",
-				PayloadSize:             512,
-				Workers:                 3,
-				InitialSize:             "5MB",
-				VerifyInterval:          "30m",
-				VerifyType:              "integrity",
-				SnapshotInterval:        "10m",
-				SyncInterval:            "1s",
-				NumDatabases:            500,
-				ActivePercent:           2,
-				ActiveRotateInterval:    "30m",
-				ActiveSetSeed:           1,
-				ConfigMode:              "list",
-				VerifySampleSize:        5,
-				VerifyChangedLimit:      100,
-				ReplicationLagThreshold: 0,
-				VolumeSizeGB:            15,
-				MemoryMB:                3072,
-				CPUs:                    2,
-			},
-		},
-		{
-			WorkerID:     "worker-main-many-dbs-500-dir",
-			Name:         "worker-main-many-dbs-500-dir",
-			Source:       "main",
-			GitSHA:       "main",
-			ProfileName:  "many-dbs-500-dir",
-			Region:       "ord",
-			VolumeSizeGB: 15,
-			Workload: workload.Config{
-				LoadMode:                "many-db",
-				WriteRate:               20,
-				Pattern:                 "constant",
-				PayloadSize:             512,
-				Workers:                 3,
-				InitialSize:             "5MB",
-				VerifyInterval:          "30m",
-				VerifyType:              "integrity",
-				SnapshotInterval:        "10m",
-				SyncInterval:            "1s",
-				NumDatabases:            500,
-				ActivePercent:           2,
-				ActiveRotateInterval:    "30m",
-				ActiveSetSeed:           1,
-				ConfigMode:              "dir",
-				VerifySampleSize:        5,
-				VerifyChangedLimit:      100,
-				ReplicationLagThreshold: 0,
-				VolumeSizeGB:            15,
-				MemoryMB:                3072,
-				CPUs:                    2,
-			},
-		},
-		{
-			WorkerID:     "worker-main-many-dbs-500-dir-lowfreq",
-			Name:         "worker-main-many-dbs-500-dir-lowfreq",
-			Source:       "main",
-			GitSHA:       "main",
-			ProfileName:  "many-dbs-500-dir-lowfreq",
-			Region:       "ord",
-			VolumeSizeGB: 15,
 			Workload: workload.Config{
 				LoadMode:                 "many-db",
 				WriteRate:                20,
 				Pattern:                  "constant",
 				PayloadSize:              512,
-				Workers:                  3,
+				Workers:                  2,
 				InitialSize:              "5MB",
 				VerifyInterval:           "30m",
 				VerifyType:               "integrity",
-				SnapshotInterval:         "1h",
+				SnapshotInterval:         "10m",
 				SyncInterval:             "1s",
-				NumDatabases:             500,
+				NumDatabases:             100,
 				ActivePercent:            2,
 				ActiveRotateInterval:     "30m",
 				ActiveSetSeed:            1,
@@ -574,52 +91,34 @@ func manyDB500FleetWorkers() []DesiredWorker {
 				VerifySampleSize:         5,
 				VerifyChangedLimit:       100,
 				ReplicationLagThreshold:  0,
-				L1CompactionInterval:     "5m",
-				L2CompactionInterval:     "30m",
-				L3CompactionInterval:     "6h",
-				L0Retention:              "1h",
 				L0RetentionCheckInterval: "2m",
-				VolumeSizeGB:             15,
-				MemoryMB:                 3072,
-				CPUs:                     2,
+				L1CompactionInterval:     "5m",
+				L2CompactionInterval:     "15m",
+				L3CompactionInterval:     "1h",
+				VolumeSizeGB:             10,
+				MemoryMB:                 2048,
+				CPUs:                     1,
 			},
-		},
-	})
+		}),
+	}}
 }
 
-func manyDB1000FleetWorker() DesiredWorker {
-	return withManyDBObserveProxy([]DesiredWorker{{
-		WorkerID:     "worker-main-many-dbs-1000-dir",
-		Name:         "worker-main-many-dbs-1000-dir",
-		Source:       "main",
-		GitSHA:       "main",
-		ProfileName:  "many-dbs-1000-dir",
-		Region:       "ord",
-		VolumeSizeGB: 20,
-		Workload: workload.Config{
-			LoadMode:                "many-db",
-			WriteRate:               20,
-			Pattern:                 "constant",
-			PayloadSize:             512,
-			Workers:                 4,
-			InitialSize:             "5MB",
-			VerifyInterval:          "30m",
-			VerifyType:              "integrity",
-			SnapshotInterval:        "10m",
-			SyncInterval:            "1s",
-			NumDatabases:            1000,
-			ActivePercent:           2,
-			ActiveRotateInterval:    "30m",
-			ActiveSetSeed:           1,
-			ConfigMode:              "dir",
-			VerifySampleSize:        5,
-			VerifyChangedLimit:      100,
-			ReplicationLagThreshold: 0,
-			VolumeSizeGB:            20,
-			MemoryMB:                4096,
-			CPUs:                    2,
-		},
-	}})[0]
+func withManyDBObserveProxy(worker DesiredWorker) DesiredWorker {
+	// Observe mode re-signs forwarded requests (#146) but stays opt-in: it
+	// puts every replica request on the worker's proxy path. This is the
+	// fleet-spec twin of the worker-profile gate from #147; fleet-created
+	// workers take their workload config from here, not from worker profile
+	// defaults.
+	if envFlagEnabled("SOAK_ENABLE_S3_OBSERVE_PROXY") {
+		worker.Workload.S3FaultProxyEnabled = true
+		worker.Workload.S3FaultProxyMode = "observe"
+	}
+	return worker
+}
+
+func envFlagEnabled(name string) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	return value == "1" || value == "true" || value == "yes"
 }
 
 func DefaultFleetForSource(source, gitSHA, litestreamSHA string) FleetSpec {

@@ -584,6 +584,10 @@ func (m *Manager) dormantWorkerLocked(ctx context.Context, workerID, reason, sig
 	if err != nil {
 		return fmt.Errorf("get worker: %w", err)
 	}
+	if worker.Status == model.WorkerStopped || worker.Status == model.WorkerFailed {
+		slog.Info("Skipping dormancy for inactive worker", "worker_id", workerID, "status", worker.Status, "signature", signature)
+		return nil
+	}
 
 	if worker.FlyMachineID != "" {
 		if err := m.flyClientForWorker(*worker).StopMachine(ctx, worker.FlyMachineID); err != nil {
