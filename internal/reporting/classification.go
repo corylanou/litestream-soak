@@ -8,6 +8,8 @@ import (
 )
 
 const (
+	SignatureRestoreTargetUnavailable = "restore_target_unavailable"
+
 	soakFixtureSourceUsedPercent = 95.0
 	diskTelemetryMaxAge          = time.Minute
 )
@@ -363,12 +365,20 @@ func restoreReplanFailureSignature(text string) string {
 	case strings.Contains(text, "restore plan retries exhausted"):
 		return "restore_plan_retries_exhausted"
 	case strings.Contains(text, "no matching backup files available") || strings.Contains(text, "transaction not available") || strings.HasSuffix(strings.Trim(text, " .\"'"), "cannot recalculate restore plan"):
-		return "restore_target_unavailable"
+		return SignatureRestoreTargetUnavailable
 	case strings.Contains(text, "cannot recalculate restore plan"):
 		return "restore_plan_recalculation_failed"
 	default:
 		return ""
 	}
+}
+
+func PinnedRestoreTargetUnavailable(restoreMode, errorMessage string) bool {
+	if strings.EqualFold(strings.TrimSpace(restoreMode), "latest") {
+		return false
+	}
+	classification := ClassifyVerificationFailure("restore_validate", errorMessage)
+	return classification.Stage == "restore" && classification.Signature == SignatureRestoreTargetUnavailable
 }
 
 func RestoreErrorOutput(output string) string {

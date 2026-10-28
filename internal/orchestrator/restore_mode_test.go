@@ -302,3 +302,122 @@ func TestRCGateScoresPerRestoreMode(t *testing.T) {
 		t.Fatalf("gate verdict = %q, want fail", entry.Verdict)
 	}
 }
+
+func TestHandleVerificationPinnedRestoreTargetUnavailableIsInconclusive(t *testing.T) {
+	t.Parallel()
+
+	const unavailable = "restore failed: validation failed (exit 1): Error: no matching backup files available: restore target txid 0000000000003d9d is no longer available: txid 0000000000003d9d unavailable (nearest covered TXIDs: before=0000000000003c48, after=0000000000003dcf): transaction not available"
+	tests := []struct {
+		mode         string
+		inconclusive bool
+	}{
+		{mode: "txid", inconclusive: true},
+		{mode: "timestamp", inconclusive: true},
+		{mode: "", inconclusive: true},
+		{mode: "latest"},
+	}
+	for _, tt := range tests {
+		t.Run("mode="+tt.mode, func(t *testing.T) {
+			t.Parallel()
+
+			db := openTestDB(t)
+			workerID := "worker-target-unavailable"
+			createTestWorker(t, db, model.Worker{
+				ID:            workerID,
+				Name:          workerID,
+				Status:        model.WorkerRunning,
+				Source:        "main",
+				GitSHA:        "abc123",
+				LitestreamSHA: "ls123",
+				ProfileName:   "low-volume",
+				ProfileConfig: "{}",
+			})
+			api := NewAPI(db, nil, nil, nil, &Manager{db: db, appName: "litestream-soak"}, nil)
+			base := time.Now().UTC().Add(-3 * time.Hour)
+			for i := range 3 {
+				completedAt := base.Add(time.Duration(i) * time.Hour)
+				payload := reporting.VerificationPayload{
+					WorkerIdentity: reporting.WorkerIdentity{
+						WorkerID:      workerID,
+						Name:          workerID,
+						Source:        "main",
+						GitSHA:        "abc123",
+						LitestreamSHA: "ls123",
+						ProfileName:   "low-volume",
+						ProfileConfig: "{}",
+					},
+					StartedAt:             completedAt.Add(-time.Minute),
+					CompletedAt:           completedAt,
+					CheckType:             "restore_validate",
+					Status:                "failed",
+					Summary:               "restore failed",
+					ErrorMessage:          unavailable,
+					FailureClassification: &reporting.FailureClassification{Stage: "restore", Signature: reporting.SignatureRestoreTargetUnavailable, RestoreMode: tt.mode},
+					RestoreMode:           tt.mode,
+				}
+				body, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request := httptest.NewRequest(http.MethodPost, "/api/workers/"+workerID+"/verifications", bytes.NewReader(body))
+				request.SetPathValue("id", workerID)
+				recorder := httptest.NewRecorder()
+				api.handleVerification(recorder, request)
+				if recorder.Code != http.StatusAccepted {
+					t.Fatalf("status code = %d; body: %s", recorder.Code, recorder.Body.String())
+				}
+			}
+
+			verifications, err := db.ListVerifications(workerID, 10)
+			if err != nil || len(verifications) != 3 {
+				t.Fatalf("ListVerifications() = %+v, %v", verifications, err)
+			}
+			_, dormant := detectDormancyCandidate(verifications, time.Now().UTC(), time.Hour, 3)
+			latest := latestVerificationInWindow(verifications, base.Add(-time.Hour), nil)
+			latestFailed, err := db.GetLatestFailedVerification(workerID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			worker, err := db.GetWorker(workerID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tt.inconclusive {
+				if !verifications[0].Failed() || !dormant || latest == nil || latestFailed == nil || worker.Status == model.WorkerRunning {
+					t.Fatalf("latest-mode failure not counted: failed=%v dormant=%v latest=%v latestFailed=%v status=%q", verifications[0].Failed(), dormant, latest, latestFailed, worker.Status)
+				}
+				return
+			}
+			for _, verification := range verifications {
+				if verification.Status != "aborted" || !verification.Inconclusive() || verification.Failed() || verification.FailureClassification != nil {
+					t.Fatalf("verification = %+v, want inconclusive without classification", verification)
+				}
+				if verification.ErrorMessage != unavailable {
+					t.Fatalf("error message = %q", verification.ErrorMessage)
+				}
+			}
+			if dormant {
+				t.Fatal("inconclusive restore target failures counted toward dormancy")
+			}
+			if latest != nil {
+				t.Fatalf("inconclusive verification scored: %+v", latest)
+			}
+			if latestFailed != nil {
+				t.Fatalf("latest failed verification = %+v, want none", latestFailed)
+			}
+			if worker.Status != model.WorkerRunning || worker.ErrorMessage != "" {
+				t.Fatalf("worker status = %q error %q, want running", worker.Status, worker.ErrorMessage)
+			}
+			events, err := db.ListWorkerEvents(workerID, 20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range events {
+				switch event.EventType {
+				case "verification_failed", "first_failure", "worker_dormant":
+					t.Fatalf("unexpected failure event %q: %+v", event.EventType, events)
+				}
+			}
+		})
+	}
+}

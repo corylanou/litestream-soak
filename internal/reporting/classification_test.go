@@ -560,3 +560,30 @@ func TestMultilineSyncFailurePreservesContext(t *testing.T) {
 		t.Fatalf("classification=%+v", got)
 	}
 }
+
+func TestPinnedRestoreTargetUnavailable(t *testing.T) {
+	const unavailable = "restore failed: validation failed (exit 1): Error: no matching backup files available: restore target txid 0000000000003d9d is no longer available: txid 0000000000003d9d unavailable (nearest covered TXIDs: before=0000000000003c48, after=0000000000003dcf): transaction not available"
+	got := ClassifyVerificationFailure("restore_validate", unavailable)
+	if got.Stage != "restore" || got.Signature != SignatureRestoreTargetUnavailable || got.ObjectStore != nil {
+		t.Fatalf("classification=%+v", got)
+	}
+	for _, tc := range []struct {
+		name, mode, message string
+		want                bool
+	}{
+		{"txid", "txid", unavailable, true},
+		{"timestamp", "timestamp", unavailable, true},
+		{"unreported mode defaults to txid", "", unavailable, true},
+		{"latest", "latest", unavailable, false},
+		{"plan retries exhausted", "txid", "restore failed: restore plan retries exhausted: decode ltx: open ltx file: file does not exist", false},
+		{"object store transport", "txid", "restore failed: cannot recalculate restore plan: operation error S3: GetObject, https response error StatusCode: 408, api error RequestCanceled: Request is canceled.", false},
+		{"integrity mismatch", "txid", "restore failed: integrity check: wrong # of entries in index", false},
+		{"sync stage", "txid", "wait for sync: transaction not available", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PinnedRestoreTargetUnavailable(tc.mode, tc.message); got != tc.want {
+				t.Fatalf("PinnedRestoreTargetUnavailable(%q) = %v, want %v", tc.mode, got, tc.want)
+			}
+		})
+	}
+}

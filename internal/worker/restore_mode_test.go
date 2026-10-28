@@ -442,3 +442,52 @@ func TestRunnerFailureClassificationIncludesRestoreMode(t *testing.T) {
 		t.Fatalf("classification = %+v", classification)
 	}
 }
+
+const pinnedRestoreTargetUnavailableError = "Error: no matching backup files available: restore target txid 0000000000003d9d is no longer available: txid 0000000000003d9d unavailable (nearest covered TXIDs: before=0000000000003c48, after=0000000000003dcf): transaction not available"
+
+func TestVerifierPinnedRestoreTargetUnavailableIsInconclusive(t *testing.T) {
+	script := "echo 'time=2026-10-23T12:00:00Z level=WARN msg=\"restore file disappeared, recalculating plan\"'\necho '" + pinnedRestoreTargetUnavailableError + "' >&2\nexit 1\n"
+	tests := []struct {
+		mode         string
+		inconclusive bool
+	}{
+		{mode: "txid", inconclusive: true},
+		{mode: "timestamp", inconclusive: true},
+		{mode: "latest"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			cfg, _ := restoreModeFixture(t, script)
+			writeLocalL0(t, cfg.DBPath, 0x40, 0x42, time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC))
+			startBoundarySyncFixture(t, &cfg, 0x42)
+			v := NewVerifier(cfg)
+			result := VerificationResult{SyncTXID: 0x42, RestoreMode: tt.mode}
+			passed, err := v.validateDBResult(context.Background(), cfg.DBPath, cfg.DBPath+".restored", &result)
+			if err == nil || passed {
+				t.Fatalf("validateDBResult() = %v, %v; want failure", passed, err)
+			}
+			if result.RestoreMode != tt.mode {
+				t.Fatalf("restore mode = %q, want %q", result.RestoreMode, tt.mode)
+			}
+			v.failValidationResult(context.Background(), &result, err)
+			if !strings.Contains(result.ErrorMessage, "restore target txid 0000000000003d9d is no longer available") {
+				t.Fatalf("error message = %q", result.ErrorMessage)
+			}
+			if !tt.inconclusive {
+				if result.Status != "failed" {
+					t.Fatalf("status = %q, want failed", result.Status)
+				}
+				return
+			}
+			if result.Status != "aborted" || !strings.HasPrefix(result.Summary, "verification inconclusive:") {
+				t.Fatalf("status = %q summary %q, want inconclusive", result.Status, result.Summary)
+			}
+			if !strings.Contains(v.logicalEvidence, "restore_target=unavailable") {
+				t.Fatalf("evidence missing unavailable target: %s", v.logicalEvidence)
+			}
+			if classification := NewRunner(DefaultConfig()).failureClassification(result); classification != nil {
+				t.Fatalf("inconclusive result classified as failure: %+v", classification)
+			}
+		})
+	}
+}
