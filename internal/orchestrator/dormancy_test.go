@@ -280,6 +280,63 @@ func TestDormantWorkerHonorsWorkerLock(t *testing.T) {
 	}
 }
 
+func TestDormantWorkerSkipsWorkerStoppedByTeardownWhileWaitingForLock(t *testing.T) {
+	db := openTestDB(t)
+	const workerID = "worker-main-high-vol"
+	createTestWorker(t, db, model.Worker{
+		ID:            workerID,
+		AppName:       "litestream-soak",
+		Name:          workerID,
+		Status:        model.WorkerRunning,
+		Source:        "main",
+		ProfileName:   "high-volume",
+		ProfileConfig: "{}",
+		Region:        "ord",
+		FlyMachineID:  "old-machine",
+		FlyVolumeID:   "old-volume",
+	})
+
+	fly := newCreateWorkerFlyServer(t)
+	manager := NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	unlockTeardown := mustLockWorker(t, manager, workerID)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.DormantWorker(context.Background(), workerID, "test dormancy", "test_signature", "next_deploy")
+	}()
+
+	if err := db.UpdateWorkerStatus(workerID, model.WorkerStopped, ""); err != nil {
+		t.Fatalf("UpdateWorkerStatus(stopped) error = %v", err)
+	}
+	unlockTeardown()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("DormantWorker() error = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("DormantWorker() did not return after teardown released the worker lock")
+	}
+
+	if worker := mustWorker(t, db, workerID); worker.Status != model.WorkerStopped {
+		t.Fatalf("worker status = %q, want stopped", worker.Status)
+	}
+	stops, _, _ := fly.replacementCounts()
+	if stops != 0 {
+		t.Fatalf("machine stops = %d, want 0", stops)
+	}
+	events, err := db.ListEvents(100)
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	for _, event := range events {
+		if event.WorkerID == workerID && event.EventType == "worker_dormant" {
+			t.Fatalf("worker_dormant event recorded for stopped worker: %+v", event)
+		}
+	}
+}
+
 func TestResumeDormantPRWorkerAppliesDesiredConfigWithoutReplacingVolume(t *testing.T) {
 	db := openTestDB(t)
 	const source = "pr-149"
