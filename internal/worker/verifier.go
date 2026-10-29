@@ -764,6 +764,10 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		} else {
 			metadata.err = fmt.Errorf("restore failed: run validate: %w: %s", err, restoreEvidence.finalError)
 		}
+		if reporting.PinnedRestoreTargetUnavailable(mode, metadata.err.Error()) {
+			v.logicalEvidence += " restore_target=unavailable"
+			metadata.err = &restoreEvidenceInconclusiveError{err: metadata.err}
+		}
 		return metadata
 	})
 	restoreStep := &v.validationSteps[len(v.validationSteps)-1]

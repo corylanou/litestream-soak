@@ -97,6 +97,7 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	}
 	reportedRuntime := payload.RuntimePayload
 	payload.RuntimePayload = payload.Normalize(observedAt)
+	normalizePinnedRestoreTargetUnavailable(&payload)
 	var vf verificationFailure
 	aborted := verificationStatusAborted(payload.Status)
 	pending := (model.Verification{Status: payload.Status}).Pending()
@@ -259,6 +260,21 @@ func (a *API) handleVerification(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func normalizePinnedRestoreTargetUnavailable(payload *reporting.VerificationPayload) {
+	if payload.Passed || verificationStatusAborted(payload.Status) || (model.Verification{Status: payload.Status}).Pending() {
+		return
+	}
+	if !reporting.PinnedRestoreTargetUnavailable(payload.RestoreMode, payload.ErrorMessage) {
+		return
+	}
+	payload.Status = "aborted"
+	payload.FailureClassification = nil
+	payload.FailureDebug = nil
+	if !strings.HasPrefix(payload.Summary, "verification inconclusive:") {
+		payload.Summary = "verification inconclusive: " + firstNonEmpty(payload.Summary, payload.ErrorMessage)
+	}
 }
 
 func verificationStatusAborted(status string) bool {

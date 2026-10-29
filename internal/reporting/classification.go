@@ -8,17 +8,20 @@ import (
 )
 
 const (
+	SignatureRestoreTargetUnavailable = "restore_target_unavailable"
+
 	soakFixtureSourceUsedPercent = 95.0
 	diskTelemetryMaxAge          = time.Minute
 )
 
 var (
-	s3OperationPattern = regexp.MustCompile(`(?i)operation error S3:\s*([A-Za-z0-9]+)`)
-	httpStatusPattern  = regexp.MustCompile(`(?i)StatusCode:\s*([0-9]+)`)
-	apiCodePattern     = regexp.MustCompile(`(?i)api error\s+([A-Za-z0-9]+):`)
-	requestIDPattern   = regexp.MustCompile(`(?i)RequestID:\s*([^,\s]+)`)
-	s3URLPattern       = regexp.MustCompile(`s3://([^/\s]+)/([^"'\s]+)`)
-	keyValuePattern    = regexp.MustCompile(`(?i)\b(operation|http_status|api_code|request_id|bucket|prefix|phase)=("[^"]+"|'[^']+'|[^\s,]+)`)
+	s3OperationPattern             = regexp.MustCompile(`(?i)operation error S3:\s*([A-Za-z0-9]+)`)
+	httpStatusPattern              = regexp.MustCompile(`(?i)StatusCode:\s*([0-9]+)`)
+	apiCodePattern                 = regexp.MustCompile(`(?i)api error\s+([A-Za-z0-9]+):`)
+	requestIDPattern               = regexp.MustCompile(`(?i)RequestID:\s*([^,\s]+)`)
+	s3URLPattern                   = regexp.MustCompile(`s3://([^/\s]+)/([^"'\s]+)`)
+	pinnedRestoreTargetLostPattern = regexp.MustCompile(`(?i)restore target (txid|timestamp) \S+ is no longer available`)
+	keyValuePattern                = regexp.MustCompile(`(?i)\b(operation|http_status|api_code|request_id|bucket|prefix|phase)=("[^"]+"|'[^']+'|[^\s,]+)`)
 )
 
 func (c *FailureClassification) Valid() bool {
@@ -368,12 +371,23 @@ func restoreReplanFailureSignature(text string) string {
 	case strings.Contains(text, "restore plan retries exhausted"):
 		return "restore_plan_retries_exhausted"
 	case strings.Contains(text, "no matching backup files available") || strings.Contains(text, "transaction not available") || strings.HasSuffix(strings.Trim(text, " .\"'"), "cannot recalculate restore plan"):
-		return "restore_target_unavailable"
+		return SignatureRestoreTargetUnavailable
 	case strings.Contains(text, "cannot recalculate restore plan"):
 		return "restore_plan_recalculation_failed"
 	default:
 		return ""
 	}
+}
+
+func PinnedRestoreTargetUnavailable(restoreMode, errorMessage string) bool {
+	if strings.EqualFold(strings.TrimSpace(restoreMode), "latest") {
+		return false
+	}
+	if !pinnedRestoreTargetLostPattern.MatchString(errorMessage) {
+		return false
+	}
+	classification := ClassifyVerificationFailure("restore_validate", errorMessage)
+	return classification.Stage == "restore" && classification.Signature == SignatureRestoreTargetUnavailable
 }
 
 func RestoreErrorOutput(output string) string {
