@@ -268,9 +268,12 @@ func (r *Runner) populate(ctx context.Context) error {
 		"-db", r.cfg.DBPath,
 		"-target-size", r.cfg.InitialSize,
 	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	stats, err := runPopulateCommand(ctx, cmd, r.cfg.DBPath)
+	if err != nil {
+		return err
+	}
+	slog.Info("Database populated", "checkpoints", stats.Checkpoints, "peak_wal_bytes", stats.PeakWALBytes, "db_size_bytes", fileSizeOrZero(r.cfg.DBPath))
+	return nil
 }
 
 func (r *Runner) runVerifyLoop(ctx context.Context) error {
