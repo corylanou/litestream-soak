@@ -116,15 +116,27 @@ type RCGateLedgerResponse struct {
 }
 
 // gateSideFilter selects which verifications count for one side of a scenario:
-// the source role, an optional profile override, an upgrade phase, and whether
-// follow-check verifications are the only ones counted or are excluded.
+// the source role, an optional profile override, an upgrade phase, which check
+// types count, and optionally a single restore mode. An empty checkType counts
+// only current-boundary verifications: follow checks and historical
+// pre-upgrade restores are scored by their own scenarios so they can never
+// stand in for current coverage.
 type gateSideFilter struct {
-	role       string
-	profile    string
-	phase      string
-	followOnly bool
-	skipFollow bool
+	role      string
+	profile   string
+	phase     string
+	checkType string
+	mode      string
 }
+
+const (
+	gateCheckCurrent    = ""
+	gateCheckAny        = "*"
+	gateCheckFollow     = "follow"
+	gateCheckHistorical = "pre-upgrade-restore"
+)
+
+var gateNonCurrentChecks = []string{gateCheckFollow, gateCheckHistorical}
 
 type gateScenario struct {
 	name          string
@@ -145,26 +157,37 @@ var (
 		{name: "remote", profile: gateRemoteProfile},
 	}
 	// The upgrade gate scores the lane worker's post-upgrade restores against
-	// its own pre-upgrade restores, its post-upgrade follow checks against the
-	// baseline follow worker, and the plain follow workers against each other.
+	// its own pre-upgrade restores, its historical pre-upgrade txid restores
+	// against the pre-upgrade txid restores, its post-upgrade follow checks
+	// against the baseline follow worker, and the plain follow workers against
+	// each other.
 	upgradeGateScenarios = []gateScenario{
 		{
 			name:      "upgrade-lane",
 			profile:   gateUpgradeLaneProfile,
-			candidate: gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost, skipFollow: true},
-			baseline:  gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePre, skipFollow: true},
+			candidate: gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost},
+			baseline:  gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePre},
+		},
+		{
+			name:          "upgrade-lane-historical",
+			profile:       gateUpgradeLaneProfile,
+			requiredModes: []string{"txid"},
+			candidate:     gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost, checkType: gateCheckHistorical},
+			baseline:      gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePre, mode: "txid"},
 		},
 		{
 			name:          "upgrade-lane-follow",
 			profile:       gateUpgradeLaneProfile,
 			requiredModes: []string{gateModeFollow},
-			candidate:     gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost, followOnly: true},
-			baseline:      gateSideFilter{role: gateRoleBaseline, profile: gateUpgradeFollowProfile, followOnly: true},
+			candidate:     gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost, checkType: gateCheckFollow},
+			baseline:      gateSideFilter{role: gateRoleBaseline, profile: gateUpgradeFollowProfile, checkType: gateCheckFollow},
 		},
 		{
 			name:          "follow-l9",
 			profile:       gateUpgradeFollowProfile,
 			requiredModes: append(slices.Clone(gateRotatingRestoreModes), gateModeFollow),
+			candidate:     gateSideFilter{role: gateRoleCandidate, checkType: gateCheckAny},
+			baseline:      gateSideFilter{role: gateRoleBaseline, checkType: gateCheckAny},
 		},
 	}
 	gateRotatingRestoreModes = []string{"txid", "timestamp", "latest"}
@@ -200,11 +223,17 @@ func (f gateSideFilter) accepts(gate model.RCGate, verification model.Verificati
 			return false
 		}
 	}
-	follow := verification.CheckType == gateModeFollow
-	if f.followOnly && !follow {
+	if f.mode != "" && firstNonEmpty(strings.TrimSpace(verification.RestoreMode), "txid") != f.mode {
 		return false
 	}
-	return !f.skipFollow || !follow
+	switch f.checkType {
+	case gateCheckAny:
+		return true
+	case gateCheckCurrent:
+		return !slices.Contains(gateNonCurrentChecks, verification.CheckType)
+	default:
+		return verification.CheckType == f.checkType
+	}
 }
 
 func isGateSource(source string) bool {
