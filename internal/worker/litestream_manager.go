@@ -386,7 +386,7 @@ func litestreamConfigReplicaTarget(configPath string) (string, bool, error) {
 func (m *litestreamManager) startLitestream(ctx context.Context) error {
 	slog.Info("Starting Litestream")
 
-	m.litestreamCmd = exec.CommandContext(ctx, "litestream", "replicate", "-config", m.cfg.ConfigPath)
+	m.litestreamCmd = exec.CommandContext(ctx, m.cfg.litestreamCommand(), "replicate", "-config", m.cfg.ConfigPath)
 	m.litestreamCmd.Stdout = io.MultiWriter(os.Stdout, m.litestreamLog)
 	m.litestreamCmd.Stderr = io.MultiWriter(os.Stderr, m.litestreamLog)
 

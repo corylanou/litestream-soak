@@ -52,7 +52,7 @@ func (c Config) ForStressScenario(name string) (Config, error) {
 	}
 	base := c
 	phase := c
-	phase.stressBase = &base
+	phase.identityBase = &base
 	phase.stressScenario = name
 	phase.DataDir = filepath.Join(c.DataDir, "scenarios", name)
 	phase.DBPath = filepath.Join(phase.DataDir, filepath.Base(c.DBPath))

@@ -88,6 +88,10 @@ type Verifier struct {
 	onStart            func(context.Context, VerificationResult)
 	clock              func() time.Time
 	objectStore        *objectStoreMeter
+	replicaLevels      func(Config, uint64) *reporting.ReplicaLevelReport
+	boundary           *verificationBoundary
+	follow             *followSession
+	followResult       *VerificationResult
 
 	checkpointAttempts    int
 	checkpointRetryDelay  time.Duration
@@ -117,6 +121,7 @@ func NewVerifier(cfg Config, pausers ...loadPauser) *Verifier {
 		cfg:                   cfg,
 		pausers:               pausers,
 		clock:                 time.Now,
+		replicaLevels:         collectReplicaLevelReport,
 		httpClient:            newIPCClient(cfg.SocketPath, cfg.verifySyncTimeout()+30*time.Second),
 		checkpointAttempts:    3,
 		checkpointRetryDelay:  2 * time.Second,
@@ -242,6 +247,10 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 
 	result.Steps[len(result.Steps)-1].OutputTail += "\n" + v.logicalEvidence
 	result.Steps = append(result.Steps, v.validationSteps...)
+	if v.cfg.FollowCheck && v.boundary != nil && result.BoundaryTXID != 0 && v.boundary.txid == result.BoundaryTXID {
+		follow := v.runFollowCheck(ctx, *v.boundary)
+		v.followResult = &follow
+	}
 	if validateErr != nil {
 		v.failValidationResult(ctx, &result, validateErr)
 		slog.Error("Verification failed", "error", validateErr, "duration", time.Since(start))
@@ -707,6 +716,7 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		return false, err
 	}
 	result.BoundaryTXID = source.txid
+	v.boundary = &source
 	var target time.Time
 	if mode == restoreModeTimestamp {
 		boundaryAt, ok := boundaryLTXTimestamp(sourcePath, source.txid)
@@ -733,7 +743,7 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 	var restoreEvidence restoreOutput
 	restoreErr := v.runValidationPhase(ctx, "restore", v.cfg.verificationPhaseBudget("restore", sourceSize), func(phaseCtx context.Context) error {
 		args := restoreArgs(configPath, mode, source.txid, target, restoredPath, sourcePath)
-		cmd := exec.CommandContext(phaseCtx, "litestream", args...)
+		cmd := exec.CommandContext(phaseCtx, v.cfg.litestreamCommand(), args...)
 		if v.cfg.ReplicaType == "s3" {
 			proxyEndpoint := v.cfg.S3FaultProxyEndpoint
 			if v.observeModeValidateEndpoint() != "" {
@@ -791,10 +801,72 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		}); err != nil {
 			return false, err
 		}
-		return true, nil
+		return v.restorePreUpgradeTXID(ctx, configPath, restoredPath, sourcePath, sourceSize)
 	}
 	if err := v.runValidationPhase(ctx, "compare", v.cfg.verificationPhaseBudget("compare", sourceSize), func(phaseCtx context.Context) error {
 		return v.compareRestoredLogical(phaseCtx, source.logicalSnapshot, restoredPath)
+	}); err != nil {
+		return false, err
+	}
+	return v.restorePreUpgradeTXID(ctx, configPath, restoredPath, sourcePath, sourceSize)
+}
+
+// restorePreUpgradeTXID keeps a txid the base build wrote restorable after the
+// upgrade lane switched builds: every post-upgrade cycle restores it with the
+// candidate build and runs the integrity check on the result.
+func (v *Verifier) restorePreUpgradeTXID(ctx context.Context, configPath, restoredPath, sourcePath string, sourceSize int64) (bool, error) {
+	if v.cfg.upgradePreTXID == 0 {
+		return true, nil
+	}
+	preRestoredPath := restoredPath + ".pre"
+	if err := removeRestoredArtifacts(preRestoredPath); err != nil {
+		return false, fmt.Errorf("clean pre-upgrade restore artifacts: %w", err)
+	}
+	defer func() {
+		if err := removeRestoredArtifacts(preRestoredPath); err != nil {
+			slog.Warn("Failed to remove pre-upgrade restore artifacts", "error", err)
+		}
+	}()
+	v.logicalEvidence += fmt.Sprintf(" pre_upgrade_txid=%016x", v.cfg.upgradePreTXID)
+	var evidence restoreOutput
+	err := v.runValidationPhase(ctx, "restore_pre_upgrade_txid", v.cfg.verificationPhaseBudget("restore", sourceSize), func(phaseCtx context.Context) error {
+		args := restoreArgs(configPath, restoreModeTXID, v.cfg.upgradePreTXID, time.Time{}, preRestoredPath, sourcePath)
+		cmd := exec.CommandContext(phaseCtx, v.cfg.litestreamCommand(), args...)
+		if v.cfg.ReplicaType == "s3" {
+			proxyEndpoint := v.cfg.S3FaultProxyEndpoint
+			if v.observeModeValidateEndpoint() != "" {
+				proxyEndpoint = ""
+			}
+			cmd.Env = v.cfg.s3CommandEnv(proxyEndpoint)
+		}
+		cmd.Env = setCommandEnv(cmd.Environ(), "LOG_LEVEL", "DEBUG")
+		cmd.Stdout, cmd.Stderr = &evidence, &evidence
+		cmd.WaitDelay = time.Second
+		err := cmd.Run()
+		v.objectStore.recordRestoreRequests(evidence.requests)
+		if err == nil {
+			v.logicalEvidence += " pre_upgrade_restore=ok"
+			return nil
+		}
+		v.logicalEvidence += " pre_upgrade_restore=unavailable"
+		metadata := validationStepMetadata(phaseCtx, cmd, []byte(evidence.text()), err)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			metadata.err = fmt.Errorf("restore failed: pre-upgrade txid %016x (exit %d): %s", v.cfg.upgradePreTXID, exitErr.ExitCode(), evidence.finalError)
+		} else {
+			metadata.err = fmt.Errorf("restore failed: pre-upgrade txid %016x: %w: %s", v.cfg.upgradePreTXID, err, evidence.finalError)
+		}
+		if reporting.PinnedRestoreTargetUnavailable(restoreModeTXID, metadata.err.Error()) {
+			metadata.err = &restoreEvidenceInconclusiveError{err: metadata.err}
+		}
+		return metadata
+	})
+	v.validationSteps[len(v.validationSteps)-1].OutputTail = evidence.text()
+	if err != nil {
+		return false, err
+	}
+	if err := v.runValidationPhase(ctx, "integrity_check_pre_upgrade", v.cfg.verificationPhaseBudget("integrity_check", sourceSize), func(phaseCtx context.Context) error {
+		return checkRestoredIntegrity(phaseCtx, preRestoredPath)
 	}); err != nil {
 		return false, err
 	}

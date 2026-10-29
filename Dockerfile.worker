@@ -1,4 +1,5 @@
 ARG LITESTREAM_SHA=main
+ARG LITESTREAM_BASE_SHA=
 ARG WORKLOAD_SHA=ae88b164dd6304bcbb654a681df767ee59042eed
 
 # Stage 1: Build litestream + litestream-test from source
@@ -16,6 +17,25 @@ RUN go build \
     -tags osusergo,netgo,sqlite_omit_load_extension \
     -o /usr/local/bin/litestream ./cmd/litestream
 RUN go version -m /usr/local/bin/litestream >/tmp/litestream.buildinfo && cat /tmp/litestream.buildinfo
+
+# Stage 1b: Optional second litestream build for the upgrade gate lane. With an
+# empty LITESTREAM_BASE_SHA the stage produces an empty /out and the runtime
+# image carries only the pinned build.
+FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS litestream-base-builder
+ENV GOTOOLCHAIN=local
+ARG LITESTREAM_BASE_SHA
+WORKDIR /src/litestream-base
+RUN mkdir -p /out && \
+    if [ -n "${LITESTREAM_BASE_SHA}" ]; then \
+      git clone https://github.com/benbjohnson/litestream.git . && \
+      git checkout --detach "${LITESTREAM_BASE_SHA}" && \
+      git rev-parse HEAD >/out/litestream-base.sha && \
+      go build \
+        -ldflags "-s -w -X 'main.Version=${LITESTREAM_BASE_SHA}'" \
+        -tags osusergo,netgo,sqlite_omit_load_extension \
+        -o /out/litestream-base ./cmd/litestream && \
+      go version -m /out/litestream-base >/out/litestream-base.buildinfo && cat /out/litestream-base.buildinfo; \
+    fi
 FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS workload-builder
 ENV GOTOOLCHAIN=local
 RUN go version
@@ -67,6 +87,7 @@ RUN apt-get update && \
 COPY --from=litestream-builder /usr/local/bin/litestream /usr/local/bin/litestream
 COPY --from=workload-builder /usr/local/bin/litestream-test /usr/local/bin/litestream-test
 COPY --from=litestream-builder /tmp/litestream.sha /opt/soak/litestream.sha
+COPY --from=litestream-base-builder /out/ /opt/soak/base/
 COPY --from=soakworker-builder /usr/local/bin/soakworker /usr/local/bin/soakworker
 COPY --from=soakworker-builder /src/soak/datasets /opt/soak/datasets
 COPY --from=litestream-builder /tmp/litestream.buildinfo /opt/soak/litestream.buildinfo
@@ -77,6 +98,8 @@ RUN chmod 0755 /usr/local/bin/docker-entrypoint
 ARG WORKLOAD_SHA
 ENV WORKLOAD_SHA=${WORKLOAD_SHA}
 ENV LITESTREAM_SHA_FILE=/opt/soak/litestream.sha
+ENV LITESTREAM_BASE_BINARY=/opt/soak/base/litestream-base
+ENV LITESTREAM_BASE_SHA_FILE=/opt/soak/base/litestream-base.sha
 ENV SOAK_DATA_DB=/data/test.db
 VOLUME /data
 EXPOSE 9091

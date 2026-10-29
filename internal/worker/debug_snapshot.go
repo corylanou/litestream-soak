@@ -273,7 +273,7 @@ type restorePlanCandidate struct {
 }
 
 func collectRestorePlanSnapshot(cfg Config, targetTXID uint64) *reporting.RestorePlanSnapshot {
-	command := []string{"litestream", "ltx", "-config", cfg.ConfigPath, "-level", "all", cfg.DBPath}
+	command := []string{cfg.litestreamCommand(), "ltx", "-config", cfg.ConfigPath, "-level", "all", cfg.DBPath}
 	output := runDebugCommand("restore_plan_ltx_listing", command[0], command[1:]...)
 	snapshot := &reporting.RestorePlanSnapshot{
 		CapturedAt:        time.Now().UTC(),
@@ -306,7 +306,7 @@ func collectRestorePlanSnapshot(cfg Config, targetTXID uint64) *reporting.Restor
 }
 
 func collectReplicaLevelReport(cfg Config, targetTXID uint64) *reporting.ReplicaLevelReport {
-	command := []string{"litestream", "ltx", "-config", cfg.ConfigPath, "-level", "all", cfg.DBPath}
+	command := []string{cfg.litestreamCommand(), "ltx", "-config", cfg.ConfigPath, "-level", "all", cfg.DBPath}
 	output := runDebugCommand("verification_replica_levels", command[0], command[1:]...)
 	report := &reporting.ReplicaLevelReport{
 		CapturedAt:        time.Now().UTC(),

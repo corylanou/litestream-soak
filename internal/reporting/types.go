@@ -56,6 +56,11 @@ type WorkerIdentity struct {
 	MachineID     string `json:"machine_id,omitempty"`
 	Region        string `json:"region,omitempty"`
 	Scenario      string `json:"scenario,omitempty"`
+	// UpgradePhase and ActiveLitestreamSHA identify which side of an
+	// upgrade-lane switch a report came from. LitestreamSHA stays the
+	// image's pinned build so deployment attribution is unchanged.
+	UpgradePhase        string `json:"upgrade_phase,omitempty"`
+	ActiveLitestreamSHA string `json:"active_litestream_sha,omitempty"`
 }
 
 type ProcessObservation struct {
