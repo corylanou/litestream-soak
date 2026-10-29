@@ -188,6 +188,11 @@ func (m *Manager) CreateWorker(ctx context.Context, req WorkerRequest) (*model.W
 }
 
 func (m *Manager) createWorker(ctx context.Context, req WorkerRequest) (*model.Worker, error) {
+	if id := strings.TrimSpace(req.WorkerID); id != "" {
+		if existing, err := m.db.GetWorker(id); err == nil && existing.EvidenceHeld() {
+			return nil, fmt.Errorf("%w: %s", errWorkerEvidenceHeld, existing.Name)
+		}
+	}
 	if err := m.checkRCGateProvisioning(req.Source, req.ProfileName, req.ImageRef, req.LitestreamSHA, time.Now().UTC()); err != nil {
 		return nil, err
 	}
@@ -515,6 +520,9 @@ func (m *Manager) destroyWorker(ctx context.Context, workerID string) error {
 	if err != nil {
 		return fmt.Errorf("get worker: %w", err)
 	}
+	if worker.EvidenceHeld() {
+		return m.retainHeldWorker(ctx, *worker)
+	}
 
 	var cleanupErrors []error
 	if worker.FlyMachineID != "" {
@@ -626,7 +634,7 @@ func (m *Manager) rollingUpdateSourceLocked(ctx context.Context, source, newImag
 			if err != nil {
 				return nil, false, fmt.Errorf("reload worker: %w", err)
 			}
-			if w.Status == model.WorkerStopped || w.Status == model.WorkerFailed || w.Status == model.WorkerDormant {
+			if w.Status == model.WorkerStopped || w.Status == model.WorkerFailed || w.Status == model.WorkerDormant || w.EvidenceHeld() {
 				return nil, false, nil
 			}
 			desired, managed := desiredWorkerFor(*w, desiredSpec)
@@ -743,6 +751,9 @@ func (m *Manager) replaceWorker(ctx context.Context, w model.Worker, newImageRef
 }
 
 func (m *Manager) replaceWorkerWithRequest(ctx context.Context, w model.Worker, request WorkerRequest) (*model.Worker, error) {
+	if w.EvidenceHeld() {
+		return nil, fmt.Errorf("%w: %s", errWorkerEvidenceHeld, w.Name)
+	}
 	if err := m.checkRCGateProvisioning(firstNonEmpty(request.Source, w.Source), firstNonEmpty(request.ProfileName, w.ProfileName), request.ImageRef, request.LitestreamSHA, time.Now().UTC()); err != nil {
 		return nil, err
 	}

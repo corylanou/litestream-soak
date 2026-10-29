@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -31,7 +32,7 @@ func (m *Manager) cleanExpiredWorkers(ctx context.Context) {
 
 	for _, w := range workers {
 		slog.Info("Cleaning expired worker", "name", w.Name, "worker_id", w.ID, "expires_at", w.ExpiresAt)
-		if err := m.DestroyWorker(ctx, w.ID); err != nil {
+		if err := m.DestroyWorker(ctx, w.ID); err != nil && !errors.Is(err, errWorkerEvidenceHeld) {
 			slog.Error("Failed to destroy expired worker", "worker_id", w.ID, "error", err)
 		}
 	}

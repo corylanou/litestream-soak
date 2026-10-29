@@ -109,6 +109,7 @@ type RCGateLedgerEntry struct {
 	TotalVolumeGB int                    `json:"total_volume_gb"`
 	Verdict       string                 `json:"verdict"`
 	Scenarios     []RCGateScenarioResult `json:"scenarios"`
+	HeldWorkers   []RCGateHeldWorker     `json:"held_workers,omitempty"`
 }
 
 type RCGateLedgerResponse struct {
@@ -857,7 +858,7 @@ func (m *Manager) destroyUnarchivedRCGateWorkers(ctx context.Context, source str
 		if keep(worker) {
 			continue
 		}
-		if err := m.DestroyWorker(ctx, worker.ID); err != nil {
+		if err := m.DestroyWorker(ctx, worker.ID); err != nil && !errors.Is(err, errWorkerEvidenceHeld) {
 			destroyErrors = append(destroyErrors, fmt.Errorf("%s: %w", worker.ID, err))
 		}
 	}
@@ -865,9 +866,10 @@ func (m *Manager) destroyUnarchivedRCGateWorkers(ctx context.Context, source str
 }
 
 type rcGateResults struct {
-	Verdict   string                 `json:"verdict"`
-	Scenarios []RCGateScenarioResult `json:"scenarios"`
-	ClosedAt  time.Time              `json:"closed_at"`
+	Verdict     string                 `json:"verdict"`
+	Scenarios   []RCGateScenarioResult `json:"scenarios"`
+	HeldWorkers []RCGateHeldWorker     `json:"held_workers,omitempty"`
+	ClosedAt    time.Time              `json:"closed_at"`
 }
 
 func buildRCGateLedgerEntry(db *model.DB, gate model.RCGate, now time.Time) (RCGateLedgerEntry, error) {
@@ -900,6 +902,7 @@ func buildRCGateLedgerEntry(db *model.DB, gate model.RCGate, now time.Time) (RCG
 	}
 	entry.Verdict = results.Verdict
 	entry.Scenarios = results.Scenarios
+	entry.HeldWorkers = results.HeldWorkers
 	return entry, nil
 }
 
@@ -949,6 +952,11 @@ func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateR
 	default:
 		results.Verdict = rcGateVerdictPass
 	}
+	held, err := rcGateHeldWorkers(db, gate)
+	if err != nil {
+		return rcGateResults{}, err
+	}
+	results.HeldWorkers = held
 	return results, nil
 }
 

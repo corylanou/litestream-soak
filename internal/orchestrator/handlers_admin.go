@@ -337,6 +337,70 @@ func (a *API) handleTeardownSource(w http.ResponseWriter, r *http.Request) {
 	writeAPIJSON(w, result)
 }
 
+type evidenceHoldRequest struct {
+	Reason string `json:"reason"`
+}
+
+func (a *API) handleHoldWorkerEvidence(w http.ResponseWriter, r *http.Request) {
+	if a.manager == nil {
+		respondError(w, r, http.StatusInternalServerError, nil, "evidence hold manager unavailable")
+		return
+	}
+	workerID := strings.TrimSpace(r.PathValue("id"))
+	if workerID == "" {
+		respondError(w, r, http.StatusBadRequest, nil, "worker id is required")
+		return
+	}
+	var request evidenceHoldRequest
+	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		defer func() { _ = r.Body.Close() }()
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			respondError(w, r, http.StatusBadRequest, err, "invalid payload")
+			return
+		}
+	}
+	reason := strings.TrimSpace(firstNonEmpty(strings.TrimSpace(request.Reason), strings.TrimSpace(r.URL.Query().Get("reason"))))
+	if reason == "" {
+		respondError(w, r, http.StatusBadRequest, nil, "reason is required")
+		return
+	}
+	if _, err := a.db.GetWorker(workerID); err != nil {
+		respondError(w, r, http.StatusNotFound, err, "worker not found")
+		return
+	}
+
+	response, err := a.manager.HoldWorkerEvidence(r.Context(), workerID, reason)
+	if err != nil {
+		respondError(w, r, http.StatusInternalServerError, err, "failed to apply evidence hold")
+		return
+	}
+	writeAPIJSON(w, response)
+}
+
+func (a *API) handleReleaseWorkerEvidenceHold(w http.ResponseWriter, r *http.Request) {
+	if a.manager == nil {
+		respondError(w, r, http.StatusInternalServerError, nil, "evidence hold manager unavailable")
+		return
+	}
+	workerID := strings.TrimSpace(r.PathValue("id"))
+	if workerID == "" {
+		respondError(w, r, http.StatusBadRequest, nil, "worker id is required")
+		return
+	}
+	if _, err := a.db.GetWorker(workerID); err != nil {
+		respondError(w, r, http.StatusNotFound, err, "worker not found")
+		return
+	}
+
+	response, err := a.manager.ReleaseWorkerEvidenceHold(r.Context(), workerID, readBoolQuery(r, "destroy"))
+	if err != nil {
+		respondError(w, r, http.StatusInternalServerError, err, "failed to release evidence hold")
+		return
+	}
+	a.observeLatestDeploymentState(response.Source)
+	writeAPIJSON(w, response)
+}
+
 func readDeploymentReadyRequest(r *http.Request) (deploymentReadyRequest, error) {
 	var request deploymentReadyRequest
 	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {

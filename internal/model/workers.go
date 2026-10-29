@@ -10,15 +10,15 @@ import (
 	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
-const workerColumns = "id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at"
+const workerColumns = "id, app_name, region, fly_machine_id, fly_volume_id, name, status, source, git_sha, litestream_sha, pr_number, profile_name, profile_config, expires_at, created_at, updated_at, last_heartbeat_at, error_message, last_runtime_json, last_runtime_at, dormant_at, dormant_reason, dormant_signature, resume_trigger, last_probe_at, evidence_hold_at, evidence_hold_reason"
 
 type workerScanner interface {
 	Scan(dest ...any) error
 }
 
 func scanWorker(scanner workerScanner, w *Worker) error {
-	var appName, region, machineID, volumeID, errorMessage, lastRuntimeJSON, dormantReason, dormantSignature, resumeTrigger, litestreamSHA sql.NullString
-	var expiresAt, heartbeat, lastRuntimeAt, dormantAt, lastProbeAt sql.NullTime
+	var appName, region, machineID, volumeID, errorMessage, lastRuntimeJSON, dormantReason, dormantSignature, resumeTrigger, litestreamSHA, evidenceHoldReason sql.NullString
+	var expiresAt, heartbeat, lastRuntimeAt, dormantAt, lastProbeAt, evidenceHoldAt sql.NullTime
 	var prNumber sql.NullInt64
 
 	if err := scanner.Scan(
@@ -47,6 +47,8 @@ func scanWorker(scanner workerScanner, w *Worker) error {
 		&dormantSignature,
 		&resumeTrigger,
 		&lastProbeAt,
+		&evidenceHoldAt,
+		&evidenceHoldReason,
 	); err != nil {
 		return err
 	}
@@ -98,6 +100,12 @@ func scanWorker(scanner workerScanner, w *Worker) error {
 	}
 	if lastProbeAt.Valid {
 		w.LastProbeAt = &lastProbeAt.Time
+	}
+	if evidenceHoldAt.Valid {
+		w.EvidenceHoldAt = &evidenceHoldAt.Time
+	}
+	if evidenceHoldReason.Valid {
+		w.EvidenceHoldReason = evidenceHoldReason.String
 	}
 
 	return nil
@@ -355,6 +363,27 @@ func (d *DB) ClearWorkerDormancy(id string) error {
 	_, err := d.exec(`
 		UPDATE workers
 		SET dormant_at = NULL, dormant_reason = '', dormant_signature = '', resume_trigger = '', last_probe_at = NULL, updated_at = datetime('now')
+		WHERE id = ?`,
+		id,
+	)
+	return err
+}
+
+func (d *DB) SetWorkerEvidenceHold(id, reason string) error {
+	_, err := d.exec(`
+		UPDATE workers
+		SET evidence_hold_at = datetime('now'), evidence_hold_reason = ?, updated_at = datetime('now')
+		WHERE id = ?`,
+		reason,
+		id,
+	)
+	return err
+}
+
+func (d *DB) ClearWorkerEvidenceHold(id string) error {
+	_, err := d.exec(`
+		UPDATE workers
+		SET evidence_hold_at = NULL, evidence_hold_reason = '', updated_at = datetime('now')
 		WHERE id = ?`,
 		id,
 	)
