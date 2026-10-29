@@ -538,6 +538,7 @@ What happens on a teardown while the hold is set:
 - Every other worker in the source is destroyed normally. Source teardown reports the held worker with outcome `held` and counts it in `held_workers`; it does not count as a failure, so the result stays `complete: true`.
 - A gate still closes at expiry. The closed gate's saved results and the ledger list the retained worker under `held_workers`, so a held worker never keeps a gate open.
 - Reconcilers do not restart, replace, or resume a held worker, and a fleet spec that names it will not recreate it. It stays stopped until the hold is released.
+- Stale unattached volume GC resolves each candidate volume to its owning worker (by `fly_volume_id` or a provisioning attempt that references it) under that worker's lock, skips a held worker's volume with a `volume_gc_skipped_evidence_hold` event, and clears any persisted destroy retry for it. Volumes with no resolvable owner keep the existing GC behavior.
 
 Release the hold when the evidence is no longer needed:
 

@@ -499,6 +499,13 @@ func (d *DB) ListDormantWorkers(source string) ([]Worker, error) {
 	return d.queryWorkers(query, args...)
 }
 
+func (d *DB) ListWorkersReferencingVolume(volumeID string) ([]Worker, error) {
+	return d.queryWorkers(
+		"SELECT "+workerColumns+" FROM workers WHERE fly_volume_id = ? OR id IN (SELECT worker_id FROM worker_provisioning WHERE volume_id = ?) ORDER BY created_at",
+		volumeID, volumeID,
+	)
+}
+
 func (d *DB) ListDormantWorkersForResumeTrigger(source, resumeTrigger string) ([]Worker, error) {
 	return d.queryWorkers(
 		"SELECT "+workerColumns+" FROM workers WHERE status = 'dormant' AND source = ? AND resume_trigger = ? ORDER BY updated_at DESC",

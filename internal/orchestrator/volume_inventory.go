@@ -189,6 +189,9 @@ func (m *Manager) destroyStaleUnattachedWorkerVolumes(ctx context.Context, volum
 	}
 
 	for volumeID, attempt := range m.volumeGCAttempts {
+		if m.volumeGCHeld(ctx, volumeID, attempt.VolumeName, attempt, now) {
+			continue
+		}
 		volume, ok := inventory[volumeID]
 		if !ok {
 			m.verifyMissingVolumeGCAttempt(ctx, attempt, cutoff, now)
@@ -202,6 +205,9 @@ func (m *Manager) destroyStaleUnattachedWorkerVolumes(ctx context.Context, volum
 			continue
 		}
 		if _, ok := m.volumeGCAttempts[volume.ID]; ok {
+			continue
+		}
+		if m.volumeGCHeld(ctx, volume.ID, volume.Name, nil, now) {
 			continue
 		}
 
@@ -287,7 +293,31 @@ func (m *Manager) reconcileVolumeGCAttempt(ctx context.Context, volume flyapi.Vo
 	m.requestStaleVolumeDestruction(ctx, volume, attempt, now)
 }
 
+func (m *Manager) volumeGCHeld(ctx context.Context, volumeID, volumeName string, attempt *model.VolumeGCAttempt, now time.Time) bool {
+	held, unlock, err := m.lockVolumeOwners(ctx, volumeID)
+	if err != nil {
+		slog.Warn("Failed to resolve volume owners for evidence hold check; skipping volume GC", "volume_id", volumeID, "volume_name", volumeName, "error", err)
+		return true
+	}
+	defer unlock()
+	if held == nil {
+		return false
+	}
+	m.skipHeldVolumeGC(volumeID, volumeName, *held, attempt, now)
+	return true
+}
+
 func (m *Manager) requestStaleVolumeDestruction(ctx context.Context, volume flyapi.Volume, attempt *model.VolumeGCAttempt, now time.Time) {
+	held, unlockOwners, err := m.lockVolumeOwners(ctx, volume.ID)
+	if err != nil {
+		slog.Warn("Failed to resolve volume owners for evidence hold check; skipping destroy request", "volume_id", volume.ID, "volume_name", volume.Name, "error", err)
+		return
+	}
+	defer unlockOwners()
+	if held != nil {
+		m.skipHeldVolumeGC(volume.ID, volume.Name, *held, attempt, now)
+		return
+	}
 	existing := attempt != nil
 	if attempt == nil {
 		attempt = &model.VolumeGCAttempt{

@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	eventEvidenceHoldApplied  = "evidence_hold_applied"
-	eventEvidenceHoldReleased = "evidence_hold_released"
-	eventEvidenceHoldRetained = "evidence_hold_retained"
+	eventEvidenceHoldApplied         = "evidence_hold_applied"
+	eventEvidenceHoldReleased        = "evidence_hold_released"
+	eventEvidenceHoldRetained        = "evidence_hold_retained"
+	volumeGCEventSkippedEvidenceHold = "volume_gc_skipped_evidence_hold"
 )
 
 var errWorkerEvidenceHeld = errors.New("worker is under an evidence hold")
@@ -159,6 +160,53 @@ func (m *Manager) retainHeldWorker(ctx context.Context, worker model.Worker) err
 	}
 	slog.Info("Evidence hold retained worker resources", "worker_id", worker.ID, "name", worker.Name, "machine_id", worker.FlyMachineID, "volume_id", worker.FlyVolumeID)
 	return fmt.Errorf("%w: %s", errWorkerEvidenceHeld, worker.Name)
+}
+
+func (m *Manager) lockVolumeOwners(ctx context.Context, volumeID string) (*model.Worker, func(), error) {
+	noop := func() {}
+	if m.db == nil || strings.TrimSpace(volumeID) == "" {
+		return nil, noop, nil
+	}
+	owners, err := m.db.ListWorkersReferencingVolume(volumeID)
+	if err != nil {
+		return nil, noop, fmt.Errorf("list workers referencing volume %s: %w", volumeID, err)
+	}
+	unlocks := make([]func(), 0, len(owners))
+	unlockAll := func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
+	}
+	var held *model.Worker
+	for _, owner := range owners {
+		unlock, err := m.lockWorker(ctx, owner.ID)
+		if err != nil {
+			unlockAll()
+			return nil, noop, err
+		}
+		unlocks = append(unlocks, unlock)
+		worker, err := m.db.GetWorker(owner.ID)
+		if err != nil {
+			unlockAll()
+			return nil, noop, fmt.Errorf("reload worker %s: %w", owner.ID, err)
+		}
+		if held == nil && worker.EvidenceHeld() {
+			held = worker
+		}
+	}
+	return held, unlockAll, nil
+}
+
+func (m *Manager) skipHeldVolumeGC(volumeID, volumeName string, held model.Worker, attempt *model.VolumeGCAttempt, now time.Time) {
+	if attempt != nil {
+		if err := m.removeVolumeGCAttempt(volumeID); err != nil {
+			slog.Warn("Failed to clear persisted volume GC attempt for held volume", "volume_id", volumeID, "worker_id", held.ID, "error", err)
+		}
+	}
+	message := fmt.Sprintf("Skipped volume GC for %s (%s): worker %s is under an evidence hold", valueOrUnknown(volumeName), volumeID, held.Name)
+	details := fmt.Sprintf("worker_id=%s evidence_hold_at=%s reason=%s", held.ID, formatTime(held.EvidenceHoldAt), held.EvidenceHoldReason)
+	m.recordVolumeGCEvent(volumeGCEventSkippedEvidenceHold, message, details, now, volumeGCOperatorEventWindow)
+	slog.Info("Skipping volume GC for held worker volume", "volume_id", volumeID, "volume_name", volumeName, "worker_id", held.ID, "worker_name", held.Name)
 }
 
 func rcGateHeldWorkers(db *model.DB, gate model.RCGate) ([]RCGateHeldWorker, error) {

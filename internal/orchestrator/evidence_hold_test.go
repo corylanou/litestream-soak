@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
 )
 
@@ -515,5 +516,157 @@ func TestEvidenceHoldAdminEndpoints(t *testing.T) {
 				step.check(t, body)
 			}
 		})
+	}
+}
+
+func TestEvidenceHoldBlocksVolumeGC(t *testing.T) {
+	const volumeID = "stale-volume"
+	staleVolume := func() flyapi.Volume {
+		return flyapi.Volume{
+			ID:        volumeID,
+			Name:      "soak_worker_rc_a25ac011_gate_large_db",
+			State:     "created",
+			SizeGB:    40,
+			CreatedAt: time.Now().UTC().Add(-3 * time.Hour),
+		}
+	}
+	createOwner := func(t *testing.T, db *model.DB, status model.WorkerStatus, attachVolume bool) model.Worker {
+		t.Helper()
+		worker := model.Worker{
+			ID:            "worker-held-owner",
+			AppName:       "litestream-soak",
+			Name:          "worker-held-owner",
+			Status:        status,
+			Source:        "rc-a25ac011",
+			GitSHA:        "soak-sha",
+			LitestreamSHA: "litestream-sha",
+			ProfileName:   gateLargeDBProfile,
+			ProfileConfig: "{}",
+			FlyMachineID:  "machine-held-owner",
+		}
+		if attachVolume {
+			worker.FlyVolumeID = volumeID
+		}
+		createTestWorker(t, db, worker)
+		return worker
+	}
+
+	cases := []struct {
+		name string
+		run  func(t *testing.T, db *model.DB, fake *volumeGCInventoryTestServer, manager *Manager)
+	}{
+		{
+			name: "initial pass skips held volume then release allows it",
+			run: func(t *testing.T, db *model.DB, fake *volumeGCInventoryTestServer, manager *Manager) {
+				owner := createOwner(t, db, model.WorkerStopped, true)
+				holdTestWorker(t, db, owner.ID, "retain large-db evidence")
+
+				manager.syncVolumeInventory(t.Context(), time.Hour)
+				manager.syncVolumeInventory(t.Context(), time.Hour)
+				if _, _, deletes := fake.requestCounts(); deletes != 0 {
+					t.Fatalf("volume delete requests while held = %d, want 0", deletes)
+				}
+				if got := len(volumeGCEventsOfType(t, db, volumeGCEventSkippedEvidenceHold)); got != 1 {
+					t.Fatalf("skip events = %d, want 1 windowed event", got)
+				}
+				attempts, err := db.ListVolumeGCAttempts("litestream-soak")
+				if err != nil || len(attempts) != 0 {
+					t.Fatalf("persisted GC attempts while held = %d, %v; want 0", len(attempts), err)
+				}
+
+				if err := db.ClearWorkerEvidenceHold(owner.ID); err != nil {
+					t.Fatal(err)
+				}
+				manager.syncVolumeInventory(t.Context(), time.Hour)
+				if _, _, deletes := fake.requestCounts(); deletes != 1 {
+					t.Fatalf("volume delete requests after release = %d, want 1", deletes)
+				}
+			},
+		},
+		{
+			name: "provisioning attempt reference is honored",
+			run: func(t *testing.T, db *model.DB, fake *volumeGCInventoryTestServer, manager *Manager) {
+				owner := createOwner(t, db, model.WorkerPending, false)
+				attempt, err := db.BeginProvisioning(model.ProvisioningAttempt{
+					ID:            "attempt-1",
+					WorkerID:      owner.ID,
+					ImageRef:      "image",
+					GitSHA:        owner.GitSHA,
+					LitestreamSHA: owner.LitestreamSHA,
+					VolumeName:    "soak_worker_rc_a25ac011_gate_large_db",
+					VolumeSizeGB:  40,
+				})
+				if err != nil {
+					t.Fatalf("BeginProvisioning() error = %v", err)
+				}
+				if ok, err := db.AdvanceProvisioning(*attempt, "volume_ready", volumeID, ""); err != nil || !ok {
+					t.Fatalf("AdvanceProvisioning() = %v, %v", ok, err)
+				}
+				holdTestWorker(t, db, owner.ID, "retain provisioning volume")
+
+				manager.syncVolumeInventory(t.Context(), time.Hour)
+				if _, _, deletes := fake.requestCounts(); deletes != 0 {
+					t.Fatalf("volume delete requests while held = %d, want 0", deletes)
+				}
+				requireVolumeGCSkipEvent(t, db, owner.ID)
+			},
+		},
+		{
+			name: "persisted retry skips held volume and clears the attempt",
+			run: func(t *testing.T, db *model.DB, fake *volumeGCInventoryTestServer, manager *Manager) {
+				owner := createOwner(t, db, model.WorkerStopped, true)
+
+				manager.syncVolumeInventory(t.Context(), time.Hour)
+				if _, _, deletes := fake.requestCounts(); deletes != 1 {
+					t.Fatalf("volume delete requests before hold = %d, want 1", deletes)
+				}
+				attempts, err := db.ListVolumeGCAttempts("litestream-soak")
+				if err != nil || len(attempts) != 1 {
+					t.Fatalf("persisted GC attempts before hold = %d, %v; want 1", len(attempts), err)
+				}
+
+				holdTestWorker(t, db, owner.ID, "retain after first destroy request")
+				manager.volumeGCMu.Lock()
+				manager.volumeGCAttempts[volumeID].NextRetryAt = time.Now().UTC().Add(-time.Minute)
+				manager.volumeGCMu.Unlock()
+
+				manager.syncVolumeInventory(t.Context(), time.Hour)
+				if _, _, deletes := fake.requestCounts(); deletes != 1 {
+					t.Fatalf("volume delete requests on held retry = %d, want 1", deletes)
+				}
+				attempts, err = db.ListVolumeGCAttempts("litestream-soak")
+				if err != nil || len(attempts) != 0 {
+					t.Fatalf("persisted GC attempts after held retry = %d, %v; want 0", len(attempts), err)
+				}
+				requireVolumeGCSkipEvent(t, db, owner.ID)
+
+				if err := db.ClearWorkerEvidenceHold(owner.ID); err != nil {
+					t.Fatal(err)
+				}
+				manager.syncVolumeInventory(t.Context(), time.Hour)
+				if _, _, deletes := fake.requestCounts(); deletes != 2 {
+					t.Fatalf("volume delete requests after release = %d, want 2", deletes)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newVolumeGCInventoryTestServer(t, staleVolume(), "")
+			db := openTestDB(t)
+			manager := NewManager(fake.client, db, NewControlMetrics(db), nil, "litestream-soak", ReplicaConfig{}, "", "")
+			tc.run(t, db, fake, manager)
+		})
+	}
+}
+
+func requireVolumeGCSkipEvent(t *testing.T, db *model.DB, workerID string) {
+	t.Helper()
+	events := volumeGCEventsOfType(t, db, volumeGCEventSkippedEvidenceHold)
+	if len(events) == 0 {
+		t.Fatalf("no %s event recorded", volumeGCEventSkippedEvidenceHold)
+	}
+	if !strings.Contains(events[0].Details, "worker_id="+workerID) {
+		t.Fatalf("skip event details = %q, want worker %s", events[0].Details, workerID)
 	}
 }
