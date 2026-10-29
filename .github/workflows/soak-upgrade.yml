@@ -1,0 +1,263 @@
+name: soak-upgrade
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: Candidate ref (tag, branch, PR head SHA) in benbjohnson/litestream whose sync/compaction change is under test
+        required: true
+        type: string
+      baseline_sha:
+        description: Base commit SHA or ref the lane starts on (defaults to the current upstream main head)
+        required: false
+        type: string
+      warmup:
+        description: How long the lane runs the base build before switching, in whole minutes or hours (default 2h)
+        required: false
+        type: string
+        default: 2h
+      duration:
+        description: Gate TTL in whole hours, such as 24h (maximum 168h); teardown and archive happen automatically
+        required: false
+        type: string
+        default: 24h
+
+permissions:
+  contents: read
+
+concurrency:
+  group: soak-upgrade-${{ github.event.inputs.candidate_ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-request:
+    runs-on: ubuntu-latest
+    outputs:
+      candidate_ref: ${{ steps.resolve.outputs.candidate_ref }}
+      candidate_sha: ${{ steps.resolve.outputs.candidate_sha }}
+      baseline_sha: ${{ steps.resolve.outputs.baseline_sha }}
+      candidate_source: ${{ steps.resolve.outputs.candidate_source }}
+      baseline_source: ${{ steps.resolve.outputs.baseline_source }}
+      warmup: ${{ steps.resolve.outputs.warmup }}
+      duration: ${{ steps.resolve.outputs.duration }}
+    steps:
+      - id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANDIDATE_REF: ${{ github.event.inputs.candidate_ref }}
+          BASELINE_REF: ${{ github.event.inputs.baseline_sha || '' }}
+          WARMUP: ${{ github.event.inputs.warmup || '2h' }}
+          DURATION: ${{ github.event.inputs.duration || '24h' }}
+        run: |
+          set -euo pipefail
+
+          upstream_repo="benbjohnson/litestream"
+          candidate_ref="${CANDIDATE_REF}"
+          baseline_ref="${BASELINE_REF:-main}"
+          warmup="${WARMUP}"
+          duration="${DURATION}"
+
+          for ref in "${candidate_ref}" "${baseline_ref}"; do
+            if [[ ! "${ref}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+              echo "refs must be a tag, branch, or commit SHA" >&2
+              exit 1
+            fi
+          done
+          if [[ ! "${duration}" =~ ^[1-9][0-9]*h$ ]] || [ "${duration%h}" -gt 168 ]; then
+            echo "duration must be whole hours between 1h and 168h" >&2
+            exit 1
+          fi
+          if [[ ! "${warmup}" =~ ^[1-9][0-9]*[mh]$ ]]; then
+            echo "warmup must be whole minutes or hours, such as 30m or 2h" >&2
+            exit 1
+          fi
+          warmup_minutes="${warmup%[mh]}"
+          if [[ "${warmup}" == *h ]]; then
+            warmup_minutes=$((warmup_minutes * 60))
+          fi
+          if [ "${warmup_minutes}" -ge $(( ${duration%h} * 60 )) ]; then
+            echo "warmup ${warmup} must end before the ${duration} gate TTL" >&2
+            exit 1
+          fi
+
+          resolve_sha() {
+            local ref="$1"
+            local sha
+            sha="$(gh api "repos/${upstream_repo}/commits/${ref}" --jq .sha | tr '[:upper:]' '[:lower:]')"
+            if [[ ! "${sha}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "failed to resolve ${upstream_repo}@${ref} to a 40-character commit SHA" >&2
+              return 1
+            fi
+            printf '%s\n' "${sha}"
+          }
+
+          candidate_sha="$(resolve_sha "${candidate_ref}")"
+          baseline_sha="$(resolve_sha "${baseline_ref}")"
+          if [ "${candidate_sha}" = "${baseline_sha}" ]; then
+            echo "candidate and baseline resolve to the same commit ${candidate_sha}" >&2
+            exit 1
+          fi
+
+          {
+            echo "candidate_ref=${candidate_ref}"
+            echo "candidate_sha=${candidate_sha}"
+            echo "baseline_sha=${baseline_sha}"
+            echo "candidate_source=up-${candidate_sha::8}"
+            echo "baseline_source=upbase-${baseline_sha::8}"
+            echo "warmup=${warmup}"
+            echo "duration=${duration}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "### Upgrade gate request"
+            echo "Candidate: ${upstream_repo}@${candidate_ref} -> ${candidate_sha}"
+            echo "Base: ${upstream_repo}@${baseline_ref} -> ${baseline_sha}"
+            echo "Lane: base for ${warmup}, then candidate on the same volume; TTL ${duration}"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+  build-worker-images:
+    needs: resolve-request
+    runs-on: ubuntu-latest
+    outputs:
+      candidate_image_ref: ${{ steps.build.outputs.candidate_image_ref }}
+      baseline_image_ref: ${{ steps.build.outputs.baseline_image_ref }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup-flyctl
+
+      - id: build
+        shell: bash
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          CANDIDATE_SHA: ${{ needs.resolve-request.outputs.candidate_sha }}
+          BASELINE_SHA: ${{ needs.resolve-request.outputs.baseline_sha }}
+          CANDIDATE_SOURCE: ${{ needs.resolve-request.outputs.candidate_source }}
+          BASELINE_SOURCE: ${{ needs.resolve-request.outputs.baseline_source }}
+        run: |
+          set -euo pipefail
+
+          parse_flyctl_image_ref() {
+            local log_file="$1"
+            local image_label="$2"
+            local image_ref
+
+            image_ref="$(awk '$1 == "image:" && $2 ~ "^registry[.]fly[.]io/litestream-soak:" {print $2}' "${log_file}" | tail -n 1 || true)"
+            if [ -z "${image_ref}" ]; then
+              echo "failed to parse image ref from flyctl output" >&2
+              echo "expected a line matching: image: registry.fly.io/litestream-soak:${image_label}" >&2
+              tail -n 40 "${log_file}" >&2
+              return 1
+            fi
+            if [[ "${image_ref}" != "registry.fly.io/litestream-soak:${image_label}"* ]]; then
+              echo "parsed flyctl image ref ${image_ref} does not match expected label ${image_label}" >&2
+              tail -n 40 "${log_file}" >&2
+              return 1
+            fi
+
+            printf '%s\n' "${image_ref}"
+          }
+
+          # The candidate image also carries the base build at
+          # /opt/soak/base/litestream-base so the lane worker can start on it
+          # and switch to the pinned candidate build in place.
+          build_gate_image() {
+            local source_name="$1"
+            local litestream_sha="$2"
+            local base_sha="$3"
+            local output_name="$4"
+            local image_label="sha-${GITHUB_SHA::12}-${source_name}-ls-${litestream_sha::12}"
+            local log_file
+            local image_ref
+            log_file="$(mktemp)"
+
+            flyctl deploy \
+              --remote-only \
+              --app litestream-soak \
+              --config fly.toml \
+              --image-label "${image_label}" \
+              --build-arg "LITESTREAM_SHA=${litestream_sha}" \
+              --build-arg "LITESTREAM_BASE_SHA=${base_sha}" \
+              --build-only \
+              --push 2>&1 | tee "${log_file}"
+
+            image_ref="$(parse_flyctl_image_ref "${log_file}" "${image_label}")"
+            echo "${output_name}=${image_ref}" >> "${GITHUB_OUTPUT}"
+          }
+
+          build_gate_image "${CANDIDATE_SOURCE}" "${CANDIDATE_SHA}" "${BASELINE_SHA}" candidate_image_ref
+          build_gate_image "${BASELINE_SOURCE}" "${BASELINE_SHA}" "" baseline_image_ref
+
+  launch-gate:
+    needs:
+      - resolve-request
+      - build-worker-images
+    if: needs.build-worker-images.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Verify candidate compatibility before launching the gate
+        timeout-minutes: 15
+        env:
+          CANDIDATE_SHA: ${{ needs.resolve-request.outputs.candidate_sha }}
+        run: bash scripts/test-compatibility.sh "$CANDIDATE_SHA"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compatibility-upgrade-${{ needs.resolve-request.outputs.candidate_sha }}
+          include-hidden-files: true
+          path: |
+            .local/compatibility/**/run.log
+            .local/compatibility/**/*.buildinfo
+            .local/compatibility/**/replication-*/
+          if-no-files-found: error
+
+      - shell: bash
+        env:
+          CONTROL_BASE_URL: ${{ vars.SOAK_CONTROL_BASE_URL }}
+          SOAK_ADMIN_BEARER_TOKEN: ${{ secrets.SOAK_ADMIN_BEARER_TOKEN }}
+          CANDIDATE_REF: ${{ needs.resolve-request.outputs.candidate_ref }}
+          CANDIDATE_SHA: ${{ needs.resolve-request.outputs.candidate_sha }}
+          BASELINE_SHA: ${{ needs.resolve-request.outputs.baseline_sha }}
+          CANDIDATE_SOURCE: ${{ needs.resolve-request.outputs.candidate_source }}
+          BASELINE_SOURCE: ${{ needs.resolve-request.outputs.baseline_source }}
+          CANDIDATE_IMAGE_REF: ${{ needs.build-worker-images.outputs.candidate_image_ref }}
+          BASELINE_IMAGE_REF: ${{ needs.build-worker-images.outputs.baseline_image_ref }}
+          WARMUP: ${{ needs.resolve-request.outputs.warmup }}
+          DURATION: ${{ needs.resolve-request.outputs.duration }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CONTROL_BASE_URL}" ]; then
+            export CONTROL_BASE_URL="https://litestream-soak-ctl.fly.dev"
+          fi
+
+          chmod +x scripts/register-rc-gate.sh scripts/notify-deployment-ready.sh
+          ./scripts/register-rc-gate.sh \
+            "benbjohnson/litestream" \
+            "${CANDIDATE_REF}" \
+            "${CANDIDATE_SHA}" \
+            "${BASELINE_SHA}" \
+            "${DURATION}" \
+            "false" \
+            "upgrade" \
+            "${WARMUP}"
+          ./scripts/notify-deployment-ready.sh \
+            "${GITHUB_SHA}" \
+            "${CANDIDATE_SOURCE}" \
+            "rc_gate" \
+            "${CANDIDATE_IMAGE_REF}" \
+            "${CANDIDATE_SHA}"
+          ./scripts/notify-deployment-ready.sh \
+            "${GITHUB_SHA}" \
+            "${BASELINE_SOURCE}" \
+            "rc_gate" \
+            "${BASELINE_IMAGE_REF}" \
+            "${BASELINE_SHA}"

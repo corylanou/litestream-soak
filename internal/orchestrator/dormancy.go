@@ -262,6 +262,27 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 		env["STRESS_SCENARIOS"] = workloadCfg.StressScenarios
 		env["STRESS_SCENARIO_PHASE"] = workloadCfg.StressScenarioPhase
 	}
+	if workloadCfg.UpgradeLane {
+		env["UPGRADE_LANE"] = "true"
+		if strings.TrimSpace(workloadCfg.UpgradeWarmup) != "" {
+			env["UPGRADE_WARMUP"] = workloadCfg.UpgradeWarmup
+		}
+		if strings.TrimSpace(workloadCfg.UpgradePostSnapshotInterval) != "" {
+			env["UPGRADE_POST_SNAPSHOT_INTERVAL"] = workloadCfg.UpgradePostSnapshotInterval
+		}
+	}
+	if workloadCfg.FollowCheck {
+		env["FOLLOW_CHECK"] = "true"
+	}
+	if workloadCfg.CompactionProgressCheck {
+		env["COMPACTION_PROGRESS_CHECK"] = "true"
+	}
+	if workloadCfg.CompactionL0ObjectBound > 0 {
+		env["COMPACTION_L0_OBJECT_BOUND"] = fmt.Sprintf("%d", workloadCfg.CompactionL0ObjectBound)
+	}
+	if workloadCfg.CompactionL1ObjectBound > 0 {
+		env["COMPACTION_L1_OBJECT_BOUND"] = fmt.Sprintf("%d", workloadCfg.CompactionL1ObjectBound)
+	}
 	if workloadCfg.ReplayDataset != "" {
 		env["REPLAY_DATASET"] = workloadCfg.ReplayDataset
 	}

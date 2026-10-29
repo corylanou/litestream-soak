@@ -45,8 +45,10 @@ func allFleetProfiles() map[string]struct{} {
 	for _, w := range DefaultMainFleet().Workers {
 		profiles[w.ProfileName] = struct{}{}
 	}
-	for _, w := range GateFleetForSource("rc-aaaaaaaa", "", "").Workers {
-		profiles[w.ProfileName] = struct{}{}
+	for _, source := range []string{"rc-aaaaaaaa", "up-aaaaaaaa", "upbase-bbbbbbbb"} {
+		for _, w := range GateFleetForSource(source, "", "").Workers {
+			profiles[w.ProfileName] = struct{}{}
+		}
 	}
 	return profiles
 }

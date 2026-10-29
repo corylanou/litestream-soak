@@ -34,12 +34,22 @@ CREATE TABLE IF NOT EXISTS rc_gates (
     paired_ready_at DATETIME,
     completed_at DATETIME,
     resources_json TEXT NOT NULL DEFAULT '[]',
-    results_json TEXT NOT NULL DEFAULT ''
+    results_json TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'rc',
+    upgrade_warmup_seconds INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_rc_gates_status ON rc_gates(status);
 `
 
 type RCGateStatus string
+
+// RCGateKind selects the gate fleet and the scenarios the ledger scores.
+type RCGateKind string
+
+const (
+	RCGateKindRC      RCGateKind = "rc"
+	RCGateKindUpgrade RCGateKind = "upgrade"
+)
 
 const (
 	RCGateRunning   RCGateStatus = "running"
@@ -65,6 +75,7 @@ type RCGateResource struct {
 
 type RCGate struct {
 	ID                int64            `json:"id"`
+	Kind              RCGateKind       `json:"kind"`
 	Repository        string           `json:"repository"`
 	CandidateRef      string           `json:"candidate_ref,omitempty"`
 	CandidateSource   string           `json:"candidate_source"`
@@ -76,6 +87,7 @@ type RCGate struct {
 	BaselineImageRef  string           `json:"baseline_image_ref,omitempty"`
 	BaselineGitSHA    string           `json:"baseline_soak_sha,omitempty"`
 	Duration          time.Duration    `json:"-"`
+	UpgradeWarmup     time.Duration    `json:"-"`
 	Tail              bool             `json:"tail"`
 	Status            RCGateStatus     `json:"status"`
 	StartedAt         time.Time        `json:"started_at"`
@@ -133,7 +145,21 @@ func (g RCGate) Closed() bool {
 
 const rcGateColumns = `id, repository, candidate_ref, candidate_source, candidate_sha, candidate_image_ref, candidate_git_sha,
 	baseline_source, baseline_sha, baseline_image_ref, baseline_git_sha, duration_seconds, tail, status,
-	started_at, expires_at, tail_expires_at, provision_deadline, candidate_ready_at, baseline_ready_at, paired_ready_at, completed_at, resources_json, results_json`
+	started_at, expires_at, tail_expires_at, provision_deadline, candidate_ready_at, baseline_ready_at, paired_ready_at, completed_at, resources_json, results_json,
+	kind, upgrade_warmup_seconds`
+
+func ensureRCGateColumns(db *sql.DB) error {
+	statements := []string{
+		`ALTER TABLE rc_gates ADD COLUMN kind TEXT NOT NULL DEFAULT 'rc'`,
+		`ALTER TABLE rc_gates ADD COLUMN upgrade_warmup_seconds INTEGER NOT NULL DEFAULT 0`,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return err
+		}
+	}
+	return nil
+}
 
 const rcGateOpenClause = "status NOT IN ('completed', 'aborted')"
 
@@ -163,16 +189,21 @@ func (d *DB) CreateRCGate(gate *RCGate) error {
 		return ErrRCGateSourceActive
 	}
 
+	if gate.Kind == "" {
+		gate.Kind = RCGateKindRC
+	}
 	result, err := tx.Exec(`
 		INSERT INTO rc_gates (repository, candidate_ref, candidate_source, candidate_sha, candidate_image_ref, candidate_git_sha,
 			baseline_source, baseline_sha, baseline_image_ref, baseline_git_sha, duration_seconds, tail, status,
-			started_at, expires_at, tail_expires_at, provision_deadline, candidate_ready_at, baseline_ready_at, paired_ready_at, completed_at, resources_json, results_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			started_at, expires_at, tail_expires_at, provision_deadline, candidate_ready_at, baseline_ready_at, paired_ready_at, completed_at, resources_json, results_json,
+			kind, upgrade_warmup_seconds)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gate.Repository, gate.CandidateRef, gate.CandidateSource, gate.CandidateSHA, gate.CandidateImageRef, gate.CandidateGitSHA,
 		gate.BaselineSource, gate.BaselineSHA, gate.BaselineImageRef, gate.BaselineGitSHA, int64(gate.Duration/time.Second), gate.Tail, gate.Status,
 		gate.StartedAt.UTC(), gate.ExpiresAt.UTC(), utcTimePtr(gate.TailExpiresAt), gate.ProvisionDeadline.UTC(),
 		utcTimePtr(gate.CandidateReadyAt), utcTimePtr(gate.BaselineReadyAt), utcTimePtr(gate.PairedReadyAt),
 		utcTimePtr(gate.CompletedAt), string(resources), gate.Results,
+		string(gate.Kind), int64(gate.UpgradeWarmup/time.Second),
 	)
 	if err != nil {
 		return err
@@ -290,6 +321,8 @@ func (d *DB) listRCGates(query string, args ...any) ([]RCGate, error) {
 		var (
 			gate            RCGate
 			durationSeconds int64
+			warmupSeconds   int64
+			kind            string
 			tailExpiresAt   sql.NullTime
 			candidateReady  sql.NullTime
 			baselineReady   sql.NullTime
@@ -301,10 +334,16 @@ func (d *DB) listRCGates(query string, args ...any) ([]RCGate, error) {
 			&gate.ID, &gate.Repository, &gate.CandidateRef, &gate.CandidateSource, &gate.CandidateSHA, &gate.CandidateImageRef, &gate.CandidateGitSHA,
 			&gate.BaselineSource, &gate.BaselineSHA, &gate.BaselineImageRef, &gate.BaselineGitSHA, &durationSeconds, &gate.Tail, &gate.Status,
 			&gate.StartedAt, &gate.ExpiresAt, &tailExpiresAt, &gate.ProvisionDeadline, &candidateReady, &baselineReady, &pairedReadyAt, &completedAt, &resources, &gate.Results,
+			&kind, &warmupSeconds,
 		); err != nil {
 			return nil, err
 		}
 		gate.Duration = time.Duration(durationSeconds) * time.Second
+		gate.UpgradeWarmup = time.Duration(warmupSeconds) * time.Second
+		gate.Kind = RCGateKind(kind)
+		if gate.Kind == "" {
+			gate.Kind = RCGateKindRC
+		}
 		gate.StartedAt = gate.StartedAt.UTC()
 		gate.ExpiresAt = gate.ExpiresAt.UTC()
 		gate.ProvisionDeadline = gate.ProvisionDeadline.UTC()
