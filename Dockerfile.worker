@@ -28,6 +28,7 @@ WORKDIR /src/litestream-base
 RUN mkdir -p /out && \
     if [ -n "${LITESTREAM_BASE_SHA}" ]; then \
       git clone https://github.com/benbjohnson/litestream.git . && \
+      git fetch origin "${LITESTREAM_BASE_SHA}" && \
       git checkout --detach "${LITESTREAM_BASE_SHA}" && \
       git rev-parse HEAD >/out/litestream-base.sha && \
       go build \

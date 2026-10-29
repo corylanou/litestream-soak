@@ -232,7 +232,7 @@ func TestUpgradeGateFleetAppliesRegisteredWarmup(t *testing.T) {
 	}
 }
 
-func recordUpgradeGateVerification(t *testing.T, db *model.DB, source, profile, phase, checkType, mode string, passed bool, at time.Time) {
+func recordUpgradeGateVerification(t *testing.T, db *model.DB, source, profile, phase, activeSHA, checkType, mode string, passed bool, at time.Time) {
 	t.Helper()
 	worker, err := db.GetWorker("worker-" + source + "-" + profile)
 	if err != nil {
@@ -244,7 +244,8 @@ func recordUpgradeGateVerification(t *testing.T, db *model.DB, source, profile, 
 	}
 	run := fixtureRun(*worker, *deployment)
 	run.UpgradePhase = phase
-	if phase != "" {
+	run.ActiveLitestreamSHA = activeSHA
+	if phase != "" && activeSHA == "" {
 		run.ActiveLitestreamSHA = testGateBaselineSHA
 		if phase == "post-upgrade" {
 			run.ActiveLitestreamSHA = testGateCandidateSHA
@@ -261,20 +262,23 @@ func recordUpgradeGateVerification(t *testing.T, db *model.DB, source, profile, 
 
 func TestUpgradeGateLedgerScoresPhasesAndFollow(t *testing.T) {
 	type verification struct {
-		source, profile, phase, checkType, mode string
-		passed                                  bool
+		source, profile, phase, activeSHA, checkType, mode string
+		passed                                             bool
 	}
 	laneRestore := func(phase, mode string, passed bool) verification {
-		return verification{testUpgradeCandidate, gateUpgradeLaneProfile, phase, "integrity", mode, passed}
+		return verification{testUpgradeCandidate, gateUpgradeLaneProfile, phase, "", "integrity", mode, passed}
+	}
+	mislabelled := func(phase, activeSHA, mode string, passed bool) verification {
+		return verification{testUpgradeCandidate, gateUpgradeLaneProfile, phase, activeSHA, "integrity", mode, passed}
 	}
 	laneRotation := func(phase string) []verification {
 		return []verification{laneRestore(phase, "txid", true), laneRestore(phase, "timestamp", true), laneRestore(phase, "latest", true)}
 	}
 	laneFollow := func(passed bool) verification {
-		return verification{testUpgradeCandidate, gateUpgradeLaneProfile, "post-upgrade", "follow", "follow", passed}
+		return verification{testUpgradeCandidate, gateUpgradeLaneProfile, "post-upgrade", "", "follow", "follow", passed}
 	}
 	follow := func(source string, checkType, mode string, passed bool) verification {
-		return verification{source, gateUpgradeFollowProfile, "", checkType, mode, passed}
+		return verification{source, gateUpgradeFollowProfile, "", "", checkType, mode, passed}
 	}
 	followRotation := func(source string) []verification {
 		return []verification{follow(source, "integrity", "txid", true), follow(source, "integrity", "timestamp", true), follow(source, "integrity", "latest", true)}
@@ -331,6 +335,23 @@ func TestUpgradeGateLedgerScoresPhasesAndFollow(t *testing.T) {
 			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictIncomplete},
 		},
 		{
+			name: "post-upgrade failures reported with the base SHA do not count",
+			verifications: append(append([]verification{}, fullCoverage...),
+				mislabelled("post-upgrade", testGateBaselineSHA, "txid", false),
+				mislabelled("pre-upgrade", testGateCandidateSHA, "txid", false),
+				mislabelled("post-upgrade", "unknown", "latest", false)),
+			wantVerdict:   rcGateVerdictPass,
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass},
+		},
+		{
+			name: "post-upgrade passes reported with the base SHA do not give coverage",
+			verifications: concat(laneRotation("pre-upgrade"), followRotation(testUpgradeCandidate), followRotation(testUpgradeBaseline),
+				[]verification{laneFollow(true), follow(testUpgradeCandidate, "follow", "follow", true), follow(testUpgradeBaseline, "follow", "follow", true),
+					mislabelled("post-upgrade", testGateBaselineSHA, "txid", true), mislabelled("post-upgrade", testGateBaselineSHA, "timestamp", true), mislabelled("post-upgrade", testGateBaselineSHA, "latest", true)}),
+			wantVerdict:   rcGateVerdictIncomplete,
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictIncomplete, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass},
+		},
+		{
 			name:          "both follow lanes failing is not a regression",
 			verifications: append(append([]verification{}, fullCoverage...), follow(testUpgradeCandidate, "follow", "follow", false), follow(testUpgradeBaseline, "follow", "follow", false)),
 			wantVerdict:   rcGateVerdictFail,
@@ -344,7 +365,7 @@ func TestUpgradeGateLedgerScoresPhasesAndFollow(t *testing.T) {
 			createTestGateFleet(t, db, gate)
 			inside := gate.StartedAt.Add(time.Hour)
 			for i, v := range tt.verifications {
-				recordUpgradeGateVerification(t, db, v.source, v.profile, v.phase, v.checkType, v.mode, v.passed, inside.Add(time.Duration(i)*time.Minute))
+				recordUpgradeGateVerification(t, db, v.source, v.profile, v.phase, v.activeSHA, v.checkType, v.mode, v.passed, inside.Add(time.Duration(i)*time.Minute))
 			}
 			stored, err := db.GetRCGate(gate.ID)
 			if err != nil {

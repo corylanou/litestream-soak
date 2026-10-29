@@ -31,12 +31,13 @@ if [ "$pinned" = 1 ] && [ "${FOLLOW_PINNED_OK:-0}" != 1 ]; then
   exit 1
 fi
 cp "$FOLLOW_SOURCE" "$out"
-printf '%s\n' "$FOLLOW_TXID" > "$out-txid"
+cp "$FOLLOW_TXID_FILE" "$out-txid"
 if [ "${FOLLOW_EXIT_AFTER_RESTORE:-0}" = 1 ]; then
   exit 0
 fi
 trap 'kill "$child" 2>/dev/null; exit 0' INT TERM
 while :; do
+  cp "$FOLLOW_TXID_FILE" "$out-txid.next" && mv "$out-txid.next" "$out-txid"
   sleep 0.2 &
   child=$!
   wait "$child"
@@ -44,8 +45,9 @@ done
 `
 
 type followFixture struct {
-	cfg Config
-	v   *Verifier
+	cfg      Config
+	v        *Verifier
+	txidFile string
 }
 
 func newFollowFixture(t *testing.T) *followFixture {
@@ -53,23 +55,30 @@ func newFollowFixture(t *testing.T) *followFixture {
 	cfg, _ := restoreModeFixture(t, fakeFollowScript)
 	cfg.FollowCheck = true
 	logicalTestDB(t, cfg.DBPath, "INSERT INTO t VALUES (1), (2)")
+	txidFile := filepath.Join(cfg.DataDir, "follower-txid")
 	t.Setenv("FOLLOW_SOURCE", cfg.DBPath)
-	t.Setenv("FOLLOW_TXID", "0000000000000042")
+	t.Setenv("FOLLOW_TXID_FILE", txidFile)
 	v := NewVerifier(cfg)
 	t.Cleanup(v.stopFollow)
-	return &followFixture{cfg: cfg, v: v}
+	return &followFixture{cfg: cfg, v: v, txidFile: txidFile}
 }
 
-func (f *followFixture) cycle(t *testing.T, l9MaxTXID uint64) VerificationResult {
+// cycle runs one follow check at the given source boundary while the fake
+// follower reports the same txid in its sidecar and the replica's L9 level
+// sits at l9MaxTXID.
+func (f *followFixture) cycle(t *testing.T, boundary, l9MaxTXID uint64) VerificationResult {
 	t.Helper()
-	f.v.replicaLevels = func(Config, uint64) *reporting.ReplicaLevelReport {
-		return levelReport(map[int]reporting.ReplicaLevelSummary{0: {ObjectCount: 3, MaxTXIDDecimal: 0x42}, 9: {ObjectCount: 1, MaxTXIDDecimal: l9MaxTXID}})
+	if err := os.WriteFile(f.txidFile, []byte(formatTXID(boundary)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	snapshot, err := f.v.logicalValidation(context.Background(), f.cfg.DBPath, 0x42)
+	f.v.replicaLevels = func(Config, uint64) *reporting.ReplicaLevelReport {
+		return levelReport(map[int]reporting.ReplicaLevelSummary{0: {ObjectCount: 3, MaxTXIDDecimal: boundary}, 9: {ObjectCount: 1, MaxTXIDDecimal: l9MaxTXID}})
+	}
+	snapshot, err := f.v.logicalValidation(context.Background(), f.cfg.DBPath, boundary)
 	if err != nil {
 		t.Fatalf("logicalValidation() error = %v", err)
 	}
-	return f.v.runFollowCheck(context.Background(), verificationBoundary{logicalSnapshot: snapshot, txid: 0x42})
+	return f.v.runFollowCheck(context.Background(), verificationBoundary{logicalSnapshot: snapshot, txid: boundary})
 }
 
 func stepStatus(result VerificationResult, name string) string {
@@ -83,6 +92,7 @@ func stepStatus(result VerificationResult, name string) string {
 
 func TestFollowCheckAcrossL9Boundary(t *testing.T) {
 	type cycle struct {
+		boundary     uint64
 		l9           uint64
 		wantStatus   string
 		wantSummary  string
@@ -95,39 +105,41 @@ func TestFollowCheckAcrossL9Boundary(t *testing.T) {
 		cycles []cycle
 	}{
 		{
-			name: "pinned unsupported, passes once L9 advances",
+			name: "pinned unsupported, passes only once the follower crosses the new L9",
 			cycles: []cycle{
-				{l9: 100, wantStatus: "pending", wantSummary: "awaiting a new L9 snapshot", wantFallback: followPinnedUnsupportedFallback,
+				{boundary: 0x42, l9: 100, wantStatus: "pending", wantSummary: "awaiting a new L9 snapshot", wantFallback: followPinnedUnsupportedFallback,
 					wantSteps: map[string]string{"follow_pinned": followStepUnsupported, "follow_start": "ok", "follow_initial": "ok", "follow_compare": "ok"}},
-				{l9: 100, wantStatus: "pending", wantSummary: "no new L9 snapshot since follow start",
+				{boundary: 0x42, l9: 100, wantStatus: "pending", wantSummary: "no new L9 snapshot since follow start",
 					wantSteps: map[string]string{"follow_catch_up": "ok", "follow_compare": "ok", "follow_l9": "pending"}},
-				{l9: 200, wantStatus: "passed", wantSummary: "after L9 snapshot advanced from 0000000000000064 to 00000000000000c8",
+				{boundary: 150, l9: 200, wantStatus: "pending", wantSummary: "behind the new L9 snapshot at 00000000000000c8",
+					wantSteps: map[string]string{"follow_catch_up": "ok", "follow_compare": "ok", "follow_l9": "pending"}},
+				{boundary: 250, l9: 200, wantStatus: "passed", wantSummary: "after crossing the L9 snapshot that advanced from 0000000000000064 to 00000000000000c8",
 					wantSteps: map[string]string{"follow_catch_up": "ok", "follow_compare": "ok", "follow_l9": "ok"}},
-				{l9: 200, wantStatus: "pending", wantSummary: "no new L9 snapshot since last pass"},
-				{l9: 260, wantStatus: "passed", wantSummary: "advanced from 00000000000000c8 to 0000000000000104"},
+				{boundary: 250, l9: 200, wantStatus: "pending", wantSummary: "no new L9 snapshot since last pass"},
+				{boundary: 260, l9: 260, wantStatus: "passed", wantSummary: "advanced from 00000000000000c8 to 0000000000000104"},
 			},
 		},
 		{
 			name: "pinned follow supported",
 			env:  map[string]string{"FOLLOW_PINNED_OK": "1"},
 			cycles: []cycle{
-				{l9: 100, wantStatus: "pending", wantSummary: "pinned-txid follow matched source at txid 0000000000000042", wantSteps: map[string]string{"follow_pinned": "ok"}},
+				{boundary: 0x42, l9: 100, wantStatus: "pending", wantSummary: "pinned-txid follow matched source at txid 0000000000000042", wantSteps: map[string]string{"follow_pinned": "ok"}},
 			},
 		},
 		{
 			name: "pinned follow rejected for another reason fails",
 			env:  map[string]string{"FOLLOW_PINNED_MESSAGE": "replica unavailable"},
 			cycles: []cycle{
-				{l9: 100, wantStatus: "failed", wantSummary: "pinned follow restore", wantSteps: map[string]string{"follow_pinned": "error"}},
+				{boundary: 0x42, l9: 100, wantStatus: "failed", wantSummary: "pinned follow restore", wantSteps: map[string]string{"follow_pinned": "error"}},
 			},
 		},
 		{
 			name: "follow process exit fails the next cycle",
 			env:  map[string]string{"FOLLOW_EXIT_AFTER_RESTORE": "1"},
 			cycles: []cycle{
-				{l9: 100, wantStatus: "pending", wantFallback: followPinnedUnsupportedFallback},
-				{l9: 200, wantStatus: "failed", wantSummary: "follow restore exited", wantSteps: map[string]string{"follow_process": "error"}},
-				{l9: 200, wantStatus: "pending", wantSummary: "awaiting a new L9 snapshot", wantFallback: followPinnedUnsupportedFallback},
+				{boundary: 0x42, l9: 100, wantStatus: "pending", wantFallback: followPinnedUnsupportedFallback},
+				{boundary: 250, l9: 200, wantStatus: "failed", wantSummary: "follow restore exited", wantSteps: map[string]string{"follow_process": "error"}},
+				{boundary: 250, l9: 200, wantStatus: "pending", wantSummary: "awaiting a new L9 snapshot", wantFallback: followPinnedUnsupportedFallback},
 			},
 		},
 	}
@@ -138,8 +150,8 @@ func TestFollowCheckAcrossL9Boundary(t *testing.T) {
 				t.Setenv(key, value)
 			}
 			for i, want := range tt.cycles {
-				result := fixture.cycle(t, want.l9)
-				if result.Status != want.wantStatus || result.CheckType != followCheckType || result.RestoreMode != followRestoreMode || result.BoundaryTXID != 0x42 {
+				result := fixture.cycle(t, want.boundary, want.l9)
+				if result.Status != want.wantStatus || result.CheckType != followCheckType || result.RestoreMode != followRestoreMode || result.BoundaryTXID != want.boundary {
 					t.Fatalf("cycle %d = status %q type %q mode %q txid %#x summary %q error %q", i, result.Status, result.CheckType, result.RestoreMode, result.BoundaryTXID, result.Summary, result.ErrorMessage)
 				}
 				if result.Passed != (want.wantStatus == "passed") {
@@ -169,12 +181,12 @@ func TestFollowCheckAcrossL9Boundary(t *testing.T) {
 
 func TestFollowCheckDivergenceFailsAndRestarts(t *testing.T) {
 	fixture := newFollowFixture(t)
-	if result := fixture.cycle(t, 100); result.Status != "pending" {
+	if result := fixture.cycle(t, 0x42, 100); result.Status != "pending" {
 		t.Fatalf("first cycle = %+v", result)
 	}
 	logicalTestDB(t, fixture.cfg.DBPath, "INSERT INTO t VALUES (3)")
-	result := fixture.cycle(t, 200)
-	if result.Status != "failed" || result.Passed || !strings.Contains(result.ErrorMessage, "follow restore diverged from source at txid 0000000000000042") {
+	result := fixture.cycle(t, 0x43, 200)
+	if result.Status != "failed" || result.Passed || !strings.Contains(result.ErrorMessage, "follow restore diverged from source at txid 0000000000000043") {
 		t.Fatalf("diverged cycle = %+v", result)
 	}
 	if fixture.v.follow != nil {
@@ -183,7 +195,7 @@ func TestFollowCheckDivergenceFailsAndRestarts(t *testing.T) {
 	if _, err := os.Stat(followDBPath(fixture.cfg.DBPath)); !os.IsNotExist(err) {
 		t.Fatalf("follow artifacts not removed: %v", err)
 	}
-	if result := fixture.cycle(t, 200); result.Status != "pending" || stepStatus(result, "follow_start") != "ok" {
+	if result := fixture.cycle(t, 0x43, 200); result.Status != "pending" || stepStatus(result, "follow_start") != "ok" {
 		t.Fatalf("restart cycle = %+v", result)
 	}
 }
@@ -235,7 +247,7 @@ func TestFollowArgsAndSidecar(t *testing.T) {
 
 func TestFollowSessionStopsWithinGrace(t *testing.T) {
 	fixture := newFollowFixture(t)
-	if result := fixture.cycle(t, 100); result.Status != "pending" {
+	if result := fixture.cycle(t, 0x42, 100); result.Status != "pending" {
 		t.Fatalf("first cycle = %+v", result)
 	}
 	start := time.Now()

@@ -300,12 +300,12 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 			r.sendVerification(context.WithoutCancel(ctx), result, levels)
 			r.recordLocalResult(result)
 			r.recordUpgradePreTXID(result)
-			if follow := r.verifier.takeFollowResult(); follow != nil {
-				if follow.Status == "failed" {
+			for _, extra := range r.verifier.takeExtraResults() {
+				if extra.Status == "failed" {
 					r.triggerProfile("verification-failed")
 				}
-				r.sendVerification(context.WithoutCancel(ctx), *follow, levels)
-				r.recordLocalResult(*follow)
+				r.sendVerification(context.WithoutCancel(ctx), extra, levels)
+				r.recordLocalResult(extra)
 			}
 			if err != nil {
 				slog.Error("Verification cycle error", "error", err)

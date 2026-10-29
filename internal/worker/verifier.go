@@ -91,7 +91,7 @@ type Verifier struct {
 	replicaLevels      func(Config, uint64) *reporting.ReplicaLevelReport
 	boundary           *verificationBoundary
 	follow             *followSession
-	followResult       *VerificationResult
+	extraResults       []VerificationResult
 
 	checkpointAttempts    int
 	checkpointRetryDelay  time.Duration
@@ -247,9 +247,13 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 
 	result.Steps[len(result.Steps)-1].OutputTail += "\n" + v.logicalEvidence
 	result.Steps = append(result.Steps, v.validationSteps...)
-	if v.cfg.FollowCheck && v.boundary != nil && result.BoundaryTXID != 0 && v.boundary.txid == result.BoundaryTXID {
-		follow := v.runFollowCheck(ctx, *v.boundary)
-		v.followResult = &follow
+	if v.boundary != nil && result.BoundaryTXID != 0 && v.boundary.txid == result.BoundaryTXID {
+		if v.cfg.upgradePreTXID != 0 {
+			v.extraResults = append(v.extraResults, v.runPreUpgradeRestore(ctx))
+		}
+		if v.cfg.FollowCheck {
+			v.extraResults = append(v.extraResults, v.runFollowCheck(ctx, *v.boundary))
+		}
 	}
 	if validateErr != nil {
 		v.failValidationResult(ctx, &result, validateErr)
@@ -801,23 +805,63 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		}); err != nil {
 			return false, err
 		}
-		return v.restorePreUpgradeTXID(ctx, configPath, restoredPath, sourcePath, sourceSize)
+		return true, nil
 	}
 	if err := v.runValidationPhase(ctx, "compare", v.cfg.verificationPhaseBudget("compare", sourceSize), func(phaseCtx context.Context) error {
 		return v.compareRestoredLogical(phaseCtx, source.logicalSnapshot, restoredPath)
 	}); err != nil {
 		return false, err
 	}
-	return v.restorePreUpgradeTXID(ctx, configPath, restoredPath, sourcePath, sourceSize)
+	return true, nil
+}
+
+const preUpgradeRestoreCheckType = "pre-upgrade-restore"
+
+// runPreUpgradeRestore reports the historical restore as its own verification
+// so a pre-upgrade target that retention has removed makes this result
+// inconclusive without touching the cycle's current-boundary coverage.
+func (v *Verifier) runPreUpgradeRestore(ctx context.Context) VerificationResult {
+	start := v.clock().UTC()
+	result := VerificationResult{
+		StartedAt:    start,
+		CheckType:    preUpgradeRestoreCheckType,
+		Status:       "running",
+		RestoreMode:  restoreModeTXID,
+		SyncTXID:     v.cfg.upgradePreTXID,
+		BoundaryTXID: v.cfg.upgradePreTXID,
+	}
+	defer func() {
+		RecordVerificationOutcome(result.Status, time.Since(start).Seconds())
+	}()
+	v.validationSteps = nil
+	v.logicalEvidence = ""
+	configPath, cleanupConfig, err := v.validateConfigPath(v.cfg.DBPath)
+	if err != nil {
+		v.failResult(ctx, &result, fmt.Sprintf("pre-upgrade restore config: %v", err))
+		return result
+	}
+	defer cleanupConfig()
+	sourceSize := fileSize(v.cfg.DBPath) + fileSize(v.cfg.DBPath+"-wal")
+	_, err = v.restorePreUpgradeTXID(ctx, configPath, v.cfg.DBPath+".restored", v.cfg.DBPath, sourceSize)
+	if len(v.validationSteps) > 0 {
+		v.validationSteps[len(v.validationSteps)-1].OutputTail += "\n" + v.logicalEvidence
+	}
+	result.Steps = append(result.Steps, v.validationSteps...)
+	if err != nil {
+		v.failValidationResult(ctx, &result, err)
+		return result
+	}
+	result.Status = "passed"
+	result.Passed = true
+	result.Summary = fmt.Sprintf("pre-upgrade txid %016x restored with the current build and passed integrity check", v.cfg.upgradePreTXID)
+	v.finalizeResult(&result)
+	return result
 }
 
 // restorePreUpgradeTXID keeps a txid the base build wrote restorable after the
 // upgrade lane switched builds: every post-upgrade cycle restores it with the
 // candidate build and runs the integrity check on the result.
 func (v *Verifier) restorePreUpgradeTXID(ctx context.Context, configPath, restoredPath, sourcePath string, sourceSize int64) (bool, error) {
-	if v.cfg.upgradePreTXID == 0 {
-		return true, nil
-	}
 	preRestoredPath := restoredPath + ".pre"
 	if err := removeRestoredArtifacts(preRestoredPath); err != nil {
 		return false, fmt.Errorf("clean pre-upgrade restore artifacts: %w", err)

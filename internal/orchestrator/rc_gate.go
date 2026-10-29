@@ -52,6 +52,8 @@ const (
 	gateRoleCandidate = "candidate"
 	gateRoleBaseline  = "baseline"
 	gateModeFollow    = "follow"
+	upgradePhasePre   = "pre-upgrade"
+	upgradePhasePost  = "post-upgrade"
 )
 
 var (
@@ -149,14 +151,14 @@ var (
 		{
 			name:      "upgrade-lane",
 			profile:   gateUpgradeLaneProfile,
-			candidate: gateSideFilter{role: gateRoleCandidate, phase: "post-upgrade", skipFollow: true},
-			baseline:  gateSideFilter{role: gateRoleCandidate, phase: "pre-upgrade", skipFollow: true},
+			candidate: gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost, skipFollow: true},
+			baseline:  gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePre, skipFollow: true},
 		},
 		{
 			name:          "upgrade-lane-follow",
 			profile:       gateUpgradeLaneProfile,
 			requiredModes: []string{gateModeFollow},
-			candidate:     gateSideFilter{role: gateRoleCandidate, phase: "post-upgrade", followOnly: true},
+			candidate:     gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost, followOnly: true},
 			baseline:      gateSideFilter{role: gateRoleBaseline, profile: gateUpgradeFollowProfile, followOnly: true},
 		},
 		{
@@ -182,9 +184,21 @@ func (f gateSideFilter) sourceFor(gate model.RCGate) string {
 	return gate.CandidateSource
 }
 
-func (f gateSideFilter) accepts(verification model.Verification) bool {
-	if f.phase != "" && verification.Run.UpgradePhase != f.phase {
-		return false
+// accepts applies the side filter. A phase filter also requires the report's
+// active Litestream SHA to be the build that phase must have run (baseline
+// before the switch, candidate after), so a mislabelled phase never counts.
+func (f gateSideFilter) accepts(gate model.RCGate, verification model.Verification) bool {
+	if f.phase != "" {
+		if verification.Run.UpgradePhase != f.phase {
+			return false
+		}
+		want := gate.CandidateSHA
+		if f.phase == upgradePhasePre {
+			want = gate.BaselineSHA
+		}
+		if !strings.EqualFold(strings.TrimSpace(verification.Run.ActiveLitestreamSHA), want) {
+			return false
+		}
 	}
 	follow := verification.CheckType == gateModeFollow
 	if f.followOnly && !follow {
@@ -944,7 +958,7 @@ func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter g
 	}
 	for _, verification := range verifications {
 		if verification.StartedAt.Before(gate.StartedAt) || verification.StartedAt.After(end) ||
-			verification.Run.Scenario != scenario.identity || !verification.MatchesDeployment(*worker, *deployment) || !filter.accepts(verification) {
+			verification.Run.Scenario != scenario.identity || !verification.MatchesDeployment(*worker, *deployment) || !filter.accepts(gate, verification) {
 			continue
 		}
 		mode := strings.TrimSpace(verification.RestoreMode)

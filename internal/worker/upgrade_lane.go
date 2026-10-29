@@ -64,14 +64,46 @@ func writeUpgradeLaneState(dataDir string, state upgradeLaneState) error {
 	}
 	path := upgradeLaneStatePath(dataDir)
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(body, '\n'), 0644); err != nil {
+	if err := writeFileDurable(tmp, append(body, '\n')); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write upgrade lane state: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("commit upgrade lane state: %w", err)
 	}
+	if err := syncDir(dataDir); err != nil {
+		return fmt.Errorf("commit upgrade lane state: %w", err)
+	}
 	return nil
+}
+
+// writeFileDurable writes and fsyncs a file so the phase marker survives a
+// crash right after the switch; the caller renames it into place and syncs
+// the directory.
+func writeFileDurable(path string, body []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(body); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	return d.Sync()
 }
 
 // recordUpgradePreTXID remembers the newest verified pre-upgrade boundary so

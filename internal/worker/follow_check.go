@@ -27,7 +27,10 @@ const (
 	followStepUnsupported           = "unsupported"
 )
 
-var errFollowL9Pending = errors.New("follow restore has not crossed a new L9 snapshot yet")
+var (
+	errFollowL9Pending = errors.New("follow restore has not crossed a new L9 snapshot yet")
+	errFollowBehindL9  = errors.New("follow restore verified behind the new L9 snapshot")
+)
 
 // followSession is one long-running `litestream restore -f` that outlives the
 // verification cycle which started it, so the primary keeps writing (and
@@ -176,10 +179,12 @@ func (v *Verifier) stopFollow() {
 	v.follow = nil
 }
 
-func (v *Verifier) takeFollowResult() *VerificationResult {
-	result := v.followResult
-	v.followResult = nil
-	return result
+// takeExtraResults returns the follow and pre-upgrade restore results the last
+// cycle produced alongside its main verification, and clears them.
+func (v *Verifier) takeExtraResults() []VerificationResult {
+	results := v.extraResults
+	v.extraResults = nil
+	return results
 }
 
 // waitForFollowTXID polls the follow sidecar until the followed database has
@@ -293,15 +298,23 @@ func (v *Verifier) runFollowCheck(ctx context.Context, boundary verificationBoun
 		if !l9Advanced(session.l9, current) {
 			return errFollowL9Pending
 		}
+		if boundary.txid < current.MaxTXIDDecimal {
+			return errFollowBehindL9
+		}
 		return nil
 	})
-	v.validationSteps[len(v.validationSteps)-1].OutputTail = fmt.Sprintf("L9 at follow %s: objects=%d max_txid=%s; now objects=%d max_txid=%s", followMark(session), session.l9.ObjectCount, formatTXID(session.l9.MaxTXIDDecimal), current.ObjectCount, formatTXID(current.MaxTXIDDecimal))
+	v.validationSteps[len(v.validationSteps)-1].OutputTail = fmt.Sprintf("L9 at follow %s: objects=%d max_txid=%s; now objects=%d max_txid=%s; follower verified at txid %s", followMark(session), session.l9.ObjectCount, formatTXID(session.l9.MaxTXIDDecimal), current.ObjectCount, formatTXID(current.MaxTXIDDecimal), formatTXID(boundary.txid))
 	result.Steps = append(result.Steps, v.validationSteps...)
 	switch {
 	case errors.Is(l9Err, errFollowL9Pending):
 		result.Steps[len(result.Steps)-1].Status = "pending"
 		result.Status = "pending"
 		result.Summary = fmt.Sprintf("follow restore matched source at txid %s; no new L9 snapshot since %s (L9 max_txid %s)", formatTXID(boundary.txid), followMark(session), formatTXID(session.l9.MaxTXIDDecimal))
+		v.finalizeResult(&result)
+	case errors.Is(l9Err, errFollowBehindL9):
+		result.Steps[len(result.Steps)-1].Status = "pending"
+		result.Status = "pending"
+		result.Summary = fmt.Sprintf("follow restore matched source at txid %s, which is behind the new L9 snapshot at %s; crossing not yet verified", formatTXID(boundary.txid), formatTXID(current.MaxTXIDDecimal))
 		v.finalizeResult(&result)
 	case l9Err != nil:
 		result.Status = "pending"
@@ -311,7 +324,7 @@ func (v *Verifier) runFollowCheck(ctx context.Context, boundary verificationBoun
 	default:
 		result.Status = "passed"
 		result.Passed = true
-		result.Summary = fmt.Sprintf("follow restore matched source at txid %s after L9 snapshot advanced from %s to %s", formatTXID(boundary.txid), formatTXID(session.l9.MaxTXIDDecimal), formatTXID(current.MaxTXIDDecimal))
+		result.Summary = fmt.Sprintf("follow restore matched source at txid %s after crossing the L9 snapshot that advanced from %s to %s", formatTXID(boundary.txid), formatTXID(session.l9.MaxTXIDDecimal), formatTXID(current.MaxTXIDDecimal))
 		session.l9 = current
 		session.passes++
 		v.finalizeResult(&result)
