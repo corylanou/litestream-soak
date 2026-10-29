@@ -74,18 +74,8 @@ func writeUpgradeLaneState(dataDir string, state upgradeLaneState) error {
 	if err != nil {
 		return err
 	}
-	path := upgradeLaneStatePath(dataDir)
-	tmp := path + ".tmp"
-	if err := writeFileDurable(tmp, append(body, '\n')); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write upgrade lane state: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("commit upgrade lane state: %w", err)
-	}
-	if err := syncDir(dataDir); err != nil {
-		return fmt.Errorf("commit upgrade lane state: %w", err)
+	if err := writeFileAtomic(upgradeLaneStatePath(dataDir), append(body, '\n')); err != nil {
+		return fmt.Errorf("upgrade lane state: %w", err)
 	}
 	return nil
 }
