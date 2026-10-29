@@ -73,22 +73,42 @@ func TestUpgradeLaneNoL9PurgeOrdering(t *testing.T) {
 			wantPostRun: true,
 		},
 		{
-			name:     "restart after a recorded purge does not purge again",
+			name:     "restart after a successful purge record never purges again",
 			deleteL9: true,
 			state: &upgradeLaneState{Phase: UpgradePhasePost, StartedAt: start.Add(-3 * time.Hour), BaseSHA: testUpgradeBaseSHA, CandidateSHA: testUpgradeCandidateSHA,
-				L9Purge: &replicaL9Purge{StartedAt: start, CompletedAt: start, Prefix: strings.TrimSuffix(own, "/"), Deleted: []string{l9}}},
+				L9Purge: &replicaL9Purge{StartedAt: start, CompletedAt: start, Prefix: strings.TrimSuffix(own, "/"), Deleted: []string{l9}, Attempt: 1, Succeeded: true}},
 			keys:        []string{l1, own + "0009/0000000000000001-0000000000000090.ltx"},
 			wantEvents:  []string{"post start"},
 			wantPurged:  true,
 			wantPostRun: true,
 		},
 		{
-			name:       "purge failure keeps the candidate from starting",
+			name:       "purge failure is retried while base is stopped and keeps the candidate from starting",
 			deleteL9:   true,
 			listErr:    errors.New("s3cmd: access denied"),
-			wantEvents: []string{"pre start", "pre stopped", "list"},
-			wantErr:    "upgrade lane L9 purge",
+			wantEvents: []string{"pre start", "pre stopped", "list", "list", "list"},
+			wantErr:    "upgrade lane L9 purge: 3 attempt(s) failed",
 			wantPurged: true,
+		},
+		{
+			name:     "restart after a failed purge record purges before the candidate",
+			deleteL9: true,
+			state: &upgradeLaneState{Phase: UpgradePhasePost, StartedAt: start.Add(-3 * time.Hour), BaseSHA: testUpgradeBaseSHA, CandidateSHA: testUpgradeCandidateSHA,
+				L9Purge: &replicaL9Purge{StartedAt: start, CompletedAt: start, Prefix: strings.TrimSuffix(own, "/"), Deleted: []string{}, Error: "list replica objects: s3cmd: access denied", Attempt: 3}},
+			keys:        []string{l1, l9},
+			wantEvents:  []string{"list", "delete " + l9, "list", "post start"},
+			wantPurged:  true,
+			wantPostRun: true,
+		},
+		{
+			name:     "restart after an incomplete purge record purges before the candidate",
+			deleteL9: true,
+			state: &upgradeLaneState{Phase: UpgradePhasePost, StartedAt: start.Add(-3 * time.Hour), BaseSHA: testUpgradeBaseSHA, CandidateSHA: testUpgradeCandidateSHA,
+				L9Purge: &replicaL9Purge{StartedAt: start, CompletedAt: start, Prefix: strings.TrimSuffix(own, "/"), Deleted: []string{l9}, RemainingL9: 1, Attempt: 1}},
+			keys:        []string{l1, l9},
+			wantEvents:  []string{"list", "delete " + l9, "list", "post start"},
+			wantPurged:  true,
+			wantPostRun: true,
 		},
 	}
 	for _, tt := range tests {
@@ -97,6 +117,9 @@ func TestUpgradeLaneNoL9PurgeOrdering(t *testing.T) {
 			cfg := upgradeLaneConfig(t, dir)
 			cfg.UpgradeWarmup = 50 * time.Millisecond
 			cfg.UpgradeDeleteL9AtSwitch = tt.deleteL9
+			previousDelay := replicaL9PurgeRetryDelay
+			replicaL9PurgeRetryDelay = 0
+			t.Cleanup(func() { replicaL9PurgeRetryDelay = previousDelay })
 			cfg.ReplicaType = "s3"
 			cfg.S3Bucket = "bucket"
 			cfg.S3Path = strings.TrimSuffix(own, "/")
@@ -165,8 +188,11 @@ func TestUpgradeLaneNoL9PurgeOrdering(t *testing.T) {
 					t.Fatalf("post config = binary %s sha %s", postCfg.litestreamCommand(), postCfg.activeLitestreamSHA)
 				}
 			}
-			if tt.wantErr != "" && state.L9Purge != nil && state.L9Purge.Error == "" {
-				t.Fatalf("failed purge recorded without its error: %+v", state.L9Purge)
+			if tt.wantErr != "" && state.L9Purge != nil && (state.L9Purge.Error == "" || state.L9Purge.Succeeded || state.L9Purge.Attempt != replicaL9PurgeAttempts) {
+				t.Fatalf("failed purge recorded without its error or attempts: %+v", state.L9Purge)
+			}
+			if tt.wantPostRun && tt.deleteL9 && !state.L9Purge.succeeded() {
+				t.Fatalf("candidate started without a durable successful purge record: %+v", state.L9Purge)
 			}
 		})
 	}

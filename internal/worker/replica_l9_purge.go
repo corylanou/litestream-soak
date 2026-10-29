@@ -21,7 +21,10 @@ const (
 	replicaL9Level         = "0009"
 	replicaL9PurgeTimeout  = 10 * time.Minute
 	replicaL9DeleteTimeout = 60 * time.Second
+	replicaL9PurgeAttempts = 3
 )
+
+var replicaL9PurgeRetryDelay = 30 * time.Second
 
 var errReplicaL9Outside = errors.New("replica L9 purge refused: object outside the worker's own replica prefix")
 
@@ -36,6 +39,14 @@ type replicaL9Purge struct {
 	Deleted     []string  `json:"deleted"`
 	RemainingL9 int       `json:"remaining_l9"`
 	Error       string    `json:"error,omitempty"`
+	Attempt     int       `json:"attempt,omitempty"`
+	Succeeded   bool      `json:"succeeded"`
+}
+
+// succeeded reports whether a durable, successful purge is on record. Only
+// such a record permits the candidate build to start.
+func (p *replicaL9Purge) succeeded() bool {
+	return p != nil && p.Succeeded && p.Error == "" && p.RemainingL9 == 0
 }
 
 // replicaL9Purger lists and deletes replica objects. list returns every
