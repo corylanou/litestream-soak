@@ -287,6 +287,35 @@ func containsFold(value, needle string) bool {
 	return strings.Contains(strings.ToLower(value), strings.ToLower(needle))
 }
 
+func TestSyncAppPlatformLogsReplayCountsDistinctCrashesOnce(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+printf '%s\n' '{"level":"error","instance":"replay-machine","message":"main child exited with exit code: 1","region":"ord","timestamp":"2026-10-29T18:24:00Z","meta":{"event":{"provider":"fly"}}}'
+printf '%s\n' '{"level":"info","instance":"replay-machine","message":"Starting init","region":"ord","timestamp":"2026-10-29T18:24:05Z","meta":{"event":{"provider":"fly"}}}'
+printf '%s\n' '{"level":"error","instance":"replay-machine","message":"main child exited with exit code: 1","region":"ord","timestamp":"2026-10-29T18:27:00Z","meta":{"event":{"provider":"fly"}}}'
+`
+	if err := os.WriteFile(filepath.Join(dir, "flyctl"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	db := openTestDB(t)
+	worker := model.Worker{ID: "worker-replay", Name: "worker-replay", Status: model.WorkerRunning, Source: "main", GitSHA: "abc123", ProfileName: "low-volume", ProfileConfig: "{}", FlyMachineID: "replay-machine", AppName: "example-app"}
+	createTestWorker(t, db, worker)
+	m := &Manager{db: db, appName: "example-app", platformLogToken: "example-token", metrics: NewControlMetrics(db)}
+	for replay := range 2 {
+		if err := m.syncAppPlatformLogs(context.Background(), "example-app", map[string]model.Worker{worker.FlyMachineID: worker}); err != nil {
+			t.Fatalf("replay %d syncAppPlatformLogs() error = %v", replay, err)
+		}
+	}
+	events, err := db.ListWorkerEvents(worker.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].EventType != "platform_restart" || events[0].Occurrences != 2 {
+		t.Fatalf("events = %+v, want one platform_restart row with 2 occurrences after replaying the batch", events)
+	}
+}
+
 func TestFetchAppPlatformLogsCommandContract(t *testing.T) {
 	dir := t.TempDir()
 	script := `#!/bin/sh

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
 	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
@@ -53,12 +54,33 @@ const (
 	rcGateSidePassing         = "passing"
 	rcGateSideFailing         = "failing"
 	rcGateVerificationHistory = 2000
+	rcGateWorkerEventHistory  = 2000
 
 	gateRoleCandidate = "candidate"
 	gateRoleBaseline  = "baseline"
 	gateModeFollow    = "follow"
 	upgradePhasePre   = "pre-upgrade"
 	upgradePhasePost  = "post-upgrade"
+
+	rcGateReasonDiskExhausted       = "disk_exhausted"
+	rcGateReasonWorkerCrashLoop     = "worker_crash_loop"
+	rcGateReasonWorkerDegraded      = "worker_degraded"
+	rcGateReasonHarnessInconclusive = "harness_inconclusive"
+
+	rcGateCrashLoopEvents        = 2
+	rcGateDiskExhaustedUsedPct   = 98.0
+	rcGateFlyNotRestartingMarker = "not restarting"
+)
+
+var (
+	rcGateDiskFullEventTypes = []string{
+		"platform_disk_full",
+		reporting.WorkerEventDiskFullNoProgress,
+		reporting.WorkerEventDiskFullRecoveryFailed,
+	}
+	rcGateCrashEventTypes = []string{"platform_restart", "platform_oom", "platform_killed", "worker_failed"}
+	// Fatal runner errors raised before Litestream is launched (internal/worker/runner.go).
+	rcGatePreStartFailurePrefixes = []string{"populate:", "prepare disk-full recovery reserve:", "write litestream config:", "start litestream:"}
 )
 
 var (
@@ -89,6 +111,8 @@ type RCGateSideResult struct {
 	Passed          int    `json:"passed"`
 	Failed          int    `json:"failed"`
 	RotationEnabled bool   `json:"rotation_enabled,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	ReasonDetail    string `json:"reason_detail,omitempty"`
 }
 
 type RCGateModeResult struct {
@@ -1068,9 +1092,13 @@ func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter g
 	if err != nil {
 		return side, modes, err
 	}
+	observed := 0
 	for _, verification := range verifications {
-		if verification.StartedAt.Before(gate.StartedAt) || verification.StartedAt.After(end) ||
-			verification.Run.Scenario != scenario.identity || !verification.MatchesDeployment(*worker, *deployment) || !filter.accepts(gate, verification) {
+		if verification.StartedAt.Before(gate.StartedAt) || verification.StartedAt.After(end) || !verification.MatchesDeployment(*worker, *deployment) {
+			continue
+		}
+		observed++
+		if verification.Run.Scenario != scenario.identity || !filter.accepts(gate, verification) {
 			continue
 		}
 		mode := strings.TrimSpace(verification.RestoreMode)
@@ -1092,8 +1120,13 @@ func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter g
 			modes[mode].Failed++
 		}
 	}
+	side.Reason, side.ReasonDetail, err = rcGateSideFault(db, gate, *worker, observed, end)
+	if err != nil {
+		return side, modes, err
+	}
 	side.Status = rcGateSideStatus(side)
 	for _, mode := range modes {
+		mode.Reason, mode.ReasonDetail = side.Reason, side.ReasonDetail
 		mode.Status = rcGateSideStatus(*mode)
 	}
 	return side, modes, nil
@@ -1101,12 +1134,121 @@ func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter g
 
 func rcGateSideStatus(side RCGateSideResult) string {
 	switch {
-	case side.Failed > 0:
+	case side.Failed > 0 || rcGateHardFault(side.Reason):
 		return rcGateSideFailing
 	case side.Passed > 0:
 		return rcGateSidePassing
 	default:
 		return rcGateSideNoCoverage
+	}
+}
+
+func rcGateHardFault(reason string) bool {
+	return reason != "" && reason != rcGateReasonHarnessInconclusive
+}
+
+func rcGateSideFault(db *model.DB, gate model.RCGate, worker model.Worker, observedVerifications int, end time.Time) (string, string, error) {
+	events, err := db.ListWorkerEvents(worker.ID, rcGateWorkerEventHistory)
+	if err != nil {
+		return "", "", fmt.Errorf("list %s events: %w", worker.ID, err)
+	}
+	windowStart := gate.StartedAt.Truncate(time.Second)
+	inWindow := events[:0]
+	for _, event := range events {
+		if event.CreatedAt.Before(windowStart) || event.CreatedAt.After(end) {
+			continue
+		}
+		inWindow = append(inWindow, event)
+	}
+	reason, detail := rcGateWorkerFault(worker, inWindow)
+	if reason == "" {
+		return "", "", nil
+	}
+	if observedVerifications == 0 {
+		if evidence, ok := rcGatePreStartEvidence(worker, inWindow); ok {
+			return rcGateReasonHarnessInconclusive, reason + " before litestream started (" + evidence + "): " + detail, nil
+		}
+	}
+	return reason, detail, nil
+}
+
+// rcGatePreStartEvidence reports affirmative evidence that Litestream never ran
+// on the worker: the control plane never stored a healthy Litestream snapshot
+// (last_runtime_at stays NULL), and either the last persisted heartbeat sample
+// still shows Litestream PID 0 with no IPC snapshot, uptime, or TXID while the
+// harness process itself was alive, or the worker reported a fatal error from a
+// pre-start step. Without that evidence a fault is a hard failure.
+func rcGatePreStartEvidence(worker model.Worker, events []model.Event) (string, bool) {
+	if worker.LastRuntimeAt != nil {
+		return "", false
+	}
+	for _, event := range events {
+		if event.EventType != "worker_failed" {
+			continue
+		}
+		for _, prefix := range rcGatePreStartFailurePrefixes {
+			if strings.HasPrefix(strings.TrimSpace(event.Message), prefix) {
+				return "worker_failed event " + strings.TrimSuffix(prefix, ":"), true
+			}
+		}
+	}
+	runtime := parseRuntimeJSON(worker.LastRuntimeJSON, time.Time{})
+	if runtime == nil || runtime.LitestreamSnapshotHealthy || runtime.LitestreamProcess.PID != 0 ||
+		runtime.LitestreamUptimeSeconds > 0 || runtime.DBTXID > 0 || runtime.ReplicatedTXID > 0 {
+		return "", false
+	}
+	harnessAlive := runtime.WorkerProcess.PID > 0 || runtime.UptimeSeconds > 0 || strings.TrimSpace(runtime.LitestreamSnapshotError) != ""
+	if !harnessAlive {
+		return "", false
+	}
+	evidence := "last heartbeat reported litestream pid 0 with no ipc snapshot"
+	if !runtime.SnapshotCollectedAt.IsZero() {
+		evidence += " at " + runtime.SnapshotCollectedAt.UTC().Format(time.RFC3339)
+	}
+	return evidence, true
+}
+
+func rcGateWorkerFault(worker model.Worker, events []model.Event) (string, string) {
+	degraded := worker.Status == model.WorkerDegraded || worker.Status == model.WorkerFailed
+	var (
+		diskDetail, crashDetail, staleDetail string
+		crashes                              int
+		terminalCrash                        bool
+	)
+	for _, event := range events {
+		switch {
+		case slices.Contains(rcGateDiskFullEventTypes, event.EventType):
+			diskDetail = firstNonEmpty(event.Message, event.EventType)
+		case slices.Contains(rcGateCrashEventTypes, event.EventType):
+			crashes += max(1, event.Occurrences)
+			crashDetail = firstNonEmpty(event.Message, event.EventType)
+			if strings.Contains(strings.ToLower(event.Message), rcGateFlyNotRestartingMarker) {
+				terminalCrash = true
+			}
+		case event.EventType == "worker_stale":
+			staleDetail = firstNonEmpty(event.Message, event.EventType)
+		}
+	}
+	if diskDetail == "" && degraded && reporting.IsDiskCapacityMessage(worker.ErrorMessage) {
+		diskDetail = worker.ErrorMessage
+	}
+	crashLoop := crashes >= rcGateCrashLoopEvents || terminalCrash
+	if diskDetail == "" && (degraded || crashLoop || staleDetail != "") {
+		if runtime := parseRuntimeJSON(worker.LastRuntimeJSON, time.Time{}); runtime != nil && runtime.DataDiskUsedPercent >= rcGateDiskExhaustedUsedPct {
+			diskDetail = fmt.Sprintf("data disk %.1f%% used", runtime.DataDiskUsedPercent)
+		}
+	}
+	switch {
+	case diskDetail != "":
+		return rcGateReasonDiskExhausted, diskDetail
+	case crashLoop:
+		return rcGateReasonWorkerCrashLoop, fmt.Sprintf("%d crash events in the gate window; last: %s", crashes, crashDetail)
+	case degraded:
+		return rcGateReasonWorkerDegraded, firstNonEmpty(worker.ErrorMessage, string(worker.Status))
+	case staleDetail != "":
+		return rcGateReasonWorkerDegraded, staleDetail
+	default:
+		return "", ""
 	}
 }
 
@@ -1136,11 +1278,12 @@ func rcGateModeResults(required []string, candidate, baseline RCGateSideResult, 
 			if mode := modes[name]; mode != nil {
 				return *mode
 			}
-			status := rcGateSideNoCoverage
+			result := RCGateSideResult{Source: base.Source, WorkerID: base.WorkerID, Reason: base.Reason, ReasonDetail: base.ReasonDetail}
+			result.Status = rcGateSideStatus(result)
 			if base.Status == rcGateSideMissing {
-				status = rcGateSideMissing
+				result.Status = rcGateSideMissing
 			}
-			return RCGateSideResult{Source: base.Source, WorkerID: base.WorkerID, Status: status}
+			return result
 		}
 		result := RCGateModeResult{Mode: name, Candidate: side(candidate, candidateModes), Baseline: side(baseline, baselineModes)}
 		result.Verdict = rcGateScenarioVerdict(result.Candidate.Status, result.Baseline.Status)

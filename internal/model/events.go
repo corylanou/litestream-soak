@@ -1,7 +1,11 @@
 package model
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -67,26 +71,53 @@ func (d *DB) RecordWindowedEventAt(workerID, eventType, message, details string,
 		return true, nil
 	}
 
-	var existingID int
-	windowStart := createdAt.Add(-window)
+	key := eventOccurrenceKey(createdAt, details)
+	var (
+		existingID      int
+		existingAt      time.Time
+		existingDetails string
+		existingKeys    string
+	)
 	err := d.queryRow(`
-		SELECT id
+		SELECT id, created_at, details, occurrence_keys
 		FROM events
 		WHERE worker_id = ? AND event_type = ? AND message = ? AND created_at >= ? AND created_at <= ?
 		ORDER BY created_at DESC
 		LIMIT 1`,
-		workerID, eventType, message, windowStart, createdAt,
-	).Scan(&existingID)
+		workerID, eventType, message, createdAt.Add(-window), createdAt.Add(window),
+	).Scan(&existingID, &existingAt, &existingDetails, &existingKeys)
 	switch {
 	case err == nil:
 		release := d.blobs.hold()
-		details, err = d.compactProfileSnapshot(details)
-		if err == nil {
+		compactDetails, err := d.compactProfileSnapshot(details)
+		if err != nil {
+			release()
+			return false, err
+		}
+		if existingKeys == "" {
+			// Rows recorded before occurrence tracking carry only their latest
+			// occurrence; seed that identity so replaying it never counts again.
+			existingKeys = eventOccurrenceKey(existingAt, existingDetails)
+		}
+		seen := strings.Split(existingKeys, "\n")
+		if slices.Contains(seen, key) || slices.Contains(seen, eventOccurrenceKey(createdAt, compactDetails)) {
+			release()
+			return false, nil
+		}
+		keys := existingKeys + "\n" + key
+		if createdAt.Before(existingAt) {
 			_, err = d.exec(`
 			UPDATE events
-			SET details = ?, created_at = ?
+			SET occurrences = occurrences + 1, occurrence_keys = ?
 			WHERE id = ?`,
-				details, createdAt, existingID,
+				keys, existingID,
+			)
+		} else {
+			_, err = d.exec(`
+			UPDATE events
+			SET details = ?, created_at = ?, occurrences = occurrences + 1, occurrence_keys = ?
+			WHERE id = ?`,
+				compactDetails, createdAt, keys, existingID,
 			)
 		}
 		release()
@@ -98,15 +129,33 @@ func (d *DB) RecordWindowedEventAt(workerID, eventType, message, details string,
 		return false, err
 	}
 
-	if err := d.RecordEventAt(workerID, eventType, message, details, createdAt); err != nil {
+	defer d.blobs.hold()()
+	details, err = d.compactProfileSnapshot(details)
+	if err != nil {
+		return false, err
+	}
+	_, err = d.exec(`
+		INSERT INTO events (worker_id, event_type, message, details, created_at, occurrence_keys)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		workerID, eventType, message, details, createdAt, key,
+	)
+	if err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
+// eventOccurrenceKey identifies one source occurrence of a windowed event by
+// its own timestamp and payload, so a replayed log batch merges into the same
+// row without counting again.
+func eventOccurrenceKey(createdAt time.Time, details string) string {
+	sum := sha256.Sum256([]byte(details))
+	return createdAt.UTC().Format(time.RFC3339Nano) + "|" + hex.EncodeToString(sum[:8])
+}
+
 func (d *DB) ListEvents(limit int) ([]Event, error) {
 	defer d.blobs.hold()()
-	rows, err := d.query(`SELECT id, worker_id, event_type, message, details, created_at FROM events ORDER BY created_at DESC LIMIT ?`, limit)
+	rows, err := d.query(`SELECT id, worker_id, event_type, message, details, created_at, occurrences FROM events ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +165,7 @@ func (d *DB) ListEvents(limit int) ([]Event, error) {
 	for rows.Next() {
 		var e Event
 		var workerID sql.NullString
-		if err := rows.Scan(&e.ID, &workerID, &e.EventType, &e.Message, &e.Details, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &workerID, &e.EventType, &e.Message, &e.Details, &e.CreatedAt, &e.Occurrences); err != nil {
 			return nil, err
 		}
 		if workerID.Valid {
@@ -134,7 +183,7 @@ func (d *DB) ListEvents(limit int) ([]Event, error) {
 func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
 	defer d.blobs.hold()()
 	rows, err := d.query(`
-		SELECT id, worker_id, event_type, message, details, created_at
+		SELECT id, worker_id, event_type, message, details, created_at, occurrences
 		FROM events
 		WHERE worker_id = ?
 		ORDER BY created_at DESC
@@ -150,7 +199,7 @@ func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
 	for rows.Next() {
 		var e Event
 		var eventWorkerID sql.NullString
-		if err := rows.Scan(&e.ID, &eventWorkerID, &e.EventType, &e.Message, &e.Details, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &eventWorkerID, &e.EventType, &e.Message, &e.Details, &e.CreatedAt, &e.Occurrences); err != nil {
 			return nil, err
 		}
 		if eventWorkerID.Valid {

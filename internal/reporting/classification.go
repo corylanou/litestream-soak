@@ -289,6 +289,10 @@ func isS3TransportFailure(text string) bool {
 		strings.Contains(text, "context deadline exceeded")
 }
 
+func IsDiskCapacityMessage(message string) bool {
+	return isDiskCapacityFailure(strings.ToLower(message))
+}
+
 func isDiskCapacityFailure(text string) bool {
 	return strings.Contains(text, "no space left on device") ||
 		strings.Contains(text, "database or disk is full") ||
