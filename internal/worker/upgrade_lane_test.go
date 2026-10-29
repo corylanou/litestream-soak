@@ -240,7 +240,7 @@ func TestUpgradeLanePhaseSwitch(t *testing.T) {
 					return nil
 				}
 			}
-			err := runUpgradeLane(ctx, cfg, func() time.Time { return now }, run)
+			err := runUpgradeLane(ctx, cfg, func() time.Time { return now }, replicaL9Purger{}, run)
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("runUpgradeLane() error = %v", err)
 			}

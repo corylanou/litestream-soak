@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 const (
@@ -27,12 +29,22 @@ var errUpgradeWarmupEnded = errors.New("upgrade warm-up ended")
 // after the switch never runs the base build against candidate-written state,
 // and so the warm-up is measured from the lane's first start.
 type upgradeLaneState struct {
-	Phase          string     `json:"phase"`
-	StartedAt      time.Time  `json:"started_at"`
-	SwitchedAt     *time.Time `json:"switched_at,omitempty"`
-	BaseSHA        string     `json:"base_litestream_sha"`
-	CandidateSHA   string     `json:"candidate_litestream_sha"`
-	PreUpgradeTXID uint64     `json:"pre_upgrade_txid,omitempty"`
+	Phase            string              `json:"phase"`
+	StartedAt        time.Time           `json:"started_at"`
+	SwitchedAt       *time.Time          `json:"switched_at,omitempty"`
+	BaseSHA          string              `json:"base_litestream_sha"`
+	CandidateSHA     string              `json:"candidate_litestream_sha"`
+	PreUpgradeTXID   uint64              `json:"pre_upgrade_txid,omitempty"`
+	L9Purge          *replicaL9Purge     `json:"l9_purge,omitempty"`
+	FirstCandidateL9 *firstL9Observation `json:"first_candidate_l9,omitempty"`
+}
+
+// firstL9Observation records when the candidate build's first L9 snapshot
+// was seen on a replica whose L9 level was emptied at the switch.
+type firstL9Observation struct {
+	ObservedAt time.Time `json:"observed_at"`
+	MaxTXID    string    `json:"max_txid"`
+	Objects    int       `json:"objects"`
 }
 
 func upgradeLaneStatePath(dataDir string) string {
@@ -207,10 +219,29 @@ func (c Config) ForUpgradePhase(phase string) (Config, error) {
 }
 
 func RunUpgradeLane(ctx context.Context, cfg Config, run func(context.Context, Config) error) error {
-	return runUpgradeLane(ctx, cfg, time.Now, run)
+	return runUpgradeLane(ctx, cfg, time.Now, newReplicaL9Purger(), run)
 }
 
-func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, run func(context.Context, Config) error) error {
+// recordFirstCandidateL9 notes the first L9 object seen after a purged switch,
+// so the evidence says when (or whether) the candidate wrote its first
+// snapshot. It returns the observation on record, if any.
+func recordFirstCandidateL9(dataDir string, l9 reporting.ReplicaLevelSummary, now time.Time) (*firstL9Observation, error) {
+	state, err := readUpgradeLaneState(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	if state.FirstCandidateL9 != nil || state.L9Purge == nil || l9.ObjectCount == 0 {
+		return state.FirstCandidateL9, nil
+	}
+	state.FirstCandidateL9 = &firstL9Observation{ObservedAt: now.UTC(), MaxTXID: formatTXID(l9.MaxTXIDDecimal), Objects: l9.ObjectCount}
+	if err := writeUpgradeLaneState(dataDir, state); err != nil {
+		return nil, err
+	}
+	slog.Info("Candidate build wrote its first L9 snapshot", "max_txid", state.FirstCandidateL9.MaxTXID, "objects", l9.ObjectCount)
+	return state.FirstCandidateL9, nil
+}
+
+func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, purger replicaL9Purger, run func(context.Context, Config) error) error {
 	if !cfg.UpgradeLane {
 		return errors.New("upgrade lane is not configured")
 	}
@@ -261,6 +292,24 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, run
 			return err
 		}
 		slog.Info("Upgrade lane switching Litestream build", "from", cfg.LitestreamBaseSHA, "to", cfg.LitestreamSHA, "pre_upgrade_txid", formatTXID(state.PreUpgradeTXID))
+	}
+
+	// The purge runs only here: the base process has exited (the Runner
+	// stops Litestream before returning) and the candidate has not started.
+	// It is recorded in the phase marker, so a crash between the switch and
+	// the purge repeats the purge instead of starting the candidate on a
+	// replica that still has an L9.
+	if cfg.UpgradeDeleteL9AtSwitch && state.L9Purge == nil {
+		slog.Info("Deleting replica L9 objects before the candidate build starts", "prefix", replicaOwnPrefix(cfg))
+		purge, err := purger.purgeReplicaL9(ctx, cfg, clock)
+		state.L9Purge = &purge
+		if writeErr := writeUpgradeLaneState(cfg.DataDir, state); writeErr != nil {
+			return errors.Join(err, writeErr)
+		}
+		if err != nil {
+			return fmt.Errorf("upgrade lane L9 purge: %w", err)
+		}
+		slog.Info("Replica L9 level emptied", "deleted", len(purge.Deleted), "listed", purge.Listed)
 	}
 
 	post, err := cfg.ForUpgradePhase(UpgradePhasePost)
