@@ -72,6 +72,13 @@ type Config struct {
 	PinnedReaderPause                         string  `json:"pinned_reader_pause,omitempty"`
 	StressScenarios                           string  `json:"stress_scenarios,omitempty"`
 	StressScenarioPhase                       string  `json:"stress_scenario_phase,omitempty"`
+	UpgradeLane                               bool    `json:"upgrade_lane,omitempty"`
+	UpgradeWarmup                             string  `json:"upgrade_warmup,omitempty"`
+	UpgradePostSnapshotInterval               string  `json:"upgrade_post_snapshot_interval,omitempty"`
+	FollowCheck                               bool    `json:"follow_check,omitempty"`
+	CompactionProgressCheck                   bool    `json:"compaction_progress_check,omitempty"`
+	CompactionL0ObjectBound                   int     `json:"compaction_l0_object_bound,omitempty"`
+	CompactionL1ObjectBound                   int     `json:"compaction_l1_object_bound,omitempty"`
 	VolumeSizeGB                              int     `json:"volume_size_gb,omitempty"`
 	MemoryMB                                  int     `json:"memory_mb,omitempty"`
 	CPUs                                      int     `json:"cpus,omitempty"`

@@ -7,10 +7,12 @@ candidate_sha="${3:-}"
 baseline_sha="${4:-}"
 duration="${5:-72h}"
 tail="${6:-false}"
+kind="${7:-rc}"
+upgrade_warmup="${8:-}"
 base_url="${CONTROL_BASE_URL:-https://litestream-soak-ctl.fly.dev}"
 
 if [ "$#" -lt 4 ]; then
-  echo "usage: $0 <repository> <candidate-ref> <candidate-sha> <baseline-sha> [duration] [tail]" >&2
+  echo "usage: $0 <repository> <candidate-ref> <candidate-sha> <baseline-sha> [duration] [tail] [kind] [upgrade-warmup]" >&2
   exit 1
 fi
 if [[ ! "${repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
@@ -25,6 +27,14 @@ for sha in "${candidate_sha}" "${baseline_sha}"; do
 done
 if [ "${tail}" != "true" ] && [ "${tail}" != "false" ]; then
   echo "tail must be true or false" >&2
+  exit 1
+fi
+if [ "${kind}" != "rc" ] && [ "${kind}" != "upgrade" ]; then
+  echo "kind must be rc or upgrade" >&2
+  exit 1
+fi
+if [ -n "${upgrade_warmup}" ] && [[ ! "${upgrade_warmup}" =~ ^[1-9][0-9]*[mh]$ ]]; then
+  echo "upgrade-warmup must be whole minutes or hours, such as 30m or 2h" >&2
   exit 1
 fi
 
@@ -44,14 +54,17 @@ payload="$(jq -n \
   --arg baseline_sha "$baseline_sha" \
   --arg duration "$duration" \
   --argjson tail "$tail" \
+  --arg kind "$kind" \
+  --arg upgrade_warmup "$upgrade_warmup" \
   '{
     repository: $repository,
     candidate_ref: $candidate_ref,
     candidate_sha: $candidate_sha,
     baseline_sha: $baseline_sha,
     duration: $duration,
-    tail: $tail
-  }')"
+    tail: $tail,
+    kind: $kind
+  } + (if $upgrade_warmup == "" then {} else {upgrade_warmup: $upgrade_warmup} end)')"
 
 curl -sS --fail-with-body --max-time 60 -X POST \
   "${auth_args[@]}" \

@@ -129,6 +129,18 @@ var profileCharters = map[string]ProfileCharter{
 		GuardsAgainst: "Release candidates that regress latency-sensitive replication paths outside the primary region.",
 		WhyItMatters:  "Users replicate from many regions; the gate keeps one remote pairing in every release decision.",
 	},
+	"gate-upgrade-lane": {
+		Synopsis:      "Upgrade gate lane: runs the baseline Litestream build with a 24-hour snapshot interval so the replica holds only legacy L0-L3 files, then switches to the candidate build on the same volume, database, and replica prefix after the warm-up.",
+		Stresses:      "The candidate's compactor, restore planner, and follow restore against a replica the baseline build wrote, with every report attributed to its phase and running Litestream SHA.",
+		GuardsAgainst: "Candidates that stop compacting legacy levels, fail to restore pre-upgrade txids, or diverge in follow mode after taking over an existing replica.",
+		WhyItMatters:  "Every real deployment upgrades in place; a candidate that only works on a replica it created from scratch is not releasable.",
+	},
+	"gate-upgrade-follow": {
+		Synopsis:      "Upgrade gate follow lane: steady writes with a 15-minute snapshot interval while a long-running follow restore is compared with the source each cycle after the replica crosses a new L9 snapshot.",
+		Stresses:      "Follow-mode restore across L9 snapshot boundaries, compaction progress bounds, and the pinned-txid follow variant, run identically on the candidate and the baseline.",
+		GuardsAgainst: "Candidates that route snapshots to L9 in a way follow mode cannot continue through, or that let L0/L1 object counts grow without compaction.",
+		WhyItMatters:  "Follow mode is the live-replica reading path; a snapshot layout change that breaks it would be invisible to one-shot restore checks.",
+	},
 	"many-dbs-100-list": {
 		Synopsis:      "Replicates 100 separate SQLite databases, each declared explicitly in the config (list mode).",
 		Stresses:      "Managing many simultaneous replication streams enumerated one by one.",

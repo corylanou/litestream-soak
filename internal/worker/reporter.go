@@ -67,6 +67,9 @@ func workerIdentity(cfg Config) reporting.WorkerIdentity {
 		MachineID:     cfg.MachineID,
 		Region:        cfg.Region,
 		Scenario:      cfg.stressScenario,
+
+		UpgradePhase:        cfg.upgradePhase,
+		ActiveLitestreamSHA: cfg.activeLitestreamSHA,
 	}
 }
 

@@ -17,18 +17,24 @@ import (
 )
 
 const (
-	gateStressProfile    = "gate-stress"
-	gateManyDB500Profile = "gate-manydb-500"
-	gateLargeDBProfile   = "gate-large-db"
-	gateRemoteProfile    = "gate-remote"
+	gateStressProfile        = "gate-stress"
+	gateManyDB500Profile     = "gate-manydb-500"
+	gateLargeDBProfile       = "gate-large-db"
+	gateRemoteProfile        = "gate-remote"
+	gateUpgradeLaneProfile   = "gate-upgrade-lane"
+	gateUpgradeFollowProfile = "gate-upgrade-follow"
 
-	rcGateCandidatePrefix    = "rc"
-	rcGateBaselinePrefix     = "rcbase"
-	rcGateMaxDuration        = 7 * 24 * time.Hour
-	rcGateProvisionTimeout   = 2 * time.Hour
-	rcGateStressPhase        = "6h"
-	rcGateUpstreamRepository = "benbjohnson/litestream"
-	rcGateTailDuration       = 7 * 24 * time.Hour
+	rcGateCandidatePrefix      = "rc"
+	rcGateBaselinePrefix       = "rcbase"
+	upgradeGateCandidatePrefix = "up"
+	upgradeGateBaselinePrefix  = "upbase"
+	upgradeGateDefaultDuration = 24 * time.Hour
+	upgradeGateDefaultWarmup   = 2 * time.Hour
+	rcGateMaxDuration          = 7 * 24 * time.Hour
+	rcGateProvisionTimeout     = 2 * time.Hour
+	rcGateStressPhase          = "6h"
+	rcGateUpstreamRepository   = "benbjohnson/litestream"
+	rcGateTailDuration         = 7 * 24 * time.Hour
 
 	runArchiveTypeRCGateTail = "rc_gate_tail"
 
@@ -42,10 +48,16 @@ const (
 	rcGateSidePassing         = "passing"
 	rcGateSideFailing         = "failing"
 	rcGateVerificationHistory = 2000
+
+	gateRoleCandidate = "candidate"
+	gateRoleBaseline  = "baseline"
+	gateModeFollow    = "follow"
+	upgradePhasePre   = "pre-upgrade"
+	upgradePhasePost  = "post-upgrade"
 )
 
 var (
-	gateSourceRe           = regexp.MustCompile(`^(rc|rcbase)-[0-9a-f]{8}$`)
+	gateSourceRe           = regexp.MustCompile(`^(rc|rcbase|up|upbase)-[0-9a-f]{8}$`)
 	fullCommitSHARe        = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	errRCGateNotRegistered = errors.New("rc gate is not registered")
 	errRCGatePinned        = errors.New("rc gate source is pinned to a different build")
@@ -54,12 +66,14 @@ var (
 )
 
 type RCGateRequest struct {
-	Repository   string `json:"repository"`
-	CandidateRef string `json:"candidate_ref,omitempty"`
-	CandidateSHA string `json:"candidate_sha"`
-	BaselineSHA  string `json:"baseline_sha"`
-	Duration     string `json:"duration"`
-	Tail         bool   `json:"tail"`
+	Kind          string `json:"kind,omitempty"`
+	Repository    string `json:"repository"`
+	CandidateRef  string `json:"candidate_ref,omitempty"`
+	CandidateSHA  string `json:"candidate_sha"`
+	BaselineSHA   string `json:"baseline_sha"`
+	Duration      string `json:"duration"`
+	UpgradeWarmup string `json:"upgrade_warmup,omitempty"`
+	Tail          bool   `json:"tail"`
 }
 
 type RCGateSideResult struct {
@@ -90,6 +104,7 @@ type RCGateScenarioResult struct {
 type RCGateLedgerEntry struct {
 	model.RCGate
 	Duration      string                 `json:"duration"`
+	UpgradeWarmup string                 `json:"upgrade_warmup,omitempty"`
 	TotalMachines int                    `json:"total_machines"`
 	TotalVolumeGB int                    `json:"total_volume_gb"`
 	Verdict       string                 `json:"verdict"`
@@ -100,23 +115,126 @@ type RCGateLedgerResponse struct {
 	Gates []RCGateLedgerEntry `json:"gates"`
 }
 
+// gateSideFilter selects which verifications count for one side of a scenario:
+// the source role, an optional profile override, an upgrade phase, which check
+// types count, and optionally a single restore mode. An empty checkType counts
+// only current-boundary verifications: follow checks and historical
+// pre-upgrade restores are scored by their own scenarios so they can never
+// stand in for current coverage.
+type gateSideFilter struct {
+	role      string
+	profile   string
+	phase     string
+	checkType string
+	mode      string
+}
+
+const (
+	gateCheckCurrent    = ""
+	gateCheckAny        = "*"
+	gateCheckFollow     = "follow"
+	gateCheckHistorical = "pre-upgrade-restore"
+)
+
+var gateNonCurrentChecks = []string{gateCheckFollow, gateCheckHistorical}
+
 type gateScenario struct {
-	name     string
-	profile  string
-	identity string
-	txidOnly bool
+	name          string
+	profile       string
+	identity      string
+	txidOnly      bool
+	requiredModes []string
+	candidate     gateSideFilter
+	baseline      gateSideFilter
 }
 
 var (
-	gateScenarios = []gateScenario{
+	rcGateScenarios = []gateScenario{
 		{name: "overload-truncate0", profile: gateStressProfile, identity: "overload-truncate0"},
 		{name: "pinned-reader", profile: gateStressProfile, identity: "pinned-reader"},
 		{name: "manydb-500", profile: gateManyDB500Profile, txidOnly: true},
 		{name: "large-db", profile: gateLargeDBProfile},
 		{name: "remote", profile: gateRemoteProfile},
 	}
+	// The upgrade gate scores the lane worker's post-upgrade restores against
+	// its own pre-upgrade restores, its historical pre-upgrade txid restores
+	// against the pre-upgrade txid restores, its post-upgrade follow checks
+	// against the baseline follow worker, and the plain follow workers against
+	// each other.
+	upgradeGateScenarios = []gateScenario{
+		{
+			name:      "upgrade-lane",
+			profile:   gateUpgradeLaneProfile,
+			candidate: gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost},
+			baseline:  gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePre},
+		},
+		{
+			name:          "upgrade-lane-historical",
+			profile:       gateUpgradeLaneProfile,
+			requiredModes: []string{"txid"},
+			candidate:     gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost, checkType: gateCheckHistorical},
+			baseline:      gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePre, mode: "txid"},
+		},
+		{
+			name:          "upgrade-lane-follow",
+			profile:       gateUpgradeLaneProfile,
+			requiredModes: []string{gateModeFollow},
+			candidate:     gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost, checkType: gateCheckFollow},
+			baseline:      gateSideFilter{role: gateRoleBaseline, profile: gateUpgradeFollowProfile, checkType: gateCheckFollow},
+		},
+		{
+			name:          "follow-l9",
+			profile:       gateUpgradeFollowProfile,
+			requiredModes: append(slices.Clone(gateRotatingRestoreModes), gateModeFollow),
+			candidate:     gateSideFilter{role: gateRoleCandidate, checkType: gateCheckAny},
+			baseline:      gateSideFilter{role: gateRoleBaseline, checkType: gateCheckAny},
+		},
+	}
 	gateRotatingRestoreModes = []string{"txid", "timestamp", "latest"}
 )
+
+func gateScenariosFor(kind model.RCGateKind) []gateScenario {
+	if kind == model.RCGateKindUpgrade {
+		return upgradeGateScenarios
+	}
+	return rcGateScenarios
+}
+
+func (f gateSideFilter) sourceFor(gate model.RCGate) string {
+	if f.role == gateRoleBaseline {
+		return gate.BaselineSource
+	}
+	return gate.CandidateSource
+}
+
+// accepts applies the side filter. A phase filter also requires the report's
+// active Litestream SHA to be the build that phase must have run (baseline
+// before the switch, candidate after), so a mislabelled phase never counts.
+func (f gateSideFilter) accepts(gate model.RCGate, verification model.Verification) bool {
+	if f.phase != "" {
+		if verification.Run.UpgradePhase != f.phase {
+			return false
+		}
+		want := gate.CandidateSHA
+		if f.phase == upgradePhasePre {
+			want = gate.BaselineSHA
+		}
+		if !strings.EqualFold(strings.TrimSpace(verification.Run.ActiveLitestreamSHA), want) {
+			return false
+		}
+	}
+	if f.mode != "" && firstNonEmpty(strings.TrimSpace(verification.RestoreMode), "txid") != f.mode {
+		return false
+	}
+	switch f.checkType {
+	case gateCheckAny:
+		return true
+	case gateCheckCurrent:
+		return !slices.Contains(gateNonCurrentChecks, verification.CheckType)
+	default:
+		return verification.CheckType == f.checkType
+	}
+}
 
 func isGateSource(source string) bool {
 	return gateSourceRe.MatchString(strings.TrimSpace(source))
@@ -126,8 +244,111 @@ func gateSourceName(prefix, sha string) string {
 	return prefix + "-" + sha[:8]
 }
 
+func gateKindForSource(source string) model.RCGateKind {
+	prefix, _, _ := strings.Cut(strings.TrimSpace(source), "-")
+	if prefix == upgradeGateCandidatePrefix || prefix == upgradeGateBaselinePrefix {
+		return model.RCGateKindUpgrade
+	}
+	return model.RCGateKindRC
+}
+
+func gateSourcePrefixes(kind model.RCGateKind) (candidate, baseline string) {
+	if kind == model.RCGateKindUpgrade {
+		return upgradeGateCandidatePrefix, upgradeGateBaselinePrefix
+	}
+	return rcGateCandidatePrefix, rcGateBaselinePrefix
+}
+
+// upgradeGateWorkers is the upgrade gate fleet: the candidate source runs the
+// lane worker (baseline build first, candidate build after the warm-up) and a
+// plain candidate follow worker; the baseline source runs only the follow
+// worker, so the two follow workers are a like-for-like pair.
+func upgradeGateWorkers(source string) []DesiredWorker {
+	levels := func(cfg *workload.Config) {
+		cfg.L1CompactionInterval = "30s"
+		cfg.L2CompactionInterval = "5m"
+		cfg.L3CompactionInterval = "1h"
+		cfg.L0Retention = "10m"
+		cfg.L0RetentionCheckInterval = "1m"
+		cfg.ReplicaLevelReporting = true
+		cfg.FollowCheck = true
+		cfg.CompactionProgressCheck = true
+		cfg.CompactionL0ObjectBound = 2000
+		cfg.CompactionL1ObjectBound = 6000
+	}
+	lane := DesiredWorker{
+		Name:         "worker-gate-upgrade-lane",
+		ProfileName:  gateUpgradeLaneProfile,
+		Region:       "ord",
+		VolumeSizeGB: 10,
+		Workload: workload.Config{
+			LoadMode:                    "synthetic",
+			WriteRate:                   50,
+			Pattern:                     "constant",
+			PayloadSize:                 1024,
+			ReadRatio:                   0.1,
+			Workers:                     2,
+			InitialSize:                 "20MB",
+			VerifyInterval:              "30m",
+			VerifyType:                  "integrity",
+			SnapshotInterval:            "24h",
+			SyncInterval:                "1s",
+			UpgradeLane:                 true,
+			UpgradeWarmup:               upgradeGateDefaultWarmup.String(),
+			UpgradePostSnapshotInterval: "1h",
+			VolumeSizeGB:                10,
+			MemoryMB:                    1024,
+			CPUs:                        1,
+		},
+	}
+	follow := DesiredWorker{
+		Name:         "worker-gate-upgrade-follow",
+		ProfileName:  gateUpgradeFollowProfile,
+		Region:       "ord",
+		VolumeSizeGB: 10,
+		Workload: workload.Config{
+			LoadMode:         "synthetic",
+			WriteRate:        50,
+			Pattern:          "constant",
+			PayloadSize:      1024,
+			ReadRatio:        0.1,
+			Workers:          2,
+			InitialSize:      "20MB",
+			VerifyInterval:   "30m",
+			VerifyType:       "integrity",
+			SnapshotInterval: "15m",
+			SyncInterval:     "1s",
+			VolumeSizeGB:     10,
+			MemoryMB:         1024,
+			CPUs:             1,
+		},
+	}
+	levels(&lane.Workload)
+	levels(&follow.Workload)
+	if strings.HasPrefix(strings.TrimSpace(source), upgradeGateBaselinePrefix+"-") {
+		return []DesiredWorker{follow}
+	}
+	return []DesiredWorker{lane, follow}
+}
+
 func GateFleetForSource(source, gitSHA, litestreamSHA string) FleetSpec {
-	workers := []DesiredWorker{
+	source = strings.TrimSpace(source)
+	workers := rcGateWorkers()
+	if gateKindForSource(source) == model.RCGateKindUpgrade {
+		workers = upgradeGateWorkers(source)
+	}
+	for i := range workers {
+		workers[i].Source = source
+		workers[i].GitSHA = gitSHA
+		workers[i].LitestreamSHA = litestreamSHA
+		workers[i].Name = workerNameForSource(source, workers[i].Name)
+		workers[i].WorkerID = workers[i].Name
+	}
+	return FleetSpec{Workers: withMeteringWindowObserveProxy(workers)}
+}
+
+func rcGateWorkers() []DesiredWorker {
+	return []DesiredWorker{
 		{
 			Name:         "worker-gate-stress",
 			ProfileName:  gateStressProfile,
@@ -233,18 +454,24 @@ func GateFleetForSource(source, gitSHA, litestreamSHA string) FleetSpec {
 			},
 		},
 	}
-	source = strings.TrimSpace(source)
-	for i := range workers {
-		workers[i].Source = source
-		workers[i].GitSHA = gitSHA
-		workers[i].LitestreamSHA = litestreamSHA
-		workers[i].Name = workerNameForSource(source, workers[i].Name)
-		workers[i].WorkerID = workers[i].Name
+}
+
+func parseRCGateKind(raw string) (model.RCGateKind, error) {
+	switch kind := model.RCGateKind(strings.TrimSpace(raw)); kind {
+	case "", model.RCGateKindRC:
+		return model.RCGateKindRC, nil
+	case model.RCGateKindUpgrade:
+		return kind, nil
+	default:
+		return "", fmt.Errorf("%w: kind must be %s or %s", errRCGateInvalid, model.RCGateKindRC, model.RCGateKindUpgrade)
 	}
-	return FleetSpec{Workers: withMeteringWindowObserveProxy(workers)}
 }
 
 func (m *Manager) RegisterRCGate(request RCGateRequest, now time.Time) (model.RCGate, bool, error) {
+	kind, err := parseRCGateKind(request.Kind)
+	if err != nil {
+		return model.RCGate{}, false, err
+	}
 	repository := strings.TrimSpace(request.Repository)
 	if repository != rcGateUpstreamRepository {
 		return model.RCGate{}, false, fmt.Errorf("%w: repository must be %s", errRCGateInvalid, rcGateUpstreamRepository)
@@ -257,20 +484,44 @@ func (m *Manager) RegisterRCGate(request RCGateRequest, now time.Time) (model.RC
 	if candidateSHA == baselineSHA {
 		return model.RCGate{}, false, fmt.Errorf("%w: candidate and baseline must be different commits", errRCGateInvalid)
 	}
-	duration, err := time.ParseDuration(strings.TrimSpace(request.Duration))
+	durationText := strings.TrimSpace(request.Duration)
+	if durationText == "" && kind == model.RCGateKindUpgrade {
+		durationText = upgradeGateDefaultDuration.String()
+	}
+	duration, err := time.ParseDuration(durationText)
 	if err != nil || duration <= 0 || duration > rcGateMaxDuration {
 		return model.RCGate{}, false, fmt.Errorf("%w: duration must be a positive duration no longer than %s", errRCGateInvalid, rcGateMaxDuration)
 	}
+	var warmup time.Duration
+	if kind == model.RCGateKindUpgrade {
+		if request.Tail {
+			return model.RCGate{}, false, fmt.Errorf("%w: upgrade gates do not support tail", errRCGateInvalid)
+		}
+		warmup = upgradeGateDefaultWarmup
+		if text := strings.TrimSpace(request.UpgradeWarmup); text != "" {
+			if warmup, err = time.ParseDuration(text); err != nil || warmup <= 0 {
+				return model.RCGate{}, false, fmt.Errorf("%w: upgrade_warmup must be a positive duration", errRCGateInvalid)
+			}
+		}
+		if warmup >= duration {
+			return model.RCGate{}, false, fmt.Errorf("%w: upgrade_warmup %s must be shorter than duration %s", errRCGateInvalid, warmup, duration)
+		}
+	} else if strings.TrimSpace(request.UpgradeWarmup) != "" {
+		return model.RCGate{}, false, fmt.Errorf("%w: upgrade_warmup is only valid for upgrade gates", errRCGateInvalid)
+	}
 
 	now = now.UTC()
+	candidatePrefix, baselinePrefix := gateSourcePrefixes(kind)
 	gate := model.RCGate{
+		Kind:              kind,
 		Repository:        repository,
 		CandidateRef:      strings.TrimSpace(request.CandidateRef),
-		CandidateSource:   gateSourceName(rcGateCandidatePrefix, candidateSHA),
+		CandidateSource:   gateSourceName(candidatePrefix, candidateSHA),
 		CandidateSHA:      candidateSHA,
-		BaselineSource:    gateSourceName(rcGateBaselinePrefix, baselineSHA),
+		BaselineSource:    gateSourceName(baselinePrefix, baselineSHA),
 		BaselineSHA:       baselineSHA,
 		Duration:          duration,
+		UpgradeWarmup:     warmup,
 		Tail:              request.Tail,
 		Status:            model.RCGateRunning,
 		StartedAt:         now,
@@ -306,24 +557,41 @@ func (m *Manager) RegisterRCGate(request RCGateRequest, now time.Time) (model.RC
 		if lookupErr != nil {
 			return model.RCGate{}, false, errors.Join(err, lookupErr)
 		}
-		if existing != nil && existing.Repository == gate.Repository && existing.CandidateSHA == gate.CandidateSHA &&
-			existing.BaselineSHA == gate.BaselineSHA && existing.Duration == gate.Duration && existing.Tail == gate.Tail {
+		if existing != nil && existing.Kind == gate.Kind && existing.Repository == gate.Repository && existing.CandidateSHA == gate.CandidateSHA &&
+			existing.BaselineSHA == gate.BaselineSHA && existing.Duration == gate.Duration && existing.UpgradeWarmup == gate.UpgradeWarmup && existing.Tail == gate.Tail {
 			return *existing, false, nil
 		}
 		return model.RCGate{}, false, err
 	}
-	_ = m.db.RecordEvent("", "rc_gate_registered", fmt.Sprintf("Registered RC gate %s vs %s for %s", gate.CandidateSource, gate.BaselineSource, duration), fmt.Sprintf("gate_id=%d tail=%t", gate.ID, gate.Tail))
+	_ = m.db.RecordEvent("", "rc_gate_registered", fmt.Sprintf("Registered %s gate %s vs %s for %s", gate.Kind, gate.CandidateSource, gate.BaselineSource, duration), fmt.Sprintf("gate_id=%d tail=%t upgrade_warmup=%s", gate.ID, gate.Tail, gate.UpgradeWarmup))
 	return gate, true, nil
 }
 
-func rcGateProfileWindow(gate model.RCGate, profile string) (bool, time.Time) {
-	known := false
-	for _, desired := range GateFleetForSource(gate.CandidateSource, "", "").Workers {
-		if desired.ProfileName == profile {
-			known = true
+func gateHasProfile(gate model.RCGate, profile string) bool {
+	for _, source := range gate.Sources() {
+		for _, desired := range GateFleetForSource(source, "", "").Workers {
+			if desired.ProfileName == profile {
+				return true
+			}
 		}
 	}
-	if !known {
+	return false
+}
+
+// applyGateWorkload overrides the fleet defaults with the per-gate settings an
+// operator chose at registration, so the attested profile config matches what
+// the worker actually runs.
+func applyGateWorkload(gate model.RCGate, spec FleetSpec) FleetSpec {
+	for i := range spec.Workers {
+		if spec.Workers[i].Workload.UpgradeLane && gate.UpgradeWarmup > 0 {
+			spec.Workers[i].Workload.UpgradeWarmup = gate.UpgradeWarmup.String()
+		}
+	}
+	return spec
+}
+
+func rcGateProfileWindow(gate model.RCGate, profile string) (bool, time.Time) {
+	if !gateHasProfile(gate, profile) {
 		return false, time.Time{}
 	}
 	tailProfile := gate.Tail && gate.TailExpiresAt != nil && profile == gateStressProfile
@@ -377,7 +645,7 @@ func (m *Manager) rcGateFleetForSource(source, gitSHA, litestreamSHA string, now
 	if gate == nil {
 		return FleetSpec{}, fmt.Errorf("%w: %s has no open gate", errRCGateClosed, source)
 	}
-	spec := GateFleetForSource(source, gitSHA, litestreamSHA)
+	spec := applyGateWorkload(*gate, GateFleetForSource(source, gitSHA, litestreamSHA))
 	permitted := spec.Workers[:0]
 	for _, desired := range spec.Workers {
 		if m.rcGateProfilePermitted(*gate, desired.ProfileName, now) {
@@ -607,6 +875,9 @@ func buildRCGateLedgerEntry(db *model.DB, gate model.RCGate, now time.Time) (RCG
 		RCGate:   gate,
 		Duration: gate.Duration.String(),
 	}
+	if gate.UpgradeWarmup > 0 {
+		entry.UpgradeWarmup = gate.UpgradeWarmup.String()
+	}
 	for _, resource := range gate.Resources {
 		entry.TotalMachines++
 		entry.TotalVolumeGB += resource.VolumeGB
@@ -635,12 +906,19 @@ func buildRCGateLedgerEntry(db *model.DB, gate model.RCGate, now time.Time) (RCG
 func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateResults, error) {
 	results := rcGateResults{ClosedAt: end.UTC()}
 	failing, incomplete := false, false
-	for _, scenario := range gateScenarios {
-		candidate, candidateModes, err := rcGateSide(db, gate, gate.CandidateSource, scenario, end)
+	for _, scenario := range gateScenariosFor(gate.Kind) {
+		candidateFilter, baselineFilter := scenario.candidate, scenario.baseline
+		if candidateFilter.role == "" {
+			candidateFilter.role = gateRoleCandidate
+		}
+		if baselineFilter.role == "" {
+			baselineFilter.role = gateRoleBaseline
+		}
+		candidate, candidateModes, err := rcGateSide(db, gate, scenario, candidateFilter, end)
 		if err != nil {
 			return rcGateResults{}, err
 		}
-		baseline, baselineModes, err := rcGateSide(db, gate, gate.BaselineSource, scenario, end)
+		baseline, baselineModes, err := rcGateSide(db, gate, scenario, baselineFilter, end)
 		if err != nil {
 			return rcGateResults{}, err
 		}
@@ -674,7 +952,9 @@ func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateR
 	return results, nil
 }
 
-func rcGateSide(db *model.DB, gate model.RCGate, source string, scenario gateScenario, end time.Time) (RCGateSideResult, map[string]*RCGateSideResult, error) {
+func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter gateSideFilter, end time.Time) (RCGateSideResult, map[string]*RCGateSideResult, error) {
+	source := filter.sourceFor(gate)
+	profile := firstNonEmpty(filter.profile, scenario.profile)
 	side := RCGateSideResult{Source: source, Status: rcGateSideMissing}
 	modes := make(map[string]*RCGateSideResult)
 	pinnedImage, pinnedGit := gate.PinnedBuildFor(source)
@@ -692,7 +972,7 @@ func rcGateSide(db *model.DB, gate model.RCGate, source string, scenario gateSce
 	}
 	var worker *model.Worker
 	for i := range workers {
-		if workers[i].ProfileName == scenario.profile && rcGateOwnsWorker(gate, workers[i]) {
+		if workers[i].ProfileName == profile && rcGateOwnsWorker(gate, workers[i]) {
 			worker = &workers[i]
 			break
 		}
@@ -707,7 +987,7 @@ func rcGateSide(db *model.DB, gate model.RCGate, source string, scenario gateSce
 	}
 	for _, verification := range verifications {
 		if verification.StartedAt.Before(gate.StartedAt) || verification.StartedAt.After(end) ||
-			verification.Run.Scenario != scenario.identity || !verification.MatchesDeployment(*worker, *deployment) {
+			verification.Run.Scenario != scenario.identity || !verification.MatchesDeployment(*worker, *deployment) || !filter.accepts(gate, verification) {
 			continue
 		}
 		mode := strings.TrimSpace(verification.RestoreMode)
@@ -748,6 +1028,9 @@ func rcGateSideStatus(side RCGateSideResult) string {
 }
 
 func rcGateRequiredModes(scenario gateScenario, candidate, baseline RCGateSideResult) []string {
+	if len(scenario.requiredModes) > 0 {
+		return scenario.requiredModes
+	}
 	if scenario.txidOnly || (!candidate.RotationEnabled && !baseline.RotationEnabled) {
 		return []string{"txid"}
 	}

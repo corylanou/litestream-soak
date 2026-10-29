@@ -128,7 +128,7 @@ func (r *Runner) sendVerificationStarted(ctx context.Context, result Verificatio
 	}
 }
 
-func (r *Runner) sendVerification(ctx context.Context, result VerificationResult) {
+func (r *Runner) sendVerification(ctx context.Context, result VerificationResult, replicaLevels *reporting.ReplicaLevelReport) {
 	if r.reporter == nil || !r.reporter.Enabled() {
 		return
 	}
@@ -142,7 +142,6 @@ func (r *Runner) sendVerification(ctx context.Context, result VerificationResult
 	default:
 		r.resetFailureDebugState()
 	}
-	replicaLevels := r.replicaLevelReport(result)
 	reportCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 

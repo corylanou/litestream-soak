@@ -233,6 +233,10 @@ func Open(path string) (*DB, error) {
 		_ = writer.Close()
 		return nil, fmt.Errorf("ensure rc gate ledger: %w", err)
 	}
+	if err := ensureRCGateColumns(writer); err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("ensure rc gate columns: %w", err)
+	}
 	if err := ensureEvidenceJournal(writer); err != nil {
 		_ = writer.Close()
 		return nil, fmt.Errorf("ensure evidence journal: %w", err)

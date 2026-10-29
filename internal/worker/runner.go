@@ -33,6 +33,7 @@ type Runner struct {
 	s3FaultProxy            *s3FaultProxy
 	harnessWriters          *harnessWriterTracker
 	objectStore             *objectStoreMeter
+	lastReplicaLevels       *reporting.ReplicaLevelReport
 }
 
 func NewRunner(cfg Config) *Runner {
@@ -145,6 +146,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("wait for first sync: %w", err)
 	}
 	go newReplicaLevelPoller(&r.cfg).Run(runCtx)
+	if r.cfg.CompactionProgressCheck && r.cfg.ReplicaLevelReporting {
+		r.lastReplicaLevels = collectReplicaLevelReport(r.cfg, 0)
+	}
 
 	if r.cfg.churnEnabled() {
 		load, err := startChurn(runCtx, r.cfg, func(op string, n int64, duration time.Duration, attemptErr error) {
@@ -215,12 +219,22 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.verifier.objectStore = r.objectStore
 	r.verifier.SetStartHook(r.sendVerificationStarted)
 	r.verifier.onProfileIncident = r.triggerProfile
+	defer r.verifier.stopFollow()
 
 	if err := r.runVerifyLoop(runCtx); err != nil {
-		r.sendWorkerFailureEvent(err)
+		if !phaseEnded(err) {
+			r.sendWorkerFailureEvent(err)
+		}
 		return err
 	}
 	return nil
+}
+
+// phaseEnded reports whether a run stopped because its scheduled phase ended
+// (a stress scenario slot or the upgrade warm-up), which is a planned restart
+// rather than a worker failure.
+func phaseEnded(err error) bool {
+	return errors.Is(err, errStressScenarioPhaseEnded) || errors.Is(err, errUpgradeWarmupEnded)
 }
 
 func (r *Runner) populate(ctx context.Context) error {
@@ -278,11 +292,21 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 			r.resetS3FaultProxyCycle()
 			result, err := r.verifier.RunCycle(ctx)
 			result = r.applyS3FaultProxyVerificationGuards(result)
+			levels := r.replicaLevelReport(result)
+			result = r.applyCompactionProgressGuard(result, levels)
 			if !result.Passed {
 				r.triggerProfile("verification-failed")
 			}
-			r.sendVerification(context.WithoutCancel(ctx), result)
+			r.sendVerification(context.WithoutCancel(ctx), result, levels)
 			r.recordLocalResult(result)
+			r.recordUpgradePreTXID(result)
+			for _, extra := range r.verifier.takeExtraResults() {
+				if extra.Status == "failed" {
+					r.triggerProfile("verification-failed")
+				}
+				r.sendVerification(context.WithoutCancel(ctx), extra, levels)
+				r.recordLocalResult(extra)
+			}
 			if err != nil {
 				slog.Error("Verification cycle error", "error", err)
 			}
@@ -294,6 +318,15 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 				slog.Warn("Verification aborted", "cause", context.Cause(ctx))
 			}
 		}
+	}
+}
+
+func (r *Runner) recordUpgradePreTXID(result VerificationResult) {
+	if r.cfg.upgradePhase != UpgradePhasePre || !result.Passed || result.restoreTXID() == 0 {
+		return
+	}
+	if err := recordUpgradePreTXID(r.cfg.DataDir, result.restoreTXID()); err != nil {
+		slog.Warn("Failed to record pre-upgrade txid", "error", err)
 	}
 }
 

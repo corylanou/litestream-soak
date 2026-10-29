@@ -141,7 +141,30 @@ type Config struct {
 	StressScenarios     []string
 	StressScenarioPhase time.Duration
 	stressScenario      string
-	stressBase          *Config
+	identityBase        *Config
+
+	// Upgrade lane: start on the base Litestream build carried by the image,
+	// then switch to the image's pinned build on the same volume, database
+	// and replica prefix once the warm-up has elapsed.
+	UpgradeLane                 bool
+	UpgradeWarmup               time.Duration
+	UpgradePostSnapshotInterval time.Duration
+	LitestreamBaseBinary        string
+	LitestreamBaseSHA           string
+	upgradePhase                string
+	activeLitestreamSHA         string
+	litestreamBinary            string
+	upgradePreTXID              uint64
+
+	// Follow check: keep a `litestream restore -f` running between cycles and
+	// compare it with the source once the primary has written past a new L9.
+	FollowCheck bool
+
+	// Compaction progress: fail a cycle when L0/L1 exceed their object bounds
+	// or no level above L0 advanced while L0 did.
+	CompactionProgressCheck bool
+	CompactionL0ObjectBound int
+	CompactionL1ObjectBound int
 
 	// Replay
 	LoadMode       string  // "synthetic", "replay", "both"
@@ -180,6 +203,9 @@ func DefaultConfig() Config {
 		ReadRatio:   0.2,
 		Workers:     1,
 		InitialSize: "5MB",
+
+		UpgradeWarmup:        2 * time.Hour,
+		LitestreamBaseBinary: defaultLitestreamBaseBinary,
 
 		ActivePercent:           2,
 		ActiveRotateInterval:    30 * time.Minute,
@@ -310,6 +336,10 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if err == nil {
 		c.LitestreamSHA = resolveLitestreamSHA()
+		c.LitestreamBaseSHA = resolveLitestreamBaseSHA(c.LitestreamBaseSHA)
+	}
+	if err == nil && c.UpgradeLane {
+		err = c.validateUpgradeLane(os.Stat)
 	}
 	return c, err
 }
@@ -897,6 +927,49 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 		c.StressScenarios = scenarios
 		c.StressScenarioPhase = d
 	}
+	if parseBoolEnv(getenv("UPGRADE_LANE")) {
+		c.UpgradeLane = true
+	}
+	if v := getenv("UPGRADE_WARMUP"); strings.TrimSpace(v) != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return c, fmt.Errorf("invalid UPGRADE_WARMUP: a positive duration is required")
+		}
+		c.UpgradeWarmup = d
+	}
+	if v := getenv("UPGRADE_POST_SNAPSHOT_INTERVAL"); strings.TrimSpace(v) != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return c, fmt.Errorf("invalid UPGRADE_POST_SNAPSHOT_INTERVAL: a positive duration is required")
+		}
+		c.UpgradePostSnapshotInterval = d
+	}
+	if v := strings.TrimSpace(getenv("LITESTREAM_BASE_BINARY")); v != "" {
+		c.LitestreamBaseBinary = v
+	}
+	c.LitestreamBaseSHA = strings.TrimSpace(getenv("LITESTREAM_BASE_SHA"))
+	if c.UpgradeLane && len(c.StressScenarios) > 0 {
+		return c, fmt.Errorf("UPGRADE_LANE cannot be combined with STRESS_SCENARIOS")
+	}
+	if parseBoolEnv(getenv("FOLLOW_CHECK")) {
+		c.FollowCheck = true
+	}
+	if parseBoolEnv(getenv("COMPACTION_PROGRESS_CHECK")) {
+		c.CompactionProgressCheck = true
+		c.ReplicaLevelReporting = true
+	}
+	for key, target := range map[string]*int{
+		"COMPACTION_L0_OBJECT_BOUND": &c.CompactionL0ObjectBound,
+		"COMPACTION_L1_OBJECT_BOUND": &c.CompactionL1ObjectBound,
+	} {
+		if v := getenv(key); strings.TrimSpace(v) != "" {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil || n < 0 {
+				return c, fmt.Errorf("invalid %s: a non-negative integer is required", key)
+			}
+			*target = n
+		}
+	}
 	levelsSet := 0
 	for _, d := range []time.Duration{c.L1CompactionInterval, c.L2CompactionInterval, c.L3CompactionInterval} {
 		if d != 0 {
@@ -1153,8 +1226,8 @@ func (c Config) manyDBVerifyChangedLimit() int {
 }
 
 func (c Config) WorkloadConfig() workload.Config {
-	if c.stressBase != nil {
-		return c.stressBase.WorkloadConfig()
+	if c.identityBase != nil {
+		return c.identityBase.WorkloadConfig()
 	}
 	cfg := workload.Config{
 		Churn:                    c.Churn,
@@ -1235,6 +1308,17 @@ func (c Config) WorkloadConfig() workload.Config {
 		cfg.StressScenarios = strings.Join(c.StressScenarios, ",")
 		cfg.StressScenarioPhase = c.StressScenarioPhase.String()
 	}
+	if c.UpgradeLane {
+		cfg.UpgradeLane = true
+		cfg.UpgradeWarmup = c.UpgradeWarmup.String()
+		if c.UpgradePostSnapshotInterval > 0 {
+			cfg.UpgradePostSnapshotInterval = c.UpgradePostSnapshotInterval.String()
+		}
+	}
+	cfg.FollowCheck = c.FollowCheck
+	cfg.CompactionProgressCheck = c.CompactionProgressCheck
+	cfg.CompactionL0ObjectBound = c.CompactionL0ObjectBound
+	cfg.CompactionL1ObjectBound = c.CompactionL1ObjectBound
 	if c.ManyDBEnabled() {
 		cfg.MaxRowsPerDatabase = c.manyDBMaxRowsPerDatabase()
 		cfg.ActiveRotateInterval = c.manyDBActiveRotateInterval().String()
