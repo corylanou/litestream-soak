@@ -417,6 +417,8 @@ The ledger scores four scenarios for an upgrade gate. `upgrade-lane` compares th
 
 Register one by hand with `scripts/register-rc-gate.sh <repo> <candidate-ref> <candidate-sha> <base-sha> 24h false upgrade 2h`, then send the two deployment-ready notifications exactly as the workflow does. The ledger entry carries `upgrade_warmup`, and the registered warm-up overrides the fleet default on the lane worker so the attested profile config matches what the worker runs.
 
+Inconclusive verifications (status `aborted` or `pending`) count for neither side. The worker reports a restore as inconclusive, and the control plane re-labels an older image's failure the same way on ingest, when the pinned `txid` or `timestamp` restore target is no longer available, or when the restore's object-store call ended with HTTP 408 `RequestCanceled` (`restore_s3_list_request_canceled`, `restore_s3_get_request_canceled`). Only that exact combination is inconclusive: a 403, a 500, a decode error without that object-store failure, a data mismatch, or the same 408 during `sync` all stay failures.
+
 ### No-L9 lane variant
 
 The base build writes an initial L9 snapshot at its first start, so the standard lane can never show a candidate taking over a replica with no snapshot level. The `nol9` variant closes that gap. Launch it from the same `soak-upgrade` workflow with `lane_variant: nol9`, or by hand with `scripts/register-rc-gate.sh <repo> <candidate-ref> <candidate-sha> <base-sha> 24h false upgrade 2h nol9`. It is its own small gate: the candidate source `up-nol9-<cand8>` runs one worker, `gate-upgrade-lane-nol9`, and the baseline source `upbase-nol9-<base8>` runs the base `gate-upgrade-follow` worker, so it never collides with a standard upgrade gate for the same commits and never needs to add a worker to one (which the pin rules would refuse).
@@ -1234,6 +1236,14 @@ Check:
 
 This usually points to the replication or object-fetch path, not the workload
 generator itself.
+
+A restore whose `ListObjectsV2` or `GetObject` call exhausted its retries with
+HTTP 408 `RequestCanceled` is recorded as an inconclusive `aborted`
+verification, not a failure, on both current and older worker images. It does
+not count toward dormancy, worker degradation, or gate scoring, but it still
+shows up in the worker's verification history with the original error, so a
+provider that keeps canceling requests is visible without being blamed on the
+build under test.
 
 ### `integrity_check`
 

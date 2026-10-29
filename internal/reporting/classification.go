@@ -1,6 +1,7 @@
 package reporting
 
 import (
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -8,7 +9,11 @@ import (
 )
 
 const (
-	SignatureRestoreTargetUnavailable = "restore_target_unavailable"
+	SignatureRestoreTargetUnavailable     = "restore_target_unavailable"
+	SignatureRestoreS3ListRequestCanceled = "restore_s3_list_request_canceled"
+	SignatureRestoreS3GetRequestCanceled  = "restore_s3_get_request_canceled"
+
+	objectStoreAPICodeRequestCanceled = "RequestCanceled"
 
 	soakFixtureSourceUsedPercent = 95.0
 	diskTelemetryMaxAge          = time.Minute
@@ -388,6 +393,18 @@ func PinnedRestoreTargetUnavailable(restoreMode, errorMessage string) bool {
 	}
 	classification := ClassifyVerificationFailure("restore_validate", errorMessage)
 	return classification.Stage == "restore" && classification.Signature == SignatureRestoreTargetUnavailable
+}
+
+func RestoreRequestCanceled(errorMessage string) bool {
+	classification := ClassifyVerificationFailure("restore_validate", errorMessage)
+	if classification.Stage != "restore" || classification.ObjectStore == nil {
+		return false
+	}
+	if classification.Signature != SignatureRestoreS3ListRequestCanceled && classification.Signature != SignatureRestoreS3GetRequestCanceled {
+		return false
+	}
+	return classification.ObjectStore.HTTPStatus == http.StatusRequestTimeout &&
+		strings.EqualFold(strings.TrimSpace(classification.ObjectStore.APICode), objectStoreAPICodeRequestCanceled)
 }
 
 func RestoreErrorOutput(output string) string {

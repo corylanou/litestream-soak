@@ -778,8 +778,12 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		} else {
 			metadata.err = fmt.Errorf("restore failed: run validate: %w: %s", err, restoreEvidence.finalError)
 		}
-		if reporting.PinnedRestoreTargetUnavailable(mode, metadata.err.Error()) {
+		switch {
+		case reporting.PinnedRestoreTargetUnavailable(mode, metadata.err.Error()):
 			v.logicalEvidence += " restore_target=unavailable"
+			metadata.err = &restoreEvidenceInconclusiveError{err: metadata.err}
+		case reporting.RestoreRequestCanceled(metadata.err.Error()):
+			v.logicalEvidence += " object_store=request_canceled"
 			metadata.err = &restoreEvidenceInconclusiveError{err: metadata.err}
 		}
 		return metadata
