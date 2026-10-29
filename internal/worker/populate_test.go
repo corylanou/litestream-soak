@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -241,5 +242,50 @@ func TestWALCheckpointTruncateReportsBusy(t *testing.T) {
 	err = walCheckpoint(context.Background(), db, "TRUNCATE")
 	if err == nil {
 		t.Fatal("walCheckpoint(TRUNCATE) succeeded with a reader pinning the wal, want busy")
+	}
+}
+
+func TestPopulateArgsPinIndexRatio(t *testing.T) {
+	tests := []struct {
+		name  string
+		ratio float64
+		want  string
+	}{
+		{name: "default pins no indexes", ratio: 0, want: "0"},
+		{name: "one pins both indexes", ratio: 1, want: "1"},
+		{name: "fractions pass through", ratio: 0.25, want: "0.25"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.DBPath = "/data/test.db"
+			cfg.InitialSize = "6GB"
+			cfg.PopulateIndexRatio = tt.ratio
+			args := populateArgs(cfg)
+			want := []string{"populate", "-db", "/data/test.db", "-target-size", "6GB", "-index-ratio", tt.want}
+			if !slices.Equal(args, want) {
+				t.Fatalf("populateArgs() = %q, want %q", args, want)
+			}
+		})
+	}
+}
+
+func TestPopulateEnvSeedsMathRand(t *testing.T) {
+	tests := []struct {
+		name string
+		env  []string
+		want []string
+	}{
+		{name: "adds GODEBUG", env: []string{"PATH=/bin"}, want: []string{"PATH=/bin", "GODEBUG=randautoseed=0"}},
+		{name: "extends existing GODEBUG", env: []string{"GODEBUG=http2debug=1"}, want: []string{"GODEBUG=http2debug=1,randautoseed=0"}},
+		{name: "fills empty GODEBUG", env: []string{"GODEBUG="}, want: []string{"GODEBUG=randautoseed=0"}},
+		{name: "keeps an existing setting once", env: []string{"GODEBUG=randautoseed=0,x=1"}, want: []string{"GODEBUG=randautoseed=0,x=1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := populateEnv(slices.Clone(tt.env)); !slices.Equal(got, tt.want) {
+				t.Fatalf("populateEnv(%q) = %q, want %q", tt.env, got, tt.want)
+			}
+		})
 	}
 }

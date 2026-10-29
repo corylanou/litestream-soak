@@ -263,11 +263,9 @@ func (r *Runner) populate(ctx context.Context) error {
 		return fmt.Errorf("create data dir: %w", err)
 	}
 
-	slog.Info("Populating database", "target_size", r.cfg.InitialSize)
-	cmd := exec.CommandContext(ctx, "litestream-test", "populate",
-		"-db", r.cfg.DBPath,
-		"-target-size", r.cfg.InitialSize,
-	)
+	slog.Info("Populating database", "target_size", r.cfg.InitialSize, "index_ratio", r.cfg.PopulateIndexRatio)
+	cmd := exec.CommandContext(ctx, "litestream-test", populateArgs(r.cfg)...)
+	cmd.Env = populateEnv(os.Environ())
 	stats, err := runPopulateCommand(ctx, cmd, r.cfg.DBPath)
 	if err != nil {
 		return err

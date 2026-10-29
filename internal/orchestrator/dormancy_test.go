@@ -1290,3 +1290,26 @@ func TestRetriableMachineCreateErrorWrappedError(t *testing.T) {
 		t.Fatalf("retriableMachineCreateError(wrapped) = false, want true")
 	}
 }
+
+func TestWorkerEnvPassesPopulateIndexRatio(t *testing.T) {
+	tests := []struct {
+		name  string
+		ratio float64
+		want  string
+		set   bool
+	}{
+		{name: "zero is the worker default and stays unset", ratio: 0},
+		{name: "one pins both indexes", ratio: 1, want: "1", set: true},
+		{name: "fractions keep their precision", ratio: 0.2, want: "0.2", set: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr := &Manager{controlBaseURL: "https://litestream-soak-ctl.fly.dev"}
+			env := mgr.workerEnv(model.Worker{ID: "worker-rc-large", Name: "worker-rc-large"}, workload.Config{PopulateIndexRatio: tt.ratio})
+			got, ok := env["POPULATE_INDEX_RATIO"]
+			if ok != tt.set || got != tt.want {
+				t.Fatalf("POPULATE_INDEX_RATIO = %q (set %v), want %q (set %v)", got, ok, tt.want, tt.set)
+			}
+		})
+	}
+}

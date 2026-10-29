@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -134,6 +135,9 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	}
 	if workloadCfg.ReadRatio > 0 {
 		env["READ_RATIO"] = fmt.Sprintf("%.2f", workloadCfg.ReadRatio)
+	}
+	if workloadCfg.PopulateIndexRatio > 0 {
+		env["POPULATE_INDEX_RATIO"] = strconv.FormatFloat(workloadCfg.PopulateIndexRatio, 'f', -1, 64)
 	}
 	if workloadCfg.Workers > 0 {
 		env["LOAD_WORKERS"] = fmt.Sprintf("%d", workloadCfg.Workers)

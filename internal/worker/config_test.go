@@ -585,3 +585,40 @@ func TestObserveProxyOptInViaEnv(t *testing.T) {
 		t.Fatalf("S3FaultProxyMode = %q, want observe", cfg.S3FaultProxyMode)
 	}
 }
+
+func TestConfigFromEnvReadsPopulateIndexRatio(t *testing.T) {
+	tests := []struct {
+		value   string
+		want    float64
+		wantErr bool
+	}{
+		{value: "", want: 0},
+		{value: "0", want: 0},
+		{value: "1", want: 1},
+		{value: "0.5", want: 0.5},
+		{value: "1.5", wantErr: true},
+		{value: "-0.1", wantErr: true},
+		{value: "half", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run("POPULATE_INDEX_RATIO="+tt.value, func(t *testing.T) {
+			t.Setenv("POPULATE_INDEX_RATIO", tt.value)
+			cfg, err := ConfigFromEnv()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("ConfigFromEnv() error = nil, want rejection")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ConfigFromEnv() error = %v", err)
+			}
+			if cfg.PopulateIndexRatio != tt.want {
+				t.Fatalf("PopulateIndexRatio = %v, want %v", cfg.PopulateIndexRatio, tt.want)
+			}
+			if got := cfg.WorkloadConfig().PopulateIndexRatio; got != tt.want {
+				t.Fatalf("WorkloadConfig().PopulateIndexRatio = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

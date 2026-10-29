@@ -9,6 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -279,6 +282,43 @@ func fileSizeOrZero(path string) int64 {
 		return 0
 	}
 	return info.Size()
+}
+
+// populateArgs pins the schema populate creates. litestream-test populate has
+// no seed flag: it decides each index with math/rand and fills int_field with
+// math/rand too, so an explicit -index-ratio is the only flag-level control
+// over the schema, and only 0 or 1 remove the draw entirely.
+func populateArgs(cfg Config) []string {
+	return []string{
+		"populate",
+		"-db", cfg.DBPath,
+		"-target-size", cfg.InitialSize,
+		"-index-ratio", strconv.FormatFloat(cfg.PopulateIndexRatio, 'f', -1, 64),
+	}
+}
+
+// populateEnv seeds populate's global math/rand deterministically. Since Go
+// 1.20 the top-level math/rand functions seed themselves randomly unless
+// GODEBUG=randautoseed=0, which restores the fixed Seed(1) sequence, so both
+// gate sides make the same index draws and insert the same int_field keys.
+// Row payloads (crypto/rand) and timestamps (wall clock) stay unique to each
+// run; neither affects which indexes exist.
+func populateEnv(env []string) []string {
+	const setting = "randautoseed=0"
+	for i, entry := range env {
+		if value, ok := strings.CutPrefix(entry, "GODEBUG="); ok {
+			if slices.Contains(strings.Split(value, ","), setting) {
+				return env
+			}
+			if value == "" {
+				env[i] = "GODEBUG=" + setting
+			} else {
+				env[i] = entry + "," + setting
+			}
+			return env
+		}
+	}
+	return append(env, "GODEBUG="+setting)
 }
 
 // runPopulateCommand runs litestream-test populate with a concurrent bounded
