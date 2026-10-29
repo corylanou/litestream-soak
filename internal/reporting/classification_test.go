@@ -579,6 +579,11 @@ func TestPinnedRestoreTargetUnavailable(t *testing.T) {
 		{"object store transport", "txid", "restore failed: cannot recalculate restore plan: operation error S3: GetObject, https response error StatusCode: 408, api error RequestCanceled: Request is canceled.", false},
 		{"integrity mismatch", "txid", "restore failed: integrity check: wrong # of entries in index", false},
 		{"sync stage", "txid", "wait for sync: transaction not available", false},
+		{"timestamp target lost", "timestamp", "restore failed: validation failed (exit 1): Error: no matching backup files available: restore target timestamp 2026-10-23T12:00:00.123000001Z is no longer available: transaction not available", true},
+		{"bare missing backup files", "txid", "restore failed: validation failed (exit 1): Error: no matching backup files available", false},
+		{"bare transaction not available", "txid", "restore failed: validation failed (exit 1): Error: transaction not available", false},
+		{"bare recalculate", "timestamp", "restore failed: validation failed (exit 1): Error: cannot recalculate restore plan", false},
+		{"recalculate for txid", "txid", "restore failed: cannot recalculate restore plan for txid 0000000000000042: transaction not available", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := PinnedRestoreTargetUnavailable(tc.mode, tc.message); got != tc.want {

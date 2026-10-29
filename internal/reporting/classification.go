@@ -15,12 +15,13 @@ const (
 )
 
 var (
-	s3OperationPattern = regexp.MustCompile(`(?i)operation error S3:\s*([A-Za-z0-9]+)`)
-	httpStatusPattern  = regexp.MustCompile(`(?i)StatusCode:\s*([0-9]+)`)
-	apiCodePattern     = regexp.MustCompile(`(?i)api error\s+([A-Za-z0-9]+):`)
-	requestIDPattern   = regexp.MustCompile(`(?i)RequestID:\s*([^,\s]+)`)
-	s3URLPattern       = regexp.MustCompile(`s3://([^/\s]+)/([^"'\s]+)`)
-	keyValuePattern    = regexp.MustCompile(`(?i)\b(operation|http_status|api_code|request_id|bucket|prefix|phase)=("[^"]+"|'[^']+'|[^\s,]+)`)
+	s3OperationPattern             = regexp.MustCompile(`(?i)operation error S3:\s*([A-Za-z0-9]+)`)
+	httpStatusPattern              = regexp.MustCompile(`(?i)StatusCode:\s*([0-9]+)`)
+	apiCodePattern                 = regexp.MustCompile(`(?i)api error\s+([A-Za-z0-9]+):`)
+	requestIDPattern               = regexp.MustCompile(`(?i)RequestID:\s*([^,\s]+)`)
+	s3URLPattern                   = regexp.MustCompile(`s3://([^/\s]+)/([^"'\s]+)`)
+	pinnedRestoreTargetLostPattern = regexp.MustCompile(`(?i)restore target (txid|timestamp) \S+ is no longer available`)
+	keyValuePattern                = regexp.MustCompile(`(?i)\b(operation|http_status|api_code|request_id|bucket|prefix|phase)=("[^"]+"|'[^']+'|[^\s,]+)`)
 )
 
 func (c *FailureClassification) Valid() bool {
@@ -375,6 +376,9 @@ func restoreReplanFailureSignature(text string) string {
 
 func PinnedRestoreTargetUnavailable(restoreMode, errorMessage string) bool {
 	if strings.EqualFold(strings.TrimSpace(restoreMode), "latest") {
+		return false
+	}
+	if !pinnedRestoreTargetLostPattern.MatchString(errorMessage) {
 		return false
 	}
 	classification := ClassifyVerificationFailure("restore_validate", errorMessage)

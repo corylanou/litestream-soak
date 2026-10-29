@@ -446,17 +446,21 @@ func TestRunnerFailureClassificationIncludesRestoreMode(t *testing.T) {
 const pinnedRestoreTargetUnavailableError = "Error: no matching backup files available: restore target txid 0000000000003d9d is no longer available: txid 0000000000003d9d unavailable (nearest covered TXIDs: before=0000000000003c48, after=0000000000003dcf): transaction not available"
 
 func TestVerifierPinnedRestoreTargetUnavailableIsInconclusive(t *testing.T) {
-	script := "echo 'time=2026-10-23T12:00:00Z level=WARN msg=\"restore file disappeared, recalculating plan\"'\necho '" + pinnedRestoreTargetUnavailableError + "' >&2\nexit 1\n"
 	tests := []struct {
+		name         string
 		mode         string
+		final        string
 		inconclusive bool
 	}{
-		{mode: "txid", inconclusive: true},
-		{mode: "timestamp", inconclusive: true},
-		{mode: "latest"},
+		{name: "txid", mode: "txid", final: pinnedRestoreTargetUnavailableError, inconclusive: true},
+		{name: "timestamp", mode: "timestamp", final: pinnedRestoreTargetUnavailableError, inconclusive: true},
+		{name: "latest", mode: "latest", final: pinnedRestoreTargetUnavailableError},
+		{name: "txid missing backup files", mode: "txid", final: "Error: no matching backup files available"},
+		{name: "timestamp recalculate", mode: "timestamp", final: "Error: cannot recalculate restore plan"},
 	}
 	for _, tt := range tests {
-		t.Run(tt.mode, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
+			script := "echo 'time=2026-10-23T12:00:00Z level=WARN msg=\"restore file disappeared, recalculating plan\"'\necho '" + tt.final + "' >&2\nexit 1\n"
 			cfg, _ := restoreModeFixture(t, script)
 			writeLocalL0(t, cfg.DBPath, 0x40, 0x42, time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC))
 			startBoundarySyncFixture(t, &cfg, 0x42)
@@ -470,7 +474,7 @@ func TestVerifierPinnedRestoreTargetUnavailableIsInconclusive(t *testing.T) {
 				t.Fatalf("restore mode = %q, want %q", result.RestoreMode, tt.mode)
 			}
 			v.failValidationResult(context.Background(), &result, err)
-			if !strings.Contains(result.ErrorMessage, "restore target txid 0000000000003d9d is no longer available") {
+			if !strings.Contains(result.ErrorMessage, strings.TrimPrefix(tt.final, "Error: ")) {
 				t.Fatalf("error message = %q", result.ErrorMessage)
 			}
 			if !tt.inconclusive {

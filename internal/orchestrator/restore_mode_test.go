@@ -308,16 +308,20 @@ func TestHandleVerificationPinnedRestoreTargetUnavailableIsInconclusive(t *testi
 
 	const unavailable = "restore failed: validation failed (exit 1): Error: no matching backup files available: restore target txid 0000000000003d9d is no longer available: txid 0000000000003d9d unavailable (nearest covered TXIDs: before=0000000000003c48, after=0000000000003dcf): transaction not available"
 	tests := []struct {
+		name         string
 		mode         string
+		message      string
 		inconclusive bool
 	}{
-		{mode: "txid", inconclusive: true},
-		{mode: "timestamp", inconclusive: true},
-		{mode: "", inconclusive: true},
-		{mode: "latest"},
+		{name: "txid", mode: "txid", message: unavailable, inconclusive: true},
+		{name: "timestamp", mode: "timestamp", message: unavailable, inconclusive: true},
+		{name: "unreported mode", mode: "", message: unavailable, inconclusive: true},
+		{name: "latest", mode: "latest", message: unavailable},
+		{name: "txid missing backup files", mode: "txid", message: "restore failed: validation failed (exit 1): Error: no matching backup files available"},
+		{name: "timestamp recalculate", mode: "timestamp", message: "restore failed: validation failed (exit 1): Error: cannot recalculate restore plan"},
 	}
 	for _, tt := range tests {
-		t.Run("mode="+tt.mode, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
 			db := openTestDB(t)
@@ -351,7 +355,7 @@ func TestHandleVerificationPinnedRestoreTargetUnavailableIsInconclusive(t *testi
 					CheckType:             "restore_validate",
 					Status:                "failed",
 					Summary:               "restore failed",
-					ErrorMessage:          unavailable,
+					ErrorMessage:          tt.message,
 					FailureClassification: &reporting.FailureClassification{Stage: "restore", Signature: reporting.SignatureRestoreTargetUnavailable, RestoreMode: tt.mode},
 					RestoreMode:           tt.mode,
 				}
@@ -384,7 +388,7 @@ func TestHandleVerificationPinnedRestoreTargetUnavailableIsInconclusive(t *testi
 			}
 			if !tt.inconclusive {
 				if !verifications[0].Failed() || !dormant || latest == nil || latestFailed == nil || worker.Status == model.WorkerRunning {
-					t.Fatalf("latest-mode failure not counted: failed=%v dormant=%v latest=%v latestFailed=%v status=%q", verifications[0].Failed(), dormant, latest, latestFailed, worker.Status)
+					t.Fatalf("correctness failure not counted: failed=%v dormant=%v latest=%v latestFailed=%v status=%q", verifications[0].Failed(), dormant, latest, latestFailed, worker.Status)
 				}
 				return
 			}
@@ -392,7 +396,7 @@ func TestHandleVerificationPinnedRestoreTargetUnavailableIsInconclusive(t *testi
 				if verification.Status != "aborted" || !verification.Inconclusive() || verification.Failed() || verification.FailureClassification != nil {
 					t.Fatalf("verification = %+v, want inconclusive without classification", verification)
 				}
-				if verification.ErrorMessage != unavailable {
+				if verification.ErrorMessage != tt.message {
 					t.Fatalf("error message = %q", verification.ErrorMessage)
 				}
 			}
