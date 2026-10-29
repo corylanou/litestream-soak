@@ -119,6 +119,15 @@ func TestWorkerDockerfileQuotesLitestreamCheckoutRef(t *testing.T) {
 	}
 }
 
+func TestWorkerDockerfileFetchesLitestreamRefBeforeCheckout(t *testing.T) {
+	content := string(readFile(t, "Dockerfile.worker"))
+	fetch := strings.Index(content, `git fetch origin "${LITESTREAM_SHA}"`)
+	checkout := strings.Index(content, `git checkout --detach "${LITESTREAM_SHA}"`)
+	if fetch < 0 || checkout < 0 || fetch > checkout {
+		t.Fatal("Dockerfile.worker must fetch the Litestream ref by name before checkout: fork PR heads are only reachable through refs/pull and are missing from a plain clone")
+	}
+}
+
 func TestDockerEntrypointRepairsDataBeforeDroppingPrivileges(t *testing.T) {
 	content := string(readFile(t, "docker-entrypoint.sh"))
 	for _, want := range []string{
