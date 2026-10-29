@@ -270,6 +270,9 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 		if strings.TrimSpace(workloadCfg.UpgradePostSnapshotInterval) != "" {
 			env["UPGRADE_POST_SNAPSHOT_INTERVAL"] = workloadCfg.UpgradePostSnapshotInterval
 		}
+		if workloadCfg.UpgradeDeleteL9AtSwitch {
+			env["UPGRADE_DELETE_L9_AT_SWITCH"] = "true"
+		}
 	}
 	if workloadCfg.FollowCheck {
 		env["FOLLOW_CHECK"] = "true"

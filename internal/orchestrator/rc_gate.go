@@ -17,12 +17,17 @@ import (
 )
 
 const (
-	gateStressProfile        = "gate-stress"
-	gateManyDB500Profile     = "gate-manydb-500"
-	gateLargeDBProfile       = "gate-large-db"
-	gateRemoteProfile        = "gate-remote"
-	gateUpgradeLaneProfile   = "gate-upgrade-lane"
-	gateUpgradeFollowProfile = "gate-upgrade-follow"
+	gateStressProfile          = "gate-stress"
+	gateManyDB500Profile       = "gate-manydb-500"
+	gateLargeDBProfile         = "gate-large-db"
+	gateRemoteProfile          = "gate-remote"
+	gateUpgradeLaneProfile     = "gate-upgrade-lane"
+	gateUpgradeLaneNoL9Profile = "gate-upgrade-lane-nol9"
+	gateUpgradeFollowProfile   = "gate-upgrade-follow"
+
+	// upgradeLaneVariantNoL9 empties the replica's L9 level at the switch so
+	// the candidate build starts on a legacy L0-L3-only replica.
+	upgradeLaneVariantNoL9 = "nol9"
 
 	rcGateCandidatePrefix      = "rc"
 	rcGateBaselinePrefix       = "rcbase"
@@ -57,7 +62,7 @@ const (
 )
 
 var (
-	gateSourceRe           = regexp.MustCompile(`^(rc|rcbase|up|upbase)-[0-9a-f]{8}$`)
+	gateSourceRe           = regexp.MustCompile(`^(rc|rcbase|up|upbase)(-nol9)?-[0-9a-f]{8}$`)
 	fullCommitSHARe        = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	errRCGateNotRegistered = errors.New("rc gate is not registered")
 	errRCGatePinned        = errors.New("rc gate source is pinned to a different build")
@@ -73,6 +78,7 @@ type RCGateRequest struct {
 	BaselineSHA   string `json:"baseline_sha"`
 	Duration      string `json:"duration"`
 	UpgradeWarmup string `json:"upgrade_warmup,omitempty"`
+	LaneVariant   string `json:"lane_variant,omitempty"`
 	Tail          bool   `json:"tail"`
 }
 
@@ -193,11 +199,65 @@ var (
 	gateRotatingRestoreModes = []string{"txid", "timestamp", "latest"}
 )
 
-func gateScenariosFor(kind model.RCGateKind) []gateScenario {
-	if kind == model.RCGateKindUpgrade {
+// The no-L9 variant runs a single lane worker whose replica loses its L9
+// level at the switch, plus the baseline follow worker, so its scenarios are
+// the lane trio only: current restores, historical restores, and follow.
+var upgradeGateNoL9Scenarios = []gateScenario{
+	{
+		name:      "upgrade-lane-nol9",
+		profile:   gateUpgradeLaneNoL9Profile,
+		candidate: gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost},
+		baseline:  gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePre},
+	},
+	{
+		name:          "upgrade-lane-nol9-historical",
+		profile:       gateUpgradeLaneNoL9Profile,
+		requiredModes: []string{"txid"},
+		candidate:     gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost, checkType: gateCheckHistorical},
+		baseline:      gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePre, mode: "txid"},
+	},
+	{
+		name:          "upgrade-lane-nol9-follow",
+		profile:       gateUpgradeLaneNoL9Profile,
+		requiredModes: []string{gateModeFollow},
+		candidate:     gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost, checkType: gateCheckFollow},
+		baseline:      gateSideFilter{role: gateRoleBaseline, profile: gateUpgradeFollowProfile, checkType: gateCheckFollow},
+	},
+}
+
+func gateScenariosFor(gate model.RCGate) []gateScenario {
+	switch {
+	case gate.Kind == model.RCGateKindUpgrade && gate.LaneVariant == upgradeLaneVariantNoL9:
+		return upgradeGateNoL9Scenarios
+	case gate.Kind == model.RCGateKindUpgrade:
 		return upgradeGateScenarios
+	default:
+		return rcGateScenarios
 	}
-	return rcGateScenarios
+}
+
+func parseLaneVariant(raw string, kind model.RCGateKind) (string, error) {
+	variant := strings.TrimSpace(raw)
+	switch {
+	case variant == "":
+		return "", nil
+	case kind != model.RCGateKindUpgrade:
+		return "", fmt.Errorf("%w: lane_variant is only valid for upgrade gates", errRCGateInvalid)
+	case variant == upgradeLaneVariantNoL9:
+		return variant, nil
+	default:
+		return "", fmt.Errorf("%w: lane_variant must be empty or %s", errRCGateInvalid, upgradeLaneVariantNoL9)
+	}
+}
+
+// gateLaneVariantForSource reads the variant segment out of a gate source
+// name: up-nol9-<cand8> is the no-L9 lane, up-<cand8> the standard lane.
+func gateLaneVariantForSource(source string) string {
+	parts := strings.Split(strings.TrimSpace(source), "-")
+	if len(parts) == 3 && parts[1] == upgradeLaneVariantNoL9 {
+		return upgradeLaneVariantNoL9
+	}
+	return ""
 }
 
 func (f gateSideFilter) sourceFor(gate model.RCGate) string {
@@ -252,11 +312,15 @@ func gateKindForSource(source string) model.RCGateKind {
 	return model.RCGateKindRC
 }
 
-func gateSourcePrefixes(kind model.RCGateKind) (candidate, baseline string) {
-	if kind == model.RCGateKindUpgrade {
+func gateSourcePrefixes(kind model.RCGateKind, laneVariant string) (candidate, baseline string) {
+	switch {
+	case kind == model.RCGateKindUpgrade && laneVariant != "":
+		return upgradeGateCandidatePrefix + "-" + laneVariant, upgradeGateBaselinePrefix + "-" + laneVariant
+	case kind == model.RCGateKindUpgrade:
 		return upgradeGateCandidatePrefix, upgradeGateBaselinePrefix
+	default:
+		return rcGateCandidatePrefix, rcGateBaselinePrefix
 	}
-	return rcGateCandidatePrefix, rcGateBaselinePrefix
 }
 
 // upgradeGateWorkers is the upgrade gate fleet: the candidate source runs the
@@ -327,6 +391,12 @@ func upgradeGateWorkers(source string) []DesiredWorker {
 	levels(&follow.Workload)
 	if strings.HasPrefix(strings.TrimSpace(source), upgradeGateBaselinePrefix+"-") {
 		return []DesiredWorker{follow}
+	}
+	if gateLaneVariantForSource(source) == upgradeLaneVariantNoL9 {
+		lane.Name = "worker-gate-upgrade-lane-nol9"
+		lane.ProfileName = gateUpgradeLaneNoL9Profile
+		lane.Workload.UpgradeDeleteL9AtSwitch = true
+		return []DesiredWorker{lane}
 	}
 	return []DesiredWorker{lane, follow}
 }
@@ -509,11 +579,16 @@ func (m *Manager) RegisterRCGate(request RCGateRequest, now time.Time) (model.RC
 	} else if strings.TrimSpace(request.UpgradeWarmup) != "" {
 		return model.RCGate{}, false, fmt.Errorf("%w: upgrade_warmup is only valid for upgrade gates", errRCGateInvalid)
 	}
+	laneVariant, err := parseLaneVariant(request.LaneVariant, kind)
+	if err != nil {
+		return model.RCGate{}, false, err
+	}
 
 	now = now.UTC()
-	candidatePrefix, baselinePrefix := gateSourcePrefixes(kind)
+	candidatePrefix, baselinePrefix := gateSourcePrefixes(kind, laneVariant)
 	gate := model.RCGate{
 		Kind:              kind,
+		LaneVariant:       laneVariant,
 		Repository:        repository,
 		CandidateRef:      strings.TrimSpace(request.CandidateRef),
 		CandidateSource:   gateSourceName(candidatePrefix, candidateSHA),
@@ -557,13 +632,13 @@ func (m *Manager) RegisterRCGate(request RCGateRequest, now time.Time) (model.RC
 		if lookupErr != nil {
 			return model.RCGate{}, false, errors.Join(err, lookupErr)
 		}
-		if existing != nil && existing.Kind == gate.Kind && existing.Repository == gate.Repository && existing.CandidateSHA == gate.CandidateSHA &&
+		if existing != nil && existing.Kind == gate.Kind && existing.LaneVariant == gate.LaneVariant && existing.Repository == gate.Repository && existing.CandidateSHA == gate.CandidateSHA &&
 			existing.BaselineSHA == gate.BaselineSHA && existing.Duration == gate.Duration && existing.UpgradeWarmup == gate.UpgradeWarmup && existing.Tail == gate.Tail {
 			return *existing, false, nil
 		}
 		return model.RCGate{}, false, err
 	}
-	_ = m.db.RecordEvent("", "rc_gate_registered", fmt.Sprintf("Registered %s gate %s vs %s for %s", gate.Kind, gate.CandidateSource, gate.BaselineSource, duration), fmt.Sprintf("gate_id=%d tail=%t upgrade_warmup=%s", gate.ID, gate.Tail, gate.UpgradeWarmup))
+	_ = m.db.RecordEvent("", "rc_gate_registered", fmt.Sprintf("Registered %s gate %s vs %s for %s", gate.Kind, gate.CandidateSource, gate.BaselineSource, duration), fmt.Sprintf("gate_id=%d tail=%t upgrade_warmup=%s lane_variant=%s", gate.ID, gate.Tail, gate.UpgradeWarmup, gate.LaneVariant))
 	return gate, true, nil
 }
 
@@ -906,7 +981,7 @@ func buildRCGateLedgerEntry(db *model.DB, gate model.RCGate, now time.Time) (RCG
 func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateResults, error) {
 	results := rcGateResults{ClosedAt: end.UTC()}
 	failing, incomplete := false, false
-	for _, scenario := range gateScenariosFor(gate.Kind) {
+	for _, scenario := range gateScenariosFor(gate) {
 		candidateFilter, baselineFilter := scenario.candidate, scenario.baseline
 		if candidateFilter.role == "" {
 			candidateFilter.role = gateRoleCandidate

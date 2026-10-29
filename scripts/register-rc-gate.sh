@@ -9,10 +9,11 @@ duration="${5:-72h}"
 tail="${6:-false}"
 kind="${7:-rc}"
 upgrade_warmup="${8:-}"
+lane_variant="${9:-}"
 base_url="${CONTROL_BASE_URL:-https://litestream-soak-ctl.fly.dev}"
 
 if [ "$#" -lt 4 ]; then
-  echo "usage: $0 <repository> <candidate-ref> <candidate-sha> <baseline-sha> [duration] [tail] [kind] [upgrade-warmup]" >&2
+  echo "usage: $0 <repository> <candidate-ref> <candidate-sha> <baseline-sha> [duration] [tail] [kind] [upgrade-warmup] [lane-variant]" >&2
   exit 1
 fi
 if [[ ! "${repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
@@ -37,6 +38,10 @@ if [ -n "${upgrade_warmup}" ] && [[ ! "${upgrade_warmup}" =~ ^[1-9][0-9]*[mh]$ ]
   echo "upgrade-warmup must be whole minutes or hours, such as 30m or 2h" >&2
   exit 1
 fi
+if [ -n "${lane_variant}" ] && [ "${lane_variant}" != "nol9" ]; then
+  echo "lane-variant must be empty or nol9" >&2
+  exit 1
+fi
 
 if [ -n "${SOAK_ADMIN_BEARER_TOKEN:-}" ]; then
   auth_args=(-H "Authorization: Bearer ${SOAK_ADMIN_BEARER_TOKEN}")
@@ -56,6 +61,7 @@ payload="$(jq -n \
   --argjson tail "$tail" \
   --arg kind "$kind" \
   --arg upgrade_warmup "$upgrade_warmup" \
+  --arg lane_variant "$lane_variant" \
   '{
     repository: $repository,
     candidate_ref: $candidate_ref,
@@ -64,7 +70,8 @@ payload="$(jq -n \
     duration: $duration,
     tail: $tail,
     kind: $kind
-  } + (if $upgrade_warmup == "" then {} else {upgrade_warmup: $upgrade_warmup} end)')"
+  } + (if $upgrade_warmup == "" then {} else {upgrade_warmup: $upgrade_warmup} end)
+    + (if $lane_variant == "" then {} else {lane_variant: $lane_variant} end)')"
 
 curl -sS --fail-with-body --max-time 60 -X POST \
   "${auth_args[@]}" \
