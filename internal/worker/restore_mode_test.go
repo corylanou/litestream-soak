@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -497,6 +498,64 @@ func TestVerifierPinnedRestoreTargetUnavailableIsInconclusive(t *testing.T) {
 	}
 }
 
+func TestEstimateRestoreOutputBytesIgnoresRewrittenWALPages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stress.db")
+	writer, err := sql.Open("sqlite", walDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	writer.SetMaxOpenConns(1)
+	if _, err := writer.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, payload BLOB)"); err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 3000)
+	for i := range 64 {
+		if _, err := writer.Exec("INSERT INTO t (id, payload) VALUES (?, ?)", i, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for round := range 40 {
+		if _, err := writer.Exec("UPDATE t SET payload = ? WHERE id % 4 = ?", payload, round%4); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var pageCount, pageSize int64
+	if err := writer.QueryRow("PRAGMA page_count").Scan(&pageCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
+		t.Fatal(err)
+	}
+	logical := pageCount * pageSize
+	dbSize, walSize := fileSize(path), fileSize(path+"-wal")
+	if walSize < 2*logical {
+		t.Fatalf("fixture did not grow the WAL past the database: logical=%d db=%d wal=%d", logical, dbSize, walSize)
+	}
+	estimate := estimateRestoreOutputBytes(path)
+	if estimate != logical {
+		t.Fatalf("estimate = %d, want the logical size %d (db=%d wal=%d)", estimate, logical, dbSize, walSize)
+	}
+	if estimate >= dbSize+walSize {
+		t.Fatalf("estimate %d is no better than db+wal %d", estimate, dbSize+walSize)
+	}
+	if restoreNeededBytes(estimate) != restoreCapacityMinimumBytes {
+		t.Fatalf("small estimates must floor at %d bytes, got %d", restoreCapacityMinimumBytes, restoreNeededBytes(estimate))
+	}
+	if needed := restoreNeededBytes(10 << 30); needed != 11<<30 {
+		t.Fatalf("needed for 10 GiB = %d, want 11 GiB", needed)
+	}
+	if _, err := writer.Exec("INSERT INTO t (id, payload) VALUES (?, ?)", 1000, make([]byte, 1<<20)); err != nil {
+		t.Fatal(err)
+	}
+	if grown := estimateRestoreOutputBytes(path); grown <= estimate {
+		t.Fatalf("estimate ignored WAL-only growth: before=%d after=%d", estimate, grown)
+	}
+	if estimateRestoreOutputBytes(filepath.Join(t.TempDir(), "missing.db")) != 0 {
+		t.Fatal("missing database should estimate zero")
+	}
+}
+
 func TestVerifierRestoreCapacityIsHarnessInconclusive(t *testing.T) {
 	const (
 		restoreTmpENOSPC = "Error: decode database: write page 501132: write /data/scenarios/overload-truncate0/test.db.restored.tmp: no space left on device"
@@ -506,6 +565,7 @@ func TestVerifierRestoreCapacityIsHarnessInconclusive(t *testing.T) {
 	tests := []struct {
 		name         string
 		freeBytes    uint64
+		leftover     bool
 		script       string
 		wantStatus   string
 		wantHarness  bool
@@ -514,16 +574,32 @@ func TestVerifierRestoreCapacityIsHarnessInconclusive(t *testing.T) {
 	}{
 		{name: "preflight skips the restore when space is short", freeBytes: 1 << 20, script: "exit 0\n", wantStatus: "aborted", wantHarness: true, wantEvidence: "restore_capacity=insufficient"},
 		{name: "preflight passes with enough space", freeBytes: 1 << 40, script: "exit 0\n", wantStatus: "passed", wantRan: true},
+		{name: "preflight reclaims an interrupted restore's temp output first", freeBytes: 1 << 40, leftover: true, script: "exit 0\n", wantStatus: "passed", wantRan: true},
 		{name: "restore tmp enospc mid-write is harness inconclusive", freeBytes: 1 << 40, script: "echo '" + restoreTmpENOSPC + "' >&2\nexit 1\n", wantStatus: "aborted", wantHarness: true, wantEvidence: "restore_capacity=exhausted", wantRan: true},
 		{name: "wal enospc stays a failure", freeBytes: 1 << 40, script: "echo '" + walENOSPC + "' >&2\nexit 1\n", wantStatus: "failed", wantRan: true},
 		{name: "litestream staging enospc stays a failure", freeBytes: 1 << 40, script: "echo '" + stagingENOSPC + "' >&2\nexit 1\n", wantStatus: "failed", wantRan: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			previous := restoreFreeBytes
-			restoreFreeBytes = func(string) (uint64, error) { return tt.freeBytes, nil }
-			t.Cleanup(func() { restoreFreeBytes = previous })
 			cfg, argsPath := restoreModeFixture(t, tt.script)
+			leftovers := []string{cfg.DBPath + ".restored.tmp", cfg.DBPath + ".restored.pre.tmp", cfg.DBPath + ".restored.tmp-wal"}
+			if tt.leftover {
+				for _, path := range leftovers {
+					if err := os.WriteFile(path, make([]byte, 1<<20), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			previous := restoreFreeBytes
+			restoreFreeBytes = func(string) (uint64, error) {
+				for _, path := range leftovers {
+					if _, err := os.Stat(path); err == nil {
+						return 0, nil
+					}
+				}
+				return tt.freeBytes, nil
+			}
+			t.Cleanup(func() { restoreFreeBytes = previous })
 			writeLocalL0(t, cfg.DBPath, 0x40, 0x42, time.Date(2026, 10, 30, 2, 36, 0, 0, time.UTC))
 			startBoundarySyncFixture(t, &cfg, 0x42)
 			v := NewVerifier(cfg)
@@ -531,6 +607,11 @@ func TestVerifierRestoreCapacityIsHarnessInconclusive(t *testing.T) {
 			passed, err := v.validateDBResult(context.Background(), cfg.DBPath, cfg.DBPath+".restored", &result)
 			if _, statErr := os.Stat(argsPath); (statErr == nil) != tt.wantRan {
 				t.Fatalf("restore ran = %v, want %v", statErr == nil, tt.wantRan)
+			}
+			for _, path := range leftovers {
+				if _, statErr := os.Stat(path); statErr == nil {
+					t.Fatalf("abandoned restore output %s survived the preflight", path)
+				}
 			}
 			if tt.wantStatus == "passed" {
 				if err != nil || !passed {

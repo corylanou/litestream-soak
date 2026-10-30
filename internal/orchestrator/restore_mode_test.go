@@ -435,6 +435,7 @@ func TestHandleVerificationRestoreOutputDiskFullIsHarnessInconclusive(t *testing
 		inconclusive bool
 	}{
 		{name: "restore tmp enospc", message: "restore failed: validation failed (exit 1): Error: decode database: write page 501132: write /data/scenarios/overload-truncate0/test.db.restored.tmp: no space left on device", inconclusive: true},
+		{name: "pre-upgrade restore tmp enospc", message: "restore failed: pre-upgrade txid 0000000000000010 (exit 1): Error: decode database: write page 7: write /data/test.db.restored.pre.tmp: no space left on device", inconclusive: true},
 		{name: "wal enospc", message: "restore failed: validation failed (exit 1): Error: write /data/scenarios/overload-truncate0/test.db-wal: no space left on device"},
 		{name: "litestream staging enospc", message: "wait for sync: disk full while staging ltx file: write /data/.test.db-litestream/ltx/0/0000000000000042.ltx: no space left on device"},
 	}

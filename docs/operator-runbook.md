@@ -1251,15 +1251,21 @@ Check:
 This usually points to the replication or object-fetch path, not the workload
 generator itself.
 
-Before every restore the verifier runs a `restore_preflight` step: it estimates
-the space the restore output needs (source database plus WAL, plus 10%, at
-least 64 MB) and compares it with the free space on the volume holding the
-`.restored` target. When space is short the restore is skipped and the
-verification is `aborted` with classification `harness_capacity_inconclusive`
-(stage `harness_capacity`), and the error names the needed and free bytes. An
-ENOSPC raised while writing the verifier's own restore output (the `.restored`
-target or its `.tmp` file) is classified the same way, on current and older
-images. ENOSPC anywhere else, in Litestream replication or staging, the source
+Before every restore, including the upgrade lane's pre-upgrade txid restore,
+the verifier runs a preflight step (`restore_preflight`,
+`restore_pre_upgrade_preflight`). It first removes any restore output an
+interrupted run left behind (`.restored`, `.restored.tmp`, `.restored.pre`,
+`.restored.pre.tmp` and their SQLite side files), then estimates the logical
+size of the database a restore produces: the largest of the main file, the page
+count in the database header, and the database size recorded by the newest WAL
+commit frame, so a WAL that rewrites the same pages does not inflate the
+estimate. That size plus 10% (at least 64 MB) is compared with the free space on
+the volume holding the restore target. When space is short the restore is
+skipped and the verification is `aborted` with classification
+`harness_capacity_inconclusive` (stage `harness_capacity`), and the error names
+the needed and free bytes. An ENOSPC raised while writing the verifier's own
+restore output (`.restored`, `.restored.pre`, or their `.tmp` files) is
+classified the same way, on current and older images. ENOSPC anywhere else, in Litestream replication or staging, the source
 database, or its WAL, stays a `disk_capacity_full` failure and a worker fault,
 so a build that bloats the disk remains visible. Inconclusive results count for
 neither gate side and give no coverage.

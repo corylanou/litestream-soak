@@ -601,6 +601,8 @@ func TestRestoreOutputDiskFull(t *testing.T) {
 		{"restore tmp page write", "restore failed: validation failed (exit 1): Error: decode database: write page 501132: write /data/scenarios/overload-truncate0/test.db.restored.tmp: no space left on device", true},
 		{"restore target write", "restore failed: validation failed (exit 1): Error: write /data/test.db.restored: no space left on device", true},
 		{"restore tmp create", "restore failed: validation failed (exit 1): Error: create /data/test.db.restored.tmp: no space left on device", true},
+		{"pre-upgrade restore tmp", "restore failed: pre-upgrade txid 0000000000000010 (exit 1): Error: decode database: write page 7: write /data/test.db.restored.pre.tmp: no space left on device", true},
+		{"pre-upgrade restore target", "restore failed: pre-upgrade txid 0000000000000010 (exit 1): Error: write /data/test.db.restored.pre: no space left on device", true},
 		{"wal write", "restore failed: validation failed (exit 1): Error: write /data/test.db-wal: no space left on device", false},
 		{"source db write", "populate: write /data/test.db: no space left on device", false},
 		{"litestream staging", "wait for sync: disk full while staging ltx file: write /data/.test.db-litestream/ltx/0/0000000000000042.ltx: no space left on device", false},

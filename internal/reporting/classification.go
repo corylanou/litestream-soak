@@ -29,7 +29,7 @@ var (
 	requestIDPattern               = regexp.MustCompile(`(?i)RequestID:\s*([^,\s]+)`)
 	s3URLPattern                   = regexp.MustCompile(`s3://([^/\s]+)/([^"'\s]+)`)
 	pinnedRestoreTargetLostPattern = regexp.MustCompile(`(?i)restore target (txid|timestamp) \S+ is no longer available`)
-	restoreOutputDiskFullPattern   = regexp.MustCompile(`(?i)(?:write|open|create|rename|sync|truncate) [^\s:]*\.restored(?:\.tmp)?(?:-wal|-shm|-journal)?: no space left on device`)
+	restoreOutputDiskFullPattern   = regexp.MustCompile(`(?i)(?:write|open|create|rename|sync|truncate) [^\s:]*\.restored(?:\.pre)?(?:\.tmp)?(?:-wal|-shm|-journal)?: no space left on device`)
 	keyValuePattern                = regexp.MustCompile(`(?i)\b(operation|http_status|api_code|request_id|bucket|prefix|phase)=("[^"]+"|'[^']+'|[^\s,]+)`)
 )
 
