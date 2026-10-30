@@ -27,6 +27,38 @@ func testGateImage(source, litestreamSHA string) string {
 	return "registry.fly.io/litestream-soak:sha-" + testGateSoakSHA[:12] + "-" + source + "-ls-" + litestreamSHA[:12]
 }
 
+// TestGateFleetPinsPopulateIndexRatio keeps the seed schema a profile-level
+// decision: both sides of a gate read the same fleet definition, so the
+// candidate and baseline always seed the same indexes. gate-large-db takes the
+// heavier case with both indexes; the other profiles keep the default of none.
+func TestGateFleetPinsPopulateIndexRatio(t *testing.T) {
+	want := map[string]float64{
+		gateStressProfile:    0,
+		gateManyDB500Profile: 0,
+		gateLargeDBProfile:   1,
+		gateRemoteProfile:    0,
+	}
+	for _, source := range []string{testGateCandidate, testGateBaseline} {
+		for _, worker := range GateFleetForSource(source, testGateSoakSHA, testGateCandidateSHA).Workers {
+			wantRatio, ok := want[worker.ProfileName]
+			if !ok {
+				t.Fatalf("%s unexpected profile %q", source, worker.ProfileName)
+			}
+			if worker.Workload.PopulateIndexRatio != wantRatio {
+				t.Fatalf("%s %s populate_index_ratio = %v, want %v", source, worker.ProfileName, worker.Workload.PopulateIndexRatio, wantRatio)
+			}
+			normalized := normalizeWorkloadConfig(worker.Workload)
+			if normalized.PopulateIndexRatio != wantRatio {
+				t.Fatalf("%s %s normalized populate_index_ratio = %v, want %v", source, worker.ProfileName, normalized.PopulateIndexRatio, wantRatio)
+			}
+			env := (&Manager{}).workerEnv(model.Worker{ID: worker.WorkerID, Name: worker.Name}, normalized)
+			if got, set := env["POPULATE_INDEX_RATIO"]; (wantRatio > 0) != set || (set && got != "1") {
+				t.Fatalf("%s %s POPULATE_INDEX_RATIO = %q (set %v), want ratio %v", source, worker.ProfileName, got, set, wantRatio)
+			}
+		}
+	}
+}
+
 func TestGateFleetSpecHasFourSizedWorkersPerSource(t *testing.T) {
 	type size struct {
 		region   string

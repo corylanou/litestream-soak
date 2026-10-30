@@ -581,6 +581,7 @@ func rcGateWorkers() []DesiredWorker {
 				ReadRatio:                  0.2,
 				Workers:                    2,
 				InitialSize:                "6GB",
+				PopulateIndexRatio:         1,
 				VerifyInterval:             "2h",
 				VerifyType:                 "integrity",
 				VerifySourceSnapshotBudget: "20m",
