@@ -75,6 +75,7 @@ const (
 	rcGateStaleBurstWorkers      = 3
 	rcGateStaleBurstWindow       = 90 * time.Second
 	rcGatePlannedRestartWindow   = 10 * time.Minute
+	rcGateHarnessCapacityWindow  = 15 * time.Minute
 )
 
 var (
@@ -1187,12 +1188,19 @@ func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter g
 	if err != nil {
 		return side, modes, err
 	}
-	var observed []time.Time
+	var observed, harnessCapacity []time.Time
 	for _, verification := range verifications {
 		if verification.StartedAt.Before(gate.StartedAt) || verification.StartedAt.After(end) || !verification.MatchesDeployment(*worker, *deployment) {
 			continue
 		}
 		observed = append(observed, verification.StartedAt)
+		if verification.Inconclusive() && verification.FailureClassification != nil && verification.FailureClassification.Signature == reporting.SignatureHarnessCapacityInconclusive {
+			at := verification.StartedAt
+			if verification.CompletedAt != nil {
+				at = *verification.CompletedAt
+			}
+			harnessCapacity = append(harnessCapacity, at)
+		}
 		if verification.Run.Scenario != scenario.identity || !filter.accepts(gate, verification) {
 			continue
 		}
@@ -1215,7 +1223,7 @@ func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter g
 			modes[mode].Failed++
 		}
 	}
-	side.Reason, side.ReasonDetail, err = rcGateSideFault(db, gate, *worker, observed, end)
+	side.Reason, side.ReasonDetail, err = rcGateSideFault(db, gate, *worker, observed, harnessCapacity, end)
 	if err != nil {
 		return side, modes, err
 	}
@@ -1242,7 +1250,7 @@ func rcGateHardFault(reason string) bool {
 	return reason != "" && reason != rcGateReasonHarnessInconclusive
 }
 
-func rcGateSideFault(db *model.DB, gate model.RCGate, worker model.Worker, verificationTimes []time.Time, end time.Time) (string, string, error) {
+func rcGateSideFault(db *model.DB, gate model.RCGate, worker model.Worker, verificationTimes, harnessCapacityAt []time.Time, end time.Time) (string, string, error) {
 	observedVerifications := len(verificationTimes)
 	events, err := db.ListWorkerEvents(worker.ID, rcGateWorkerEventHistory)
 	if err != nil {
@@ -1256,7 +1264,7 @@ func rcGateSideFault(db *model.DB, gate model.RCGate, worker model.Worker, verif
 		}
 		inWindow = append(inWindow, event)
 	}
-	reason, detail, err := rcGateWorkerFault(db, worker, inWindow, verificationTimes, end)
+	reason, detail, err := rcGateWorkerFault(db, worker, inWindow, verificationTimes, harnessCapacityAt, end)
 	if err != nil {
 		return "", "", err
 	}
@@ -1307,7 +1315,7 @@ func rcGatePreStartEvidence(worker model.Worker, events []model.Event) (string, 
 	return evidence, true
 }
 
-func rcGateWorkerFault(db *model.DB, worker model.Worker, events []model.Event, verificationTimes []time.Time, end time.Time) (string, string, error) {
+func rcGateWorkerFault(db *model.DB, worker model.Worker, events []model.Event, verificationTimes, harnessCapacityAt []time.Time, end time.Time) (string, string, error) {
 	degraded := worker.Status == model.WorkerDegraded || worker.Status == model.WorkerFailed
 	planned := rcGatePlannedRestartsFor(worker, events)
 	var (
@@ -1319,6 +1327,9 @@ func rcGateWorkerFault(db *model.DB, worker model.Worker, events []model.Event, 
 	for _, event := range events {
 		switch {
 		case slices.Contains(rcGateDiskFullEventTypes, event.EventType):
+			if rcGateRestoreCapacityPressure(event, harnessCapacityAt) {
+				continue
+			}
 			diskDetail = firstNonEmpty(event.Message, event.EventType)
 		case slices.Contains(rcGateCrashEventTypes, event.EventType):
 			if rcGatePlannedLifecycleEvent(event) {
@@ -1379,6 +1390,42 @@ func rcGateWorkerFault(db *model.DB, worker model.Worker, events []model.Event, 
 	default:
 		return "", "", nil
 	}
+}
+
+// rcGateRestoreCapacityPressure reports whether a Fly disk-pressure event is
+// really the verifier running out of room for its own restore output, which the
+// verification already reports as harness_capacity_inconclusive. The event
+// message is normalized and loses the path, so the raw log line is read from
+// the event details. A line naming a restore output path is never a fault; a
+// line with no path at all is forgiven only when a harness-capacity verification
+// on the same worker completed within the capacity window of it.
+func rcGateRestoreCapacityPressure(event model.Event, harnessCapacityAt []time.Time) bool {
+	if event.EventType != "platform_disk_full" {
+		return false
+	}
+	raw := rcGatePlatformLogMessage(event.Details)
+	if reporting.RestoreOutputDiskFullPath(raw) || reporting.RestoreOutputDiskFullPath(event.Message) {
+		return true
+	}
+	if strings.Contains(raw, "/") {
+		return false
+	}
+	for _, at := range harnessCapacityAt {
+		if delta := event.CreatedAt.Sub(at); delta >= -rcGateHarnessCapacityWindow && delta <= rcGateHarnessCapacityWindow {
+			return true
+		}
+	}
+	return false
+}
+
+func rcGatePlatformLogMessage(details string) string {
+	var line struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(details), &line); err != nil {
+		return ""
+	}
+	return line.Message
 }
 
 // rcGateStaleFault decides whether one worker_stale event is a worker fault.

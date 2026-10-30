@@ -176,6 +176,28 @@ func TestClassifyPlatformLog(t *testing.T) {
 			wantOK: false,
 		},
 		{
+			name: "enospc on the verifier restore output is not disk pressure",
+			entry: flyapi.AppLogEntry{
+				Attributes: flyapi.AppLogAttributes{
+					Message: `time=2026-10-30T02:36:12Z level=ERROR msg="Verification failed" error="restore failed: validation failed (exit 1): Error: decode database: write page 501132: write /data/scenarios/overload-truncate0/test.db.restored.tmp: no space left on device" duration=14m2s`,
+					Meta:    flyapi.AppLogMeta{Event: flyapi.AppLogMetaEvent{Provider: "app"}},
+				},
+			},
+			wantOK: false,
+		},
+		{
+			name: "enospc on litestream staging is disk pressure",
+			entry: flyapi.AppLogEntry{
+				Attributes: flyapi.AppLogAttributes{
+					Message: `time=2026-10-30T02:36:12Z level=ERROR msg="disk full while staging ltx file" error="write /data/.test.db-litestream/ltx/0/0000000000000042.ltx: no space left on device"`,
+					Meta:    flyapi.AppLogMeta{Event: flyapi.AppLogMetaEvent{Provider: "app"}},
+				},
+			},
+			wantType:  "platform_disk_full",
+			wantMatch: "no space left on device",
+			wantOK:    true,
+		},
+		{
 			name: "clean exit not restarting",
 			entry: flyapi.AppLogEntry{
 				Attributes: flyapi.AppLogAttributes{

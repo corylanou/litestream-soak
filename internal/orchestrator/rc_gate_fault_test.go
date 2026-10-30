@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -93,6 +94,35 @@ func (f gateFaultFixture) heartbeatNow(source string) {
 	}
 }
 
+func (f gateFaultFixture) flyDiskPressure(source, rawLine string, at time.Time) {
+	f.t.Helper()
+	details, err := json.Marshal(platformLogLine{Level: "error", Instance: f.workerID(source) + "-machine", Message: rawLine, Region: "ord", Timestamp: at})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if _, err := f.db.RecordWindowedEventAt(f.workerID(source), "platform_disk_full", "Fly log reported disk pressure: no space left on device", string(details), at, platformEventCoalesceWindow); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f gateFaultFixture) harnessCapacityVerification(source string, at time.Time) {
+	f.t.Helper()
+	worker, err := f.db.GetWorker(f.workerID(source))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	deployment, err := f.db.GetDeploymentByVersion(source, worker.GitSHA, worker.LitestreamSHA)
+	if err != nil || deployment == nil {
+		f.t.Fatalf("deployment for %s: %v", source, err)
+	}
+	completed := at
+	mustRecordVerification(f.t, f.db, &model.Verification{
+		WorkerID: worker.ID, StartedAt: at.Add(-5 * time.Minute), CompletedAt: &completed, Status: "aborted", CheckType: "integrity", Run: fixtureRun(*worker, *deployment), Attributed: true,
+		ErrorMessage:          "restore failed: validation failed (exit 1): Error: decode database: write page 501132: write /data/scenarios/overload-truncate0/test.db.restored.tmp: no space left on device",
+		FailureClassification: reporting.HarnessCapacityClassification("txid"),
+	})
+}
+
 func (f gateFaultFixture) verification(source string, passed bool) {
 	f.t.Helper()
 	recordGateVerification(f.t, f.db, source, gateLargeDBProfile, "", passed, f.gate.StartedAt.Add(time.Hour))
@@ -158,6 +188,61 @@ func TestRCGateWorkerFaultsScoreAsHardFailures(t *testing.T) {
 			verdict:       rcGateVerdictRegression,
 			gateVerdict:   rcGateVerdictFail,
 			detailContain: "no space left on device",
+		},
+		{
+			name: "fly disk pressure on the verifier restore output is not a fault",
+			arrange: func(f gateFaultFixture) {
+				f.litestreamRan(testGateCandidate)
+				f.flyDiskPressure(testGateCandidate, `time=2026-10-30T02:36:12Z level=ERROR msg="Verification failed" error="restore failed: validation failed (exit 1): Error: decode database: write page 501132: write /data/scenarios/overload-truncate0/test.db.restored.tmp: no space left on device" duration=14m2s`, f.gate.StartedAt.Add(30*time.Minute))
+				f.harnessCapacityVerification(testGateCandidate, f.gate.StartedAt.Add(30*time.Minute))
+				f.verification(testGateCandidate, true)
+				f.verification(testGateBaseline, true)
+			},
+			candidate:   side{rcGateSidePassing, ""},
+			baseline:    side{rcGateSidePassing, ""},
+			verdict:     rcGateVerdictPass,
+			gateVerdict: rcGateVerdictIncomplete,
+		},
+		{
+			name: "fly disk pressure on litestream staging stays a fault",
+			arrange: func(f gateFaultFixture) {
+				f.litestreamRan(testGateCandidate)
+				f.flyDiskPressure(testGateCandidate, `time=2026-10-30T02:36:12Z level=ERROR msg="disk full while staging ltx file" error="write /data/.test.db-litestream/ltx/0/0000000000000042.ltx: no space left on device"`, f.gate.StartedAt.Add(30*time.Minute))
+				f.harnessCapacityVerification(testGateCandidate, f.gate.StartedAt.Add(30*time.Minute))
+				f.verification(testGateBaseline, true)
+			},
+			candidate:     side{rcGateSideFailing, rcGateReasonDiskExhausted},
+			baseline:      side{rcGateSidePassing, ""},
+			verdict:       rcGateVerdictRegression,
+			gateVerdict:   rcGateVerdictFail,
+			detailContain: "no space left on device",
+		},
+		{
+			name: "path-less disk pressure beside a harness capacity verification is not a fault",
+			arrange: func(f gateFaultFixture) {
+				f.litestreamRan(testGateCandidate)
+				f.flyDiskPressure(testGateCandidate, "no space left on device", f.gate.StartedAt.Add(30*time.Minute))
+				f.harnessCapacityVerification(testGateCandidate, f.gate.StartedAt.Add(36*time.Minute))
+				f.verification(testGateCandidate, true)
+				f.verification(testGateBaseline, true)
+			},
+			candidate:   side{rcGateSidePassing, ""},
+			baseline:    side{rcGateSidePassing, ""},
+			verdict:     rcGateVerdictPass,
+			gateVerdict: rcGateVerdictIncomplete,
+		},
+		{
+			name: "path-less disk pressure without a harness capacity verification stays a fault",
+			arrange: func(f gateFaultFixture) {
+				f.litestreamRan(testGateCandidate)
+				f.flyDiskPressure(testGateCandidate, "no space left on device", f.gate.StartedAt.Add(30*time.Minute))
+				f.verification(testGateCandidate, true)
+				f.verification(testGateBaseline, true)
+			},
+			candidate:   side{rcGateSideFailing, rcGateReasonDiskExhausted},
+			baseline:    side{rcGateSidePassing, ""},
+			verdict:     rcGateVerdictRegression,
+			gateVerdict: rcGateVerdictFail,
 		},
 		{
 			name: "worker disk full no progress event",

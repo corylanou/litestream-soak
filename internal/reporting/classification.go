@@ -408,10 +408,19 @@ func PinnedRestoreTargetUnavailable(restoreMode, errorMessage string) bool {
 // from Litestream replication, the source database, its WAL, or any other path
 // are not matched, so a build that bloats the disk stays a real failure.
 func RestoreOutputDiskFull(errorMessage string) bool {
-	if !restoreOutputDiskFullPattern.MatchString(errorMessage) {
+	if !RestoreOutputDiskFullPath(errorMessage) {
 		return false
 	}
 	return InferFailureStage("restore_validate", errorMessage) == "restore" || strings.Contains(strings.ToLower(errorMessage), "restore failed")
+}
+
+// RestoreOutputDiskFullPath reports whether a message names an ENOSPC on one of
+// the verifier's restore output paths (.restored, .restored.tmp, .restored.pre,
+// .restored.pre.tmp or their side files), regardless of which stage or log line
+// carried it. It is the path test behind RestoreOutputDiskFull, exposed so the
+// platform log scanner can recognise the same lines in raw Fly log output.
+func RestoreOutputDiskFullPath(message string) bool {
+	return restoreOutputDiskFullPattern.MatchString(message)
 }
 
 // HarnessCapacityClassification is the classification an inconclusive

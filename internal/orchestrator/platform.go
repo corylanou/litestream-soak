@@ -18,6 +18,7 @@ import (
 
 	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 const platformEventCoalesceWindow = 10 * time.Minute
@@ -166,6 +167,10 @@ func classifyPlatformLog(entry flyapi.AppLogEntry) (string, string, bool) {
 	switch {
 	case strings.Contains(lower, "oom:") || strings.Contains(lower, "out of memory"):
 		return "platform_oom", fmt.Sprintf("Fly log reported OOM: %s", normalizePlatformMessage(lower, message)), true
+	case reporting.RestoreOutputDiskFullPath(message):
+		// ENOSPC on the verifier's own restore output is harness capacity; the
+		// verification already reports it as harness_capacity_inconclusive.
+		return "", "", false
 	case strings.Contains(lower, "no space left on device"),
 		strings.Contains(lower, "disk is full"),
 		strings.Contains(lower, "database is full"),
