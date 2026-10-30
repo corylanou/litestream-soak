@@ -148,7 +148,7 @@ func (w *walWatcher) stats() (peak, breach int64) {
 // aborted populate error so the worker reports a pre-start failure instead of
 // filling the volume.
 func runPopulateCommand(ctx context.Context, cmd *exec.Cmd, dbPath string, watcher *walWatcher) (populateStats, error) {
-	stderr := &tailBuffer{limit: 4096}
+	stderr := &populateStderrTail{limit: 4096}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = io.MultiWriter(os.Stderr, stderr)
 	if err := cmd.Start(); err != nil {
@@ -194,16 +194,16 @@ func runPopulateCommand(ctx context.Context, cmd *exec.Cmd, dbPath string, watch
 	return stats, nil
 }
 
-// tailBuffer keeps the last limit bytes written to it, so populate's final
+// populateStderrTail keeps the last limit bytes written to it, so populate's final
 // stderr line (the reason it exited) can travel with the exit error into the
 // worker_failed event and the deterministic-failure comparison.
-type tailBuffer struct {
+type populateStderrTail struct {
 	mu    sync.Mutex
 	limit int
 	buf   []byte
 }
 
-func (b *tailBuffer) Write(p []byte) (int, error) {
+func (b *populateStderrTail) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.buf = append(b.buf, p...)
@@ -213,7 +213,7 @@ func (b *tailBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (b *tailBuffer) lastLine() string {
+func (b *populateStderrTail) lastLine() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	lines := strings.Split(strings.TrimSpace(string(b.buf)), "\n")
