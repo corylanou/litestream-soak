@@ -3,11 +3,13 @@ package worker
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -319,6 +321,170 @@ func populateEnv(env []string) []string {
 		}
 	}
 	return append(env, "GODEBUG="+setting)
+}
+
+// populateMarker is the durable record that populate finished and its final
+// checkpoint folded the WAL into the database. Only its presence makes an
+// existing database reusable on restart; a database without it is a populate
+// that was cut short and is removed before populate runs again.
+type populateMarker struct {
+	CompletedAt time.Time `json:"completed_at"`
+	WorkloadSHA string    `json:"workload_sha,omitempty"`
+	TargetSize  string    `json:"target_size"`
+	IndexRatio  float64   `json:"index_ratio"`
+	Indexes     []string  `json:"indexes"`
+	DBSizeBytes int64     `json:"db_size_bytes"`
+	Adopted     bool      `json:"adopted,omitempty"`
+	populateCheckpointStats
+}
+
+func populateMarkerPath(dbPath string) string {
+	return filepath.Join(filepath.Dir(dbPath), "."+filepath.Base(dbPath)+"-populated.json")
+}
+
+func readPopulateMarker(dbPath string) (*populateMarker, error) {
+	body, err := os.ReadFile(populateMarkerPath(dbPath))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read populate marker: %w", err)
+	}
+	var marker populateMarker
+	if err := json.Unmarshal(body, &marker); err != nil {
+		return nil, fmt.Errorf("decode populate marker: %w", err)
+	}
+	return &marker, nil
+}
+
+func writePopulateMarker(dbPath string, marker populateMarker) error {
+	body, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(populateMarkerPath(dbPath), append(body, '\n')); err != nil {
+		return fmt.Errorf("populate marker: %w", err)
+	}
+	return nil
+}
+
+// populateIndexes lists the indexes populate created, so the realized schema
+// is recorded with the completion marker and can be compared across a gate.
+func populateIndexes(ctx context.Context, dbPath string) ([]string, error) {
+	db, err := openCheckpointDB(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = db.Close() }()
+	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL ORDER BY name")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	indexes := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		indexes = append(indexes, name)
+	}
+	return indexes, rows.Err()
+}
+
+// removePopulateFiles deletes a partial seed so a retry never builds on it
+// and the disk it consumed is released before the next attempt.
+func removePopulateFiles(dbPath string) error {
+	var errs []error
+	for _, path := range []string{dbPath, walPath(dbPath), dbPath + "-shm", populateMarkerPath(dbPath)} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// populateSingleDB seeds cfg.DBPath, or confirms an earlier seed completed.
+//
+// Restart cases: a database with a completion marker is reused. A database
+// without one that already has Litestream state next to it predates the
+// marker and had reached replication, so it is adopted and marked. Any other
+// database without a marker is a populate that did not finish; it is removed
+// and populate runs again from scratch.
+func populateSingleDB(ctx context.Context, cfg Config) error {
+	marker, err := readPopulateMarker(cfg.DBPath)
+	if err != nil {
+		return err
+	}
+	_, statErr := os.Stat(cfg.DBPath)
+	dbExists := statErr == nil
+	switch {
+	case marker != nil && dbExists:
+		slog.Info("Database already populated, skipping populate", "path", cfg.DBPath, "completed_at", marker.CompletedAt, "indexes", marker.Indexes)
+		return nil
+	case dbExists && legacyPopulatedDB(cfg.DBPath):
+		indexes, err := populateIndexes(ctx, cfg.DBPath)
+		if err != nil {
+			return fmt.Errorf("inspect existing database: %w", err)
+		}
+		slog.Info("Adopting database that predates the populate marker", "path", cfg.DBPath, "indexes", indexes)
+		return writePopulateMarker(cfg.DBPath, populateMarker{
+			CompletedAt: time.Now().UTC(),
+			WorkloadSHA: cfg.WorkloadSHA,
+			TargetSize:  cfg.InitialSize,
+			IndexRatio:  cfg.PopulateIndexRatio,
+			Indexes:     indexes,
+			DBSizeBytes: fileSizeOrZero(cfg.DBPath),
+			Adopted:     true,
+		})
+	case dbExists || marker != nil:
+		slog.Warn("Removing database left by an incomplete populate", "path", cfg.DBPath, "db_size_bytes", fileSizeOrZero(cfg.DBPath), "wal_size_bytes", fileSizeOrZero(walPath(cfg.DBPath)))
+		if err := removePopulateFiles(cfg.DBPath); err != nil {
+			return fmt.Errorf("remove incomplete database: %w", err)
+		}
+	}
+
+	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
+
+	slog.Info("Populating database", "target_size", cfg.InitialSize, "index_ratio", cfg.PopulateIndexRatio)
+	cmd := exec.CommandContext(ctx, "litestream-test", populateArgs(cfg)...)
+	cmd.Env = populateEnv(os.Environ())
+	stats, err := runPopulateCommand(ctx, cmd, cfg.DBPath)
+	if err != nil {
+		if removeErr := removePopulateFiles(cfg.DBPath); removeErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove incomplete database: %w", removeErr))
+		}
+		return err
+	}
+	indexes, err := populateIndexes(ctx, cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("inspect populated database: %w", err)
+	}
+	marker = &populateMarker{
+		CompletedAt:             time.Now().UTC(),
+		WorkloadSHA:             cfg.WorkloadSHA,
+		TargetSize:              cfg.InitialSize,
+		IndexRatio:              cfg.PopulateIndexRatio,
+		Indexes:                 indexes,
+		DBSizeBytes:             fileSizeOrZero(cfg.DBPath),
+		populateCheckpointStats: stats,
+	}
+	if err := writePopulateMarker(cfg.DBPath, *marker); err != nil {
+		return err
+	}
+	slog.Info("Database populated", "db_size_bytes", marker.DBSizeBytes, "indexes", indexes, "checkpoints", stats.Checkpoints, "truncations", stats.Truncations, "peak_wal_bytes", stats.PeakWALBytes)
+	return nil
+}
+
+// legacyPopulatedDB reports whether a database without a completion marker
+// was seeded by a harness build that predates the marker: such a database has
+// Litestream's local state directory next to it, which only appears once
+// Litestream has started against a finished seed.
+func legacyPopulatedDB(dbPath string) bool {
+	info, err := os.Stat(litestreamStateDir(dbPath))
+	return err == nil && info.IsDir()
 }
 
 // runPopulateCommand runs litestream-test populate with a concurrent bounded

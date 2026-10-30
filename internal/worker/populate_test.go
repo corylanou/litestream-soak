@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -242,6 +244,160 @@ func TestWALCheckpointTruncateReportsBusy(t *testing.T) {
 	err = walCheckpoint(context.Background(), db, "TRUNCATE")
 	if err == nil {
 		t.Fatal("walCheckpoint(TRUNCATE) succeeded with a reader pinning the wal, want busy")
+	}
+}
+
+// populateFixtureDB builds the database the fake litestream-test copies into
+// place, with the index populate creates at -index-ratio 1.
+func populateFixtureDB(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	for _, stmt := range []string{
+		"CREATE TABLE test_table_0 (id INTEGER PRIMARY KEY AUTOINCREMENT, data BLOB, int_field INTEGER, timestamp INTEGER)",
+		"CREATE INDEX idx_test_table_0_int ON test_table_0(int_field)",
+		"INSERT INTO test_table_0 (data, int_field, timestamp) VALUES (x'01', 7, 1)",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+}
+
+func TestPopulateSingleDBCompletionMarker(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires Unix")
+	}
+	const (
+		succeed = `
+db=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-db" ]; then db="$2"; fi
+  shift
+done
+printf '%s\n' "$GODEBUG" > "$POPULATE_GODEBUG_OUT"
+cp "$POPULATE_FIXTURE" "$db"
+`
+		fail = `
+db=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-db" ]; then db="$2"; fi
+  shift
+done
+printf 'partial' > "$db"
+printf 'partial' > "$db-wal"
+echo "populate: no space left on device" >&2
+exit 1
+`
+	)
+	tests := []struct {
+		name          string
+		script        string
+		existingDB    string
+		marker        bool
+		litestreamDir bool
+		wantErr       string
+		wantPopulated bool
+		wantAdopted   bool
+		wantRemoved   bool
+	}{
+		{name: "fresh volume populates and writes the marker", script: succeed, wantPopulated: true},
+		{name: "marker present reuses the database", script: fail, existingDB: "existing", marker: true},
+		{name: "database with litestream state but no marker is adopted", script: fail, existingDB: "fixture", litestreamDir: true, wantAdopted: true},
+		{name: "database without marker or litestream state is removed and repopulated", script: succeed, existingDB: "partial", wantPopulated: true},
+		{name: "failed populate removes the partial database", script: fail, wantErr: "exit status 1", wantRemoved: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binDir := filepath.Join(dir, "bin")
+			dataDir := filepath.Join(dir, "data")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(dataDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			fixture := filepath.Join(dir, "fixture.db")
+			populateFixtureDB(t, fixture)
+			godebugOut := filepath.Join(dir, "godebug")
+			writeFakeLitestreamTest(t, binDir, tt.script)
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("POPULATE_FIXTURE", fixture)
+			t.Setenv("POPULATE_GODEBUG_OUT", godebugOut)
+			t.Setenv("GODEBUG", "")
+
+			cfg := DefaultConfig()
+			cfg.DataDir = dataDir
+			cfg.DBPath = filepath.Join(dataDir, "test.db")
+			cfg.InitialSize = "1MB"
+			cfg.PopulateIndexRatio = 1
+			cfg.WorkloadSHA = "workload-sha"
+			switch tt.existingDB {
+			case "fixture":
+				populateFixtureDB(t, cfg.DBPath)
+			case "":
+			default:
+				if err := os.WriteFile(cfg.DBPath, []byte(tt.existingDB), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.marker {
+				if err := writePopulateMarker(cfg.DBPath, populateMarker{CompletedAt: time.Now().UTC()}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.litestreamDir {
+				if err := os.MkdirAll(litestreamStateDir(cfg.DBPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			err := populateSingleDB(context.Background(), cfg)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("populateSingleDB() error = %v, want %q", err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("populateSingleDB() error = %v", err)
+			}
+
+			if tt.wantRemoved {
+				for _, path := range []string{cfg.DBPath, walPath(cfg.DBPath), populateMarkerPath(cfg.DBPath)} {
+					if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+						t.Fatalf("%s still exists after failed populate: %v", path, statErr)
+					}
+				}
+				return
+			}
+			marker, err := readPopulateMarker(cfg.DBPath)
+			if err != nil || marker == nil {
+				t.Fatalf("marker = %+v, %v; want marker", marker, err)
+			}
+			if marker.Adopted != tt.wantAdopted {
+				t.Fatalf("marker.Adopted = %v, want %v (%+v)", marker.Adopted, tt.wantAdopted, marker)
+			}
+			if tt.wantPopulated || tt.wantAdopted {
+				if !slices.Equal(marker.Indexes, []string{"idx_test_table_0_int"}) || marker.IndexRatio != 1 || marker.WorkloadSHA != "workload-sha" || marker.TargetSize != "1MB" {
+					t.Fatalf("marker = %+v", marker)
+				}
+			}
+			if tt.wantPopulated {
+				if got := readFile(t, godebugOut); !strings.Contains(got, "randautoseed=0") {
+					t.Fatalf("populate ran with GODEBUG=%q, want randautoseed=0", got)
+				}
+				if size := fileSizeOrZero(walPath(cfg.DBPath)); size != 0 {
+					t.Fatalf("wal after populate = %d bytes, want 0", size)
+				}
+			} else if tt.existingDB != "fixture" {
+				if got := readFile(t, cfg.DBPath); got != tt.existingDB {
+					t.Fatalf("existing database was replaced: %q", got)
+				}
+			}
+		})
 	}
 }
 
