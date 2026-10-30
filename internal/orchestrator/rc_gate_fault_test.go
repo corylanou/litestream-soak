@@ -801,6 +801,26 @@ func TestRCGateStressPlannedPhaseRestartsAreNotCrashes(t *testing.T) {
 			wantReason: rcGateReasonWorkerCrashLoop,
 		},
 		{
+			name: "duplicate lifecycle reports share one allowance per boundary",
+			arrange: func(db *model.DB, workerID string, boundary time.Time) {
+				for _, at := range []time.Time{boundary.Add(15 * time.Second), boundary.Add(15*time.Second + time.Millisecond), boundary.Add(16 * time.Second)} {
+					if err := db.RecordEventAt(workerID, "worker_failed", phaseEnded, "", at); err != nil {
+						t.Fatal(err)
+					}
+				}
+				record := func(at time.Time, message string) {
+					if _, err := db.RecordWindowedEventAt(workerID, "platform_restart", message, `{"line":"`+at.Format(time.RFC3339Nano)+`"}`, at, platformEventCoalesceWindow); err != nil {
+						t.Fatal(err)
+					}
+				}
+				record(boundary.Add(20*time.Second), "Fly platform event: main child exited with exit code: 0")
+				record(boundary.Add(40*time.Second), exitOne)
+				record(boundary.Add(4*time.Minute), "Fly platform event: main child exited with exit code: 2")
+			},
+			wantStatus: rcGateSideFailing,
+			wantReason: rcGateReasonWorkerCrashLoop,
+		},
+		{
 			name: "terminal exit near the boundary still counts",
 			arrange: func(db *model.DB, workerID string, boundary time.Time) {
 				if err := db.RecordEventAt(workerID, "worker_failed", phaseEnded, "", boundary.Add(15*time.Second)); err != nil {

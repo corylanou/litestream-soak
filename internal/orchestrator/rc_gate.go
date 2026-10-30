@@ -1439,49 +1439,68 @@ func rcGatePlannedLifecycleEvent(event model.Event) bool {
 }
 
 // rcGatePlannedRestarts tracks the moments a worker restarted on purpose, so
-// the one platform restart each of them causes is not counted as a crash.
-// A moment is either a planned lifecycle event the worker reported, or, for the
-// gate-stress worker, a wall-clock scenario phase boundary, which only forgives
-// a restart whose Fly message is a clean exit. Each moment forgives one restart.
+// the single platform restart each of them causes is not counted as a crash.
+// Every signal is normalized to one planned moment: on the gate-stress worker
+// the nearest wall-clock scenario phase boundary, elsewhere the first lifecycle
+// report of that restart. A moment is planned when the worker reported a
+// lifecycle event for it, or, at a stress boundary, when the restart's own Fly
+// message is a clean exit. Each moment holds exactly one allowance, however
+// many duplicate lifecycle reports or clean-exit rows land on it.
 type rcGatePlannedRestarts struct {
-	lifecycle []time.Time
-	phase     time.Duration
-	forgiven  map[time.Time]bool
+	phase    time.Duration
+	moments  []time.Time
+	forgiven map[time.Time]bool
 }
 
-func rcGatePlannedRestartsFor(worker model.Worker, events []model.Event) rcGatePlannedRestarts {
-	planned := rcGatePlannedRestarts{forgiven: make(map[time.Time]bool)}
-	for _, event := range events {
-		if rcGatePlannedLifecycleEvent(event) {
-			planned.lifecycle = append(planned.lifecycle, event.CreatedAt)
-		}
-	}
+func rcGatePlannedRestartsFor(worker model.Worker, events []model.Event) *rcGatePlannedRestarts {
+	planned := &rcGatePlannedRestarts{forgiven: make(map[time.Time]bool)}
 	if worker.ProfileName == gateStressProfile {
 		if phase, err := time.ParseDuration(rcGateStressPhase); err == nil && phase > 0 {
 			planned.phase = phase
 		}
 	}
+	for _, event := range events {
+		if !rcGatePlannedLifecycleEvent(event) {
+			continue
+		}
+		if moment := planned.normalize(event.CreatedAt); !slices.Contains(planned.moments, moment) {
+			planned.moments = append(planned.moments, moment)
+		}
+	}
 	return planned
 }
 
-func (p rcGatePlannedRestarts) forgive(event model.Event) bool {
-	for _, moment := range p.lifecycle {
-		if rcGateWithinPlannedWindow(event.CreatedAt, moment) && !p.forgiven[moment] {
-			p.forgiven[moment] = true
-			return true
+// normalize maps a time to the planned moment it belongs to: the nearest phase
+// boundary when the worker has phases, otherwise an already-known moment within
+// the planned window, otherwise the time itself.
+func (p *rcGatePlannedRestarts) normalize(at time.Time) time.Time {
+	at = at.UTC()
+	if p.phase > 0 {
+		boundary := at.Truncate(p.phase)
+		if at.Sub(boundary) > p.phase/2 {
+			boundary = boundary.Add(p.phase)
+		}
+		return boundary
+	}
+	for _, moment := range p.moments {
+		if rcGateWithinPlannedWindow(at, moment) {
+			return moment
 		}
 	}
-	if p.phase <= 0 || !rcGateCleanExitMessage(event.Message) {
+	return at
+}
+
+func (p *rcGatePlannedRestarts) forgive(event model.Event) bool {
+	moment := p.normalize(event.CreatedAt)
+	if !rcGateWithinPlannedWindow(event.CreatedAt, moment) {
 		return false
 	}
-	lower := event.CreatedAt.UTC().Truncate(p.phase)
-	for _, boundary := range []time.Time{lower, lower.Add(p.phase)} {
-		if rcGateWithinPlannedWindow(event.CreatedAt, boundary) && !p.forgiven[boundary] {
-			p.forgiven[boundary] = true
-			return true
-		}
+	plannedMoment := slices.Contains(p.moments, moment) || (p.phase > 0 && rcGateCleanExitMessage(event.Message))
+	if !plannedMoment || p.forgiven[moment] {
+		return false
 	}
-	return false
+	p.forgiven[moment] = true
+	return true
 }
 
 func rcGateWithinPlannedWindow(at, moment time.Time) bool {
