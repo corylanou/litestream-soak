@@ -219,7 +219,7 @@ func (m *Manager) recoverPendingWorker(ctx context.Context, workerID, image stri
 	if err != nil {
 		return err
 	}
-	if worker.Status == model.WorkerStopped || worker.Status == model.WorkerDormant || worker.Status == model.WorkerFailed {
+	if worker.Status == model.WorkerStopped || worker.Status == model.WorkerDormant || worker.Status == model.WorkerFailed || worker.EvidenceHeld() {
 		return nil
 	}
 	if worker.Status != model.WorkerPending && a == nil {

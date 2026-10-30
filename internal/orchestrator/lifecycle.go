@@ -26,6 +26,7 @@ const (
 	sourceTeardownOutcomeAlreadyStopped = "already_stopped"
 	sourceTeardownOutcomeFailed         = "failed"
 	sourceTeardownOutcomeKept           = "kept"
+	sourceTeardownOutcomeHeld           = "held"
 )
 
 var (
@@ -548,7 +549,9 @@ func (m *Manager) evaluateSuccessTeardownLocked(ctx context.Context, source stri
 			return errors.Join(append(cleanupErrors, err)...)
 		}
 		slog.Info("Destroying successful soak worker", "worker_id", worker.ID, "source", worker.Source, "deployment_id", deployment.ID)
-		if err := m.destroyWorker(ctx, worker.ID); err != nil {
+		if err := m.destroyWorker(ctx, worker.ID); errors.Is(err, errWorkerEvidenceHeld) {
+			continue
+		} else if err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("destroy successful worker %s: %w", worker.ID, err))
 			continue
 		}
@@ -695,7 +698,9 @@ func (m *Manager) evaluatePRMaxAge(ctx context.Context, policy PRMaxAgePolicy) {
 			switch evaluation.Action {
 			case PRMaxAgeActionDestroy:
 				slog.Info("Destroying max-age soak worker", "worker_id", worker.ID, "source", worker.Source, "deployment_id", evaluation.Deployment.ID)
-				if err := m.DestroyWorker(ctx, worker.ID); err != nil {
+				if err := m.DestroyWorker(ctx, worker.ID); errors.Is(err, errWorkerEvidenceHeld) {
+					continue
+				} else if err != nil {
 					slog.Error("Failed to destroy max-age soak worker", "worker_id", worker.ID, "error", err)
 					continue
 				}
@@ -1102,7 +1107,11 @@ func (m *Manager) archiveAndDestroySourceWorkers(ctx context.Context, source, ar
 			continue
 		}
 
-		if err := m.DestroyWorker(ctx, worker.ID); err != nil {
+		if err := m.DestroyWorker(ctx, worker.ID); errors.Is(err, errWorkerEvidenceHeld) {
+			outcome.Outcome = sourceTeardownOutcomeHeld
+			outcome.Status = model.WorkerStopped
+			result.HeldWorkers++
+		} else if err != nil {
 			outcome.Outcome = sourceTeardownOutcomeFailed
 			outcome.Error = err.Error()
 			result.Complete = false
@@ -1116,7 +1125,7 @@ func (m *Manager) archiveAndDestroySourceWorkers(ctx context.Context, source, ar
 	}
 
 	eventType := fmt.Sprintf("%s_source_teardown_completed", eventPrefix)
-	message := fmt.Sprintf("Completed cleanup for %d %s worker(s) after archiving evidence; destroyed %d and skipped %d already stopped", result.TotalWorkers, source, result.DestroyedWorkers, result.AlreadyStoppedWorkers)
+	message := fmt.Sprintf("Completed cleanup for %d %s worker(s) after archiving evidence; destroyed %d, skipped %d already stopped and retained %d under evidence hold", result.TotalWorkers, source, result.DestroyedWorkers, result.AlreadyStoppedWorkers, result.HeldWorkers)
 	if !result.Complete {
 		eventType = fmt.Sprintf("%s_source_teardown_incomplete", eventPrefix)
 		message = fmt.Sprintf("Failed to destroy %d of %d %s worker(s) after archiving evidence", result.FailedWorkers, result.TotalWorkers, source)

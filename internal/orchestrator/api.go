@@ -167,6 +167,7 @@ type SourceTeardownResponse struct {
 	DestroyedWorkers      int                           `json:"destroyed_workers"`
 	AlreadyStoppedWorkers int                           `json:"already_stopped_workers"`
 	KeptWorkers           int                           `json:"kept_workers,omitempty"`
+	HeldWorkers           int                           `json:"held_workers,omitempty"`
 	FailedWorkers         int                           `json:"failed_workers"`
 	Workers               []SourceTeardownWorkerOutcome `json:"workers"`
 }
@@ -326,6 +327,8 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/run-archives/{id}/prompt", a.handleGetRunArchivePrompt)
 	mux.HandleFunc("POST /api/admin/deployments/ready", a.handleDeploymentReady)
 	mux.HandleFunc("POST /api/admin/workers/{id}/roll", a.handleRollWorker)
+	mux.HandleFunc("POST /api/admin/workers/{id}/evidence-hold", a.handleHoldWorkerEvidence)
+	mux.HandleFunc("POST /api/admin/workers/{id}/evidence-hold/release", a.handleReleaseWorkerEvidenceHold)
 	mux.HandleFunc("POST /api/admin/resume-dormant", a.handleResumeDormantWorkers)
 	mux.HandleFunc("POST /api/admin/pause-source", a.handlePauseSourceWorkers)
 	mux.HandleFunc("POST /api/admin/teardown-source", a.handleTeardownSource)

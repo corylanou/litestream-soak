@@ -711,6 +711,9 @@ func (m *Manager) resumeDormantWorker(ctx context.Context, worker model.Worker, 
 }
 
 func (m *Manager) resumeDormantWorkerLocked(ctx context.Context, worker model.Worker, imageRef, gitSHA, litestreamSHA, resumeTrigger string) error {
+	if worker.EvidenceHeld() {
+		return fmt.Errorf("%w: %s", errWorkerEvidenceHeld, worker.Name)
+	}
 	if err := m.checkRCGateProvisioning(worker.Source, worker.ProfileName, strings.TrimSpace(imageRef), litestreamSHA, time.Now().UTC()); err != nil {
 		return err
 	}

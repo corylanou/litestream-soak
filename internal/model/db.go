@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS workers (
     dormant_reason TEXT NOT NULL DEFAULT '',
     dormant_signature TEXT NOT NULL DEFAULT '',
     resume_trigger TEXT NOT NULL DEFAULT '',
-    last_probe_at DATETIME
+    last_probe_at DATETIME,
+    evidence_hold_at DATETIME,
+    evidence_hold_reason TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS expected_worker_runs (
@@ -368,6 +370,8 @@ func ensureWorkerColumns(db *sql.DB) error {
 		`ALTER TABLE workers ADD COLUMN dormant_signature TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE workers ADD COLUMN resume_trigger TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE workers ADD COLUMN last_probe_at DATETIME`,
+		`ALTER TABLE workers ADD COLUMN evidence_hold_at DATETIME`,
+		`ALTER TABLE workers ADD COLUMN evidence_hold_reason TEXT NOT NULL DEFAULT ''`,
 	}
 
 	for _, statement := range statements {

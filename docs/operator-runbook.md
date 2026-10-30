@@ -380,18 +380,18 @@ The gate loop records when each side is first observed with all four workers run
 
 `gate-stress` never merges its stressors. The worker runs one scenario at a time in wall-clock-aligned phases (`STRESS_SCENARIOS`, `STRESS_SCENARIO_PHASE`), so the candidate and baseline machines run the same scenario at the same time. Each scenario has its own database directory and replica prefix under `scenarios/<name>`, Litestream restarts between phases, and every report carries the scenario in its run identity.
 
-Gate sources are excluded from the 24-hour success teardown, PR max age, the upstream PR poller, and main and PR fleet reconciliation. Dormancy still applies. When the gate expires, the control plane archives the evidence for both sources and destroys every gate worker, including ones already marked stopped, through the same path as operator source teardown (archive type `teardown`, reason `rc_gate_ttl`). The gate closes only after every machine, volume, provisioning resource, and replica prefix is gone; otherwise the loop retries every 5 minutes. With `tail` enabled, `gate-stress` keeps running in both sources until 7 days after launch, and its final archive uses type `rc_gate_tail`.
+Gate sources are excluded from the 24-hour success teardown, PR max age, the upstream PR poller, and main and PR fleet reconciliation. Dormancy still applies. When the gate expires, the control plane archives the evidence for both sources and destroys every gate worker, including ones already marked stopped, through the same path as operator source teardown (archive type `teardown`, reason `rc_gate_ttl`). The gate closes only after every machine, volume, provisioning resource, and replica prefix is gone, or is retained by an [evidence hold](#evidence-hold); otherwise the loop retries every 5 minutes. With `tail` enabled, `gate-stress` keeps running in both sources until 7 days after launch, and its final archive uses type `rc_gate_tail`.
 
 ```bash
 curl -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
   "https://litestream-soak-ctl.fly.dev/api/rc-gates" | jq .
 ```
 
-The read-only ledger lists every gate with its kind (`rc` or `upgrade`), pinned SHAs and images, start, expiry, tail expiry, launch deadline, status (`running`, `tail`, `completed`, or `aborted`), and every machine with its size, volume GB, start, and expiry. Each gate also reports candidate-versus-baseline results per scenario. Only verifications attributed to the pinned deployment, reported by workers created for this gate, started inside the gate window, and carrying the scenario's identity count. Metering-window runs are excluded as they are everywhere else, and a gate source only joins a metering window when `SOAK_METERING_WINDOW_SOURCES` lists it. A scenario passes only when both sides have coverage and the candidate has no failures. Missing coverage is `incomplete`, never a pass. When a gate closes, its results are saved, and later evidence or retention does not change them.
+The read-only ledger lists every gate with its kind (`rc` or `upgrade`), pinned SHAs and images, start, expiry, tail expiry, launch deadline, status (`running`, `tail`, `completed`, or `aborted`), every machine with its size, volume GB, start, and expiry, and `held_workers` for any gate worker whose machine, volume, and replica prefix are retained by an [evidence hold](#evidence-hold). Each gate also reports candidate-versus-baseline results per scenario. Only verifications attributed to the pinned deployment, reported by workers created for this gate, started inside the gate window, and carrying the scenario's identity count. Metering-window runs are excluded as they are everywhere else, and a gate source only joins a metering window when `SOAK_METERING_WINDOW_SOURCES` lists it. A scenario passes only when both sides have coverage and the candidate has no failures. Missing coverage is `incomplete`, never a pass. When a gate closes, its results are saved, and later evidence or retention does not change them.
 
 ## Upgrade Gate
 
-An upgrade gate is the RC gate's small sibling for Litestream changes to sync and compaction that have to be proven against a replica an older build wrote, not just against a replica the candidate created from scratch. It reuses the RC gate machinery end to end: the same `POST /api/admin/rc-gates` registration with `kind: upgrade`, the same pinned builds, launch deadline, readiness pairing, ledger, exclusion from main and PR reconciliation and the 24-hour success teardown, and the same TTL teardown with archiving (archive type `teardown`, reason `rc_gate_ttl`). The default TTL is `24h`. Upgrade gates do not offer `tail`, and nothing about them touches the metering window.
+An upgrade gate is the RC gate's small sibling for Litestream changes to sync and compaction that have to be proven against a replica an older build wrote, not just against a replica the candidate created from scratch. It reuses the RC gate machinery end to end: the same `POST /api/admin/rc-gates` registration with `kind: upgrade`, the same pinned builds, launch deadline, readiness pairing, ledger, exclusion from main and PR reconciliation and the 24-hour success teardown, and the same TTL teardown with archiving (archive type `teardown`, reason `rc_gate_ttl`). An [evidence hold](#evidence-hold) on an upgrade gate worker is honored by that teardown exactly as for an RC gate. The default TTL is `24h`. Upgrade gates do not offer `tail`, and nothing about them touches the metering window.
 
 Launch it with the manual `.github/workflows/soak-upgrade.yml` workflow. Inputs: `candidate_ref` (the PR head or branch in `benbjohnson/litestream`), `baseline_sha` (the build the lane starts on; defaults to the upstream `main` head), `warmup` (how long the lane runs the base build before switching; whole minutes or hours, default `2h`, must end before the TTL), and `duration` (whole hours, default `24h`, maximum `168h`). The candidate source is `up-<cand8>` and the baseline source is `upbase-<base8>`. The candidate image is built with `--build-arg LITESTREAM_BASE_SHA=<base>` in addition to `LITESTREAM_SHA=<candidate>`, so it carries both builds: the pinned candidate at `/usr/local/bin/litestream` and the base at `/opt/soak/base/litestream-base` with its SHA in `/opt/soak/base/litestream-base.sha`. Images built without the argument get an empty `/opt/soak/base/`, and a lane worker refuses to start when the base binary or SHA is missing or equals the candidate SHA.
 
@@ -517,6 +517,44 @@ requested source. If no ready deployment exists for that source, the request
 returns `409` without creating machines. To select a specific ready deployment,
 add both `&sha=<soak-git-sha>` and
 `&litestream_sha=<upstream-litestream-sha>` to the request.
+
+## Evidence Hold
+
+An evidence hold pins one worker's Fly machine, volume, and S3 replica prefix in place while an incident is investigated. While the hold is set, no control-plane path destroys them: gate TTL expiry, the gate launch abort, operator source teardown, the 24-hour success teardown, worker expiry, PR max age, upstream PR retirement, and operator or reconciler rolls, replacements, and dormant resumes all skip the worker. The hold is stored on the worker row (`evidence_hold_at`, `evidence_hold_reason`), so it survives control-plane restarts and deploys, and it can be applied to a worker that is already running, degraded, dormant, or stopped.
+
+Apply a hold with a required reason:
+
+```bash
+curl -X POST -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  "https://litestream-soak-ctl.fly.dev/api/admin/workers/worker-rc-a25ac011-gate-large-db/evidence-hold?reason=large-db+restore+evidence+under+review" | jq .
+```
+
+A JSON body `{"reason":"..."}` with `Content-Type: application/json` works as well. The response reports the hold together with the machine, volume, and `replica_prefix` it protects; repeating the call is harmless and returns `already_held: true` with the original reason. The worker's `evidence_hold_at` and `evidence_hold_reason` appear in `/api/workers`, `/api/workers/{id}`, and worker summaries, and a gate worker appears under `held_workers` in `/api/rc-gates`.
+
+What happens on a teardown while the hold is set:
+
+- The source is archived as usual, and the archived worker record carries the hold fields.
+- The held worker's machine is stopped if it is still running, its status becomes `stopped`, and the control plane records an `evidence_hold_retained` event naming the retained machine, volume, and replica prefix. Nothing is destroyed or cleared.
+- Every other worker in the source is destroyed normally. Source teardown reports the held worker with outcome `held` and counts it in `held_workers`; it does not count as a failure, so the result stays `complete: true`.
+- A gate still closes at expiry. The closed gate's saved results and the ledger list the retained worker under `held_workers`, so a held worker never keeps a gate open.
+- Reconcilers do not restart, replace, or resume a held worker, and a fleet spec that names it will not recreate it. It stays stopped until the hold is released.
+- Stale unattached volume GC resolves each candidate volume to its owning worker (by `fly_volume_id` or a provisioning attempt that references it) under that worker's lock, skips a held worker's volume with a `volume_gc_skipped_evidence_hold` event, and clears any persisted destroy retry for it. Volumes with no resolvable owner keep the existing GC behavior.
+
+Release the hold when the evidence is no longer needed:
+
+```bash
+curl -X POST -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  "https://litestream-soak-ctl.fly.dev/api/admin/workers/worker-rc-a25ac011-gate-large-db/evidence-hold/release" | jq .
+```
+
+Release alone only clears the hold. If no teardown reached the worker while it was held, it keeps its previous status and the normal cleanup paths apply again on their next pass (worker expiry, PR max age, PR retirement, source teardown). If a teardown already ran while it was held, the worker is `stopped`: a closed gate is not revisited by any loop, the expiry and max-age loops ignore stopped workers, and a repeated `teardown-source` skips it as already stopped. In that case add `destroy=true` to release the hold and destroy the machine, volume, and replica prefix in the same synchronous request:
+
+```bash
+curl -X POST -sS -u "$SOAK_BASIC_AUTH_USERNAME:$SOAK_BASIC_AUTH_PASSWORD" \
+  "https://litestream-soak-ctl.fly.dev/api/admin/workers/worker-rc-a25ac011-gate-large-db/evidence-hold/release?destroy=true" | jq .
+```
+
+The response reports `released`, `destroyed`, and any `destroy_error`. The earlier teardown archive already holds the evidence, so no new archive is written. Hold and release are recorded as `evidence_hold_applied` and `evidence_hold_released` events on the worker.
 
 ## Trusted Main Deployment Path
 

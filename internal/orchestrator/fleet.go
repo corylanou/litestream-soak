@@ -317,7 +317,7 @@ func (m *Manager) resumeDeploymentDormantWorkers(ctx context.Context, deployment
 			if err != nil {
 				return err
 			}
-			if worker.Status != model.WorkerDormant || (onlyOutdated && workerMatchesDeployment(*worker, deployment)) {
+			if worker.Status != model.WorkerDormant || worker.EvidenceHeld() || (onlyOutdated && workerMatchesDeployment(*worker, deployment)) {
 				return nil
 			}
 			return m.resumeDormantWorkerLocked(ctx, *worker, deployment.ImageRef, deployment.GitSHA, deployment.LitestreamSHA, trigger)
@@ -357,7 +357,7 @@ func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef 
 
 	byName := make(map[string]model.Worker, len(activeWorkers))
 	for _, worker := range activeWorkers {
-		if worker.Status == model.WorkerStopped || worker.Status == model.WorkerFailed {
+		if (worker.Status == model.WorkerStopped || worker.Status == model.WorkerFailed) && !worker.EvidenceHeld() {
 			continue
 		}
 		byName[worker.Name] = worker
@@ -378,6 +378,9 @@ func (m *Manager) ensureFleetSpec(ctx context.Context, spec FleetSpec, imageRef 
 			return errors.Join(ensureErrors...)
 		}
 		current, ok := byName[desired.Name]
+		if ok && current.EvidenceHeld() {
+			continue
+		}
 		var activeAttempt *model.ProvisioningAttempt
 		if ok {
 			var err error
