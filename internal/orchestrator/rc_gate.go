@@ -1319,6 +1319,9 @@ func rcGateWorkerFault(db *model.DB, worker model.Worker, events []model.Event, 
 	for _, event := range events {
 		switch {
 		case slices.Contains(rcGateDiskFullEventTypes, event.EventType):
+			if rcGateRestoreCapacityPressure(event) {
+				continue
+			}
 			diskDetail = firstNonEmpty(event.Message, event.EventType)
 		case slices.Contains(rcGateCrashEventTypes, event.EventType):
 			if rcGatePlannedLifecycleEvent(event) {
@@ -1359,7 +1362,9 @@ func rcGateWorkerFault(db *model.DB, worker model.Worker, events []model.Event, 
 		diskDetail = worker.ErrorMessage
 	}
 	crashLoop := crashes >= rcGateCrashLoopEvents || terminalCrash
-	if diskDetail == "" && (degraded || crashLoop || staleDetail != "") {
+	if diskDetail == "" {
+		// A nearly full data disk is disk-full evidence on its own, even while the
+		// worker still heartbeats and verifies.
 		if runtime := parseRuntimeJSON(worker.LastRuntimeJSON, time.Time{}); runtime != nil && runtime.DataDiskUsedPercent >= rcGateDiskExhaustedUsedPct {
 			diskDetail = fmt.Sprintf("data disk %.1f%% used", runtime.DataDiskUsedPercent)
 		}
@@ -1379,6 +1384,36 @@ func rcGateWorkerFault(db *model.DB, worker model.Worker, events []model.Event, 
 	default:
 		return "", "", nil
 	}
+}
+
+// rcGateRestoreCapacityPressure reports whether a Fly disk-pressure event is
+// really the verifier running out of room for its own restore output, which the
+// verification already reports as harness_capacity_inconclusive. The event
+// message is normalized and loses the path, so provenance comes from the raw
+// log line in the event details, and only a parsed path naming a restore output
+// counts: a path-less or unparseable line stays a hard fault, because a real
+// disk-full can itself abort a restore. Platform log rows coalesce identical
+// messages within ten minutes and keep only the latest details, so a row with
+// more than one occurrence is forgiven only when every occurrence was recorded
+// with restore-output provenance.
+func rcGateRestoreCapacityPressure(event model.Event) bool {
+	if event.EventType != "platform_disk_full" {
+		return false
+	}
+	if !reporting.RestoreOutputDiskFullPath(rcGatePlatformLogMessage(event.Details)) {
+		return false
+	}
+	return event.Occurrences <= 1 || event.RestoreOutputOccurrences >= event.Occurrences
+}
+
+func rcGatePlatformLogMessage(details string) string {
+	var line struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(details), &line); err != nil {
+		return ""
+	}
+	return line.Message
 }
 
 // rcGateStaleFault decides whether one worker_stale event is a worker fault.

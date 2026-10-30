@@ -622,6 +622,13 @@ func TestRestoreOutputDiskFull(t *testing.T) {
 	if c := HarnessCapacityClassification("txid"); !c.Valid() || c.Stage != StageHarnessCapacity || c.Signature != SignatureHarnessCapacityInconclusive || c.RestoreMode != "txid" {
 		t.Fatalf("harness capacity classification = %+v", c)
 	}
+	flyLine := `time=2026-10-30T02:36:12Z level=ERROR msg="Verification failed" error="restore failed: validation failed (exit 1): Error: decode database: write page 501132: write /data/scenarios/overload-truncate0/test.db.restored.tmp: no space left on device" duration=14m2s`
+	if !RestoreOutputDiskFullPath(flyLine) || !RestoreOutputDiskFullPath("write /data/test.db.restored.pre.tmp: no space left on device") {
+		t.Fatal("raw Fly log lines naming a restore output path must match")
+	}
+	if RestoreOutputDiskFullPath(`level=ERROR msg="disk full while staging ltx file" error="write /data/.test.db-litestream/ltx/0/0000000000000042.ltx: no space left on device"`) || RestoreOutputDiskFullPath("no space left on device") {
+		t.Fatal("non-restore or path-less lines must not match")
+	}
 }
 
 func TestRestoreRequestCanceled(t *testing.T) {
