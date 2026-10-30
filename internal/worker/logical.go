@@ -5,16 +5,44 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
 	"strings"
+	"time"
 
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
 const logicalValidatorVersion = "soak-logical-v1"
+
+var (
+	logicalReadBusyTimeout    = 5 * time.Second
+	restoredCompareAttempts   = 3
+	restoredCompareRetryDelay = 500 * time.Millisecond
+)
+
+// restoredComparisonLockedError marks a comparison that could not read the
+// restored copy because SQLite kept reporting it busy or locked. No content
+// was compared, so it is inconclusive for the build under test.
+type restoredComparisonLockedError struct {
+	err error
+}
+
+func (e *restoredComparisonLockedError) Error() string {
+	return e.err.Error()
+}
+
+func (e *restoredComparisonLockedError) Unwrap() error {
+	return e.err
+}
+
+func sqliteLockError(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && (sqliteErr.Code()&255 == sqlite3.SQLITE_BUSY || sqliteErr.Code()&255 == sqlite3.SQLITE_LOCKED)
+}
 
 func (c Config) logicalLimits() logicalLimits {
 	return logicalLimits{rows: c.LogicalMaxRows, bytes: c.LogicalMaxBytes, objects: c.LogicalMaxObjects, valueBytes: c.LogicalMaxValueBytes}
@@ -44,7 +72,7 @@ func readLogicalSnapshot(ctx context.Context, path string, limits logicalLimits)
 
 func readLogicalSnapshotMode(ctx context.Context, path string, limits logicalLimits, schemaOnly bool) (logicalSnapshot, error) {
 	var snapshot logicalSnapshot
-	uri := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}
+	uri := url.URL{Scheme: "file", Path: path, RawQuery: fmt.Sprintf("mode=ro&_pragma=busy_timeout(%d)", logicalReadBusyTimeout.Milliseconds())}
 	db, err := sql.Open("sqlite", uri.String())
 	if err != nil {
 		return snapshot, err
@@ -328,7 +356,10 @@ func (v *Verifier) logicalValidation(ctx context.Context, sourcePath string, txi
 }
 
 func (v *Verifier) compareRestoredLogical(ctx context.Context, source logicalSnapshot, restoredPath string) error {
-	restored, err := readLogicalSnapshot(ctx, restoredPath, v.cfg.logicalLimits())
+	restored, err := readRestoredLogicalSnapshot(ctx, restoredPath, v.cfg.logicalLimits())
+	if err != nil && sqliteLockError(err) {
+		return &restoredComparisonLockedError{err: fmt.Errorf("%s: restored comparison: %w", v.logicalEvidence, err)}
+	}
 	if err == nil {
 		err = compareLogicalSnapshots(source, restored)
 	}
@@ -343,4 +374,18 @@ func (v *Verifier) compareRestoredLogical(ctx context.Context, source logicalSna
 	}
 	v.logicalEvidence += fmt.Sprintf(" schema_sha256=%x tables=%d logical_match=true", source.schema, len(source.tables))
 	return nil
+}
+
+func readRestoredLogicalSnapshot(ctx context.Context, path string, limits logicalLimits) (logicalSnapshot, error) {
+	for attempt := 1; ; attempt++ {
+		snapshot, err := readLogicalSnapshot(ctx, path, limits)
+		if err == nil || !sqliteLockError(err) || attempt >= restoredCompareAttempts {
+			return snapshot, err
+		}
+		select {
+		case <-ctx.Done():
+			return snapshot, err
+		case <-time.After(restoredCompareRetryDelay):
+		}
+	}
 }

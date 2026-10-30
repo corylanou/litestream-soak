@@ -70,6 +70,8 @@ func inferProbableSubsystem(stage, signature string) string {
 		return "Soak fixture disk consumption"
 	case strings.Contains(text, "disk_capacity") || strings.Contains(text, "disk_full"):
 		return "Disk capacity / restore scratch headroom"
+	case strings.Contains(text, reporting.SignatureRestoredComparisonLocked):
+		return "Soak harness or worker runtime"
 	case strings.Contains(text, "s3_bucket_missing") || strings.Contains(text, "s3_slowdown"):
 		return "Object store provider (environmental)"
 	case strings.Contains(text, "s3_transport") || strings.Contains(text, "s3-transport"):

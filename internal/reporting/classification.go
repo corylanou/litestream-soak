@@ -20,6 +20,10 @@ const (
 
 	SignatureReplicaLevelReportIncomplete = "replica_level_report_incomplete"
 
+	StageHarnessLock                  = "harness_lock"
+	SignatureRestoredComparisonLocked = "restored_comparison_locked"
+	restoredComparisonMarker          = "restored comparison:"
+
 	soakFixtureSourceUsedPercent = 95.0
 	diskTelemetryMaxAge          = time.Minute
 )
@@ -32,6 +36,7 @@ var (
 	s3URLPattern                   = regexp.MustCompile(`s3://([^/\s]+)/([^"'\s]+)`)
 	pinnedRestoreTargetLostPattern = regexp.MustCompile(`(?i)restore target (txid|timestamp) \S+ is no longer available`)
 	restoreOutputDiskFullPattern   = regexp.MustCompile(`(?i)(?:write|open|create|rename|sync|truncate) [^\s:]*\.restored(?:\.pre)?(?:\.tmp)?(?:-wal|-shm|-journal)?: no space left on device`)
+	sqliteLockPattern              = regexp.MustCompile(`(?i)database is locked|database table is locked|\bsqlite_busy\b|\bsqlite_locked\b`)
 	keyValuePattern                = regexp.MustCompile(`(?i)\b(operation|http_status|api_code|request_id|bucket|prefix|phase)=("[^"]+"|'[^']+'|[^\s,]+)`)
 )
 
@@ -69,6 +74,11 @@ func ClassifyVerificationFailure(checkType, errorMessage string) FailureClassifi
 	if isDiskCapacityFailure(text) {
 		classification.Stage = "disk_capacity"
 		classification.Signature = "disk_capacity_full"
+		return classification
+	}
+	if RestoredComparisonLocked(errorMessage) {
+		classification.Stage = StageHarnessLock
+		classification.Signature = SignatureRestoredComparisonLocked
 		return classification
 	}
 	objectStore := ParseObjectStoreFailure(errorMessage)
@@ -430,6 +440,29 @@ func RestoreOutputDiskFullPath(message string) bool {
 // space for the restore.
 func HarnessCapacityClassification(restoreMode string) *FailureClassification {
 	return &FailureClassification{Stage: StageHarnessCapacity, Signature: SignatureHarnessCapacityInconclusive, RestoreMode: restoreMode}
+}
+
+// RestoredComparisonLocked reports a logical comparison that could not read the
+// restored copy because SQLite returned SQLITE_BUSY or SQLITE_LOCKED. The
+// comparison never saw the restored rows, so no content difference was proven.
+// A schema, row or digest mismatch reported by the comparison does not match.
+func RestoredComparisonLocked(errorMessage string) bool {
+	index := strings.LastIndex(strings.ToLower(errorMessage), restoredComparisonMarker)
+	if index < 0 {
+		return false
+	}
+	detail := strings.ToLower(errorMessage[index+len(restoredComparisonMarker):])
+	if strings.Contains(detail, "mismatch") || strings.Contains(detail, "missing") {
+		return false
+	}
+	return sqliteLockPattern.MatchString(detail)
+}
+
+// RestoredComparisonLockedClassification is the classification an inconclusive
+// verification carries when a lock, not the build under test, kept the
+// harness from reading the restored copy it compares.
+func RestoredComparisonLockedClassification(restoreMode string) *FailureClassification {
+	return &FailureClassification{Stage: StageHarnessLock, Signature: SignatureRestoredComparisonLocked, RestoreMode: restoreMode}
 }
 
 func RestoreRequestCanceled(errorMessage string) bool {

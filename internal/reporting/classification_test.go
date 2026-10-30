@@ -664,3 +664,34 @@ func TestRestoreRequestCanceled(t *testing.T) {
 		})
 	}
 }
+
+func TestRestoredComparisonLocked(t *testing.T) {
+	const evidence = "validator=soak-logical-v1 workload=soak:abc boundary_txid=000000000000c81b pre_upgrade_txid=0000000000001beb pre_upgrade_restore=ok"
+	for _, tc := range []struct {
+		name, checkType, message string
+		want                     bool
+	}{
+		{"live follow busy", "follow", "follow restore diverged from source at txid 000000000000c81b:  pre_upgrade_txid=0000000000001beb pre_upgrade_restore=ok: restored comparison: database is locked (5) (SQLITE_BUSY)", true},
+		{"follow inconclusive message", "follow", "follow restore comparison inconclusive at txid 000000000000c81b: " + evidence + ": restored comparison: database is locked (5) (SQLITE_BUSY)", true},
+		{"table locked", "restore_validate", evidence + ": restored comparison: table \"t\": database table is locked (262) (SQLITE_LOCKED_SHAREDCACHE)", true},
+		{"pinned follow busy", "follow", "pinned follow restore diverged from source at txid 0000000000000043: " + evidence + ": restored comparison: SQLITE_BUSY", true},
+		{"table mismatch", "follow", "follow restore diverged from source at txid 000000000000c81b: " + evidence + ": restored comparison: logical table \"t\" mismatch: source_rows=2 restored_rows=3 source_sha256=aa restored_sha256=bb", false},
+		{"schema mismatch", "follow", "follow restore diverged from source at txid 000000000000c81b: " + evidence + ": restored comparison: logical schema mismatch: source_sha256=aa restored_sha256=bb", false},
+		{"missing table", "follow", "follow restore diverged from source at txid 000000000000c81b: " + evidence + ": restored comparison: logical table \"t\" missing", false},
+		{"lock outside the comparison", "follow", "follow restore exited: exit status 1: database is locked", false},
+		{"source snapshot busy", "restore_validate", evidence + ": source snapshot: database is locked (5) (SQLITE_BUSY)", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RestoredComparisonLocked(tc.message); got != tc.want {
+				t.Fatalf("RestoredComparisonLocked() = %v, want %v", got, tc.want)
+			}
+			classification := ClassifyVerificationFailure(tc.checkType, tc.message)
+			if locked := classification.Stage == StageHarnessLock && classification.Signature == SignatureRestoredComparisonLocked; locked != tc.want {
+				t.Fatalf("classification = %+v, want locked=%v", classification, tc.want)
+			}
+		})
+	}
+	if c := RestoredComparisonLockedClassification("follow"); !c.Valid() || c.Stage != StageHarnessLock || c.Signature != SignatureRestoredComparisonLocked || c.RestoreMode != "follow" {
+		t.Fatalf("restored comparison locked classification = %+v", c)
+	}
+}

@@ -271,6 +271,12 @@ func (v *Verifier) runFollowCheck(ctx context.Context, boundary verificationBoun
 			v.finalizeResult(&result)
 			return result
 		}
+		var locked *restoredComparisonLockedError
+		if errors.As(failed, &locked) {
+			v.stopFollow()
+			v.inconclusiveFollowComparison(&result, failed.Error())
+			return result
+		}
 		if failed != nil {
 			v.stopFollow()
 			v.failResult(ctx, &result, failed.Error())
@@ -297,6 +303,11 @@ func (v *Verifier) runFollowCheck(ctx context.Context, boundary verificationBoun
 		return v.compareRestoredLogical(phaseCtx, boundary.logicalSnapshot, path)
 	}); err != nil {
 		result.Steps = append(result.Steps, v.validationSteps...)
+		var locked *restoredComparisonLockedError
+		if errors.As(err, &locked) {
+			v.inconclusiveFollowComparison(&result, fmt.Sprintf("follow restore comparison inconclusive at txid %s: %v", formatTXID(boundary.txid), err))
+			return result
+		}
 		v.stopFollow()
 		v.failResult(ctx, &result, fmt.Sprintf("follow restore diverged from source at txid %s: %v", formatTXID(boundary.txid), err))
 		return result
@@ -343,6 +354,18 @@ func (v *Verifier) runFollowCheck(ctx context.Context, boundary verificationBoun
 		v.finalizeResult(&result)
 	}
 	return result
+}
+
+// inconclusiveFollowComparison reports a follow comparison that could not read
+// the followed copy because it stayed locked. Nothing was compared, so the
+// result gives no coverage and does not blame the build.
+func (v *Verifier) inconclusiveFollowComparison(result *VerificationResult, message string) {
+	result.Status = "aborted"
+	result.Passed = false
+	result.ErrorMessage = message
+	result.Summary = "verification inconclusive: " + summarizeVerificationMessage(message)
+	result.InconclusiveClassification = reporting.RestoredComparisonLockedClassification(result.RestoreMode)
+	v.finalizeResult(result)
 }
 
 func followMark(session *followSession) string {
@@ -403,6 +426,10 @@ func (v *Verifier) startFollowCheck(ctx context.Context, result *VerificationRes
 	if err := v.runValidationPhase(ctx, "follow_compare", v.cfg.verificationPhaseBudget("compare", sourceSize), func(phaseCtx context.Context) error {
 		return v.compareRestoredLogical(phaseCtx, boundary.logicalSnapshot, path)
 	}); err != nil {
+		var locked *restoredComparisonLockedError
+		if errors.As(err, &locked) {
+			return "", fmt.Errorf("follow restore comparison inconclusive at txid %s: %w", formatTXID(boundary.txid), err)
+		}
 		return "", fmt.Errorf("follow restore diverged from source at txid %s: %v", formatTXID(boundary.txid), err)
 	}
 	summary := fmt.Sprintf("follow restore started and matched source at txid %s; awaiting a new L9 snapshot past max_txid %s", formatTXID(boundary.txid), formatTXID(baseline.MaxTXIDDecimal))
@@ -447,6 +474,13 @@ func (v *Verifier) followPinned(ctx context.Context, result *VerificationResult,
 	compareCtx, cancelCompare := context.WithTimeout(ctx, v.cfg.verificationPhaseBudget("compare", sourceSize))
 	defer cancelCompare()
 	if err := v.compareRestoredLogical(compareCtx, boundary.logicalSnapshot, path); err != nil {
+		var locked *restoredComparisonLockedError
+		if errors.As(err, &locked) {
+			err = fmt.Errorf("pinned follow restore comparison inconclusive at txid %s: %w", formatTXID(boundary.txid), err)
+			v.followStep(result, "follow_pinned", "inconclusive", output, err)
+			result.Steps[len(result.Steps)-1].Command = command
+			return "", err
+		}
 		err = fmt.Errorf("pinned follow restore diverged from source at txid %s: %v", formatTXID(boundary.txid), err)
 		v.followStep(result, "follow_pinned", "error", output, err)
 		result.Steps[len(result.Steps)-1].Command = command

@@ -599,3 +599,86 @@ func TestHandleVerificationRestoreRequestCanceledIsInconclusive(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleVerificationFollowComparisonLockIsHarnessInconclusive(t *testing.T) {
+	t.Parallel()
+
+	const liveMessage = "follow restore diverged from source at txid 000000000000c81b:  pre_upgrade_txid=0000000000001beb pre_upgrade_restore=ok: restored comparison: database is locked (5) (SQLITE_BUSY)"
+	tests := []struct {
+		name         string
+		message      string
+		inconclusive bool
+	}{
+		{name: "comparison locked", message: liveMessage, inconclusive: true},
+		{name: "content mismatch", message: "follow restore diverged from source at txid 000000000000c81b:  pre_upgrade_txid=0000000000001beb pre_upgrade_restore=ok: restored comparison: logical table \"t\" mismatch: source_rows=2 restored_rows=3 source_sha256=aa restored_sha256=bb"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := openTestDB(t)
+			workerID := "worker-up-follow-lock"
+			createTestWorker(t, db, model.Worker{ID: workerID, Name: workerID, Status: model.WorkerRunning, Source: "main", GitSHA: "abc123", LitestreamSHA: "ls123", ProfileName: "gate-upgrade", ProfileConfig: "{}"})
+			api := NewAPI(db, nil, nil, nil, &Manager{db: db, appName: "litestream-soak"}, nil)
+			completedAt := time.Now().UTC().Add(-time.Hour)
+			reported := reporting.ClassifyVerificationFailure("follow", tt.message)
+			payload := reporting.VerificationPayload{
+				WorkerIdentity:        reporting.WorkerIdentity{WorkerID: workerID, Name: workerID, Source: "main", GitSHA: "abc123", LitestreamSHA: "ls123", ProfileName: "gate-upgrade", ProfileConfig: "{}"},
+				StartedAt:             completedAt.Add(-time.Minute),
+				CompletedAt:           completedAt,
+				CheckType:             "follow",
+				Status:                "failed",
+				Summary:               tt.message,
+				ErrorMessage:          tt.message,
+				FailureClassification: &reported,
+				RestoreMode:           "follow",
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/api/workers/"+workerID+"/verifications", bytes.NewReader(body))
+			request.SetPathValue("id", workerID)
+			recorder := httptest.NewRecorder()
+			api.handleVerification(recorder, request)
+			if recorder.Code != http.StatusAccepted {
+				t.Fatalf("status code = %d; body: %s", recorder.Code, recorder.Body.String())
+			}
+			verifications, err := db.ListVerifications(workerID, 10)
+			if err != nil || len(verifications) != 1 {
+				t.Fatalf("ListVerifications() = %+v, %v", verifications, err)
+			}
+			verification := verifications[0]
+			worker, err := db.GetWorker(workerID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			latestFailed, err := db.GetLatestFailedVerification(workerID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tt.inconclusive {
+				if !verification.Failed() || verification.FailureClassification == nil || verification.FailureClassification.Signature == reporting.SignatureRestoredComparisonLocked || latestFailed == nil || worker.Status != model.WorkerDegraded {
+					t.Fatalf("content mismatch not counted: %+v status=%q latestFailed=%v", verification, worker.Status, latestFailed)
+				}
+				if subsystem := classifyFailureMessage(verification.CheckType, verification.ErrorMessage).probableSubsystem(); subsystem != "Replication or restore path" {
+					t.Fatalf("mismatch subsystem = %q", subsystem)
+				}
+				return
+			}
+			if verification.Status != "aborted" || !verification.Inconclusive() || verification.Failed() || verification.Succeeded() || verification.FailureClassification == nil ||
+				verification.FailureClassification.Stage != reporting.StageHarnessLock || verification.FailureClassification.Signature != reporting.SignatureRestoredComparisonLocked || verification.FailureClassification.RestoreMode != "follow" {
+				t.Fatalf("verification = %+v, want aborted with restored comparison lock classification", verification)
+			}
+			if verification.ErrorMessage != liveMessage {
+				t.Fatalf("error %q, want the reported message kept", verification.ErrorMessage)
+			}
+			if latestFailed != nil || worker.Status != model.WorkerRunning || worker.ErrorMessage != "" {
+				t.Fatalf("inconclusive verification scored: latestFailed=%+v status=%q error=%q", latestFailed, worker.Status, worker.ErrorMessage)
+			}
+			if subsystem := classifyFailureMessage(verification.CheckType, verification.ErrorMessage).probableSubsystem(); subsystem != "Soak harness or worker runtime" {
+				t.Fatalf("locked comparison subsystem = %q", subsystem)
+			}
+		})
+	}
+}
