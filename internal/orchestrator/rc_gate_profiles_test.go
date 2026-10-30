@@ -36,7 +36,7 @@ func TestRegisterRCGateProfilesAndSourceSuffix(t *testing.T) {
 			wantCandidate: testGateCandidate,
 			wantBaseline:  testGateBaseline,
 			wantMachines:  8,
-			wantVolumeGB:  150,
+			wantVolumeGB:  170,
 			wantScenarios: []string{"overload-truncate0", "pinned-reader", "manydb-500", "large-db", "remote"},
 		},
 		{
@@ -57,7 +57,7 @@ func TestRegisterRCGateProfilesAndSourceSuffix(t *testing.T) {
 			wantBaseline:    testGateBaseline,
 			wantProfiles:    []string{gateStressProfile, gateRemoteProfile},
 			wantMachines:    4,
-			wantVolumeGB:    40,
+			wantVolumeGB:    60,
 			wantScenarios:   []string{"overload-truncate0", "pinned-reader", "remote"},
 			wantNotProfiles: []string{gateManyDB500Profile, gateLargeDBProfile},
 		},

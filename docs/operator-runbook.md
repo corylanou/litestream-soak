@@ -383,7 +383,7 @@ The gate loop records when each side is first observed with every selected worke
 
 | Worker | Region | CPU / memory | Volume | Workload |
 | --- | --- | --- | --- | --- |
-| `gate-stress` | ord | 2 shared / 2 GB | 10 GB | alternating 6-hour phases of `overload-truncate0` and `pinned-reader` |
+| `gate-stress` | ord | 2 shared / 2 GB | 20 GB | alternating 6-hour phases of `overload-truncate0` and `pinned-reader`; two scenario databases of roughly 3.5 GB each plus WAL, and a restore needs that much again in temp space |
 | `gate-manydb-500` | ord | 2 shared / 3 GB | 15 GB | 500 databases, directory mode, rotating active set |
 | `gate-large-db` | ord | 2 shared / 4 GB | 40 GB | 6 GB seed with both populate indexes (`populate_index_ratio: 1`) and per-phase verifier budgets |
 | `gate-remote` | ams | 1 shared / 1 GB | 10 GB | low volume |
@@ -1250,6 +1250,25 @@ Check:
 
 This usually points to the replication or object-fetch path, not the workload
 generator itself.
+
+Before every restore, including the upgrade lane's pre-upgrade txid restore,
+the verifier runs a preflight step (`restore_preflight`,
+`restore_pre_upgrade_preflight`). It first removes any restore output an
+interrupted run left behind (`.restored`, `.restored.tmp`, `.restored.pre`,
+`.restored.pre.tmp` and their SQLite side files), then estimates the logical
+size of the database a restore produces: the largest of the main file, the page
+count in the database header, and the database size recorded by the newest WAL
+commit frame, so a WAL that rewrites the same pages does not inflate the
+estimate. That size plus 10% (at least 64 MB) is compared with the free space on
+the volume holding the restore target. When space is short the restore is
+skipped and the verification is `aborted` with classification
+`harness_capacity_inconclusive` (stage `harness_capacity`), and the error names
+the needed and free bytes. An ENOSPC raised while writing the verifier's own
+restore output (`.restored`, `.restored.pre`, or their `.tmp` files) is
+classified the same way, on current and older images. ENOSPC anywhere else, in Litestream replication or staging, the source
+database, or its WAL, stays a `disk_capacity_full` failure and a worker fault,
+so a build that bloats the disk remains visible. Inconclusive results count for
+neither gate side and give no coverage.
 
 A restore whose `ListObjectsV2` or `GetObject` call exhausted its retries with
 HTTP 408 `RequestCanceled` is recorded as an inconclusive `aborted`

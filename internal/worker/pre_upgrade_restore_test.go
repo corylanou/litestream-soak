@@ -25,6 +25,7 @@ if [ "$txid" = "0000000000000010" ]; then
   case "${PRE_UPGRADE_OUTCOME:-ok}" in
     ok) cp "$SOURCE_PATH" "$out"; exit 0 ;;
     lost) echo '` + pinnedRestoreTargetUnavailableError + `' >&2; exit 1 ;;
+    enospc) echo "Error: decode database: write page 7: write $out.tmp: no space left on device" >&2; exit 1 ;;
     *) echo 'Error: replica unreachable' >&2; exit 1 ;;
   esac
 fi
@@ -41,6 +42,7 @@ func TestPreUpgradeRestoreIsItsOwnResult(t *testing.T) {
 	}{
 		{name: "pre-upgrade txid restores", outcome: "ok", wantStatus: "passed", wantSummary: "pre-upgrade txid 0000000000000010 restored"},
 		{name: "retention removed the target", outcome: "lost", wantStatus: "aborted", wantSummary: "verification inconclusive"},
+		{name: "restore output ran out of disk", outcome: "enospc", wantStatus: "aborted", wantSummary: "verification inconclusive"},
 		{name: "restore error", outcome: "error", wantStatus: "failed", wantSummary: "replica unreachable"},
 	}
 	for _, tt := range tests {
@@ -78,6 +80,16 @@ func TestPreUpgradeRestoreIsItsOwnResult(t *testing.T) {
 			}
 			if tt.wantStatus == "passed" && stepStatus(historical, "integrity_check_pre_upgrade") != "ok" {
 				t.Fatalf("integrity step = %+v", historical.Steps)
+			}
+			if stepStatus(historical, "restore_pre_upgrade_preflight") == "missing" {
+				t.Fatalf("pre-upgrade preflight step missing: %+v", historical.Steps)
+			}
+			if tt.outcome == "enospc" {
+				if historical.InconclusiveClassification == nil || historical.InconclusiveClassification.Signature != "harness_capacity_inconclusive" || !strings.Contains(historical.ErrorMessage, ".restored.pre.tmp: no space left on device") {
+					t.Fatalf("historical capacity result = %+v", historical)
+				}
+			} else if historical.InconclusiveClassification != nil {
+				t.Fatalf("unexpected inconclusive classification: %+v", historical.InconclusiveClassification)
 			}
 			if _, err := os.Stat(cfg.DBPath + ".restored.pre"); !os.IsNotExist(err) {
 				t.Fatalf("pre-upgrade restore artifact left behind: %v", err)

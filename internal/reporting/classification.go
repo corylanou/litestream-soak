@@ -15,6 +15,9 @@ const (
 
 	objectStoreAPICodeRequestCanceled = "RequestCanceled"
 
+	StageHarnessCapacity                 = "harness_capacity"
+	SignatureHarnessCapacityInconclusive = "harness_capacity_inconclusive"
+
 	soakFixtureSourceUsedPercent = 95.0
 	diskTelemetryMaxAge          = time.Minute
 )
@@ -26,6 +29,7 @@ var (
 	requestIDPattern               = regexp.MustCompile(`(?i)RequestID:\s*([^,\s]+)`)
 	s3URLPattern                   = regexp.MustCompile(`s3://([^/\s]+)/([^"'\s]+)`)
 	pinnedRestoreTargetLostPattern = regexp.MustCompile(`(?i)restore target (txid|timestamp) \S+ is no longer available`)
+	restoreOutputDiskFullPattern   = regexp.MustCompile(`(?i)(?:write|open|create|rename|sync|truncate) [^\s:]*\.restored(?:\.pre)?(?:\.tmp)?(?:-wal|-shm|-journal)?: no space left on device`)
 	keyValuePattern                = regexp.MustCompile(`(?i)\b(operation|http_status|api_code|request_id|bucket|prefix|phase)=("[^"]+"|'[^']+'|[^\s,]+)`)
 )
 
@@ -397,6 +401,24 @@ func PinnedRestoreTargetUnavailable(restoreMode, errorMessage string) bool {
 	}
 	classification := ClassifyVerificationFailure("restore_validate", errorMessage)
 	return classification.Stage == "restore" && classification.Signature == SignatureRestoreTargetUnavailable
+}
+
+// RestoreOutputDiskFull reports an ENOSPC raised while the verifier wrote its
+// own restore output (the .restored target or its .tmp file). Disk-full errors
+// from Litestream replication, the source database, its WAL, or any other path
+// are not matched, so a build that bloats the disk stays a real failure.
+func RestoreOutputDiskFull(errorMessage string) bool {
+	if !restoreOutputDiskFullPattern.MatchString(errorMessage) {
+		return false
+	}
+	return InferFailureStage("restore_validate", errorMessage) == "restore" || strings.Contains(strings.ToLower(errorMessage), "restore failed")
+}
+
+// HarnessCapacityClassification is the classification an inconclusive
+// verification carries when the harness, not the build under test, lacked disk
+// space for the restore.
+func HarnessCapacityClassification(restoreMode string) *FailureClassification {
+	return &FailureClassification{Stage: StageHarnessCapacity, Signature: SignatureHarnessCapacityInconclusive, RestoreMode: restoreMode}
 }
 
 func RestoreRequestCanceled(errorMessage string) bool {

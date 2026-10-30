@@ -64,6 +64,23 @@ func (e *restoreEvidenceInconclusiveError) Unwrap() error {
 	return e.err
 }
 
+// restoreCapacityInconclusiveError marks a restore the harness could not
+// complete for lack of disk space at its own output path. It is inconclusive
+// for the build under test and carries the harness capacity classification.
+type restoreCapacityInconclusiveError struct {
+	err         error
+	neededBytes uint64
+	freeBytes   uint64
+}
+
+func (e *restoreCapacityInconclusiveError) Error() string {
+	return e.err.Error()
+}
+
+func (e *restoreCapacityInconclusiveError) Unwrap() error {
+	return e.err
+}
+
 func writeRestoreMarker(ctx context.Context, path string, marker int64, txidHint uint64) error {
 	defer harnessWriters.begin("verifier_restore_marker", path)()
 	uri := url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw&_pragma=busy_timeout(5000)"}

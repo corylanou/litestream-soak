@@ -179,6 +179,10 @@ func (r *Runner) replicaLevelReport(result VerificationResult) *reporting.Replic
 
 func (r *Runner) failureClassification(result VerificationResult) *reporting.FailureClassification {
 	if result.Passed || (result.Status == "aborted" || result.Status == "pending") {
+		if result.Status == "aborted" && result.InconclusiveClassification != nil {
+			classification := *result.InconclusiveClassification
+			return &classification
+		}
 		return nil
 	}
 	snapshot := r.currentSnapshot()

@@ -43,6 +43,7 @@ type VerificationResult struct {
 	CheckpointResidualBusy            bool
 	RestoreMode                       string
 	RestoreModeFallback               string
+	InconclusiveClassification        *reporting.FailureClassification
 }
 
 type verificationStepMetadataError struct {
@@ -304,7 +305,7 @@ func (v *Verifier) failResult(ctx context.Context, result *VerificationResult, m
 
 func removeRestoredArtifacts(restoredPath string) error {
 	var errs []error
-	for _, path := range []string{restoredPath, restoredPath + "-wal", restoredPath + "-shm"} {
+	for _, path := range []string{restoredPath, restoredPath + ".tmp", restoredPath + "-wal", restoredPath + "-shm"} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}
@@ -744,6 +745,12 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		return false, err
 	}
 	defer cleanupConfig()
+	if err := v.runValidationPhase(ctx, "restore_preflight", v.cfg.verificationPhaseBudget("restore_preflight", sourceSize), func(context.Context) error {
+		return checkRestoreCapacity(restoredPath, sourcePath)
+	}); err != nil {
+		v.logicalEvidence += " restore_capacity=insufficient"
+		return false, err
+	}
 	var restoreEvidence restoreOutput
 	restoreErr := v.runValidationPhase(ctx, "restore", v.cfg.verificationPhaseBudget("restore", sourceSize), func(phaseCtx context.Context) error {
 		args := restoreArgs(configPath, mode, source.txid, target, restoredPath, sourcePath)
@@ -785,6 +792,9 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		case reporting.RestoreRequestCanceled(metadata.err.Error()):
 			v.logicalEvidence += " object_store=request_canceled"
 			metadata.err = &restoreEvidenceInconclusiveError{err: metadata.err}
+		case reporting.RestoreOutputDiskFull(metadata.err.Error()):
+			v.logicalEvidence += " restore_capacity=exhausted"
+			metadata.err = restoreCapacityExhausted(metadata.err, restoredPath, sourcePath)
 		}
 		return metadata
 	})
@@ -876,6 +886,12 @@ func (v *Verifier) restorePreUpgradeTXID(ctx context.Context, configPath, restor
 		}
 	}()
 	v.logicalEvidence += fmt.Sprintf(" pre_upgrade_txid=%016x", v.cfg.upgradePreTXID)
+	if err := v.runValidationPhase(ctx, "restore_pre_upgrade_preflight", v.cfg.verificationPhaseBudget("restore_preflight", sourceSize), func(context.Context) error {
+		return checkRestoreCapacity(preRestoredPath, sourcePath)
+	}); err != nil {
+		v.logicalEvidence += " restore_capacity=insufficient"
+		return false, err
+	}
 	var evidence restoreOutput
 	err := v.runValidationPhase(ctx, "restore_pre_upgrade_txid", v.cfg.verificationPhaseBudget("restore", sourceSize), func(phaseCtx context.Context) error {
 		args := restoreArgs(configPath, restoreModeTXID, v.cfg.upgradePreTXID, time.Time{}, preRestoredPath, sourcePath)
@@ -904,8 +920,12 @@ func (v *Verifier) restorePreUpgradeTXID(ctx context.Context, configPath, restor
 		} else {
 			metadata.err = fmt.Errorf("restore failed: pre-upgrade txid %016x: %w: %s", v.cfg.upgradePreTXID, err, evidence.finalError)
 		}
-		if reporting.PinnedRestoreTargetUnavailable(restoreModeTXID, metadata.err.Error()) {
+		switch {
+		case reporting.PinnedRestoreTargetUnavailable(restoreModeTXID, metadata.err.Error()):
 			metadata.err = &restoreEvidenceInconclusiveError{err: metadata.err}
+		case reporting.RestoreOutputDiskFull(metadata.err.Error()):
+			v.logicalEvidence += " restore_capacity=exhausted"
+			metadata.err = restoreCapacityExhausted(metadata.err, preRestoredPath, sourcePath)
 		}
 		return metadata
 	})
