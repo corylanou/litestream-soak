@@ -110,20 +110,20 @@ func TestPopulateCheckpointerBoundsWAL(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			peak := sampleWALPeak(ctx, dbPath)
 
-			checkpointer := &populateCheckpointer{dbPath: dbPath, threshold: threshold, interval: 5 * time.Millisecond, spinLimit: populateCheckpointSpinLimit}
-			checkpointerDone := make(chan struct{})
+			checkpointer := testCheckpointer(dbPath, threshold)
+			checkpointer.interval = 5 * time.Millisecond
+			checkpointerDone := make(chan error, 1)
 			if tt.checkpoint {
-				go func() {
-					defer close(checkpointerDone)
-					checkpointer.run(ctx)
-				}()
+				go func() { checkpointerDone <- checkpointer.run(ctx) }()
 			} else {
-				close(checkpointerDone)
+				checkpointerDone <- nil
 			}
 
 			writeUncheckpointedRows(t, dbPath, rows, batch)
 			cancel()
-			<-checkpointerDone
+			if err := <-checkpointerDone; err != nil {
+				t.Fatalf("checkpointer.run() error = %v", err)
+			}
 			got := peak()
 			t.Logf("peak wal = %d bytes, final db = %d bytes", got, fileSizeOrZero(dbPath))
 
@@ -185,7 +185,7 @@ func TestRunPopulateCommandBoundsWALWithPinnedBinary(t *testing.T) {
 	peak := sampleWALPeak(ctx, dbPath)
 	cmd := exec.CommandContext(ctx, binary, "populate", "-db", dbPath, "-target-size", target, "-index-ratio", ratio)
 	started := time.Now()
-	stats, err := runPopulateCommand(ctx, cmd, dbPath)
+	stats, err := runPopulateCommand(ctx, cmd, dbPath, newPopulateCheckpointer(dbPath))
 	elapsed := time.Since(started)
 	cancel()
 	observed := peak()
@@ -200,6 +200,159 @@ func TestRunPopulateCommandBoundsWALWithPinnedBinary(t *testing.T) {
 	}
 	if size := fileSizeOrZero(walPath(dbPath)); size != 0 {
 		t.Fatalf("wal after populate = %d bytes, want 0", size)
+	}
+}
+
+// testCheckpointer mirrors newPopulateCheckpointer with a small threshold and
+// the production ratios, so tests exercise the same bound logic quickly.
+func testCheckpointer(dbPath string, threshold int64) *populateCheckpointer {
+	return &populateCheckpointer{
+		dbPath:      dbPath,
+		threshold:   threshold,
+		ceiling:     8 * threshold,
+		interval:    populateCheckpointPollInterval,
+		spinLimit:   populateCheckpointSpinLimit,
+		lockHold:    populateCheckpointLockHold,
+		maxFailures: populateCheckpointMaxFailures,
+	}
+}
+
+// openWALHolder writes rows with auto-checkpoint off and keeps the connection
+// open, so the WAL stays populated for the test; with holdWriteLock it also
+// keeps a write transaction open, which is what a populate that never yields
+// looks like to the checkpointer.
+func openWALHolder(t *testing.T, dbPath string, rows int, holdWriteLock bool) *sql.Conn {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(200)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxOpenConns(1)
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	for _, stmt := range []string{
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA wal_autocheckpoint = 0",
+		"CREATE TABLE IF NOT EXISTS test_table_0 (id INTEGER PRIMARY KEY AUTOINCREMENT, data BLOB, int_field INTEGER)",
+		"CREATE INDEX IF NOT EXISTS idx_test_table_0_int ON test_table_0(int_field)",
+	} {
+		if _, err := conn.ExecContext(context.Background(), stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	payload := make([]byte, 1024)
+	if _, err := conn.ExecContext(context.Background(), "BEGIN"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < rows; i++ {
+		if _, err := conn.ExecContext(context.Background(), "INSERT INTO test_table_0 (data, int_field) VALUES (?, ?)", payload, rand.Int64()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := conn.ExecContext(context.Background(), "COMMIT"); err != nil {
+		t.Fatal(err)
+	}
+	if holdWriteLock {
+		if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return conn
+}
+
+func TestPopulateCheckpointerAbortsWhenTheBoundIsLost(t *testing.T) {
+	tests := []struct {
+		name          string
+		holdWriteLock bool
+		tune          func(*populateCheckpointer)
+		wantErr       string
+	}{
+		{
+			name:          "write lock starvation after consecutive failures",
+			holdWriteLock: true,
+			tune: func(c *populateCheckpointer) {
+				c.ceiling = 64 << 20
+				c.spinLimit = 20 * time.Millisecond
+				c.maxFailures = 2
+			},
+			wantErr: "2 consecutive wal checkpoints failed",
+		},
+		{
+			name:    "wal at the ceiling aborts at once",
+			tune:    func(c *populateCheckpointer) { c.ceiling = 1 },
+			wantErr: "at or above the 1 byte ceiling",
+		},
+		{
+			name:          "backfill lock hold deadline counts as a failure and releases the lock",
+			holdWriteLock: false,
+			tune:          func(c *populateCheckpointer) { c.ceiling = 64 << 20; c.lockHold = time.Nanosecond; c.maxFailures = 2 },
+			wantErr:       "2 consecutive wal checkpoints failed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			holder := openWALHolder(t, dbPath, 400, tt.holdWriteLock)
+			if size := fileSizeOrZero(walPath(dbPath)); size < 256<<10 {
+				t.Fatalf("fixture wal = %d bytes, want frames to checkpoint", size)
+			}
+			checkpointer := testCheckpointer(dbPath, 64<<10)
+			checkpointer.interval = 5 * time.Millisecond
+			tt.tune(checkpointer)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			started := time.Now()
+			err := checkpointer.run(ctx)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("run() error = %v, want %q", err, tt.wantErr)
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("run() only stopped because the test deadline passed after %s", time.Since(started))
+			}
+			if tt.holdWriteLock {
+				if _, err := holder.ExecContext(context.Background(), "COMMIT"); err != nil {
+					t.Fatalf("holder commit: %v", err)
+				}
+			}
+			if _, err := holder.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+				t.Fatalf("write lock not released after run(): %v", err)
+			}
+			if _, err := holder.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestRunPopulateCommandKillsPopulateWhenTheBoundIsLost(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sleep binary requires Unix")
+	}
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	openWALHolder(t, dbPath, 400, true)
+	checkpointer := testCheckpointer(dbPath, 64<<10)
+	checkpointer.interval = 5 * time.Millisecond
+	checkpointer.ceiling = 64 << 20
+	checkpointer.spinLimit = 20 * time.Millisecond
+	checkpointer.maxFailures = 2
+
+	cmd := exec.Command("sleep", "30")
+	started := time.Now()
+	_, err := runPopulateCommand(context.Background(), cmd, dbPath, checkpointer)
+	elapsed := time.Since(started)
+	if err == nil || !strings.Contains(err.Error(), "aborted populate") || !strings.Contains(err.Error(), "consecutive wal checkpoints failed") {
+		t.Fatalf("runPopulateCommand() error = %v, want aborted populate after checkpoint failures", err)
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("populate was not killed promptly: %s", elapsed)
+	}
+	if cmd.ProcessState == nil || cmd.ProcessState.Success() {
+		t.Fatalf("populate process state = %v, want killed", cmd.ProcessState)
 	}
 }
 

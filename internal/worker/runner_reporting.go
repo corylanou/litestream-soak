@@ -270,9 +270,10 @@ func (r *Runner) sendWorkerFailureEvent(err error) {
 }
 
 // sendPreStartFailureEvent reports a failure that happened before Litestream
-// started, such as a populate that ran out of disk. The runtime payload still
-// carries the startup phase, so the control plane can tell a harness
-// pre-start failure from a Litestream or verification failure.
+// started, such as a populate that ran out of disk or lost its WAL bound. The
+// message keeps the "populate:" prefix the harness scoring keys off, and the
+// runtime payload still carries the startup phase, so the control plane can
+// tell a harness pre-start failure from a Litestream or verification failure.
 func (r *Runner) sendPreStartFailureEvent(err error) {
 	if r.reporter == nil || !r.reporter.Enabled() {
 		return
@@ -283,7 +284,7 @@ func (r *Runner) sendPreStartFailureEvent(err error) {
 	defer cancel()
 	if sendErr := r.reporter.SendEvent(reportCtx, reporting.WorkerEventPayload{
 		EventType:      "worker_failed",
-		Message:        "harness pre-start failure: " + err.Error(),
+		Message:        err.Error(),
 		SentAt:         time.Now().UTC(),
 		RuntimePayload: snapshot.RuntimePayload,
 	}); sendErr != nil {

@@ -22,8 +22,17 @@ import (
 
 const (
 	populateCheckpointWALThreshold int64 = 64 << 20
+	// populateCheckpointWALCeiling is the hard bound: a WAL this large means
+	// checkpoints have been failing, and populate is aborted rather than
+	// allowed to fill the volume.
+	populateCheckpointWALCeiling   int64 = 8 * populateCheckpointWALThreshold
 	populateCheckpointPollInterval       = 100 * time.Millisecond
 	populateCheckpointSpinLimit          = 10 * time.Second
+	// populateCheckpointLockHold caps how long the backfill may hold the WAL
+	// write lock. litestream-test populate opens SQLite through mattn/go-sqlite3,
+	// whose default busy timeout is 5s, so the hold stays well under it.
+	populateCheckpointLockHold    = 3 * time.Second
+	populateCheckpointMaxFailures = 5
 )
 
 var errWALCheckpointBusy = errors.New("wal checkpoint could not complete: database busy")
@@ -35,12 +44,17 @@ var errWALCheckpointBusy = errors.New("wal checkpoint could not complete: databa
 // stays in the WAL until its final close, and an indexed seed can need several
 // times the final database size in WAL alone. Peak disk during populate is
 // therefore bounded by the database plus roughly one threshold of WAL plus
-// whatever populate commits during one poll interval.
+// whatever populate commits during one poll interval, and never more than the
+// database plus the ceiling: past that, or after maxFailures consecutive
+// failed checkpoints, run returns an error and the caller aborts populate.
 type populateCheckpointer struct {
-	dbPath    string
-	threshold int64
-	interval  time.Duration
-	spinLimit time.Duration
+	dbPath      string
+	threshold   int64
+	ceiling     int64
+	interval    time.Duration
+	spinLimit   time.Duration
+	lockHold    time.Duration
+	maxFailures int
 
 	mu          sync.Mutex
 	checkpoints int
@@ -56,14 +70,20 @@ type populateCheckpointStats struct {
 
 func newPopulateCheckpointer(dbPath string) *populateCheckpointer {
 	return &populateCheckpointer{
-		dbPath:    dbPath,
-		threshold: populateCheckpointWALThreshold,
-		interval:  populateCheckpointPollInterval,
-		spinLimit: populateCheckpointSpinLimit,
+		dbPath:      dbPath,
+		threshold:   populateCheckpointWALThreshold,
+		ceiling:     populateCheckpointWALCeiling,
+		interval:    populateCheckpointPollInterval,
+		spinLimit:   populateCheckpointSpinLimit,
+		lockHold:    populateCheckpointLockHold,
+		maxFailures: populateCheckpointMaxFailures,
 	}
 }
 
-func (c *populateCheckpointer) run(ctx context.Context) {
+// run checkpoints until ctx is cancelled (nil) or the bound cannot be held:
+// the WAL reached the ceiling, or maxFailures checkpoints in a row failed.
+// Either error means populate must be stopped before it fills the disk.
+func (c *populateCheckpointer) run(ctx context.Context) error {
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 
@@ -74,35 +94,51 @@ func (c *populateCheckpointer) run(ctx context.Context) {
 		}
 	}()
 
+	failures := 0
+	var lastErr error
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-ticker.C:
 		}
 
 		size := fileSizeOrZero(walPath(c.dbPath))
 		c.observeWAL(size)
+		if size >= c.ceiling {
+			return fmt.Errorf("wal is %d bytes, at or above the %d byte ceiling, after %d consecutive failed checkpoints (last: %v)", size, c.ceiling, failures, lastErr)
+		}
 		if size < c.threshold {
 			continue
 		}
-		if conns == nil {
-			opened, err := openCheckpointConns(ctx, c.dbPath)
-			if err != nil {
-				slog.Warn("Populate checkpointer could not open database", "error", err)
-				continue
-			}
-			conns = opened
-		}
-		truncated, err := c.checkpoint(ctx, conns)
+		truncated, err := c.checkpointOnce(ctx, &conns)
 		if err != nil {
-			if ctx.Err() == nil {
-				slog.Warn("Populate checkpoint failed", "error", err)
+			if ctx.Err() != nil {
+				return nil
+			}
+			failures++
+			lastErr = err
+			slog.Warn("Populate checkpoint failed", "error", err, "consecutive_failures", failures, "wal_bytes", size)
+			if failures >= c.maxFailures {
+				return fmt.Errorf("%d consecutive wal checkpoints failed with %d bytes of wal (last: %w)", failures, size, err)
 			}
 			continue
 		}
+		failures = 0
+		lastErr = nil
 		c.recordCheckpoint(truncated)
 	}
+}
+
+func (c *populateCheckpointer) checkpointOnce(ctx context.Context, conns **checkpointConns) (bool, error) {
+	if *conns == nil {
+		opened, err := openCheckpointConns(ctx, c.dbPath)
+		if err != nil {
+			return false, fmt.Errorf("open database: %w", err)
+		}
+		*conns = opened
+	}
+	return c.checkpoint(ctx, *conns)
 }
 
 // checkpoint forces one bounded checkpoint while populate keeps writing.
@@ -117,12 +153,16 @@ func (c *populateCheckpointer) run(ctx context.Context) {
 // populate is asleep in its busy handler at that moment so the truncate almost
 // always wins; if it loses, populate's next transaction finds the WAL fully
 // backfilled and restarts it from frame zero anyway, so the file is bounded
-// either way.
+// either way. The backfill holds the write lock for at most lockHold so slow
+// storage cannot push populate past its own busy timeout; a backfill cut
+// short is retried on the next pass with less left to copy.
 func (c *populateCheckpointer) checkpoint(ctx context.Context, conns *checkpointConns) (bool, error) {
 	if err := c.acquireWriteLock(ctx, conns.lock); err != nil {
 		return false, err
 	}
-	backfillErr := walCheckpoint(ctx, conns.checkpoint, "PASSIVE")
+	holdCtx, releaseHold := context.WithTimeout(ctx, c.lockHold)
+	backfillErr := walCheckpoint(holdCtx, conns.checkpoint, "PASSIVE")
+	releaseHold()
 	if _, err := conns.lock.ExecContext(ctx, "COMMIT"); err != nil {
 		_, _ = conns.lock.ExecContext(context.WithoutCancel(ctx), "ROLLBACK")
 		return false, fmt.Errorf("release wal write lock: %w", err)
@@ -451,7 +491,7 @@ func populateSingleDB(ctx context.Context, cfg Config) error {
 	slog.Info("Populating database", "target_size", cfg.InitialSize, "index_ratio", cfg.PopulateIndexRatio)
 	cmd := exec.CommandContext(ctx, "litestream-test", populateArgs(cfg)...)
 	cmd.Env = populateEnv(os.Environ())
-	stats, err := runPopulateCommand(ctx, cmd, cfg.DBPath)
+	stats, err := runPopulateCommand(ctx, cmd, cfg.DBPath, newPopulateCheckpointer(cfg.DBPath))
 	if err != nil {
 		if removeErr := removePopulateFiles(cfg.DBPath); removeErr != nil {
 			err = errors.Join(err, fmt.Errorf("remove incomplete database: %w", removeErr))
@@ -488,25 +528,38 @@ func legacyPopulatedDB(dbPath string) bool {
 }
 
 // runPopulateCommand runs litestream-test populate with a concurrent bounded
-// checkpointer and folds the remaining WAL into the database afterwards.
-func runPopulateCommand(ctx context.Context, cmd *exec.Cmd, dbPath string) (populateCheckpointStats, error) {
+// checkpointer and folds the remaining WAL into the database afterwards. If
+// the checkpointer cannot hold its bound, populate is killed and the error
+// names the bound that was lost, so the worker reports a pre-start failure
+// instead of filling the volume.
+func runPopulateCommand(ctx context.Context, cmd *exec.Cmd, dbPath string, checkpointer *populateCheckpointer) (populateCheckpointStats, error) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		return populateCheckpointStats{}, fmt.Errorf("start populate: %w", err)
 	}
 
-	checkpointer := newPopulateCheckpointer(dbPath)
 	checkpointCtx, stopCheckpointer := context.WithCancel(ctx)
-	checkpointerDone := make(chan struct{})
-	go func() {
-		defer close(checkpointerDone)
-		checkpointer.run(checkpointCtx)
-	}()
+	defer stopCheckpointer()
+	checkpointerDone := make(chan error, 1)
+	go func() { checkpointerDone <- checkpointer.run(checkpointCtx) }()
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
 
-	waitErr := cmd.Wait()
-	stopCheckpointer()
-	<-checkpointerDone
+	var waitErr error
+	select {
+	case waitErr = <-waitDone:
+		stopCheckpointer()
+		<-checkpointerDone
+	case checkpointErr := <-checkpointerDone:
+		if checkpointErr != nil {
+			slog.Error("Aborting populate: wal bound lost", "error", checkpointErr)
+			_ = cmd.Process.Kill()
+			<-waitDone
+			return checkpointer.stats(), fmt.Errorf("aborted populate: %w", checkpointErr)
+		}
+		waitErr = <-waitDone
+	}
 	stats := checkpointer.stats()
 	if waitErr != nil {
 		return stats, waitErr
