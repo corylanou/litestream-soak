@@ -417,6 +417,12 @@ The ledger scores four scenarios for an upgrade gate. `upgrade-lane` compares th
 
 Register one by hand with `scripts/register-rc-gate.sh <repo> <candidate-ref> <candidate-sha> <base-sha> 24h false upgrade 2h`, then send the two deployment-ready notifications exactly as the workflow does. The ledger entry carries `upgrade_warmup`, and the registered warm-up overrides the fleet default on the lane worker so the attested profile config matches what the worker runs.
 
+Inconclusive verifications (status `aborted` or `pending`) count for neither side. The worker reports a restore as inconclusive, and the control plane re-labels an older image's failure the same way on ingest, when the pinned `txid` or `timestamp` restore target is no longer available, or when the restore's object-store call ended with HTTP 408 `RequestCanceled` (`restore_s3_list_request_canceled`, `restore_s3_get_request_canceled`). Only that exact combination is inconclusive: a 403, a 500, a decode error without that object-store failure, a data mismatch, or the same 408 during `sync` all stay failures.
+
+A gate worker that stops doing its job is a hard failure for its side even when it never reports a failed verification. Each side's result carries `reason` and `reason_detail`. The scoring reads the worker row (`status` `degraded` or `failed`, `error_message`, the last runtime snapshot's `data_disk_used_percent`) and the worker's events inside the gate window: `platform_disk_full`, `platform_disk_full_no_progress`, and `platform_disk_full_recovery_failed` give `disk_exhausted`; two or more crashes across `platform_restart`, `platform_oom`, `platform_killed`, or `worker_failed`, or a single Fly `not restarting` exit, give `worker_crash_loop`; a `degraded` or `failed` status or a `worker_stale` event gives `worker_degraded`. Platform log events that repeat the same message within 10 minutes are stored as one row whose `occurrences` column is what the crash count adds up; each occurrence is identified by the log line's own timestamp and payload, so the platform log monitor re-reading the same lines on its next pass does not count a crash twice, and a row recorded before occurrence tracking existed seeds its own stored timestamp and payload as its first occurrence. Events are read from the existing feed, so a gate already running when the control plane deploys is scored the same way, and an operator stopping a degraded worker afterwards does not erase the failure. A side with a hard fault is `failing` in every restore mode; both sides faulting is `both_failing`. Upgrade gates apply the same rules to their lane and follow workers; a scenario whose two sides come from one worker (the lane's pre- and post-upgrade phases) reports that worker's fault on both sides.
+
+A fault that happens before Litestream ever started is a harness problem, not a candidate result, but the scoring needs affirmative evidence of that before it will say so. The side is reported as `harness_inconclusive` only when the faulted worker has no verification of any status inside the gate window, its row has no `last_runtime_at` (the control plane sets it only from a heartbeat whose `litestream_snapshot_healthy` is true), and either the persisted last heartbeat sample (`last_runtime_json`) shows `litestream_process.pid` 0, `litestream_snapshot_healthy` false with a `litestream_snapshot_error` (the IPC socket could not be polled), no Litestream uptime or TXID, and a live `worker_process.pid`, or the worker sent a `worker_failed` event from a pre-start step (`populate:`, `prepare disk-full recovery reserve:`, `write litestream config:`, `start litestream:`). `reason_detail` names the underlying fault and the evidence. That side keeps `no_coverage`, the scenario is `incomplete`, and it never counts as a candidate failure. Without that evidence, including a worker that died before it stored any sample, the fault stays a hard failure, as does any fault after Litestream reported once or after any verification.
+
 ### No-L9 lane variant
 
 The base build writes an initial L9 snapshot at its first start, so the standard lane can never show a candidate taking over a replica with no snapshot level. The `nol9` variant closes that gap. Launch it from the same `soak-upgrade` workflow with `lane_variant: nol9`, or by hand with `scripts/register-rc-gate.sh <repo> <candidate-ref> <candidate-sha> <base-sha> 24h false upgrade 2h nol9`. It is its own small gate: the candidate source `up-nol9-<cand8>` runs one worker, `gate-upgrade-lane-nol9`, and the baseline source `upbase-nol9-<base8>` runs the base `gate-upgrade-follow` worker, so it never collides with a standard upgrade gate for the same commits and never needs to add a worker to one (which the pin rules would refuse).
@@ -1234,6 +1240,14 @@ Check:
 
 This usually points to the replication or object-fetch path, not the workload
 generator itself.
+
+A restore whose `ListObjectsV2` or `GetObject` call exhausted its retries with
+HTTP 408 `RequestCanceled` is recorded as an inconclusive `aborted`
+verification, not a failure, on both current and older worker images. It does
+not count toward dormancy, worker degradation, or gate scoring, but it still
+shows up in the worker's verification history with the original error, so a
+provider that keeps canceling requests is visible without being blamed on the
+build under test.
 
 ### `integrity_check`
 

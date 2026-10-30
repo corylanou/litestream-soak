@@ -495,3 +495,54 @@ func TestVerifierPinnedRestoreTargetUnavailableIsInconclusive(t *testing.T) {
 		})
 	}
 }
+
+func TestVerifierRestoreRequestCanceledIsInconclusive(t *testing.T) {
+	tests := []struct {
+		name         string
+		mode         string
+		final        string
+		inconclusive bool
+	}{
+		{name: "list request canceled", mode: "txid", final: "Error: cannot calc restore plan: operation error S3: ListObjectsV2, exceeded maximum number of attempts, 10, https response error StatusCode: 408, RequestID: 1761761212849403, HostID: , api error RequestCanceled: Request is canceled.", inconclusive: true},
+		{name: "get request canceled latest", mode: "latest", final: "Error: operation error S3: GetObject, exceeded maximum number of attempts, 10, https response error StatusCode: 408, RequestID: 1761761212849404, HostID: , api error RequestCanceled: Request is canceled.", inconclusive: true},
+		{name: "access denied", mode: "txid", final: "Error: cannot calc restore plan: operation error S3: ListObjectsV2, https response error StatusCode: 403, RequestID: 2, HostID: , api error AccessDenied: Access Denied"},
+		{name: "server error", mode: "txid", final: "Error: cannot calc restore plan: operation error S3: ListObjectsV2, https response error StatusCode: 500, RequestID: 3, HostID: , api error InternalError: We encountered an internal error."},
+		{name: "decode error", mode: "timestamp", final: "Error: read page header: unexpected EOF"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			script := "echo 'time=2026-10-29T18:00:00Z level=WARN msg=\"retrying request\"'\necho '" + tt.final + "' >&2\nexit 1\n"
+			cfg, _ := restoreModeFixture(t, script)
+			writeLocalL0(t, cfg.DBPath, 0x40, 0x42, time.Date(2026, 10, 29, 18, 0, 0, 0, time.UTC))
+			startBoundarySyncFixture(t, &cfg, 0x42)
+			v := NewVerifier(cfg)
+			result := VerificationResult{SyncTXID: 0x42, RestoreMode: tt.mode}
+			passed, err := v.validateDBResult(context.Background(), cfg.DBPath, cfg.DBPath+".restored", &result)
+			if err == nil || passed {
+				t.Fatalf("validateDBResult() = %v, %v; want failure", passed, err)
+			}
+			v.failValidationResult(context.Background(), &result, err)
+			if !strings.Contains(result.ErrorMessage, strings.TrimPrefix(tt.final, "Error: ")) {
+				t.Fatalf("error message = %q", result.ErrorMessage)
+			}
+			if !tt.inconclusive {
+				if result.Status != "failed" {
+					t.Fatalf("status = %q, want failed", result.Status)
+				}
+				if classification := NewRunner(DefaultConfig()).failureClassification(result); classification == nil {
+					t.Fatal("failed result lost its classification")
+				}
+				return
+			}
+			if result.Status != "aborted" || !strings.HasPrefix(result.Summary, "verification inconclusive:") {
+				t.Fatalf("status = %q summary %q, want inconclusive", result.Status, result.Summary)
+			}
+			if !strings.Contains(v.logicalEvidence, "object_store=request_canceled") {
+				t.Fatalf("evidence missing canceled request: %s", v.logicalEvidence)
+			}
+			if classification := NewRunner(DefaultConfig()).failureClassification(result); classification != nil {
+				t.Fatalf("inconclusive result classified as failure: %+v", classification)
+			}
+		})
+	}
+}

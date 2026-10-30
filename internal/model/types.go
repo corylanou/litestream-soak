@@ -116,6 +116,7 @@ type Event struct {
 	Message              string     `json:"message"`
 	Details              string     `json:"details,omitempty"`
 	CreatedAt            time.Time  `json:"created_at"`
+	Occurrences          int        `json:"occurrences,omitempty"`
 	CollapsedCount       int        `json:"collapsed_count,omitempty"`
 	CollapsedWindowStart *time.Time `json:"collapsed_window_start,omitempty"`
 	CollapsedWindowEnd   *time.Time `json:"collapsed_window_end,omitempty"`

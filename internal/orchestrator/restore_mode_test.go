@@ -425,3 +425,107 @@ func TestHandleVerificationPinnedRestoreTargetUnavailableIsInconclusive(t *testi
 		})
 	}
 }
+
+func TestHandleVerificationRestoreRequestCanceledIsInconclusive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		message      string
+		signature    string
+		inconclusive bool
+	}{
+		{name: "list request canceled", message: "restore failed: validation failed (exit 1): Error: cannot calc restore plan: operation error S3: ListObjectsV2, exceeded maximum number of attempts, 10, https response error StatusCode: 408, RequestID: 1761761212849403, HostID: , api error RequestCanceled: Request is canceled.", signature: reporting.SignatureRestoreS3ListRequestCanceled, inconclusive: true},
+		{name: "get request canceled", message: "restore failed: validation failed (exit 1): Error: operation error S3: GetObject, exceeded maximum number of attempts, 10, https response error StatusCode: 408, RequestID: 1761761212849404, HostID: , api error RequestCanceled: Request is canceled.", signature: reporting.SignatureRestoreS3GetRequestCanceled, inconclusive: true},
+		{name: "access denied", message: "restore failed: validation failed (exit 1): Error: cannot calc restore plan: operation error S3: ListObjectsV2, https response error StatusCode: 403, RequestID: 2, HostID: , api error AccessDenied: Access Denied", signature: "restore_s3_access_denied"},
+		{name: "server error", message: "restore failed: validation failed (exit 1): Error: cannot calc restore plan: operation error S3: ListObjectsV2, https response error StatusCode: 500, RequestID: 3, HostID: , api error InternalError: We encountered an internal error.", signature: "restore_s3_list_failed"},
+		{name: "sync stage", message: "wait for sync: operation error S3: ListObjectsV2, https response error StatusCode: 408, RequestID: 5, HostID: , api error RequestCanceled: Request is canceled.", signature: "sync_s3_list_request_canceled"},
+		{name: "decode error", message: "restore failed: validation failed (exit 1): Error: read page header: unexpected EOF", signature: "restore_decode_error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := openTestDB(t)
+			workerID := "worker-request-canceled"
+			createTestWorker(t, db, model.Worker{
+				ID:            workerID,
+				Name:          workerID,
+				Status:        model.WorkerRunning,
+				Source:        "main",
+				GitSHA:        "abc123",
+				LitestreamSHA: "ls123",
+				ProfileName:   "low-volume",
+				ProfileConfig: "{}",
+			})
+			api := NewAPI(db, nil, nil, nil, &Manager{db: db, appName: "litestream-soak"}, nil)
+			completedAt := time.Now().UTC().Add(-time.Hour)
+			payload := reporting.VerificationPayload{
+				WorkerIdentity: reporting.WorkerIdentity{
+					WorkerID:      workerID,
+					Name:          workerID,
+					Source:        "main",
+					GitSHA:        "abc123",
+					LitestreamSHA: "ls123",
+					ProfileName:   "low-volume",
+					ProfileConfig: "{}",
+				},
+				StartedAt:             completedAt.Add(-time.Minute),
+				CompletedAt:           completedAt,
+				CheckType:             "restore_validate",
+				Status:                "failed",
+				Summary:               "restore failed",
+				ErrorMessage:          tt.message,
+				FailureClassification: &reporting.FailureClassification{Stage: "restore", Signature: tt.signature, RestoreMode: "txid"},
+				RestoreMode:           "txid",
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/api/workers/"+workerID+"/verifications", bytes.NewReader(body))
+			request.SetPathValue("id", workerID)
+			recorder := httptest.NewRecorder()
+			api.handleVerification(recorder, request)
+			if recorder.Code != http.StatusAccepted {
+				t.Fatalf("status code = %d; body: %s", recorder.Code, recorder.Body.String())
+			}
+
+			verifications, err := db.ListVerifications(workerID, 10)
+			if err != nil || len(verifications) != 1 {
+				t.Fatalf("ListVerifications() = %+v, %v", verifications, err)
+			}
+			verification := verifications[0]
+			worker, err := db.GetWorker(workerID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			latestFailed, err := db.GetLatestFailedVerification(workerID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tt.inconclusive {
+				if !verification.Failed() || verification.FailureClassification == nil || verification.FailureClassification.Signature != tt.signature || latestFailed == nil || worker.Status != model.WorkerDegraded {
+					t.Fatalf("failure not counted: %+v status=%q latestFailed=%v", verification, worker.Status, latestFailed)
+				}
+				return
+			}
+			if verification.Status != "aborted" || !verification.Inconclusive() || verification.FailureClassification != nil || verification.ErrorMessage != tt.message {
+				t.Fatalf("verification = %+v, want inconclusive without classification", verification)
+			}
+			if latestFailed != nil || worker.Status != model.WorkerRunning || worker.ErrorMessage != "" {
+				t.Fatalf("inconclusive verification scored: latestFailed=%+v status=%q error=%q", latestFailed, worker.Status, worker.ErrorMessage)
+			}
+			events, err := db.ListWorkerEvents(workerID, 20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range events {
+				switch event.EventType {
+				case "verification_failed", "first_failure":
+					t.Fatalf("unexpected failure event %q: %+v", event.EventType, events)
+				}
+			}
+		})
+	}
+}

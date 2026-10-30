@@ -219,6 +219,10 @@ func Open(path string) (*DB, error) {
 		_ = writer.Close()
 		return nil, fmt.Errorf("ensure alert columns: %w", err)
 	}
+	if err := ensureEventColumns(writer); err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("ensure event columns: %w", err)
+	}
 	if _, err := writer.Exec(provisioningSchema); err != nil {
 		_ = writer.Close()
 		return nil, fmt.Errorf("ensure provisioning journal: %w", err)
@@ -414,6 +418,19 @@ func ensureDeploymentColumns(db *sql.DB) error {
 		}
 	}
 
+	return nil
+}
+
+func ensureEventColumns(db *sql.DB) error {
+	statements := []string{
+		`ALTER TABLE events ADD COLUMN occurrences INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE events ADD COLUMN occurrence_keys TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return err
+		}
+	}
 	return nil
 }
 

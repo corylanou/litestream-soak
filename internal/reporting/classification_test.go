@@ -592,3 +592,37 @@ func TestPinnedRestoreTargetUnavailable(t *testing.T) {
 		})
 	}
 }
+
+func TestRestoreRequestCanceled(t *testing.T) {
+	const (
+		listCanceled = "restore failed: validation failed (exit 1): Error: cannot calc restore plan: operation error S3: ListObjectsV2, exceeded maximum number of attempts, 10, https response error StatusCode: 408, RequestID: 1761761212849403, HostID: , api error RequestCanceled: Request is canceled."
+		getCanceled  = "restore failed: validation failed (exit 1): Error: operation error S3: GetObject, exceeded maximum number of attempts, 10, https response error StatusCode: 408, RequestID: 1761761212849404, HostID: , api error RequestCanceled: Request is canceled."
+	)
+	for _, tc := range []struct {
+		name, message, signature string
+		want                     bool
+	}{
+		{"list request canceled", listCanceled, SignatureRestoreS3ListRequestCanceled, true},
+		{"get request canceled", getCanceled, SignatureRestoreS3GetRequestCanceled, true},
+		{"decode wrapping canceled get", "restore failed: decode ltx: operation error S3: GetObject, https response error StatusCode: 408, RequestID: 1, HostID: , api error RequestCanceled: Request is canceled.", SignatureRestoreS3GetRequestCanceled, true},
+		{"access denied", "restore failed: validation failed (exit 1): Error: cannot calc restore plan: operation error S3: ListObjectsV2, https response error StatusCode: 403, RequestID: 2, HostID: , api error AccessDenied: Access Denied", "restore_s3_access_denied", false},
+		{"server error", "restore failed: validation failed (exit 1): Error: cannot calc restore plan: operation error S3: ListObjectsV2, https response error StatusCode: 500, RequestID: 3, HostID: , api error InternalError: We encountered an internal error.", "restore_s3_list_failed", false},
+		{"status 408 without api code", "restore failed: validation failed (exit 1): Error: operation error S3: GetObject, https response error StatusCode: 408, RequestID: 4, HostID: ", SignatureRestoreS3GetRequestCanceled, false},
+		{"request canceled without 408", "restore failed: validation failed (exit 1): Error: operation error S3: GetObject, https response error StatusCode: 0, RequestID: , HostID: , api error RequestCanceled: Request is canceled.", SignatureRestoreS3GetRequestCanceled, false},
+		{"sync stage", "wait for sync: operation error S3: ListObjectsV2, exceeded maximum number of attempts, 10, https response error StatusCode: 408, RequestID: 5, HostID: , api error RequestCanceled: Request is canceled.", "sync_s3_list_request_canceled", false},
+		{"decode error", "restore failed: validation failed (exit 1): Error: read page header: unexpected EOF", "restore_decode_error", false},
+		{"data mismatch", "restore failed: compare: logical snapshot mismatch: table t rows 10 != 12", "", false},
+		{"pinned target lost", "restore failed: validation failed (exit 1): Error: no matching backup files available: restore target txid 0000000000003d9d is no longer available: transaction not available", SignatureRestoreTargetUnavailable, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.signature != "" {
+				if got := ClassifyVerificationFailure("restore_validate", tc.message); got.Signature != tc.signature {
+					t.Fatalf("signature = %q, want %q (%+v)", got.Signature, tc.signature, got)
+				}
+			}
+			if got := RestoreRequestCanceled(tc.message); got != tc.want {
+				t.Fatalf("RestoreRequestCanceled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
