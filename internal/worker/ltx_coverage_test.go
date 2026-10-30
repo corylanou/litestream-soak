@@ -20,6 +20,7 @@ func TestComputeLTXCoverage(t *testing.T) {
 		wantFiles  int
 		wantWindow txidRange
 		wantHoles  []txidRange
+		wantBelow  []txidRange
 	}{
 		{
 			name:       "contiguous L0 files",
@@ -55,10 +56,45 @@ func TestComputeLTXCoverage(t *testing.T) {
 		},
 		{
 			name:       "L9 does not fill a gap or extend the window",
-			files:      []restorePlanCandidate{ltxFile(1, 1, 100), ltxFile(9, 1, 105), ltxFile(1, 106, 200), ltxFile(9, 1, 500)},
+			files:      []restorePlanCandidate{ltxFile(1, 1, 100), ltxFile(9, 1, 50), ltxFile(9, 1, 105), ltxFile(1, 106, 200), ltxFile(9, 1, 500)},
 			wantFiles:  2,
 			wantWindow: txidRange{1, 200},
 			wantHoles:  []txidRange{{101, 105}},
+		},
+		{
+			name:       "uneven lower-level trimming below the retention cutoff is not judged",
+			files:      []restorePlanCandidate{ltxFile(2, 1, 100), ltxFile(1, 201, 300), ltxFile(0, 301, 310), ltxFile(9, 1, 260), ltxFile(9, 1, 400)},
+			wantFiles:  3,
+			wantWindow: txidRange{1, 310},
+			wantBelow:  []txidRange{{101, 200}},
+		},
+		{
+			name: "one retained remnant file per level is not judged",
+			files: []restorePlanCandidate{
+				ltxFile(1, 41, 50), ltxFile(2, 61, 80), ltxFile(3, 101, 300), ltxFile(1, 301, 320), ltxFile(0, 321, 321),
+				ltxFile(9, 1, 150), ltxFile(9, 1, 300),
+			},
+			wantFiles:  5,
+			wantWindow: txidRange{41, 321},
+			wantBelow:  []txidRange{{51, 60}, {81, 100}},
+		},
+		{
+			name:       "hole straddling the retention floor is judged from the floor up",
+			files:      []restorePlanCandidate{ltxFile(1, 1, 100), ltxFile(1, 151, 200), ltxFile(9, 1, 120), ltxFile(9, 1, 200)},
+			wantFiles:  2,
+			wantWindow: txidRange{1, 200},
+			wantHoles:  []txidRange{{120, 150}},
+			wantBelow:  []txidRange{{101, 119}},
+		},
+		{
+			name: "mid-window hole ending at a newer L9 snapshot is judged",
+			files: []restorePlanCandidate{
+				ltxFile(2, 0x6001, 0x7100), ltxFile(1, 0x7101, 0x7174), ltxFile(0, 0x7175, 0x7175), ltxFile(1, 0x7180, 0x7200), ltxFile(0, 0x7201, 0x7210),
+				ltxFile(9, 1, 0x7000), ltxFile(9, 1, 0x717f),
+			},
+			wantFiles:  5,
+			wantWindow: txidRange{0x6001, 0x7210},
+			wantHoles:  []txidRange{{0x7176, 0x717f}},
 		},
 		{
 			name:  "only L9",
@@ -75,8 +111,8 @@ func TestComputeLTXCoverage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := computeLTXCoverage(tt.files)
-			if got.files != tt.wantFiles || got.window != tt.wantWindow || !reflect.DeepEqual(got.holes, tt.wantHoles) {
-				t.Fatalf("coverage = %+v, want files=%d window=%v holes=%v", got, tt.wantFiles, tt.wantWindow, tt.wantHoles)
+			if got.files != tt.wantFiles || got.window != tt.wantWindow || !reflect.DeepEqual(got.holes, tt.wantHoles) || !reflect.DeepEqual(got.retained, tt.wantBelow) {
+				t.Fatalf("coverage = %+v, want files=%d window=%v holes=%v below floor=%v", got, tt.wantFiles, tt.wantWindow, tt.wantHoles, tt.wantBelow)
 			}
 		})
 	}
@@ -130,6 +166,7 @@ func TestRunLTXCoverageCheckConfirmsHolesOnRelist(t *testing.T) {
 		wantErr       string
 	}{
 		{name: "no hole skips the relist", listings: []replicaLTXListing{healed}, wantCalls: 1},
+		{name: "hole below the retention floor skips the relist", listings: []replicaLTXListing{completeListing(append(gapped.candidates, ltxFile(9, 1, 150))...)}, wantCalls: 1},
 		{name: "hole seen on both passes is confirmed", listings: []replicaLTXListing{gapped, gapped}, wantCalls: 2, wantConfirmed: []txidRange{{101, 105}}},
 		{name: "hole closed by in-flight compaction is not reported", listings: []replicaLTXListing{gapped, healed}, wantCalls: 2},
 		{name: "only the overlap of both passes is reported", listings: []replicaLTXListing{gapped, shifted}, wantCalls: 2, wantConfirmed: []txidRange{{103, 105}}},
@@ -161,7 +198,7 @@ func TestLTXCoverageResult(t *testing.T) {
 	if !passed.Passed || passed.Status != "passed" || passed.CheckType != ltxCoverageCheckType || passed.RestoreMode != ltxCoverageRestoreMode || passed.DurationMS != 2000 {
 		t.Fatalf("passed = %+v", passed)
 	}
-	if len(passed.Steps) != 1 || passed.Steps[0].Name != ltxCoverageStep || passed.Steps[0].Status != "ok" || !strings.Contains(passed.Steps[0].OutputTail, "window=0000000000000001-000000000000000a holes=0") {
+	if len(passed.Steps) != 1 || passed.Steps[0].Name != ltxCoverageStep || passed.Steps[0].Status != "ok" || !strings.Contains(passed.Steps[0].OutputTail, "window=0000000000000001-000000000000000a retention_floor=unknown holes=0 below_floor=0") {
 		t.Fatalf("passed steps = %+v", passed.Steps)
 	}
 
@@ -181,6 +218,20 @@ func TestLTXCoverageResult(t *testing.T) {
 		t.Fatalf("unconfirmed = %+v", result)
 	}
 
+	trimmed := computeLTXCoverage([]restorePlanCandidate{ltxFile(2, 1, 100), ltxFile(1, 201, 300), ltxFile(9, 1, 260)})
+	if result := ltxCoverageResult(ltxCoverageOutcome{first: trimmed}, started, completed); !result.Passed || !strings.Contains(result.Steps[0].OutputTail, "retention_floor=0000000000000104 holes=0 below_floor=1; below retention floor, not judged: 0000000000000065-00000000000000c8") {
+		t.Fatalf("trimmed = %+v", result)
+	}
+
+	noL9 := computeLTXCoverage([]restorePlanCandidate{ltxFile(1, 1, 100), ltxFile(1, 106, 200)})
+	unbounded := ltxCoverageResult(ltxCoverageOutcome{first: noL9, second: noL9, relisted: true, confirmed: noL9.holes}, started, completed)
+	if unbounded.Passed || unbounded.Status != "aborted" || !strings.Contains(unbounded.ErrorMessage, "no L9 snapshot bounds retention") {
+		t.Fatalf("unbounded = %+v, want inconclusive", unbounded)
+	}
+	if c := unbounded.InconclusiveClassification; c == nil || c.Signature != reporting.SignatureLTXCoverageFloorUnknown || c.Stage != ltxCoverageStep {
+		t.Fatalf("unbounded classification = %+v", unbounded.InconclusiveClassification)
+	}
+
 	relistFailed := ltxCoverageOutcome{first: unconfirmed.first, err: "relisting: exit status 1"}
 	if result := ltxCoverageResult(relistFailed, started, completed); result.Passed || result.Status != "aborted" || result.InconclusiveClassification == nil {
 		t.Fatalf("relist failure = %+v", result)
@@ -196,12 +247,13 @@ func TestLTXCoverageCatchesHoleBeforeL9Snapshot(t *testing.T) {
 		"1      0000000000007101  0000000000007174  1048576  2026-10-30T11:58:00Z",
 		"1      0000000000007180  0000000000007200  1048576  2026-10-30T12:00:30Z",
 		"2      0000000000007001  0000000000007100  4194304  2026-10-30T11:55:00Z",
+		"9      0000000000000001  0000000000007000  9437184  2026-10-30T11:44:00Z",
 		"9      0000000000000001  000000000000717f  9437184  2026-10-30T11:59:00Z",
 	}, "\n")
 	files := parseRestorePlanCandidates(listing)
 	coverage := computeLTXCoverage(files)
 	want := []txidRange{{0x7176, 0x717f}}
-	if coverage.window != (txidRange{0x7001, 0x7200}) || !reflect.DeepEqual(coverage.holes, want) {
+	if coverage.window != (txidRange{0x7001, 0x7200}) || coverage.floor != 0x7000 || !reflect.DeepEqual(coverage.holes, want) {
 		t.Fatalf("coverage = %+v, want window 7001-7200 holes %v", coverage, want)
 	}
 

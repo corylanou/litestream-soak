@@ -20,6 +20,7 @@ const (
 
 	SignatureReplicaLevelReportIncomplete = "replica_level_report_incomplete"
 	SignatureLTXCoverageHole              = "ltx_coverage_hole"
+	SignatureLTXCoverageFloorUnknown      = "ltx_coverage_floor_unknown"
 
 	StageHarnessLock                  = "harness_lock"
 	SignatureRestoredComparisonLocked = "restored_comparison_locked"
