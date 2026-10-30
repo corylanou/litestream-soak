@@ -21,12 +21,20 @@ on:
         required: false
         type: string
         default: 24h
+      lane_variant:
+        description: standard runs the lane plus two follow workers under up-/upbase-; nol9 runs one lane that deletes every L9 object at the switch plus the base follow worker, under up-nol9-/upbase-nol9-
+        required: false
+        type: choice
+        options:
+          - standard
+          - nol9
+        default: standard
 
 permissions:
   contents: read
 
 concurrency:
-  group: soak-upgrade-${{ github.event.inputs.candidate_ref }}
+  group: soak-upgrade-${{ github.event.inputs.lane_variant || 'standard' }}-${{ github.event.inputs.candidate_ref }}
   cancel-in-progress: false
 
 jobs:
@@ -40,6 +48,7 @@ jobs:
       baseline_source: ${{ steps.resolve.outputs.baseline_source }}
       warmup: ${{ steps.resolve.outputs.warmup }}
       duration: ${{ steps.resolve.outputs.duration }}
+      lane_variant: ${{ steps.resolve.outputs.lane_variant }}
     steps:
       - id: resolve
         shell: bash
@@ -49,6 +58,7 @@ jobs:
           BASELINE_REF: ${{ github.event.inputs.baseline_sha || '' }}
           WARMUP: ${{ github.event.inputs.warmup || '2h' }}
           DURATION: ${{ github.event.inputs.duration || '24h' }}
+          LANE_VARIANT: ${{ github.event.inputs.lane_variant || 'standard' }}
         run: |
           set -euo pipefail
 
@@ -57,6 +67,13 @@ jobs:
           baseline_ref="${BASELINE_REF:-main}"
           warmup="${WARMUP}"
           duration="${DURATION}"
+          lane_variant=""
+          source_infix=""
+          case "${LANE_VARIANT}" in
+            standard) ;;
+            nol9) lane_variant="nol9"; source_infix="nol9-" ;;
+            *) echo "lane_variant must be standard or nol9" >&2; exit 1 ;;
+          esac
 
           for ref in "${candidate_ref}" "${baseline_ref}"; do
             if [[ ! "${ref}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
@@ -103,17 +120,18 @@ jobs:
             echo "candidate_ref=${candidate_ref}"
             echo "candidate_sha=${candidate_sha}"
             echo "baseline_sha=${baseline_sha}"
-            echo "candidate_source=up-${candidate_sha::8}"
-            echo "baseline_source=upbase-${baseline_sha::8}"
+            echo "candidate_source=up-${source_infix}${candidate_sha::8}"
+            echo "baseline_source=upbase-${source_infix}${baseline_sha::8}"
             echo "warmup=${warmup}"
             echo "duration=${duration}"
+            echo "lane_variant=${lane_variant}"
           } >> "${GITHUB_OUTPUT}"
 
           {
             echo "### Upgrade gate request"
             echo "Candidate: ${upstream_repo}@${candidate_ref} -> ${candidate_sha}"
             echo "Base: ${upstream_repo}@${baseline_ref} -> ${baseline_sha}"
-            echo "Lane: base for ${warmup}, then candidate on the same volume; TTL ${duration}"
+            echo "Lane: base for ${warmup}, then candidate on the same volume; TTL ${duration}; variant ${LANE_VARIANT}"
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
   build-worker-images:
@@ -232,6 +250,7 @@ jobs:
           BASELINE_IMAGE_REF: ${{ needs.build-worker-images.outputs.baseline_image_ref }}
           WARMUP: ${{ needs.resolve-request.outputs.warmup }}
           DURATION: ${{ needs.resolve-request.outputs.duration }}
+          LANE_VARIANT: ${{ needs.resolve-request.outputs.lane_variant }}
         run: |
           set -euo pipefail
 
@@ -248,7 +267,8 @@ jobs:
             "${DURATION}" \
             "false" \
             "upgrade" \
-            "${WARMUP}"
+            "${WARMUP}" \
+            "${LANE_VARIANT}"
           ./scripts/notify-deployment-ready.sh \
             "${GITHUB_SHA}" \
             "${CANDIDATE_SOURCE}" \

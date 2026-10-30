@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS rc_gates (
     resources_json TEXT NOT NULL DEFAULT '[]',
     results_json TEXT NOT NULL DEFAULT '',
     kind TEXT NOT NULL DEFAULT 'rc',
-    upgrade_warmup_seconds INTEGER NOT NULL DEFAULT 0
+    upgrade_warmup_seconds INTEGER NOT NULL DEFAULT 0,
+    lane_variant TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_rc_gates_status ON rc_gates(status);
 `
@@ -76,6 +77,7 @@ type RCGateResource struct {
 type RCGate struct {
 	ID                int64            `json:"id"`
 	Kind              RCGateKind       `json:"kind"`
+	LaneVariant       string           `json:"lane_variant,omitempty"`
 	Repository        string           `json:"repository"`
 	CandidateRef      string           `json:"candidate_ref,omitempty"`
 	CandidateSource   string           `json:"candidate_source"`
@@ -146,12 +148,13 @@ func (g RCGate) Closed() bool {
 const rcGateColumns = `id, repository, candidate_ref, candidate_source, candidate_sha, candidate_image_ref, candidate_git_sha,
 	baseline_source, baseline_sha, baseline_image_ref, baseline_git_sha, duration_seconds, tail, status,
 	started_at, expires_at, tail_expires_at, provision_deadline, candidate_ready_at, baseline_ready_at, paired_ready_at, completed_at, resources_json, results_json,
-	kind, upgrade_warmup_seconds`
+	kind, upgrade_warmup_seconds, lane_variant`
 
 func ensureRCGateColumns(db *sql.DB) error {
 	statements := []string{
 		`ALTER TABLE rc_gates ADD COLUMN kind TEXT NOT NULL DEFAULT 'rc'`,
 		`ALTER TABLE rc_gates ADD COLUMN upgrade_warmup_seconds INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE rc_gates ADD COLUMN lane_variant TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
@@ -196,14 +199,14 @@ func (d *DB) CreateRCGate(gate *RCGate) error {
 		INSERT INTO rc_gates (repository, candidate_ref, candidate_source, candidate_sha, candidate_image_ref, candidate_git_sha,
 			baseline_source, baseline_sha, baseline_image_ref, baseline_git_sha, duration_seconds, tail, status,
 			started_at, expires_at, tail_expires_at, provision_deadline, candidate_ready_at, baseline_ready_at, paired_ready_at, completed_at, resources_json, results_json,
-			kind, upgrade_warmup_seconds)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			kind, upgrade_warmup_seconds, lane_variant)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gate.Repository, gate.CandidateRef, gate.CandidateSource, gate.CandidateSHA, gate.CandidateImageRef, gate.CandidateGitSHA,
 		gate.BaselineSource, gate.BaselineSHA, gate.BaselineImageRef, gate.BaselineGitSHA, int64(gate.Duration/time.Second), gate.Tail, gate.Status,
 		gate.StartedAt.UTC(), gate.ExpiresAt.UTC(), utcTimePtr(gate.TailExpiresAt), gate.ProvisionDeadline.UTC(),
 		utcTimePtr(gate.CandidateReadyAt), utcTimePtr(gate.BaselineReadyAt), utcTimePtr(gate.PairedReadyAt),
 		utcTimePtr(gate.CompletedAt), string(resources), gate.Results,
-		string(gate.Kind), int64(gate.UpgradeWarmup/time.Second),
+		string(gate.Kind), int64(gate.UpgradeWarmup/time.Second), gate.LaneVariant,
 	)
 	if err != nil {
 		return err
@@ -334,7 +337,7 @@ func (d *DB) listRCGates(query string, args ...any) ([]RCGate, error) {
 			&gate.ID, &gate.Repository, &gate.CandidateRef, &gate.CandidateSource, &gate.CandidateSHA, &gate.CandidateImageRef, &gate.CandidateGitSHA,
 			&gate.BaselineSource, &gate.BaselineSHA, &gate.BaselineImageRef, &gate.BaselineGitSHA, &durationSeconds, &gate.Tail, &gate.Status,
 			&gate.StartedAt, &gate.ExpiresAt, &tailExpiresAt, &gate.ProvisionDeadline, &candidateReady, &baselineReady, &pairedReadyAt, &completedAt, &resources, &gate.Results,
-			&kind, &warmupSeconds,
+			&kind, &warmupSeconds, &gate.LaneVariant,
 		); err != nil {
 			return nil, err
 		}

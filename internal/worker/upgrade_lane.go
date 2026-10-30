@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 const (
@@ -27,12 +29,22 @@ var errUpgradeWarmupEnded = errors.New("upgrade warm-up ended")
 // after the switch never runs the base build against candidate-written state,
 // and so the warm-up is measured from the lane's first start.
 type upgradeLaneState struct {
-	Phase          string     `json:"phase"`
-	StartedAt      time.Time  `json:"started_at"`
-	SwitchedAt     *time.Time `json:"switched_at,omitempty"`
-	BaseSHA        string     `json:"base_litestream_sha"`
-	CandidateSHA   string     `json:"candidate_litestream_sha"`
-	PreUpgradeTXID uint64     `json:"pre_upgrade_txid,omitempty"`
+	Phase            string              `json:"phase"`
+	StartedAt        time.Time           `json:"started_at"`
+	SwitchedAt       *time.Time          `json:"switched_at,omitempty"`
+	BaseSHA          string              `json:"base_litestream_sha"`
+	CandidateSHA     string              `json:"candidate_litestream_sha"`
+	PreUpgradeTXID   uint64              `json:"pre_upgrade_txid,omitempty"`
+	L9Purge          *replicaL9Purge     `json:"l9_purge,omitempty"`
+	FirstCandidateL9 *firstL9Observation `json:"first_candidate_l9,omitempty"`
+}
+
+// firstL9Observation records when the candidate build's first L9 snapshot
+// was seen on a replica whose L9 level was emptied at the switch.
+type firstL9Observation struct {
+	ObservedAt time.Time `json:"observed_at"`
+	MaxTXID    string    `json:"max_txid"`
+	Objects    int       `json:"objects"`
 }
 
 func upgradeLaneStatePath(dataDir string) string {
@@ -207,10 +219,86 @@ func (c Config) ForUpgradePhase(phase string) (Config, error) {
 }
 
 func RunUpgradeLane(ctx context.Context, cfg Config, run func(context.Context, Config) error) error {
-	return runUpgradeLane(ctx, cfg, time.Now, run)
+	return runUpgradeLane(ctx, cfg, time.Now, newReplicaL9Purger(), run)
 }
 
-func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, run func(context.Context, Config) error) error {
+// recordFirstCandidateL9 notes the first L9 object seen after a purged switch,
+// so the evidence says when (or whether) the candidate wrote its first
+// snapshot. It returns the observation on record, if any.
+func recordFirstCandidateL9(dataDir string, l9 reporting.ReplicaLevelSummary, now time.Time) (*firstL9Observation, error) {
+	state, err := readUpgradeLaneState(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	if state.FirstCandidateL9 != nil || state.L9Purge == nil || l9.ObjectCount == 0 {
+		return state.FirstCandidateL9, nil
+	}
+	state.FirstCandidateL9 = &firstL9Observation{ObservedAt: now.UTC(), MaxTXID: formatTXID(l9.MaxTXIDDecimal), Objects: l9.ObjectCount}
+	if err := writeUpgradeLaneState(dataDir, state); err != nil {
+		return nil, err
+	}
+	slog.Info("Candidate build wrote its first L9 snapshot", "max_txid", state.FirstCandidateL9.MaxTXID, "objects", l9.ObjectCount)
+	return state.FirstCandidateL9, nil
+}
+
+// purgeUntilClean runs the L9 purge up to replicaL9PurgeAttempts times,
+// persisting every attempt, and returns nil only once a successful record is
+// durable. The candidate build must not start on a replica that still holds
+// base-written L9 objects; a persistent failure is a harness failure.
+func purgeUntilClean(ctx context.Context, cfg Config, clock func() time.Time, purger replicaL9Purger, state *upgradeLaneState) error {
+	var attemptErr error
+	for attempt := 1; attempt <= replicaL9PurgeAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return errors.Join(attemptErr, ctx.Err())
+		}
+		slog.Info("Deleting replica L9 objects before the candidate build starts", "prefix", replicaOwnPrefix(cfg), "attempt", attempt)
+		purge, err := purger.purgeReplicaL9(ctx, cfg, clock)
+		purge.Attempt = attempt
+		if state.L9Purge != nil {
+			purge.Attempt = state.L9Purge.Attempt + 1
+		}
+		purge.Succeeded = err == nil
+		state.L9Purge = &purge
+		if writeErr := writeUpgradeLaneState(cfg.DataDir, *state); writeErr != nil {
+			return errors.Join(err, writeErr)
+		}
+		if err == nil {
+			slog.Info("Replica L9 level emptied", "deleted", len(purge.Deleted), "listed", purge.Listed, "attempt", purge.Attempt)
+			return nil
+		}
+		attemptErr = err
+		slog.Warn("Replica L9 purge attempt failed; the candidate build will not start on a dirty replica", "attempt", purge.Attempt, "error", err)
+		if attempt < replicaL9PurgeAttempts {
+			select {
+			case <-ctx.Done():
+				return errors.Join(attemptErr, ctx.Err())
+			case <-time.After(replicaL9PurgeRetryDelay):
+			}
+		}
+	}
+	return fmt.Errorf("%d attempt(s) failed, replica may still hold base-written L9 objects: %w", replicaL9PurgeAttempts, attemptErr)
+}
+
+// reportLaneHarnessFailure tells the control plane that the lane itself,
+// not Litestream, stopped the switch, so the gate shows a harness failure
+// rather than a silent missing worker.
+func reportLaneHarnessFailure(ctx context.Context, cfg Config, err error) {
+	reporter := NewReporter(cfg)
+	if !reporter.Enabled() {
+		return
+	}
+	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if sendErr := reporter.SendEvent(reportCtx, reporting.WorkerEventPayload{
+		EventType: "worker_failed",
+		Message:   "upgrade lane harness failure: " + err.Error(),
+		SentAt:    time.Now().UTC(),
+	}); sendErr != nil {
+		slog.Warn("Failed to report upgrade lane harness failure", "error", sendErr)
+	}
+}
+
+func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, purger replicaL9Purger, run func(context.Context, Config) error) error {
 	if !cfg.UpgradeLane {
 		return errors.New("upgrade lane is not configured")
 	}
@@ -261,6 +349,21 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, run
 			return err
 		}
 		slog.Info("Upgrade lane switching Litestream build", "from", cfg.LitestreamBaseSHA, "to", cfg.LitestreamSHA, "pre_upgrade_txid", formatTXID(state.PreUpgradeTXID))
+	}
+
+	// The purge runs only here: the base process has exited (the Runner
+	// stops Litestream before returning) and the candidate has not started.
+	// Only a durable successful record lets the candidate start: a failed
+	// attempt is recorded and retried while the base build is still stopped,
+	// a crash between the switch and a successful purge repeats the purge on
+	// restart, and a successful record is never acted on again, so L9
+	// objects the candidate writes are never deleted.
+	if cfg.UpgradeDeleteL9AtSwitch && !state.L9Purge.succeeded() {
+		if err := purgeUntilClean(ctx, cfg, clock, purger, &state); err != nil {
+			err = fmt.Errorf("upgrade lane L9 purge: %w", err)
+			reportLaneHarnessFailure(ctx, cfg, err)
+			return err
+		}
 	}
 
 	post, err := cfg.ForUpgradePhase(UpgradePhasePost)

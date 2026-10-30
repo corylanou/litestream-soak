@@ -64,6 +64,18 @@ func compactionProgressSummary(report *reporting.ReplicaLevelReport) string {
 	return fmt.Sprintf("L0 objects=%d max_txid=%s; L1 objects=%d max_txid=%s; L9 objects=%d max_txid=%s", l0.ObjectCount, formatTXID(l0.MaxTXIDDecimal), l1.ObjectCount, formatTXID(l1.MaxTXIDDecimal), l9.ObjectCount, formatTXID(l9.MaxTXIDDecimal))
 }
 
+func (r *Runner) candidateL9Note(l9 reporting.ReplicaLevelSummary, now time.Time) string {
+	first, err := recordFirstCandidateL9(r.cfg.DataDir, l9, now)
+	switch {
+	case err != nil:
+		return "candidate first L9: unknown (" + err.Error() + ")"
+	case first == nil:
+		return "candidate first L9: not yet written since the switch purge"
+	default:
+		return fmt.Sprintf("candidate first L9: observed %s at max_txid %s", first.ObservedAt.Format(time.RFC3339), first.MaxTXID)
+	}
+}
+
 // applyCompactionProgressGuard records the compaction verdict for this cycle
 // as a step and fails an otherwise passing verification when compaction has
 // stalled. The report becomes the baseline for the next cycle.
@@ -78,6 +90,9 @@ func (r *Runner) applyCompactionProgressGuard(result VerificationResult, levels 
 	err := compactionProgressError(r.cfg, previous, levels)
 	now := time.Now().UTC()
 	step := reporting.VerificationStep{Name: compactionProgressStep, StartedAt: now, CompletedAt: now, Status: "ok", OutputTail: compactionProgressSummary(levels)}
+	if r.cfg.UpgradeDeleteL9AtSwitch && r.cfg.upgradePhase == UpgradePhasePost && usableReplicaLevelReport(levels) {
+		step.OutputTail += "; " + r.candidateL9Note(replicaLevelSummary(levels, 9), now)
+	}
 	if err != nil {
 		step.Status = "error"
 		step.Error = err.Error()

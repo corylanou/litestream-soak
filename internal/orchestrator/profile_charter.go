@@ -135,6 +135,12 @@ var profileCharters = map[string]ProfileCharter{
 		GuardsAgainst: "Candidates that stop compacting legacy levels, fail to restore pre-upgrade txids, or diverge in follow mode after taking over an existing replica.",
 		WhyItMatters:  "Every real deployment upgrades in place; a candidate that only works on a replica it created from scratch is not releasable.",
 	},
+	"gate-upgrade-lane-nol9": {
+		Synopsis:      "Upgrade gate no-L9 lane: the standard upgrade lane, except that after the baseline Litestream process has stopped and before the candidate starts, every L9 object under the lane's own replica prefix is deleted, so the candidate takes over a replica holding only L0-L3.",
+		Stresses:      "The candidate's compactor, restore planner, and follow restore on a legacy replica with no snapshot level at all, with the first candidate-written L9 recorded when it appears.",
+		GuardsAgainst: "Candidates whose compaction, restore, or follow paths assume an L9 snapshot exists, which the standard lane cannot show because the baseline build always writes an initial L9.",
+		WhyItMatters:  "Replicas created by older builds or with snapshots disabled have no L9; a candidate that stalls on them never compacts legacy data.",
+	},
 	"gate-upgrade-follow": {
 		Synopsis:      "Upgrade gate follow lane: steady writes with a 15-minute snapshot interval while a long-running follow restore is compared with the source each cycle after the replica crosses a new L9 snapshot.",
 		Stresses:      "Follow-mode restore across L9 snapshot boundaries, compaction progress bounds, and the pinned-txid follow variant, run identically on the candidate and the baseline.",

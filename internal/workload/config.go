@@ -75,6 +75,7 @@ type Config struct {
 	UpgradeLane                               bool    `json:"upgrade_lane,omitempty"`
 	UpgradeWarmup                             string  `json:"upgrade_warmup,omitempty"`
 	UpgradePostSnapshotInterval               string  `json:"upgrade_post_snapshot_interval,omitempty"`
+	UpgradeDeleteL9AtSwitch                   bool    `json:"upgrade_delete_l9_at_switch,omitempty"`
 	FollowCheck                               bool    `json:"follow_check,omitempty"`
 	CompactionProgressCheck                   bool    `json:"compaction_progress_check,omitempty"`
 	CompactionL0ObjectBound                   int     `json:"compaction_l0_object_bound,omitempty"`

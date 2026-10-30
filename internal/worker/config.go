@@ -149,6 +149,7 @@ type Config struct {
 	UpgradeLane                 bool
 	UpgradeWarmup               time.Duration
 	UpgradePostSnapshotInterval time.Duration
+	UpgradeDeleteL9AtSwitch     bool
 	LitestreamBaseBinary        string
 	LitestreamBaseSHA           string
 	upgradePhase                string
@@ -944,6 +945,9 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 		}
 		c.UpgradePostSnapshotInterval = d
 	}
+	if parseBoolEnv(getenv("UPGRADE_DELETE_L9_AT_SWITCH")) {
+		c.UpgradeDeleteL9AtSwitch = true
+	}
 	if v := strings.TrimSpace(getenv("LITESTREAM_BASE_BINARY")); v != "" {
 		c.LitestreamBaseBinary = v
 	}
@@ -1314,6 +1318,7 @@ func (c Config) WorkloadConfig() workload.Config {
 		if c.UpgradePostSnapshotInterval > 0 {
 			cfg.UpgradePostSnapshotInterval = c.UpgradePostSnapshotInterval.String()
 		}
+		cfg.UpgradeDeleteL9AtSwitch = c.UpgradeDeleteL9AtSwitch
 	}
 	cfg.FollowCheck = c.FollowCheck
 	cfg.CompactionProgressCheck = c.CompactionProgressCheck
