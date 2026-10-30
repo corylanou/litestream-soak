@@ -13,6 +13,17 @@ import (
 
 const litestreamMetricsEventWindow = 24 * time.Hour
 
+// upsertReportedWorker records a heartbeat or event. A report sent from a
+// startup phase (the worker is still seeding its database) keeps the worker
+// in starting rather than flipping it to running, so gate readiness and the
+// verification clock begin only once the worker has finished starting.
+func (a *API) upsertReportedWorker(identity reporting.WorkerIdentity, runtime reporting.RuntimePayload) error {
+	if runtime.PreStart() {
+		return a.db.UpsertStartingWorker(identity)
+	}
+	return a.db.UpsertReportedWorker(identity)
+}
+
 func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	workerID := r.PathValue("id")
 	var payload reporting.HeartbeatPayload
@@ -50,7 +61,7 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
-	if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
+	if err := a.upsertReportedWorker(payload.WorkerIdentity, payload.RuntimePayload); err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to record worker")
 		return
 	}
@@ -332,7 +343,7 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(rawPayload, &replay)
 	if replay.EventID == "" && replay.IncidentID == "" {
-		if err := a.db.UpsertReportedWorker(payload.WorkerIdentity); err != nil {
+		if err := a.upsertReportedWorker(payload.WorkerIdentity, payload.RuntimePayload); err != nil {
 			respondError(w, r, http.StatusInternalServerError, err, "failed to record worker")
 			return
 		}

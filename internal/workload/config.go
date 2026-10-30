@@ -19,6 +19,7 @@ type Config struct {
 	ReadRatio                                 float64 `json:"read_ratio,omitempty"`
 	Workers                                   int     `json:"workers,omitempty"`
 	InitialSize                               string  `json:"initial_size,omitempty"`
+	PopulateIndexRatio                        float64 `json:"populate_index_ratio,omitempty"`
 	MonitorInterval                           string  `json:"monitor_interval,omitempty"`
 	VerifyInterval                            string  `json:"verify_interval,omitempty"`
 	VerifyType                                string  `json:"verify_type,omitempty"`

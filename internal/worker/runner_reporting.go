@@ -269,6 +269,29 @@ func (r *Runner) sendWorkerFailureEvent(err error) {
 	}
 }
 
+// sendPreStartFailureEvent reports a failure that happened before Litestream
+// started, such as a populate that ran out of disk or lost its WAL bound. The
+// message keeps the "populate:" prefix the harness scoring keys off, and the
+// runtime payload still carries the startup phase, so the control plane can
+// tell a harness pre-start failure from a Litestream or verification failure.
+func (r *Runner) sendPreStartFailureEvent(err error) {
+	if r.reporter == nil || !r.reporter.Enabled() {
+		return
+	}
+
+	snapshot := r.currentSnapshot()
+	reportCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if sendErr := r.reporter.SendEvent(reportCtx, reporting.WorkerEventPayload{
+		EventType:      "worker_failed",
+		Message:        err.Error(),
+		SentAt:         time.Now().UTC(),
+		RuntimePayload: snapshot.RuntimePayload,
+	}); sendErr != nil {
+		slog.Warn("Failed to send pre-start failure event", "error", sendErr)
+	}
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {

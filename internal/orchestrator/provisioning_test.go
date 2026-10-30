@@ -196,7 +196,7 @@ func TestProvisioningAdoptsLostCreationResponsesAfterRestart(t *testing.T) {
 				t.Fatal(err)
 			}
 			worker := mustWorker(t, db, request.WorkerID)
-			if worker.Status != model.WorkerRunning || worker.FlyMachineID != "machine-1" || worker.FlyVolumeID != "volume-1" {
+			if worker.Status != model.WorkerStarting || worker.FlyMachineID != "machine-1" || worker.FlyVolumeID != "volume-1" {
 				t.Fatalf("not recovered: %+v", worker)
 			}
 			if fake.volumePosts != 1 || fake.machinePosts != 1 || fake.deletes != 0 {
@@ -233,7 +233,7 @@ func TestLegacyPendingMissingResourcesRecoversWithoutCleanup(t *testing.T) {
 			if err := manager.ensureFleetSpec(context.Background(), FleetSpec{Workers: []DesiredWorker{desired}}, "image"); err != nil {
 				t.Fatal(err)
 			}
-			if got := mustWorker(t, db, worker.ID); got.Status != model.WorkerRunning || got.FlyMachineID == machineID {
+			if got := mustWorker(t, db, worker.ID); got.Status != model.WorkerStarting || got.FlyMachineID == machineID {
 				t.Fatalf("not recovered: %+v", got)
 			}
 			if fake.deletes != 0 || fake.volumePosts != 1 || fake.machinePosts != 1 {
@@ -461,7 +461,7 @@ func TestPendingAttemptCompletesBeforeNewDeployment(t *testing.T) {
 		t.Fatal(err)
 	}
 	worker := mustWorker(t, db, request.WorkerID)
-	if worker.Status != model.WorkerRunning || worker.GitSHA != request.GitSHA {
+	if worker.Status != model.WorkerStarting || worker.GitSHA != request.GitSHA {
 		t.Fatal("original attempt did not complete with its immutable target")
 	}
 	if fake.machinePosts != 1 || fake.volumePosts != 1 || fake.deletes != 0 {
@@ -596,7 +596,7 @@ func TestLegacyRetiringVolumesPermitFreshRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	current := mustWorker(t, db, worker.ID)
-	if current.Status != model.WorkerRunning || current.FlyVolumeID == worker.FlyVolumeID || current.FlyMachineID == worker.FlyMachineID {
+	if current.Status != model.WorkerStarting || current.FlyVolumeID == worker.FlyVolumeID || current.FlyMachineID == worker.FlyMachineID {
 		t.Fatal("fresh recovery did not replace physical identity")
 	}
 	if fake.volumePosts != 1 || fake.machinePosts != 1 || fake.deletes != 0 || len(fake.volumes) != 3 {
@@ -777,8 +777,8 @@ func TestTeardownClosesParkedAttemptAndPermitsRelaunch(t *testing.T) {
 		t.Fatalf("relaunch after teardown: %v", err)
 	}
 	worker := mustWorker(t, db, request.WorkerID)
-	if worker.Status != model.WorkerRunning || worker.GitSHA != "next" {
-		t.Fatalf("relaunched worker = %+v, want running on next", worker)
+	if worker.Status != model.WorkerStarting || worker.GitSHA != "next" {
+		t.Fatalf("relaunched worker = %+v, want starting on next", worker)
 	}
 }
 
@@ -877,7 +877,7 @@ func TestFleetReconcilerRecoversInterruptedPRReplacement(t *testing.T) {
 	fake.mu.Unlock()
 	manager.reconcileFleets(context.Background(), FleetSpec{})
 	worker := mustWorker(t, db, desired.WorkerID)
-	if worker.Status != model.WorkerRunning || worker.GitSHA != latest.GitSHA || worker.FlyMachineID != "machine-2" || worker.FlyVolumeID != "volume-2" {
+	if worker.Status != model.WorkerStarting || worker.GitSHA != latest.GitSHA || worker.FlyMachineID != "machine-2" || worker.FlyVolumeID != "volume-2" {
 		t.Fatalf("not recovered: %+v", worker)
 	}
 	attempt, err := db.ActiveProvisioning(desired.WorkerID)

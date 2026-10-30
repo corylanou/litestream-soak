@@ -28,6 +28,11 @@ on:
         required: false
         type: boolean
         default: false
+      profiles:
+        description: Comma-separated subset of gate profiles to run (gate-stress, gate-manydb-500, gate-large-db, gate-remote); empty runs all four
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -48,6 +53,8 @@ jobs:
       baseline_source: ${{ steps.resolve.outputs.baseline_source }}
       duration: ${{ steps.resolve.outputs.duration }}
       tail: ${{ steps.resolve.outputs.tail }}
+      profiles: ${{ steps.resolve.outputs.profiles }}
+      source_suffix: ${{ steps.resolve.outputs.source_suffix }}
     steps:
       - id: resolve
         shell: bash
@@ -58,6 +65,7 @@ jobs:
           BASELINE_REF: ${{ github.event.inputs.baseline_sha || '' }}
           DURATION: ${{ github.event.inputs.duration || '72h' }}
           TAIL: ${{ github.event.inputs.tail || 'false' }}
+          PROFILES: ${{ github.event.inputs.profiles || '' }}
         run: |
           set -euo pipefail
 
@@ -66,7 +74,35 @@ jobs:
           baseline_ref="${BASELINE_REF:-main}"
           duration="${DURATION}"
           tail="${TAIL}"
+          profiles="${PROFILES//[[:space:]]/}"
           upstream_repo="benbjohnson/litestream"
+          gate_profile="gate-stress|gate-manydb-500|gate-large-db|gate-remote"
+
+          if [ -n "${profiles}" ] && [[ ! "${profiles}" =~ ^(${gate_profile})(,(${gate_profile}))*$ ]]; then
+            echo "profiles must be a comma-separated subset of gate-stress, gate-manydb-500, gate-large-db, gate-remote" >&2
+            exit 1
+          fi
+          if [ "${tail}" = "true" ] && [ -n "${profiles}" ] && [[ ! ",${profiles}," == *",gate-stress,"* ]]; then
+            echo "tail keeps gate-stress running, so profiles must include gate-stress" >&2
+            exit 1
+          fi
+
+          # Every dispatch gets its own gate sources, rc-<sha8>-<suffix>, so a
+          # rerun (such as one profile only) can register while an earlier
+          # gate for the same commits is still open. Re-running this workflow
+          # run keeps the same suffix, so registration stays idempotent.
+          if [[ ! "${GITHUB_RUN_ID:-}" =~ ^[0-9]+$ ]]; then
+            echo "GITHUB_RUN_ID is required to derive the gate source suffix" >&2
+            exit 1
+          fi
+          source_suffix="$(printf '%x' "${GITHUB_RUN_ID}")"
+          if [ "${#source_suffix}" -gt 8 ]; then
+            source_suffix="${source_suffix: -8}"
+          fi
+          if [[ ! "${source_suffix}" =~ ^[0-9a-z]{1,8}$ ]]; then
+            echo "derived source suffix ${source_suffix} is invalid" >&2
+            exit 1
+          fi
 
           if [ "${repo_full_name}" != "${upstream_repo}" ]; then
             echo "repo_full_name must be ${upstream_repo}: worker builds and compatibility checks only fetch from it" >&2
@@ -111,17 +147,20 @@ jobs:
             echo "candidate_ref=${candidate_ref}"
             echo "candidate_sha=${candidate_sha}"
             echo "baseline_sha=${baseline_sha}"
-            echo "candidate_source=rc-${candidate_sha::8}"
-            echo "baseline_source=rcbase-${baseline_sha::8}"
+            echo "candidate_source=rc-${candidate_sha::8}-${source_suffix}"
+            echo "baseline_source=rcbase-${baseline_sha::8}-${source_suffix}"
             echo "duration=${duration}"
             echo "tail=${tail}"
+            echo "profiles=${profiles}"
+            echo "source_suffix=${source_suffix}"
           } >> "${GITHUB_OUTPUT}"
 
           {
             echo "### RC gate request"
-            echo "Candidate: ${repo_full_name}@${candidate_ref} -> ${candidate_sha}"
-            echo "Baseline: ${upstream_repo}@${baseline_ref} -> ${baseline_sha}"
+            echo "Candidate: ${repo_full_name}@${candidate_ref} -> ${candidate_sha} (source rc-${candidate_sha::8}-${source_suffix})"
+            echo "Baseline: ${upstream_repo}@${baseline_ref} -> ${baseline_sha} (source rcbase-${baseline_sha::8}-${source_suffix})"
             echo "Duration: ${duration} (tail: ${tail})"
+            echo "Profiles: ${profiles:-all four}"
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
   build-worker-images:
@@ -238,6 +277,8 @@ jobs:
           BASELINE_IMAGE_REF: ${{ needs.build-worker-images.outputs.baseline_image_ref }}
           DURATION: ${{ needs.resolve-request.outputs.duration }}
           TAIL: ${{ needs.resolve-request.outputs.tail }}
+          GATE_PROFILES: ${{ needs.resolve-request.outputs.profiles }}
+          GATE_SOURCE_SUFFIX: ${{ needs.resolve-request.outputs.source_suffix }}
         run: |
           set -euo pipefail
 

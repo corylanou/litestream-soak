@@ -240,6 +240,18 @@ func (d *DB) UpdateWorkerRuntimeSnapshot(id string, payload reporting.RuntimePay
 // so teardown races leave an observable heartbeat trail without resurrecting
 // the row. Only pending, building, and starting workers are flipped to running.
 func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
+	return d.upsertReportedWorker(identity, WorkerRunning)
+}
+
+// UpsertStartingWorker records a report from a worker that is still in a
+// startup phase, such as seeding its database before Litestream runs. The
+// heartbeat trail is kept, but the worker stays (or returns to) starting
+// instead of running, so readiness is only observed once startup completes.
+func (d *DB) UpsertStartingWorker(identity reporting.WorkerIdentity) error {
+	return d.upsertReportedWorker(identity, WorkerStarting)
+}
+
+func (d *DB) upsertReportedWorker(identity reporting.WorkerIdentity, reported WorkerStatus) error {
 	name := identity.Name
 	if name == "" {
 		name = identity.WorkerID
@@ -252,7 +264,7 @@ func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
 
 	_, err := d.exec(`
 		INSERT INTO workers (id, app_name, region, fly_machine_id, name, status, source, git_sha, litestream_sha, profile_name, profile_config, last_heartbeat_at)
-		VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, datetime('now'))
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 			ON CONFLICT(id) DO UPDATE SET
 				app_name = CASE
 					WHEN excluded.app_name <> '' THEN excluded.app_name
@@ -265,8 +277,8 @@ func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
 			fly_machine_id = COALESCE(excluded.fly_machine_id, workers.fly_machine_id),
 				name = excluded.name,
 				status = CASE
-					WHEN workers.status IN ('pending', 'building', 'starting') THEN 'running'
-					WHEN workers.status = 'degraded' AND workers.error_message = 'worker missed heartbeat deadline' THEN 'running'
+					WHEN workers.status IN ('pending', 'building', 'starting') THEN excluded.status
+					WHEN workers.status = 'degraded' AND workers.error_message = 'worker missed heartbeat deadline' THEN excluded.status
 					ELSE workers.status
 				END,
 				error_message = CASE
@@ -293,6 +305,7 @@ func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
 		identity.Region,
 		nullIntString(identity.MachineID),
 		name,
+		string(reported),
 		identity.Source,
 		identity.GitSHA,
 		identity.LitestreamSHA,
@@ -541,5 +554,5 @@ func (d *DB) DeleteWorker(id string) error {
 // StaleWorkers returns workers that haven't sent a heartbeat within the given duration.
 func (d *DB) StaleWorkers(timeout time.Duration) ([]Worker, error) {
 	cutoff := time.Now().UTC().Add(-timeout).Format("2006-01-02 15:04:05")
-	return d.queryWorkers("SELECT "+workerColumns+" FROM workers WHERE status IN ('running', 'probing') AND last_heartbeat_at IS NOT NULL AND last_heartbeat_at < ?", cutoff)
+	return d.queryWorkers("SELECT "+workerColumns+" FROM workers WHERE status IN ('running', 'probing', 'starting') AND last_heartbeat_at IS NOT NULL AND last_heartbeat_at < ?", cutoff)
 }

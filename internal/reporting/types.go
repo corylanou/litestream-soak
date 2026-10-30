@@ -81,6 +81,7 @@ type RuntimePayload struct {
 	LocalStateCollectedAt time.Time          `json:"local_state_collected_at,omitempty"`
 
 	UptimeSeconds                              float64   `json:"uptime_seconds,omitempty"`
+	StartupPhase                               string    `json:"startup_phase,omitempty"`
 	DataDiskTotalBytes                         uint64    `json:"data_disk_total_bytes,omitempty"`
 	DataDiskUsedBytes                          uint64    `json:"data_disk_used_bytes,omitempty"`
 	DataDiskFreeBytes                          uint64    `json:"data_disk_free_bytes,omitempty"`
@@ -135,6 +136,21 @@ type RuntimePayload struct {
 	SnapshotCollectedAt                        time.Time `json:"snapshot_collected_at,omitempty"`
 	LitestreamSnapshotHealthy                  bool      `json:"litestream_snapshot_healthy"`
 	LitestreamSnapshotError                    string    `json:"litestream_snapshot_error,omitempty"`
+}
+
+// Startup phases mark reports sent before the worker is running: populate
+// while it seeds its database, litestream while it writes the config, starts
+// Litestream, and waits for the first sync. A worker in a startup phase is not
+// running yet and must not count toward gate readiness.
+const (
+	StartupPhasePopulate   = "populate"
+	StartupPhaseLitestream = "litestream"
+)
+
+// PreStart reports whether the runtime was captured before Litestream and the
+// load started.
+func (p RuntimePayload) PreStart() bool {
+	return strings.TrimSpace(p.StartupPhase) != ""
 }
 
 func (p RuntimePayload) Normalize(observedAt time.Time) RuntimePayload {

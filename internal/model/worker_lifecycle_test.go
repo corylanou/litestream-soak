@@ -82,6 +82,62 @@ func TestCreateWorkerResetsRuntimeStateOnReuse(t *testing.T) {
 	}
 }
 
+func TestUpsertStartingWorkerKeepsWorkerOutOfRunning(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		initial    WorkerStatus
+		initialErr string
+		starting   bool
+		want       WorkerStatus
+	}{
+		{name: "starting worker stays starting while populating", initial: WorkerStarting, starting: true, want: WorkerStarting},
+		{name: "pending worker becomes starting while populating", initial: WorkerPending, starting: true, want: WorkerStarting},
+		{name: "stale starting worker returns to starting", initial: WorkerDegraded, initialErr: "worker missed heartbeat deadline", starting: true, want: WorkerStarting},
+		{name: "running worker is not demoted by a startup report", initial: WorkerRunning, starting: true, want: WorkerRunning},
+		{name: "plain report flips starting to running", initial: WorkerStarting, want: WorkerRunning},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+
+			worker := &Worker{ID: "worker-rc-gate-large-db", Name: "worker-rc-gate-large-db", Status: tt.initial, Source: "rc-aaaaaaaa", GitSHA: "soak", LitestreamSHA: "ls", ProfileName: "gate-large-db", ProfileConfig: "{}"}
+			if err := db.CreateWorker(worker); err != nil {
+				t.Fatalf("CreateWorker() error = %v", err)
+			}
+			if tt.initialErr != "" {
+				if err := db.UpdateWorkerStatus(worker.ID, tt.initial, tt.initialErr); err != nil {
+					t.Fatalf("UpdateWorkerStatus() error = %v", err)
+				}
+			}
+			identity := reporting.WorkerIdentity{WorkerID: worker.ID, Name: worker.Name, Source: worker.Source, GitSHA: worker.GitSHA, LitestreamSHA: worker.LitestreamSHA, ProfileName: worker.ProfileName, ProfileConfig: "{}"}
+			if tt.starting {
+				err = db.UpsertStartingWorker(identity)
+			} else {
+				err = db.UpsertReportedWorker(identity)
+			}
+			if err != nil {
+				t.Fatalf("upsert error = %v", err)
+			}
+			stored, err := db.GetWorker(worker.ID)
+			if err != nil {
+				t.Fatalf("GetWorker() error = %v", err)
+			}
+			if stored.Status != tt.want {
+				t.Fatalf("Status = %s, want %s", stored.Status, tt.want)
+			}
+			if stored.LastHeartbeatAt == nil {
+				t.Fatal("LastHeartbeatAt = nil, want heartbeat recorded")
+			}
+		})
+	}
+}
+
 func TestUpsertReportedWorkerClearsStaleHeartbeatDegradation(t *testing.T) {
 	t.Parallel()
 

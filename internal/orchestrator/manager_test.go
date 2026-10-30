@@ -310,8 +310,8 @@ func TestCreateWorkerFallsBackToFreshVolumeWhenForkIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateWorker() error = %v", err)
 	}
-	if worker.Status != model.WorkerRunning || worker.FlyVolumeID == "" {
-		t.Fatalf("worker = %+v, want running with a volume", worker)
+	if worker.Status != model.WorkerStarting || worker.FlyVolumeID == "" {
+		t.Fatalf("worker = %+v, want starting with a volume", worker)
 	}
 
 	volumes := fly.volumeRequests()

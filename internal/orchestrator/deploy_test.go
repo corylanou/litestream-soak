@@ -261,8 +261,8 @@ func TestDeployNewSHABuildsReadyDeploymentAndRollsFleet(t *testing.T) {
 
 	workers := mustWorkersForSource(t, db, "main")
 	for _, worker := range workers {
-		if worker.Status != model.WorkerRunning {
-			t.Fatalf("%s Status=%q want running", worker.ID, worker.Status)
+		if worker.Status != model.WorkerStarting {
+			t.Fatalf("%s Status=%q want starting", worker.ID, worker.Status)
 		}
 		if worker.GitSHA != sha {
 			t.Fatalf("%s GitSHA=%q want %q", worker.ID, worker.GitSHA, sha)
@@ -1006,7 +1006,7 @@ func testReconcileFleetResumesVersionRolloutAfterRestart(t *testing.T, dormant b
 	if rollout.UpdatedWorkers != 2 || rollout.OutdatedWorkers != 0 {
 		t.Fatalf("restart rollout: updated=%d outdated=%d", rollout.UpdatedWorkers, rollout.OutdatedWorkers)
 	}
-	wantStatus := model.WorkerRunning
+	wantStatus := model.WorkerStarting
 	wantVolumes := 4
 	if dormant {
 		wantStatus = model.WorkerProbing
@@ -1074,8 +1074,8 @@ func testFleetReconcilerRollsOutdatedPRSourceWorkers(t *testing.T, staleAttempt 
 
 	for _, desired := range spec.Workers {
 		worker := mustWorker(t, db, desired.WorkerID)
-		if worker.GitSHA != latest.GitSHA || worker.LitestreamSHA != latest.LitestreamSHA || worker.Status != model.WorkerRunning {
-			t.Fatalf("%s = soak %s / litestream %s status %s; want rolled to %s / %s running", worker.ID, worker.GitSHA, worker.LitestreamSHA, worker.Status, latest.GitSHA, latest.LitestreamSHA)
+		if worker.GitSHA != latest.GitSHA || worker.LitestreamSHA != latest.LitestreamSHA || worker.Status != model.WorkerStarting {
+			t.Fatalf("%s = soak %s / litestream %s status %s; want rolled to %s / %s starting", worker.ID, worker.GitSHA, worker.LitestreamSHA, worker.Status, latest.GitSHA, latest.LitestreamSHA)
 		}
 		attempt, err := db.ActiveProvisioning(desired.WorkerID)
 		if err != nil || attempt != nil {
@@ -1142,8 +1142,8 @@ func TestEnsureFleetSpecSupersedesStaleProvisioningForNewDeployment(t *testing.T
 		t.Fatal(err)
 	}
 	worker := mustWorker(t, db, desired.WorkerID)
-	if worker.GitSHA != latest.GitSHA || worker.Status != model.WorkerRunning {
-		t.Fatalf("worker = soak %s status %s; want %s running", worker.GitSHA, worker.Status, latest.GitSHA)
+	if worker.GitSHA != latest.GitSHA || worker.Status != model.WorkerStarting {
+		t.Fatalf("worker = soak %s status %s; want %s starting", worker.GitSHA, worker.Status, latest.GitSHA)
 	}
 	nextFly.assertCreateCounts(t, 2, 2)
 	nextFly.assertNoErrors(t)

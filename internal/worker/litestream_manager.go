@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -116,14 +117,12 @@ func (m *litestreamManager) writeLitestreamConfig() error {
 		}
 	}
 
-	f, err := os.Create(m.cfg.ConfigPath)
-	if err != nil {
-		return fmt.Errorf("create config file: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	if err := litestreamConfigTmpl.Execute(f, m.litestreamConfigData()); err != nil {
+	var rendered bytes.Buffer
+	if err := litestreamConfigTmpl.Execute(&rendered, m.litestreamConfigData()); err != nil {
 		return err
+	}
+	if err := writeFileAtomic(m.cfg.ConfigPath, rendered.Bytes()); err != nil {
+		return fmt.Errorf("config file: %w", err)
 	}
 	if err := m.writeLitestreamReplicaTarget(); err != nil {
 		return fmt.Errorf("write replica target marker: %w", err)
@@ -326,7 +325,7 @@ func (m *litestreamManager) writeLitestreamReplicaTarget() error {
 		if err := os.MkdirAll(stateDir, 0755); err != nil {
 			return fmt.Errorf("create litestream state dir: %w", err)
 		}
-		if err := os.WriteFile(litestreamReplicaTargetPath(dbPath), []byte(target+"\n"), 0644); err != nil {
+		if err := writeFileAtomic(litestreamReplicaTargetPath(dbPath), []byte(target+"\n")); err != nil {
 			return err
 		}
 	}

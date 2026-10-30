@@ -1287,7 +1287,7 @@ func workerEligibleForPRMaxAge(worker model.Worker, deployment model.Deployment,
 		return false
 	}
 	switch worker.Status {
-	case model.WorkerRunning, model.WorkerDegraded, model.WorkerProbing:
+	case model.WorkerRunning, model.WorkerDegraded, model.WorkerProbing, model.WorkerStarting:
 		return true
 	case model.WorkerDormant:
 		return action == PRMaxAgeActionDestroy
@@ -1301,7 +1301,7 @@ func workerActiveForSourcePause(worker model.Worker, deployment model.Deployment
 		return false
 	}
 	switch worker.Status {
-	case model.WorkerRunning, model.WorkerDegraded, model.WorkerProbing:
+	case model.WorkerRunning, model.WorkerDegraded, model.WorkerProbing, model.WorkerStarting:
 		return true
 	default:
 		return false

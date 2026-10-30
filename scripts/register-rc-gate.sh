@@ -10,10 +10,23 @@ tail="${6:-false}"
 kind="${7:-rc}"
 upgrade_warmup="${8:-}"
 lane_variant="${9:-}"
+profiles="${GATE_PROFILES:-}"
+profiles="${profiles//[[:space:]]/}"
+source_suffix="${GATE_SOURCE_SUFFIX:-}"
 base_url="${CONTROL_BASE_URL:-https://litestream-soak-ctl.fly.dev}"
 
 if [ "$#" -lt 4 ]; then
   echo "usage: $0 <repository> <candidate-ref> <candidate-sha> <baseline-sha> [duration] [tail] [kind] [upgrade-warmup] [lane-variant]" >&2
+  echo "  GATE_PROFILES=<comma-separated profiles> runs a subset of the gate fleet (default: all)" >&2
+  echo "  GATE_SOURCE_SUFFIX=<1-8 lowercase alphanumerics> names the sources <prefix>-<sha8>-<suffix>" >&2
+  exit 1
+fi
+if [ -n "${profiles}" ] && [[ ! "${profiles}" =~ ^[a-z0-9-]+(,[a-z0-9-]+)*$ ]]; then
+  echo "GATE_PROFILES must be a comma-separated list of profile names" >&2
+  exit 1
+fi
+if [ -n "${source_suffix}" ] && [[ ! "${source_suffix}" =~ ^[0-9a-z]{1,8}$ ]]; then
+  echo "GATE_SOURCE_SUFFIX must be 1 to 8 lowercase letters or digits" >&2
   exit 1
 fi
 if [[ ! "${repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
@@ -62,6 +75,8 @@ payload="$(jq -n \
   --arg kind "$kind" \
   --arg upgrade_warmup "$upgrade_warmup" \
   --arg lane_variant "$lane_variant" \
+  --arg profiles "$profiles" \
+  --arg source_suffix "$source_suffix" \
   '{
     repository: $repository,
     candidate_ref: $candidate_ref,
@@ -70,8 +85,11 @@ payload="$(jq -n \
     duration: $duration,
     tail: $tail,
     kind: $kind
-  } + (if $upgrade_warmup == "" then {} else {upgrade_warmup: $upgrade_warmup} end)
-    + (if $lane_variant == "" then {} else {lane_variant: $lane_variant} end)')"
+  }
+  + (if $upgrade_warmup == "" then {} else {upgrade_warmup: $upgrade_warmup} end)
+  + (if $lane_variant == "" then {} else {lane_variant: $lane_variant} end)
+  + (if $profiles == "" then {} else {profiles: ($profiles | split(","))} end)
+  + (if $source_suffix == "" then {} else {source_suffix: $source_suffix} end)')"
 
 curl -sS --fail-with-body --max-time 60 -X POST \
   "${auth_args[@]}" \

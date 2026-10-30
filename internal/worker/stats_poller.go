@@ -504,6 +504,12 @@ func (p *statsPoller) currentSnapshot() runtimeSnapshot {
 	return snapshot
 }
 
+func (p *statsPoller) setStartupPhase(phase string) {
+	p.snapshotMu.Lock()
+	defer p.snapshotMu.Unlock()
+	p.snapshot.StartupPhase = phase
+}
+
 func (p *statsPoller) setUptime(seconds float64) {
 	p.snapshotMu.Lock()
 	defer p.snapshotMu.Unlock()

@@ -49,6 +49,10 @@ type Config struct {
 	ReadRatio   float64
 	Workers     int
 	InitialSize string
+	// PopulateIndexRatio is passed to litestream-test populate as -index-ratio.
+	// Only 0 and 1 give a schema that is fixed by construction; populate picks
+	// each index with its own random draw for anything in between.
+	PopulateIndexRatio float64
 
 	NumDatabases            int
 	MaxRowsPerDatabase      int
@@ -534,6 +538,16 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 	}
 	if v := getenv("INITIAL_SIZE"); v != "" {
 		c.InitialSize = v
+	}
+	if v := getenv("POPULATE_INDEX_RATIO"); v != "" {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return c, fmt.Errorf("invalid POPULATE_INDEX_RATIO: %w", err)
+		}
+		if math.IsNaN(n) || n < 0 || n > 1 {
+			return c, fmt.Errorf("invalid POPULATE_INDEX_RATIO: must be between 0 and 1")
+		}
+		c.PopulateIndexRatio = n
 	}
 	if v := getenv("NUM_DATABASES"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -1242,6 +1256,7 @@ func (c Config) WorkloadConfig() workload.Config {
 		ReadRatio:                c.ReadRatio,
 		Workers:                  c.Workers,
 		InitialSize:              c.InitialSize,
+		PopulateIndexRatio:       c.PopulateIndexRatio,
 		MonitorInterval:          c.MonitorInterval.String(),
 		VerifyInterval:           c.VerifyInterval.String(),
 		VerifyType:               c.VerifyType,

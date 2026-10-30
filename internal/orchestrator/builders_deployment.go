@@ -999,7 +999,7 @@ func verificationObservedAt(verification model.Verification) (time.Time, bool) {
 
 func workerNeedsPostDeployVerification(status model.WorkerStatus) bool {
 	switch status {
-	case model.WorkerRunning, model.WorkerProbing, model.WorkerDegraded:
+	case model.WorkerRunning, model.WorkerProbing, model.WorkerDegraded, model.WorkerStarting:
 		return true
 	default:
 		return false

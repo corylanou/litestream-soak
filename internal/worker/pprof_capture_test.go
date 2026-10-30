@@ -871,6 +871,9 @@ func TestPprofRunnerKeepsProcessAliveForFinalCapture(t *testing.T) {
 	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("pprof-%d.sock", time.Now().UnixNano()))
 	cfg.LoadMode = "none"
 	logicalTestDB(t, cfg.DBPath, "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+	if err := writePopulateMarker(cfg.DBPath, populateMarker{CompletedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
 	dir := t.TempDir()
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	if err := os.WriteFile(filepath.Join(dir, "litestream"), []byte("#!/bin/sh\nexec sleep 60\n"), 0700); err != nil {

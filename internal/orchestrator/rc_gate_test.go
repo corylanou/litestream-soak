@@ -574,7 +574,7 @@ func createTestGateFleet(t *testing.T, db *model.DB, gate model.RCGate) {
 		if _, _, err := db.PinRCGateBuild(gate.ID, source, testGateImage(source, litestreamSHA), testGateSoakSHA); err != nil {
 			t.Fatalf("PinRCGateBuild() error = %v", err)
 		}
-		for _, desired := range GateFleetForSource(source, testGateSoakSHA, litestreamSHA).Workers {
+		for _, desired := range gateFleetForSource(gate, source, testGateSoakSHA, litestreamSHA).Workers {
 			cfg := normalizeWorkloadConfig(desired.Workload)
 			cfg.VolumeSizeGB = effectiveDesiredVolumeSize(desired, cfg)
 			createTestWorker(t, db, model.Worker{

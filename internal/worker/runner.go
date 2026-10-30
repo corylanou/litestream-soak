@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -120,21 +118,31 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}()
 
+	r.setStartupPhase(reporting.StartupPhasePopulate)
 	if err := r.populate(runCtx); err != nil {
-		return fmt.Errorf("populate: %w", err)
+		err = fmt.Errorf("populate: %w", err)
+		r.sendPreStartFailureEvent(err)
+		return err
 	}
+	r.setStartupPhase(reporting.StartupPhaseLitestream)
 	if err := r.prepareDiskFullRecoveryReserve(); err != nil {
-		return fmt.Errorf("prepare disk-full recovery reserve: %w", err)
+		err = fmt.Errorf("prepare disk-full recovery reserve: %w", err)
+		r.sendPreStartFailureEvent(err)
+		return err
 	}
 
 	if err := r.writeLitestreamConfig(); err != nil {
-		return fmt.Errorf("write litestream config: %w", err)
+		err = fmt.Errorf("write litestream config: %w", err)
+		r.sendPreStartFailureEvent(err)
+		return err
 	}
 
 	litestreamCtx, cancelLitestream := context.WithCancel(context.WithoutCancel(runCtx))
 	if err := r.startLitestream(litestreamCtx); err != nil {
 		cancelLitestream()
-		return fmt.Errorf("start litestream: %w", err)
+		err = fmt.Errorf("start litestream: %w", err)
+		r.sendPreStartFailureEvent(err)
+		return err
 	}
 	defer r.stopLitestream()
 	defer cancelLitestream()
@@ -143,8 +151,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	defer stopProfiles()
 
 	if err := r.waitForFirstSync(runCtx); err != nil {
-		return fmt.Errorf("wait for first sync: %w", err)
+		err = fmt.Errorf("wait for first sync: %w", err)
+		r.sendPreStartFailureEvent(err)
+		return err
 	}
+	r.setStartupPhase("")
 	go newReplicaLevelPoller(&r.cfg).Run(runCtx)
 	if r.cfg.CompactionProgressCheck && r.cfg.ReplicaLevelReporting {
 		r.lastReplicaLevels = collectReplicaLevelReport(r.cfg, 0)
@@ -253,24 +264,7 @@ func (r *Runner) populate(ctx context.Context) error {
 	if r.cfg.ManyDBEnabled() {
 		return populateManyDBs(ctx, r.cfg)
 	}
-
-	if _, err := os.Stat(r.cfg.DBPath); err == nil {
-		slog.Info("Database already exists, skipping populate", "path", r.cfg.DBPath)
-		return nil
-	}
-
-	if err := os.MkdirAll(r.cfg.DataDir, 0755); err != nil {
-		return fmt.Errorf("create data dir: %w", err)
-	}
-
-	slog.Info("Populating database", "target_size", r.cfg.InitialSize)
-	cmd := exec.CommandContext(ctx, "litestream-test", "populate",
-		"-db", r.cfg.DBPath,
-		"-target-size", r.cfg.InitialSize,
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return populateSingleDB(ctx, r.cfg)
 }
 
 func (r *Runner) runVerifyLoop(ctx context.Context) error {
