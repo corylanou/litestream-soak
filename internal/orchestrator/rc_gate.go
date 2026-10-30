@@ -70,6 +70,11 @@ const (
 	rcGateCrashLoopEvents        = 2
 	rcGateDiskExhaustedUsedPct   = 98.0
 	rcGateFlyNotRestartingMarker = "not restarting"
+	rcGateStaleWorkerMessage     = "worker missed heartbeat deadline"
+	rcGateStaleGrace             = 30 * time.Minute
+	rcGateStaleBurstWorkers      = 3
+	rcGateStaleBurstWindow       = 90 * time.Second
+	rcGatePlannedRestartWindow   = 10 * time.Minute
 )
 
 var (
@@ -79,6 +84,9 @@ var (
 		reporting.WorkerEventDiskFullRecoveryFailed,
 	}
 	rcGateCrashEventTypes = []string{"platform_restart", "platform_oom", "platform_killed", "worker_failed"}
+	// Planned restarts the worker reports as worker_failed on images that predate
+	// the phaseEnded check in internal/worker/runner.go.
+	rcGatePlannedLifecycleMarkers = []string{"stress scenario phase ended", "upgrade warm-up ended"}
 	// Fatal runner errors raised before Litestream is launched (internal/worker/runner.go).
 	rcGatePreStartFailurePrefixes = []string{"populate:", "prepare disk-full recovery reserve:", "write litestream config:", "start litestream:"}
 )
@@ -1168,12 +1176,12 @@ func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter g
 	if err != nil {
 		return side, modes, err
 	}
-	observed := 0
+	var observed []time.Time
 	for _, verification := range verifications {
 		if verification.StartedAt.Before(gate.StartedAt) || verification.StartedAt.After(end) || !verification.MatchesDeployment(*worker, *deployment) {
 			continue
 		}
-		observed++
+		observed = append(observed, verification.StartedAt)
 		if verification.Run.Scenario != scenario.identity || !filter.accepts(gate, verification) {
 			continue
 		}
@@ -1223,7 +1231,8 @@ func rcGateHardFault(reason string) bool {
 	return reason != "" && reason != rcGateReasonHarnessInconclusive
 }
 
-func rcGateSideFault(db *model.DB, gate model.RCGate, worker model.Worker, observedVerifications int, end time.Time) (string, string, error) {
+func rcGateSideFault(db *model.DB, gate model.RCGate, worker model.Worker, verificationTimes []time.Time, end time.Time) (string, string, error) {
+	observedVerifications := len(verificationTimes)
 	events, err := db.ListWorkerEvents(worker.ID, rcGateWorkerEventHistory)
 	if err != nil {
 		return "", "", fmt.Errorf("list %s events: %w", worker.ID, err)
@@ -1236,7 +1245,10 @@ func rcGateSideFault(db *model.DB, gate model.RCGate, worker model.Worker, obser
 		}
 		inWindow = append(inWindow, event)
 	}
-	reason, detail := rcGateWorkerFault(worker, inWindow)
+	reason, detail, err := rcGateWorkerFault(db, worker, inWindow, verificationTimes, end)
+	if err != nil {
+		return "", "", err
+	}
 	if reason == "" {
 		return "", "", nil
 	}
@@ -1284,26 +1296,53 @@ func rcGatePreStartEvidence(worker model.Worker, events []model.Event) (string, 
 	return evidence, true
 }
 
-func rcGateWorkerFault(worker model.Worker, events []model.Event) (string, string) {
+func rcGateWorkerFault(db *model.DB, worker model.Worker, events []model.Event, verificationTimes []time.Time, end time.Time) (string, string, error) {
 	degraded := worker.Status == model.WorkerDegraded || worker.Status == model.WorkerFailed
+	planned := rcGatePlannedRestartsFor(worker, events)
 	var (
 		diskDetail, crashDetail, staleDetail string
 		crashes                              int
 		terminalCrash                        bool
+		lastStale                            time.Time
 	)
 	for _, event := range events {
 		switch {
 		case slices.Contains(rcGateDiskFullEventTypes, event.EventType):
 			diskDetail = firstNonEmpty(event.Message, event.EventType)
 		case slices.Contains(rcGateCrashEventTypes, event.EventType):
-			crashes += max(1, event.Occurrences)
+			if rcGatePlannedLifecycleEvent(event) {
+				continue
+			}
+			count := max(1, event.Occurrences)
+			terminal := strings.Contains(strings.ToLower(event.Message), rcGateFlyNotRestartingMarker)
+			if event.EventType == "platform_restart" && !terminal && planned.forgive(event) {
+				count--
+			}
+			if count == 0 {
+				continue
+			}
+			crashes += count
 			crashDetail = firstNonEmpty(event.Message, event.EventType)
-			if strings.Contains(strings.ToLower(event.Message), rcGateFlyNotRestartingMarker) {
+			if terminal {
 				terminalCrash = true
 			}
 		case event.EventType == "worker_stale":
-			staleDetail = firstNonEmpty(event.Message, event.EventType)
+			if event.CreatedAt.After(lastStale) {
+				lastStale = event.CreatedAt
+			}
+			detail, fault, err := rcGateStaleFault(db, worker, event, verificationTimes, end)
+			if err != nil {
+				return "", "", err
+			}
+			if fault {
+				staleDetail = detail
+			}
 		}
+	}
+	if degraded && worker.ErrorMessage == rcGateStaleWorkerMessage {
+		// A stale-only degradation stands while the worker is still silent past
+		// the grace period; a worker that is reporting again only missed a deadline.
+		degraded = rcGateCurrentlySilent(worker, lastStale, end)
 	}
 	if diskDetail == "" && degraded && reporting.IsDiskCapacityMessage(worker.ErrorMessage) {
 		diskDetail = worker.ErrorMessage
@@ -1316,16 +1355,163 @@ func rcGateWorkerFault(worker model.Worker, events []model.Event) (string, strin
 	}
 	switch {
 	case diskDetail != "":
-		return rcGateReasonDiskExhausted, diskDetail
+		return rcGateReasonDiskExhausted, diskDetail, nil
 	case crashLoop:
-		return rcGateReasonWorkerCrashLoop, fmt.Sprintf("%d crash events in the gate window; last: %s", crashes, crashDetail)
+		return rcGateReasonWorkerCrashLoop, fmt.Sprintf("%d crash events in the gate window; last: %s", crashes, crashDetail), nil
 	case degraded:
-		return rcGateReasonWorkerDegraded, firstNonEmpty(worker.ErrorMessage, string(worker.Status))
+		if staleDetail != "" && worker.ErrorMessage == rcGateStaleWorkerMessage {
+			return rcGateReasonWorkerDegraded, staleDetail, nil
+		}
+		return rcGateReasonWorkerDegraded, firstNonEmpty(worker.ErrorMessage, string(worker.Status)), nil
 	case staleDetail != "":
-		return rcGateReasonWorkerDegraded, staleDetail
+		return rcGateReasonWorkerDegraded, staleDetail, nil
 	default:
-		return "", ""
+		return "", "", nil
 	}
+}
+
+// rcGateStaleFault decides whether one worker_stale event is a worker fault.
+// A worker whose heartbeats or verifications resumed within the grace period
+// only missed a deadline. A stale burst that hits several workers in the same
+// minute is a control-plane restart, but it forgives a member only with that
+// same recovery evidence. Staleness counts when the worker never reported
+// again once the grace period has passed, or stayed silent longer than it.
+func rcGateStaleFault(db *model.DB, worker model.Worker, event model.Event, verificationTimes []time.Time, end time.Time) (string, bool, error) {
+	resumedAt, resumed, err := db.FirstHeartbeatAfter(worker.Source, worker.ID, event.CreatedAt)
+	if err != nil {
+		return "", false, fmt.Errorf("find heartbeat after stale: %w", err)
+	}
+	for _, at := range verificationTimes {
+		if at.After(event.CreatedAt) && (!resumed || at.Before(resumedAt)) {
+			resumedAt, resumed = at.UTC(), true
+		}
+	}
+	if !resumed && worker.LastHeartbeatAt != nil && worker.LastHeartbeatAt.After(event.CreatedAt) {
+		resumedAt, resumed = worker.LastHeartbeatAt.UTC(), true
+	}
+	recoveredInGrace := resumed && resumedAt.Sub(event.CreatedAt) <= rcGateStaleGrace
+	if recoveredInGrace {
+		return "", false, nil
+	}
+	if !resumed && end.Sub(event.CreatedAt) < rcGateStaleGrace {
+		return "", false, nil
+	}
+	burst, err := db.CountWorkersWithEventBetween("worker_stale", event.CreatedAt.Add(-rcGateStaleBurstWindow), event.CreatedAt.Add(rcGateStaleBurstWindow))
+	if err != nil {
+		return "", false, fmt.Errorf("count stale workers: %w", err)
+	}
+	message := firstNonEmpty(event.Message, event.EventType)
+	if burst >= rcGateStaleBurstWorkers {
+		message += fmt.Sprintf(" (control-plane restart burst of %d workers, but this worker did not recover within %s)", burst, rcGateStaleGrace)
+	}
+	if !resumed {
+		return fmt.Sprintf("%s; no heartbeat since %s", message, event.CreatedAt.UTC().Format(time.RFC3339)), true, nil
+	}
+	return fmt.Sprintf("%s; heartbeats resumed after %s", message, resumedAt.Sub(event.CreatedAt).Round(time.Minute)), true, nil
+}
+
+// rcGateCurrentlySilent reports whether a stale-degraded worker is still silent:
+// its newest heartbeat (or, failing that, its last stale event) is at least the
+// grace period old. A worker that never heartbeated and never went stale is
+// treated as silent so its degraded status stands.
+func rcGateCurrentlySilent(worker model.Worker, lastStale, end time.Time) bool {
+	switch {
+	case worker.LastHeartbeatAt != nil && worker.LastHeartbeatAt.After(lastStale):
+		return end.Sub(*worker.LastHeartbeatAt) >= rcGateStaleGrace
+	case !lastStale.IsZero():
+		return end.Sub(lastStale) >= rcGateStaleGrace
+	default:
+		return true
+	}
+}
+
+func rcGatePlannedLifecycleEvent(event model.Event) bool {
+	if event.EventType != "worker_failed" {
+		return false
+	}
+	message := strings.ToLower(event.Message)
+	for _, marker := range rcGatePlannedLifecycleMarkers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// rcGatePlannedRestarts tracks the moments a worker restarted on purpose, so
+// the single platform restart each of them causes is not counted as a crash.
+// Every signal is normalized to one planned moment: on the gate-stress worker
+// the nearest wall-clock scenario phase boundary, elsewhere the first lifecycle
+// report of that restart. A moment is planned when the worker reported a
+// lifecycle event for it, or, at a stress boundary, when the restart's own Fly
+// message is a clean exit. Each moment holds exactly one allowance, however
+// many duplicate lifecycle reports or clean-exit rows land on it.
+type rcGatePlannedRestarts struct {
+	phase    time.Duration
+	moments  []time.Time
+	forgiven map[time.Time]bool
+}
+
+func rcGatePlannedRestartsFor(worker model.Worker, events []model.Event) *rcGatePlannedRestarts {
+	planned := &rcGatePlannedRestarts{forgiven: make(map[time.Time]bool)}
+	if worker.ProfileName == gateStressProfile {
+		if phase, err := time.ParseDuration(rcGateStressPhase); err == nil && phase > 0 {
+			planned.phase = phase
+		}
+	}
+	for _, event := range events {
+		if !rcGatePlannedLifecycleEvent(event) {
+			continue
+		}
+		if moment := planned.normalize(event.CreatedAt); !slices.Contains(planned.moments, moment) {
+			planned.moments = append(planned.moments, moment)
+		}
+	}
+	return planned
+}
+
+// normalize maps a time to the planned moment it belongs to: the nearest phase
+// boundary when the worker has phases, otherwise an already-known moment within
+// the planned window, otherwise the time itself.
+func (p *rcGatePlannedRestarts) normalize(at time.Time) time.Time {
+	at = at.UTC()
+	if p.phase > 0 {
+		boundary := at.Truncate(p.phase)
+		if at.Sub(boundary) > p.phase/2 {
+			boundary = boundary.Add(p.phase)
+		}
+		return boundary
+	}
+	for _, moment := range p.moments {
+		if rcGateWithinPlannedWindow(at, moment) {
+			return moment
+		}
+	}
+	return at
+}
+
+func (p *rcGatePlannedRestarts) forgive(event model.Event) bool {
+	moment := p.normalize(event.CreatedAt)
+	if !rcGateWithinPlannedWindow(event.CreatedAt, moment) {
+		return false
+	}
+	plannedMoment := slices.Contains(p.moments, moment) || (p.phase > 0 && rcGateCleanExitMessage(event.Message))
+	if !plannedMoment || p.forgiven[moment] {
+		return false
+	}
+	p.forgiven[moment] = true
+	return true
+}
+
+func rcGateWithinPlannedWindow(at, moment time.Time) bool {
+	delta := at.Sub(moment)
+	return delta >= -rcGatePlannedRestartWindow && delta <= rcGatePlannedRestartWindow
+}
+
+var rcGateCleanExitPattern = regexp.MustCompile(`exit code:?\s*(0|143)\b`)
+
+func rcGateCleanExitMessage(message string) bool {
+	return rcGateCleanExitPattern.MatchString(strings.ToLower(message))
 }
 
 func rcGateRequiredModes(scenario gateScenario, candidate, baseline RCGateSideResult) []string {

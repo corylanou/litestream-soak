@@ -68,6 +68,31 @@ func (f gateFaultFixture) windowedEvent(source, eventType, message string, at ti
 	}
 }
 
+func (f gateFaultFixture) staleBurst(at time.Time) {
+	f.t.Helper()
+	for i, id := range []string{f.workerID(testGateCandidate), "worker-" + testGateCandidate + "-" + gateRemoteProfile, "worker-" + testGateBaseline + "-" + gateManyDB500Profile, "worker-" + testGateBaseline + "-" + gateRemoteProfile} {
+		if err := f.db.RecordEventAt(id, "worker_stale", "Worker missed heartbeat deadline", "", at.Add(time.Duration(i)*time.Second)); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+}
+
+func (f gateFaultFixture) heartbeatNow(source string) {
+	f.t.Helper()
+	id := f.workerID(source)
+	if err := f.db.UpdateWorkerHeartbeat(id); err != nil {
+		f.t.Fatal(err)
+	}
+	worker, err := f.db.GetWorker(id)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	identity := reporting.WorkerIdentity{WorkerID: id, Name: id, Source: source, GitSHA: worker.GitSHA, LitestreamSHA: worker.LitestreamSHA, ProfileName: worker.ProfileName}
+	if err := f.db.RecordRuntimeEvidence(identity, []byte(`{"uptime_seconds":1}`), true, "heartbeat"); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
 func (f gateFaultFixture) verification(source string, passed bool) {
 	f.t.Helper()
 	recordGateVerification(f.t, f.db, source, gateLargeDBProfile, "", passed, f.gate.StartedAt.Add(time.Hour))
@@ -159,6 +184,109 @@ func TestRCGateWorkerFaultsScoreAsHardFailures(t *testing.T) {
 			verdict:       rcGateVerdictRegression,
 			gateVerdict:   rcGateVerdictFail,
 			detailContain: staleMessage,
+		},
+		{
+			name: "control-plane restart stale burst followed by recovery is not a fault",
+			arrange: func(f gateFaultFixture) {
+				f.litestreamRan(testGateCandidate)
+				f.staleBurst(f.now.Add(-12 * time.Minute))
+				f.heartbeatNow(testGateCandidate)
+				f.verification(testGateCandidate, true)
+				f.verification(testGateBaseline, true)
+			},
+			candidate:   side{rcGateSidePassing, ""},
+			baseline:    side{rcGateSidePassing, ""},
+			verdict:     rcGateVerdictPass,
+			gateVerdict: rcGateVerdictIncomplete,
+		},
+		{
+			name: "stale burst member that never recovered is a fault",
+			arrange: func(f gateFaultFixture) {
+				f.litestreamRan(testGateCandidate)
+				f.staleBurst(f.now.Add(-45 * time.Minute))
+				f.status(testGateCandidate, model.WorkerDegraded, "worker missed heartbeat deadline")
+				f.heartbeatNow(testGateBaseline)
+				f.verification(testGateCandidate, true)
+				f.verification(testGateBaseline, true)
+			},
+			candidate:     side{rcGateSideFailing, rcGateReasonWorkerDegraded},
+			baseline:      side{rcGateSidePassing, ""},
+			verdict:       rcGateVerdictRegression,
+			gateVerdict:   rcGateVerdictFail,
+			detailContain: "did not recover",
+		},
+		{
+			name: "stale burst member that stayed silent past the grace period is a fault",
+			arrange: func(f gateFaultFixture) {
+				f.litestreamRan(testGateCandidate)
+				f.staleBurst(f.now.Add(-45 * time.Minute))
+				f.heartbeatNow(testGateCandidate)
+				f.heartbeatNow(testGateBaseline)
+				f.verification(testGateCandidate, true)
+				f.verification(testGateBaseline, true)
+			},
+			candidate:     side{rcGateSideFailing, rcGateReasonWorkerDegraded},
+			baseline:      side{rcGateSidePassing, ""},
+			verdict:       rcGateVerdictRegression,
+			gateVerdict:   rcGateVerdictFail,
+			detailContain: "heartbeats resumed after",
+		},
+		{
+			name: "single stale that recovered within the grace period is not a fault",
+			arrange: func(f gateFaultFixture) {
+				f.litestreamRan(testGateCandidate)
+				f.event(testGateCandidate, "worker_stale", staleMessage, f.now.Add(-10*time.Minute))
+				f.heartbeatNow(testGateCandidate)
+				f.verification(testGateCandidate, true)
+				f.verification(testGateBaseline, true)
+			},
+			candidate:   side{rcGateSidePassing, ""},
+			baseline:    side{rcGateSidePassing, ""},
+			verdict:     rcGateVerdictPass,
+			gateVerdict: rcGateVerdictIncomplete,
+		},
+		{
+			name: "single stale that stayed silent past the grace period is a fault",
+			arrange: func(f gateFaultFixture) {
+				f.litestreamRan(testGateCandidate)
+				f.event(testGateCandidate, "worker_stale", staleMessage, f.now.Add(-45*time.Minute))
+				f.heartbeatNow(testGateCandidate)
+				f.verification(testGateCandidate, true)
+				f.verification(testGateBaseline, true)
+			},
+			candidate:     side{rcGateSideFailing, rcGateReasonWorkerDegraded},
+			baseline:      side{rcGateSidePassing, ""},
+			verdict:       rcGateVerdictRegression,
+			gateVerdict:   rcGateVerdictFail,
+			detailContain: "heartbeats resumed after",
+		},
+		{
+			name: "recent stale without recovery yet is not a fault",
+			arrange: func(f gateFaultFixture) {
+				f.litestreamRan(testGateCandidate)
+				f.event(testGateCandidate, "worker_stale", staleMessage, f.now.Add(-5*time.Minute))
+				f.status(testGateCandidate, model.WorkerDegraded, "worker missed heartbeat deadline")
+				f.verification(testGateCandidate, true)
+				f.verification(testGateBaseline, true)
+			},
+			candidate:   side{rcGateSidePassing, ""},
+			baseline:    side{rcGateSidePassing, ""},
+			verdict:     rcGateVerdictPass,
+			gateVerdict: rcGateVerdictIncomplete,
+		},
+		{
+			name: "stale-degraded status while heartbeating is not a fault",
+			arrange: func(f gateFaultFixture) {
+				f.litestreamRan(testGateCandidate)
+				f.status(testGateCandidate, model.WorkerDegraded, "worker missed heartbeat deadline")
+				f.heartbeatNow(testGateCandidate)
+				f.verification(testGateCandidate, true)
+				f.verification(testGateBaseline, true)
+			},
+			candidate:   side{rcGateSidePassing, ""},
+			baseline:    side{rcGateSidePassing, ""},
+			verdict:     rcGateVerdictPass,
+			gateVerdict: rcGateVerdictIncomplete,
 		},
 		{
 			name: "degraded status without events",
@@ -596,6 +724,179 @@ func TestUpgradeGateWorkerFaultsUseTheSameRules(t *testing.T) {
 				if want := tt.wantReason[scenario.Scenario]; scenario.Candidate.Reason != want {
 					t.Fatalf("%s candidate reason = %q, want %q: %+v", scenario.Scenario, scenario.Candidate.Reason, want, scenario.Candidate)
 				}
+			}
+		})
+	}
+}
+
+func TestRCGateStressPlannedPhaseRestartsAreNotCrashes(t *testing.T) {
+	phase, err := time.ParseDuration(rcGateStressPhase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		phaseEnded = "stress scenario phase ended"
+		exitOne    = "Fly platform event: main child exited with exit code: 1"
+	)
+	tests := []struct {
+		name       string
+		arrange    func(db *model.DB, workerID string, boundary time.Time)
+		wantStatus string
+		wantReason string
+	}{
+		{
+			name: "phase-end worker_failed plus the restart it causes",
+			arrange: func(db *model.DB, workerID string, boundary time.Time) {
+				for _, at := range []time.Time{boundary.Add(15 * time.Second), boundary.Add(15*time.Second + time.Millisecond)} {
+					if err := db.RecordEventAt(workerID, "worker_failed", phaseEnded, "", at); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for _, at := range []time.Time{boundary.Add(40 * time.Second), boundary.Add(95 * time.Second)} {
+					if _, err := db.RecordWindowedEventAt(workerID, "platform_restart", exitOne, `{"line":"`+at.Format(time.RFC3339Nano)+`"}`, at, platformEventCoalesceWindow); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			wantStatus: rcGateSidePassing,
+		},
+		{
+			name: "clean exit at the wall-clock phase boundary without a planned event",
+			arrange: func(db *model.DB, workerID string, boundary time.Time) {
+				record := func(at time.Time, message string) {
+					if _, err := db.RecordWindowedEventAt(workerID, "platform_restart", message, `{"line":"`+at.Format(time.RFC3339Nano)+`"}`, at, platformEventCoalesceWindow); err != nil {
+						t.Fatal(err)
+					}
+				}
+				record(boundary.Add(20*time.Second), "Fly platform event: main child exited with exit code: 0")
+				record(boundary.Add(-3*time.Hour), exitOne)
+			},
+			wantStatus: rcGateSidePassing,
+		},
+		{
+			name: "unclean restarts at the boundary without a planned event are a crash loop",
+			arrange: func(db *model.DB, workerID string, boundary time.Time) {
+				for _, at := range []time.Time{boundary.Add(-30 * time.Second), boundary.Add(2 * time.Minute)} {
+					if _, err := db.RecordWindowedEventAt(workerID, "platform_restart", exitOne, `{"line":"`+at.Format(time.RFC3339Nano)+`"}`, at, platformEventCoalesceWindow); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			wantStatus: rcGateSideFailing,
+			wantReason: rcGateReasonWorkerCrashLoop,
+		},
+		{
+			name: "genuine crash loop after the planned phase restart",
+			arrange: func(db *model.DB, workerID string, boundary time.Time) {
+				if err := db.RecordEventAt(workerID, "worker_failed", phaseEnded, "", boundary.Add(15*time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				for _, at := range []time.Time{boundary.Add(40 * time.Second), boundary.Add(3 * time.Minute), boundary.Add(6 * time.Minute)} {
+					if _, err := db.RecordWindowedEventAt(workerID, "platform_restart", exitOne, `{"line":"`+at.Format(time.RFC3339Nano)+`"}`, at, platformEventCoalesceWindow); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			wantStatus: rcGateSideFailing,
+			wantReason: rcGateReasonWorkerCrashLoop,
+		},
+		{
+			name: "duplicate lifecycle reports share one allowance per boundary",
+			arrange: func(db *model.DB, workerID string, boundary time.Time) {
+				for _, at := range []time.Time{boundary.Add(15 * time.Second), boundary.Add(15*time.Second + time.Millisecond), boundary.Add(16 * time.Second)} {
+					if err := db.RecordEventAt(workerID, "worker_failed", phaseEnded, "", at); err != nil {
+						t.Fatal(err)
+					}
+				}
+				record := func(at time.Time, message string) {
+					if _, err := db.RecordWindowedEventAt(workerID, "platform_restart", message, `{"line":"`+at.Format(time.RFC3339Nano)+`"}`, at, platformEventCoalesceWindow); err != nil {
+						t.Fatal(err)
+					}
+				}
+				record(boundary.Add(20*time.Second), "Fly platform event: main child exited with exit code: 0")
+				record(boundary.Add(40*time.Second), exitOne)
+				record(boundary.Add(4*time.Minute), "Fly platform event: main child exited with exit code: 2")
+			},
+			wantStatus: rcGateSideFailing,
+			wantReason: rcGateReasonWorkerCrashLoop,
+		},
+		{
+			name: "terminal exit near the boundary still counts",
+			arrange: func(db *model.DB, workerID string, boundary time.Time) {
+				if err := db.RecordEventAt(workerID, "worker_failed", phaseEnded, "", boundary.Add(15*time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.RecordWindowedEventAt(workerID, "platform_restart", "Fly platform event: machine exited with exit code 1, not restarting", `{"line":"terminal"}`, boundary.Add(time.Minute), platformEventCoalesceWindow); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantStatus: rcGateSideFailing,
+			wantReason: rcGateReasonWorkerCrashLoop,
+		},
+		{
+			name: "restarts away from any boundary stay a crash loop",
+			arrange: func(db *model.DB, workerID string, boundary time.Time) {
+				for _, at := range []time.Time{boundary.Add(-3 * time.Hour), boundary.Add(-2*time.Hour - 30*time.Minute)} {
+					if _, err := db.RecordWindowedEventAt(workerID, "platform_restart", exitOne, `{"line":"`+at.Format(time.RFC3339Nano)+`"}`, at, platformEventCoalesceWindow); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			wantStatus: rcGateSideFailing,
+			wantReason: rcGateReasonWorkerCrashLoop,
+		},
+		{
+			name: "a real worker_failed near the boundary still counts",
+			arrange: func(db *model.DB, workerID string, boundary time.Time) {
+				for _, at := range []time.Time{boundary.Add(20 * time.Second), boundary.Add(4 * time.Minute)} {
+					if err := db.RecordEventAt(workerID, "worker_failed", "wait for first sync: litestream exited: exit status 2", "", at); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			wantStatus: rcGateSideFailing,
+			wantReason: rcGateReasonWorkerCrashLoop,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := openTestDB(t)
+			now := time.Now().UTC()
+			gate := registerTestGate(t, db, false, now.Add(-10*time.Hour))
+			createTestGateFleet(t, db, gate)
+			boundary := now.Add(-time.Hour).Truncate(phase)
+			if boundary.Before(gate.StartedAt.Add(4 * time.Hour)) {
+				boundary = boundary.Add(phase)
+			}
+			if boundary.After(now) || boundary.Before(gate.StartedAt) {
+				t.Fatalf("no usable phase boundary between %s and %s", gate.StartedAt, now)
+			}
+			workerID := "worker-" + testGateCandidate + "-" + gateStressProfile
+			tt.arrange(db, workerID, boundary)
+			for _, scenario := range []string{"overload-truncate0", "pinned-reader"} {
+				recordGateVerification(t, db, testGateCandidate, gateStressProfile, scenario, true, gate.StartedAt.Add(time.Hour))
+				recordGateVerification(t, db, testGateBaseline, gateStressProfile, scenario, true, gate.StartedAt.Add(time.Hour))
+			}
+			stored, err := db.GetRCGate(gate.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry, err := buildRCGateLedgerEntry(db, *stored, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen := 0
+			for _, scenario := range entry.Scenarios {
+				if scenario.Profile != gateStressProfile {
+					continue
+				}
+				seen++
+				if scenario.Candidate.Status != tt.wantStatus || scenario.Candidate.Reason != tt.wantReason {
+					t.Fatalf("%s candidate = %+v, want %s/%q", scenario.Scenario, scenario.Candidate, tt.wantStatus, tt.wantReason)
+				}
+			}
+			if seen != 2 {
+				t.Fatalf("stress scenarios = %d", seen)
 			}
 		})
 	}
