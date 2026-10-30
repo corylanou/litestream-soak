@@ -43,6 +43,7 @@ type VerificationResult struct {
 	CheckpointResidualBusy            bool
 	RestoreMode                       string
 	RestoreModeFallback               string
+	InconclusiveClassification        *reporting.FailureClassification
 }
 
 type verificationStepMetadataError struct {
@@ -744,6 +745,12 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		return false, err
 	}
 	defer cleanupConfig()
+	if err := v.runValidationPhase(ctx, "restore_preflight", v.cfg.verificationPhaseBudget("restore_preflight", sourceSize), func(context.Context) error {
+		return checkRestoreCapacity(restoredPath, sourceSize)
+	}); err != nil {
+		v.logicalEvidence += " restore_capacity=insufficient"
+		return false, err
+	}
 	var restoreEvidence restoreOutput
 	restoreErr := v.runValidationPhase(ctx, "restore", v.cfg.verificationPhaseBudget("restore", sourceSize), func(phaseCtx context.Context) error {
 		args := restoreArgs(configPath, mode, source.txid, target, restoredPath, sourcePath)
@@ -785,6 +792,10 @@ func (v *Verifier) validateDBResult(ctx context.Context, sourcePath, restoredPat
 		case reporting.RestoreRequestCanceled(metadata.err.Error()):
 			v.logicalEvidence += " object_store=request_canceled"
 			metadata.err = &restoreEvidenceInconclusiveError{err: metadata.err}
+		case reporting.RestoreOutputDiskFull(metadata.err.Error()):
+			v.logicalEvidence += " restore_capacity=exhausted"
+			free, _ := restoreFreeBytes(filepath.Dir(restoredPath))
+			metadata.err = &restoreCapacityInconclusiveError{err: metadata.err, neededBytes: restoreNeededBytes(sourceSize), freeBytes: free}
 		}
 		return metadata
 	})

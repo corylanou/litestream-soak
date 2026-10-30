@@ -426,6 +426,75 @@ func TestHandleVerificationPinnedRestoreTargetUnavailableIsInconclusive(t *testi
 	}
 }
 
+func TestHandleVerificationRestoreOutputDiskFullIsHarnessInconclusive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		message      string
+		inconclusive bool
+	}{
+		{name: "restore tmp enospc", message: "restore failed: validation failed (exit 1): Error: decode database: write page 501132: write /data/scenarios/overload-truncate0/test.db.restored.tmp: no space left on device", inconclusive: true},
+		{name: "wal enospc", message: "restore failed: validation failed (exit 1): Error: write /data/scenarios/overload-truncate0/test.db-wal: no space left on device"},
+		{name: "litestream staging enospc", message: "wait for sync: disk full while staging ltx file: write /data/.test.db-litestream/ltx/0/0000000000000042.ltx: no space left on device"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := openTestDB(t)
+			workerID := "worker-restore-capacity"
+			createTestWorker(t, db, model.Worker{ID: workerID, Name: workerID, Status: model.WorkerRunning, Source: "main", GitSHA: "abc123", LitestreamSHA: "ls123", ProfileName: "gate-stress", ProfileConfig: "{}"})
+			api := NewAPI(db, nil, nil, nil, &Manager{db: db, appName: "litestream-soak"}, nil)
+			completedAt := time.Now().UTC().Add(-time.Hour)
+			payload := reporting.VerificationPayload{
+				WorkerIdentity:        reporting.WorkerIdentity{WorkerID: workerID, Name: workerID, Source: "main", GitSHA: "abc123", LitestreamSHA: "ls123", ProfileName: "gate-stress", ProfileConfig: "{}"},
+				StartedAt:             completedAt.Add(-time.Minute),
+				CompletedAt:           completedAt,
+				CheckType:             "restore_validate",
+				Status:                "failed",
+				Summary:               "restore failed",
+				ErrorMessage:          tt.message,
+				FailureClassification: &reporting.FailureClassification{Stage: "disk_capacity", Signature: "disk_capacity_full", RestoreMode: "txid"},
+				RestoreMode:           "txid",
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/api/workers/"+workerID+"/verifications", bytes.NewReader(body))
+			request.SetPathValue("id", workerID)
+			recorder := httptest.NewRecorder()
+			api.handleVerification(recorder, request)
+			if recorder.Code != http.StatusAccepted {
+				t.Fatalf("status code = %d; body: %s", recorder.Code, recorder.Body.String())
+			}
+			verifications, err := db.ListVerifications(workerID, 10)
+			if err != nil || len(verifications) != 1 {
+				t.Fatalf("ListVerifications() = %+v, %v", verifications, err)
+			}
+			verification := verifications[0]
+			worker, err := db.GetWorker(workerID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tt.inconclusive {
+				if !verification.Failed() || verification.FailureClassification == nil || verification.FailureClassification.Signature != "disk_capacity_full" || worker.Status != model.WorkerDegraded {
+					t.Fatalf("disk failure not counted: %+v status=%q", verification, worker.Status)
+				}
+				return
+			}
+			if verification.Status != "aborted" || !verification.Inconclusive() || verification.Failed() || verification.FailureClassification == nil ||
+				verification.FailureClassification.Stage != reporting.StageHarnessCapacity || verification.FailureClassification.Signature != reporting.SignatureHarnessCapacityInconclusive {
+				t.Fatalf("verification = %+v, want aborted with harness capacity classification", verification)
+			}
+			if worker.Status != model.WorkerRunning || worker.ErrorMessage != "" {
+				t.Fatalf("worker = %q %q, want untouched running worker", worker.Status, worker.ErrorMessage)
+			}
+		})
+	}
+}
+
 func TestHandleVerificationRestoreRequestCanceledIsInconclusive(t *testing.T) {
 	t.Parallel()
 

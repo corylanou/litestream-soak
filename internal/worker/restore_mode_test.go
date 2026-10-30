@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -491,6 +492,78 @@ func TestVerifierPinnedRestoreTargetUnavailableIsInconclusive(t *testing.T) {
 			}
 			if classification := NewRunner(DefaultConfig()).failureClassification(result); classification != nil {
 				t.Fatalf("inconclusive result classified as failure: %+v", classification)
+			}
+		})
+	}
+}
+
+func TestVerifierRestoreCapacityIsHarnessInconclusive(t *testing.T) {
+	const (
+		restoreTmpENOSPC = "Error: decode database: write page 501132: write /data/scenarios/overload-truncate0/test.db.restored.tmp: no space left on device"
+		walENOSPC        = "Error: write /data/scenarios/overload-truncate0/test.db-wal: no space left on device"
+		stagingENOSPC    = "Error: disk full while staging ltx file: write /data/.test.db-litestream/ltx/0/0000000000000042.ltx: no space left on device"
+	)
+	tests := []struct {
+		name         string
+		freeBytes    uint64
+		script       string
+		wantStatus   string
+		wantHarness  bool
+		wantEvidence string
+		wantRan      bool
+	}{
+		{name: "preflight skips the restore when space is short", freeBytes: 1 << 20, script: "exit 0\n", wantStatus: "aborted", wantHarness: true, wantEvidence: "restore_capacity=insufficient"},
+		{name: "preflight passes with enough space", freeBytes: 1 << 40, script: "exit 0\n", wantStatus: "passed", wantRan: true},
+		{name: "restore tmp enospc mid-write is harness inconclusive", freeBytes: 1 << 40, script: "echo '" + restoreTmpENOSPC + "' >&2\nexit 1\n", wantStatus: "aborted", wantHarness: true, wantEvidence: "restore_capacity=exhausted", wantRan: true},
+		{name: "wal enospc stays a failure", freeBytes: 1 << 40, script: "echo '" + walENOSPC + "' >&2\nexit 1\n", wantStatus: "failed", wantRan: true},
+		{name: "litestream staging enospc stays a failure", freeBytes: 1 << 40, script: "echo '" + stagingENOSPC + "' >&2\nexit 1\n", wantStatus: "failed", wantRan: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			previous := restoreFreeBytes
+			restoreFreeBytes = func(string) (uint64, error) { return tt.freeBytes, nil }
+			t.Cleanup(func() { restoreFreeBytes = previous })
+			cfg, argsPath := restoreModeFixture(t, tt.script)
+			writeLocalL0(t, cfg.DBPath, 0x40, 0x42, time.Date(2026, 10, 30, 2, 36, 0, 0, time.UTC))
+			startBoundarySyncFixture(t, &cfg, 0x42)
+			v := NewVerifier(cfg)
+			result := VerificationResult{SyncTXID: 0x42, RestoreMode: "txid"}
+			passed, err := v.validateDBResult(context.Background(), cfg.DBPath, cfg.DBPath+".restored", &result)
+			if _, statErr := os.Stat(argsPath); (statErr == nil) != tt.wantRan {
+				t.Fatalf("restore ran = %v, want %v", statErr == nil, tt.wantRan)
+			}
+			if tt.wantStatus == "passed" {
+				if err != nil || !passed {
+					t.Fatalf("validateDBResult() = %v, %v; want pass", passed, err)
+				}
+				return
+			}
+			if err == nil || passed {
+				t.Fatalf("validateDBResult() = %v, %v; want failure", passed, err)
+			}
+			v.failValidationResult(context.Background(), &result, err)
+			if result.Status != tt.wantStatus {
+				t.Fatalf("status = %q, want %q (%s)", result.Status, tt.wantStatus, result.ErrorMessage)
+			}
+			classification := NewRunner(DefaultConfig()).failureClassification(result)
+			if !tt.wantHarness {
+				if classification == nil || classification.Signature != "disk_capacity_full" {
+					t.Fatalf("classification = %+v, want disk_capacity_full failure", classification)
+				}
+				return
+			}
+			if !strings.HasPrefix(result.Summary, "verification inconclusive:") || !strings.Contains(v.logicalEvidence, tt.wantEvidence) {
+				t.Fatalf("summary %q evidence %q, want inconclusive with %s", result.Summary, v.logicalEvidence, tt.wantEvidence)
+			}
+			if classification == nil || classification.Stage != reporting.StageHarnessCapacity || classification.Signature != reporting.SignatureHarnessCapacityInconclusive || classification.RestoreMode != "txid" {
+				t.Fatalf("classification = %+v, want harness capacity", classification)
+			}
+			var capacity *restoreCapacityInconclusiveError
+			if !errors.As(err, &capacity) || capacity.neededBytes == 0 {
+				t.Fatalf("error %v does not carry the capacity estimate", err)
+			}
+			if tt.wantEvidence == "restore_capacity=insufficient" && (capacity.freeBytes != tt.freeBytes || !strings.Contains(result.ErrorMessage, "bytes are free")) {
+				t.Fatalf("preflight error = %q free=%d", result.ErrorMessage, capacity.freeBytes)
 			}
 		})
 	}

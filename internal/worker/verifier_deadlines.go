@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 func verificationPhaseBudget(floor time.Duration, size int64) time.Duration {
@@ -99,7 +101,11 @@ func (v *Verifier) failValidationResult(ctx context.Context, result *Verificatio
 	var deadline *verifierDeadlineError
 	var boundary *unreplicatedBoundaryError
 	var evidence *restoreEvidenceInconclusiveError
-	if (errors.As(err, &deadline) || errors.As(err, &boundary) || errors.As(err, &evidence)) && result.Status != "aborted" {
+	var capacity *restoreCapacityInconclusiveError
+	if errors.As(err, &capacity) {
+		result.InconclusiveClassification = reporting.HarnessCapacityClassification(result.RestoreMode)
+	}
+	if (errors.As(err, &deadline) || errors.As(err, &boundary) || errors.As(err, &evidence) || capacity != nil) && result.Status != "aborted" {
 		result.Status = "aborted"
 		result.Summary = "verification inconclusive: " + summarizeVerificationMessage(err.Error())
 	}

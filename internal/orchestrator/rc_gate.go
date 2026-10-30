@@ -516,7 +516,7 @@ func rcGateWorkers() []DesiredWorker {
 			Name:         "worker-gate-stress",
 			ProfileName:  gateStressProfile,
 			Region:       "ord",
-			VolumeSizeGB: 10,
+			VolumeSizeGB: 20,
 			Workload: workload.Config{
 				LoadMode:            "synthetic",
 				WriteRate:           600,
@@ -534,7 +534,7 @@ func rcGateWorkers() []DesiredWorker {
 				TruncatePageN:       intPtr(0),
 				StressScenarios:     "overload-truncate0,pinned-reader",
 				StressScenarioPhase: rcGateStressPhase,
-				VolumeSizeGB:        10,
+				VolumeSizeGB:        20,
 				MemoryMB:            2048,
 				CPUs:                2,
 			},
@@ -763,10 +763,20 @@ func gateHasProfile(gate model.RCGate, profile string) bool {
 // applyGateWorkload overrides the fleet defaults with the per-gate settings an
 // operator chose at registration, so the attested profile config matches what
 // the worker actually runs.
+// applyGateWorkload pins a gate's workers to what was registered for it: the
+// registered warm-up on the upgrade lane, and the volume size recorded in the
+// gate's resources, so a later change to the fleet defaults (such as a larger
+// gate-stress volume) applies to new gates only and never drifts a running one.
 func applyGateWorkload(gate model.RCGate, spec FleetSpec) FleetSpec {
 	for i := range spec.Workers {
 		if spec.Workers[i].Workload.UpgradeLane && gate.UpgradeWarmup > 0 {
 			spec.Workers[i].Workload.UpgradeWarmup = gate.UpgradeWarmup.String()
+		}
+		for _, resource := range gate.Resources {
+			if resource.Source == spec.Workers[i].Source && resource.Profile == spec.Workers[i].ProfileName && resource.VolumeGB > 0 {
+				spec.Workers[i].VolumeSizeGB = resource.VolumeGB
+				spec.Workers[i].Workload.VolumeSizeGB = resource.VolumeGB
+			}
 		}
 	}
 	return spec

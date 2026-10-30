@@ -67,7 +67,7 @@ func TestGateFleetSpecHasFourSizedWorkersPerSource(t *testing.T) {
 		volumeGB int
 	}
 	want := map[string]size{
-		gateStressProfile:    {"ord", 2, 2048, 10},
+		gateStressProfile:    {"ord", 2, 2048, 20},
 		gateManyDB500Profile: {"ord", 2, 3072, 15},
 		gateLargeDBProfile:   {"ord", 2, 4096, 40},
 		gateRemoteProfile:    {"ams", 1, 1024, 10},
@@ -317,8 +317,8 @@ func TestGateDeploymentReadyPinsImmutableBuild(t *testing.T) {
 	for _, volume := range fly.volumeRequests() {
 		volumes += volume.SizeGB
 	}
-	if volumes != 75 {
-		t.Fatalf("total volume GB = %d, want 75", volumes)
+	if volumes != 85 {
+		t.Fatalf("total volume GB = %d, want 85", volumes)
 	}
 }
 
@@ -481,7 +481,7 @@ func TestRCGateLedgerEndpoint(t *testing.T) {
 	if !entry.ExpiresAt.Equal(entry.StartedAt.Add(72*time.Hour)) || entry.TailExpiresAt == nil || !entry.TailExpiresAt.Equal(entry.StartedAt.Add(rcGateTailDuration)) {
 		t.Fatalf("entry times = %+v", entry)
 	}
-	if len(entry.Resources) != 8 || entry.TotalVolumeGB != 150 || entry.TotalMachines != 8 {
+	if len(entry.Resources) != 8 || entry.TotalVolumeGB != 170 || entry.TotalMachines != 8 {
 		t.Fatalf("resources = %d volume %d machines %d", len(entry.Resources), entry.TotalVolumeGB, entry.TotalMachines)
 	}
 	for _, resource := range entry.Resources {

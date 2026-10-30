@@ -277,11 +277,16 @@ func normalizeInconclusiveRestoreFailure(payload *reporting.VerificationPayload)
 	if payload.Passed || verificationStatusAborted(payload.Status) || (model.Verification{Status: payload.Status}).Pending() {
 		return
 	}
-	if !reporting.PinnedRestoreTargetUnavailable(payload.RestoreMode, payload.ErrorMessage) && !reporting.RestoreRequestCanceled(payload.ErrorMessage) {
+	var classification *reporting.FailureClassification
+	switch {
+	case reporting.RestoreOutputDiskFull(payload.ErrorMessage):
+		classification = reporting.HarnessCapacityClassification(payload.RestoreMode)
+	case reporting.PinnedRestoreTargetUnavailable(payload.RestoreMode, payload.ErrorMessage), reporting.RestoreRequestCanceled(payload.ErrorMessage):
+	default:
 		return
 	}
 	payload.Status = "aborted"
-	payload.FailureClassification = nil
+	payload.FailureClassification = classification
 	payload.FailureDebug = nil
 	if !strings.HasPrefix(payload.Summary, "verification inconclusive:") {
 		payload.Summary = "verification inconclusive: " + firstNonEmpty(payload.Summary, payload.ErrorMessage)

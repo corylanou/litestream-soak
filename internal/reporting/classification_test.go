@@ -593,6 +593,35 @@ func TestPinnedRestoreTargetUnavailable(t *testing.T) {
 	}
 }
 
+func TestRestoreOutputDiskFull(t *testing.T) {
+	for _, tc := range []struct {
+		name, message string
+		want          bool
+	}{
+		{"restore tmp page write", "restore failed: validation failed (exit 1): Error: decode database: write page 501132: write /data/scenarios/overload-truncate0/test.db.restored.tmp: no space left on device", true},
+		{"restore target write", "restore failed: validation failed (exit 1): Error: write /data/test.db.restored: no space left on device", true},
+		{"restore tmp create", "restore failed: validation failed (exit 1): Error: create /data/test.db.restored.tmp: no space left on device", true},
+		{"wal write", "restore failed: validation failed (exit 1): Error: write /data/test.db-wal: no space left on device", false},
+		{"source db write", "populate: write /data/test.db: no space left on device", false},
+		{"litestream staging", "wait for sync: disk full while staging ltx file: write /data/.test.db-litestream/ltx/0/0000000000000042.ltx: no space left on device", false},
+		{"replica sync", "replica sync: write /data/.test.db-litestream/ltx/1/x.ltx: no space left on device", false},
+		{"database or disk is full", "restore failed: integrity check: database or disk is full", false},
+		{"restore tmp other error", "restore failed: validation failed (exit 1): Error: write /data/test.db.restored.tmp: input/output error", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RestoreOutputDiskFull(tc.message); got != tc.want {
+				t.Fatalf("RestoreOutputDiskFull() = %v, want %v", got, tc.want)
+			}
+			if classification := ClassifyVerificationFailure("restore_validate", tc.message); tc.want && classification.Signature != "disk_capacity_full" {
+				t.Fatalf("classifier signature = %q, want disk_capacity_full for the raw failure", classification.Signature)
+			}
+		})
+	}
+	if c := HarnessCapacityClassification("txid"); !c.Valid() || c.Stage != StageHarnessCapacity || c.Signature != SignatureHarnessCapacityInconclusive || c.RestoreMode != "txid" {
+		t.Fatalf("harness capacity classification = %+v", c)
+	}
+}
+
 func TestRestoreRequestCanceled(t *testing.T) {
 	const (
 		listCanceled = "restore failed: validation failed (exit 1): Error: cannot calc restore plan: operation error S3: ListObjectsV2, exceeded maximum number of attempts, 10, https response error StatusCode: 408, RequestID: 1761761212849403, HostID: , api error RequestCanceled: Request is canceled."
