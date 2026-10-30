@@ -556,6 +556,68 @@ func TestEstimateRestoreOutputBytesIgnoresRewrittenWALPages(t *testing.T) {
 	}
 }
 
+func TestEstimateRestoreOutputBytesIgnoresStaleWALGenerations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reset.db")
+	writer, err := sql.Open("sqlite", walDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	writer.SetMaxOpenConns(1)
+	if _, err := writer.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, payload BLOB)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Exec("INSERT INTO t (id, payload) VALUES (1, ?)", make([]byte, 64)); err != nil {
+		t.Fatal(err)
+	}
+	for round := range 300 {
+		if _, err := writer.Exec("UPDATE t SET payload = ? WHERE id = 1", []byte{byte(round)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	staleWAL := fileSize(path + "-wal")
+	var busy, logged, checkpointed int
+	if err := writer.QueryRow("PRAGMA wal_checkpoint(RESTART)").Scan(&busy, &logged, &checkpointed); err != nil || busy != 0 {
+		t.Fatalf("restart checkpoint = busy %d logged %d checkpointed %d, %v", busy, logged, checkpointed, err)
+	}
+	smallDB := fileSize(path)
+	tx, err := writer.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 2; i <= 150; i++ {
+		if _, err := tx.Exec("INSERT INTO t (id, payload) VALUES (?, ?)", i, make([]byte, 3000)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var pageCount, pageSize int64
+	if err := writer.QueryRow("PRAGMA page_count").Scan(&pageCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
+		t.Fatal(err)
+	}
+	logical := pageCount * pageSize
+	if walSize := fileSize(path + "-wal"); walSize != staleWAL || logical <= smallDB*4 {
+		t.Fatalf("fixture did not reuse the WAL in place: wal before %d after %d, small db %d, logical %d", staleWAL, walSize, smallDB, logical)
+	}
+	if estimate := estimateRestoreOutputBytes(path); estimate != logical {
+		t.Fatalf("estimate = %d, want the logical size %d (stale frames would give about %d)", estimate, logical, smallDB)
+	}
+	if _, err := writer.Exec("PRAGMA wal_checkpoint(RESTART)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Exec("DELETE FROM t WHERE id > 1"); err != nil {
+		t.Fatal(err)
+	}
+	if estimate, dbSize := estimateRestoreOutputBytes(path), fileSize(path); estimate < dbSize {
+		t.Fatalf("estimate %d fell below the main file size %d", estimate, dbSize)
+	}
+}
+
 func TestVerifierRestoreCapacityIsHarnessInconclusive(t *testing.T) {
 	const (
 		restoreTmpENOSPC = "Error: decode database: write page 501132: write /data/scenarios/overload-truncate0/test.db.restored.tmp: no space left on device"

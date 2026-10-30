@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -59,7 +60,9 @@ func removeAbandonedRestoreOutput(restoredPath string) error {
 // sourcePath produces. The WAL may rewrite the same pages many times, so the
 // physical WAL size overstates the result; the logical size is the largest of
 // the main file, the page count the database header declares, and the
-// database size the newest WAL commit frame records, each in whole pages.
+// database size the newest valid WAL commit frame records, each in whole
+// pages. The main file size is always a floor, so the estimate can never be
+// lower than the database already on disk.
 func estimateRestoreOutputBytes(sourcePath string) int64 {
 	dbSize := fileSize(sourcePath)
 	estimate := dbSize
@@ -94,30 +97,54 @@ func sqliteHeaderGeometry(path string) (pageSize, pages int64) {
 }
 
 // sqliteWALCommittedPages returns the database size in pages recorded by the
-// newest commit frame in the WAL, which is the logical size of the database
-// once that WAL is applied.
+// newest valid commit frame in the WAL, which is the logical size of the
+// database once that WAL is applied. It follows SQLite's own recovery rules:
+// the header checksum must verify, and frames count only while their salts
+// match the header and the cumulative checksum chain holds. SQLite restarts a
+// WAL in place after a checkpoint, so frames past the first invalid one are
+// stale leftovers from an older generation and are ignored.
 func sqliteWALCommittedPages(walPath string, pageSize int64) int64 {
 	f, err := os.Open(walPath)
 	if err != nil {
 		return 0
 	}
 	defer func() { _ = f.Close() }()
+	reader := bufio.NewReaderSize(f, 1<<20)
 	header := make([]byte, sqliteWALHeaderLen)
-	if _, err := io.ReadFull(f, header); err != nil {
+	if _, err := io.ReadFull(reader, header); err != nil {
 		return 0
 	}
 	magic := binary.BigEndian.Uint32(header[0:4])
-	if magic != 0x377f0682 && magic != 0x377f0683 {
+	var order binary.ByteOrder
+	switch magic {
+	case 0x377f0682:
+		order = binary.LittleEndian
+	case 0x377f0683:
+		order = binary.BigEndian
+	default:
 		return 0
 	}
 	walPageSize := int64(binary.BigEndian.Uint32(header[8:12]))
 	if walPageSize <= 0 || (pageSize > 0 && walPageSize != pageSize) {
 		return 0
 	}
-	frame := make([]byte, sqliteWALFrameLen)
+	salt1, salt2 := binary.BigEndian.Uint32(header[16:20]), binary.BigEndian.Uint32(header[20:24])
+	sum1, sum2 := sqliteWALChecksum(order, 0, 0, header[:24])
+	if sum1 != binary.BigEndian.Uint32(header[24:28]) || sum2 != binary.BigEndian.Uint32(header[28:32]) {
+		return 0
+	}
+	frame := make([]byte, sqliteWALFrameLen+walPageSize)
 	var committed int64
-	for offset := int64(sqliteWALHeaderLen); ; offset += sqliteWALFrameLen + walPageSize {
-		if _, err := f.ReadAt(frame, offset); err != nil {
+	for {
+		if _, err := io.ReadFull(reader, frame); err != nil {
+			break
+		}
+		if binary.BigEndian.Uint32(frame[8:12]) != salt1 || binary.BigEndian.Uint32(frame[12:16]) != salt2 {
+			break
+		}
+		sum1, sum2 = sqliteWALChecksum(order, sum1, sum2, frame[:8])
+		sum1, sum2 = sqliteWALChecksum(order, sum1, sum2, frame[sqliteWALFrameLen:])
+		if sum1 != binary.BigEndian.Uint32(frame[16:20]) || sum2 != binary.BigEndian.Uint32(frame[20:24]) {
 			break
 		}
 		if size := int64(binary.BigEndian.Uint32(frame[4:8])); size > 0 {
@@ -125,6 +152,16 @@ func sqliteWALCommittedPages(walPath string, pageSize int64) int64 {
 		}
 	}
 	return committed
+}
+
+// sqliteWALChecksum continues SQLite's WAL checksum over data, which must be a
+// multiple of eight bytes, using the byte order the WAL magic selects.
+func sqliteWALChecksum(order binary.ByteOrder, sum1, sum2 uint32, data []byte) (uint32, uint32) {
+	for i := 0; i+8 <= len(data); i += 8 {
+		sum1 += order.Uint32(data[i:i+4]) + sum2
+		sum2 += order.Uint32(data[i+4:i+8]) + sum1
+	}
+	return sum1, sum2
 }
 
 func restoreNeededBytes(outputBytes int64) uint64 {
