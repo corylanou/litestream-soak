@@ -264,7 +264,7 @@ func (r *Runner) populate(ctx context.Context) error {
 	if r.cfg.ManyDBEnabled() {
 		return populateManyDBs(ctx, r.cfg)
 	}
-	return populateSingleDB(ctx, r.cfg)
+	return populateSingleDBWithRetry(ctx, r.cfg, populateAttempts)
 }
 
 func (r *Runner) runVerifyLoop(ctx context.Context) error {

@@ -118,7 +118,7 @@ func readProfileBinary(name string) profileBinary {
 func (c *pprofCapturer) newRecord(label, kind, artifact string) *profileRecord {
 	c.identityOnce.Do(func() {
 		c.binaries = make(map[string]profileBinary)
-		for _, name := range []string{"litestream", "litestream-test", "soakworker"} {
+		for _, name := range []string{"litestream", "litestream-test", "litestream-test-populate", "soakworker"} {
 			c.binaries[name] = readProfileBinary(name)
 		}
 	})

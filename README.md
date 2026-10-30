@@ -546,8 +546,13 @@ Repository layout:
   pprof captures via flyctl for `go tool pprof`).
 - `docs/`: operator runbook and integration examples.
 
-`Dockerfile.worker` builds Litestream and `litestream-test` from
-`LITESTREAM_SHA`, records the resolved SHA in `/opt/soak/litestream.sha`, builds
+`Dockerfile.worker` builds Litestream from `LITESTREAM_SHA`, records the
+resolved SHA in `/opt/soak/litestream.sha`, builds two `litestream-test`
+binaries from the pinned `WORKLOAD_SHA` (`litestream-test` for the load phase
+with SQLite's automatic WAL checkpoint compiled off so Litestream owns
+checkpointing, and `litestream-test-populate` with SQLite's default
+autocheckpoint for the initial seed, which runs before Litestream exists), with
+each binary's `go version -m` output under `/opt/soak/*.buildinfo`, builds
 `soakworker`, and copies replay datasets into `/opt/soak/datasets`.
 `Dockerfile.control` builds `soakctl` and includes `flyctl` for platform-log and
 deployment support. Both runtime images use `docker-entrypoint.sh` to ensure

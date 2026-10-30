@@ -586,6 +586,30 @@ func TestObserveProxyOptInViaEnv(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvReadsPopulateStopOnFailure(t *testing.T) {
+	tests := []struct {
+		value string
+		want  bool
+	}{
+		{value: ""},
+		{value: "false"},
+		{value: "true", want: true},
+		{value: "1", want: true},
+	}
+	for _, tt := range tests {
+		t.Run("POPULATE_STOP_ON_FAILURE="+tt.value, func(t *testing.T) {
+			t.Setenv("POPULATE_STOP_ON_FAILURE", tt.value)
+			cfg, err := ConfigFromEnv()
+			if err != nil {
+				t.Fatalf("ConfigFromEnv() error = %v", err)
+			}
+			if cfg.PopulateStopOnFailure != tt.want || cfg.WorkloadConfig().PopulateStopOnFailure != tt.want {
+				t.Fatalf("PopulateStopOnFailure = %v (workload %v), want %v", cfg.PopulateStopOnFailure, cfg.WorkloadConfig().PopulateStopOnFailure, tt.want)
+			}
+		})
+	}
+}
+
 func TestConfigFromEnvReadsPopulateIndexRatio(t *testing.T) {
 	tests := []struct {
 		value   string
