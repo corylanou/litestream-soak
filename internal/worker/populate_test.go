@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -326,6 +327,56 @@ func TestPopulateCheckpointerAbortsWhenTheBoundIsLost(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// TestPopulateCheckpointerEnforcesCeilingWhileWaitingForWriteLock grows the
+// WAL past the ceiling while the checkpointer is still spinning for a write
+// lock a populate-like holder never releases. The breach must end the run
+// during the wait, long before the spin limit, not after a later checkpoint
+// has hidden it.
+func TestPopulateCheckpointerEnforcesCeilingWhileWaitingForWriteLock(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	holder := openWALHolder(t, dbPath, 200, true)
+	start := fileSizeOrZero(walPath(dbPath))
+	checkpointer := testCheckpointer(dbPath, start/2)
+	checkpointer.interval = 5 * time.Millisecond
+	checkpointer.ceiling = start + 512<<10
+	checkpointer.spinLimit = 30 * time.Second
+	checkpointer.maxFailures = 1
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	started := time.Now()
+	go func() { result <- checkpointer.run(ctx) }()
+
+	payload := make([]byte, 1024)
+	deadline := time.Now().Add(10 * time.Second)
+	for fileSizeOrZero(walPath(dbPath)) < checkpointer.ceiling+64<<10 && time.Now().Before(deadline) {
+		if _, err := holder.ExecContext(context.Background(), "INSERT INTO test_table_0 (data, int_field) VALUES (?, ?)", payload, rand.Int64()); err != nil {
+			t.Fatalf("holder insert while checkpointer waits: %v", err)
+		}
+	}
+	grown := fileSizeOrZero(walPath(dbPath))
+	if grown < checkpointer.ceiling {
+		t.Fatalf("wal only grew to %d bytes, ceiling %d", grown, checkpointer.ceiling)
+	}
+
+	select {
+	case err := <-result:
+		elapsed := time.Since(started)
+		if err == nil || !errors.Is(err, errWALCeiling) || !strings.Contains(err.Error(), "while waiting for the write lock") {
+			t.Fatalf("run() error = %v, want the ceiling breach detected during the write-lock wait", err)
+		}
+		if elapsed >= checkpointer.spinLimit {
+			t.Fatalf("breach detected only after the %s spin limit (%s)", checkpointer.spinLimit, elapsed)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("checkpointer kept waiting for the write lock after the wal passed the ceiling")
+	}
+	if _, err := holder.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+		t.Fatal(err)
 	}
 }
 

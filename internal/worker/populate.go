@@ -35,7 +35,10 @@ const (
 	populateCheckpointMaxFailures = 5
 )
 
-var errWALCheckpointBusy = errors.New("wal checkpoint could not complete: database busy")
+var (
+	errWALCheckpointBusy = errors.New("wal checkpoint could not complete: database busy")
+	errWALCeiling        = errors.New("wal reached its ceiling")
+)
 
 // populateCheckpointer bounds the WAL while litestream-test populate runs.
 // The workload binary is built with SQLITE_DEFAULT_WAL_AUTOCHECKPOINT=0 so
@@ -105,8 +108,8 @@ func (c *populateCheckpointer) run(ctx context.Context) error {
 
 		size := fileSizeOrZero(walPath(c.dbPath))
 		c.observeWAL(size)
-		if size >= c.ceiling {
-			return fmt.Errorf("wal is %d bytes, at or above the %d byte ceiling, after %d consecutive failed checkpoints (last: %v)", size, c.ceiling, failures, lastErr)
+		if err := c.checkCeiling(size); err != nil {
+			return fmt.Errorf("%w after %d consecutive failed checkpoints (last: %v)", err, failures, lastErr)
 		}
 		if size < c.threshold {
 			continue
@@ -115,6 +118,9 @@ func (c *populateCheckpointer) run(ctx context.Context) error {
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
+			}
+			if errors.Is(err, errWALCeiling) {
+				return fmt.Errorf("%w while waiting for the write lock, after %d consecutive failed checkpoints (last: %v)", err, failures, lastErr)
 			}
 			failures++
 			lastErr = err
@@ -196,8 +202,23 @@ func (c *populateCheckpointer) acquireWriteLock(ctx context.Context, lock *sql.C
 		if time.Now().After(deadline) {
 			return fmt.Errorf("wal write lock starved for %s", c.spinLimit)
 		}
+		if err := c.checkCeiling(fileSizeOrZero(walPath(c.dbPath))); err != nil {
+			return err
+		}
 		runtime.Gosched()
 	}
+}
+
+// checkCeiling is the hard bound. It runs on every poll and on every spin of
+// the write-lock wait, the only window in which populate keeps appending while
+// the checkpointer is busy, so a breach is caught while it happens rather than
+// hidden by a checkpoint that later succeeds.
+func (c *populateCheckpointer) checkCeiling(size int64) error {
+	c.observeWAL(size)
+	if size >= c.ceiling {
+		return fmt.Errorf("%w: wal is %d bytes, at or above the %d byte ceiling", errWALCeiling, size, c.ceiling)
+	}
+	return nil
 }
 
 func (c *populateCheckpointer) observeWAL(size int64) {
