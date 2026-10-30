@@ -23,7 +23,8 @@ func TestHeartbeatStartupPhaseKeepsWorkerStarting(t *testing.T) {
 	}{
 		{name: "populate heartbeat keeps the worker starting", phases: []string{reporting.StartupPhasePopulate}, want: model.WorkerStarting},
 		{name: "repeated populate heartbeats never flip to running", phases: []string{reporting.StartupPhasePopulate, reporting.StartupPhasePopulate}, want: model.WorkerStarting},
-		{name: "first plain heartbeat after populate marks running", phases: []string{reporting.StartupPhasePopulate, ""}, want: model.WorkerRunning},
+		{name: "litestream startup heartbeat keeps the worker starting", phases: []string{reporting.StartupPhasePopulate, reporting.StartupPhaseLitestream}, want: model.WorkerStarting},
+		{name: "first plain heartbeat after startup marks running", phases: []string{reporting.StartupPhasePopulate, reporting.StartupPhaseLitestream, ""}, want: model.WorkerRunning},
 		{name: "plain heartbeat marks running", phases: []string{""}, want: model.WorkerRunning},
 	}
 	for _, tt := range tests {

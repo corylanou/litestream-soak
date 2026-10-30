@@ -87,7 +87,7 @@ func (d *DB) CompleteProvisioning(a ProvisioningAttempt, events []Event) error {
 	if n != 1 {
 		return fmt.Errorf("provisioning completion lost its state claim")
 	}
-	result, err = tx.Exec(`UPDATE workers SET fly_machine_id=?,fly_volume_id=?,status='running',error_message='',updated_at=datetime('now') WHERE id=? AND git_sha=? AND litestream_sha=? AND status IN ('pending','running','starting','probing')`, a.MachineID, a.VolumeID, a.WorkerID, a.GitSHA, a.LitestreamSHA)
+	result, err = tx.Exec(`UPDATE workers SET fly_machine_id=?,fly_volume_id=?,status='starting',error_message='',updated_at=datetime('now') WHERE id=? AND git_sha=? AND litestream_sha=? AND status IN ('pending','running','starting','probing')`, a.MachineID, a.VolumeID, a.WorkerID, a.GitSHA, a.LitestreamSHA)
 	if err != nil {
 		return err
 	}

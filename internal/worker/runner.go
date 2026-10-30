@@ -124,19 +124,25 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.sendPreStartFailureEvent(err)
 		return err
 	}
-	r.setStartupPhase("")
+	r.setStartupPhase(reporting.StartupPhaseLitestream)
 	if err := r.prepareDiskFullRecoveryReserve(); err != nil {
-		return fmt.Errorf("prepare disk-full recovery reserve: %w", err)
+		err = fmt.Errorf("prepare disk-full recovery reserve: %w", err)
+		r.sendPreStartFailureEvent(err)
+		return err
 	}
 
 	if err := r.writeLitestreamConfig(); err != nil {
-		return fmt.Errorf("write litestream config: %w", err)
+		err = fmt.Errorf("write litestream config: %w", err)
+		r.sendPreStartFailureEvent(err)
+		return err
 	}
 
 	litestreamCtx, cancelLitestream := context.WithCancel(context.WithoutCancel(runCtx))
 	if err := r.startLitestream(litestreamCtx); err != nil {
 		cancelLitestream()
-		return fmt.Errorf("start litestream: %w", err)
+		err = fmt.Errorf("start litestream: %w", err)
+		r.sendPreStartFailureEvent(err)
+		return err
 	}
 	defer r.stopLitestream()
 	defer cancelLitestream()
@@ -145,8 +151,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	defer stopProfiles()
 
 	if err := r.waitForFirstSync(runCtx); err != nil {
-		return fmt.Errorf("wait for first sync: %w", err)
+		err = fmt.Errorf("wait for first sync: %w", err)
+		r.sendPreStartFailureEvent(err)
+		return err
 	}
+	r.setStartupPhase("")
 	go newReplicaLevelPoller(&r.cfg).Run(runCtx)
 	if r.cfg.CompactionProgressCheck && r.cfg.ReplicaLevelReporting {
 		r.lastReplicaLevels = collectReplicaLevelReport(r.cfg, 0)

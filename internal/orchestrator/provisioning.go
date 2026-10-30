@@ -199,7 +199,7 @@ func (m *Manager) finishWorkerProvisioning(worker model.Worker, a model.Provisio
 	if err := m.db.CompleteProvisioning(a, events); err != nil {
 		return nil, err
 	}
-	worker.Status = model.WorkerRunning
+	worker.Status = model.WorkerStarting
 	m.observeWorkerByID(worker.ID)
 	slog.Info("Worker created", "name", worker.Name, "machine_id", machine.ID, "volume_id", a.VolumeID, "profile", worker.ProfileName)
 	return &worker, nil

@@ -554,5 +554,5 @@ func (d *DB) DeleteWorker(id string) error {
 // StaleWorkers returns workers that haven't sent a heartbeat within the given duration.
 func (d *DB) StaleWorkers(timeout time.Duration) ([]Worker, error) {
 	cutoff := time.Now().UTC().Add(-timeout).Format("2006-01-02 15:04:05")
-	return d.queryWorkers("SELECT "+workerColumns+" FROM workers WHERE status IN ('running', 'probing') AND last_heartbeat_at IS NOT NULL AND last_heartbeat_at < ?", cutoff)
+	return d.queryWorkers("SELECT "+workerColumns+" FROM workers WHERE status IN ('running', 'probing', 'starting') AND last_heartbeat_at IS NOT NULL AND last_heartbeat_at < ?", cutoff)
 }

@@ -138,10 +138,14 @@ type RuntimePayload struct {
 	LitestreamSnapshotError                    string    `json:"litestream_snapshot_error,omitempty"`
 }
 
-// StartupPhasePopulate marks reports sent while the worker is still seeding
-// its database. A worker in a startup phase has not started Litestream, so it
-// is not running yet and must not count toward gate readiness.
-const StartupPhasePopulate = "populate"
+// Startup phases mark reports sent before the worker is running: populate
+// while it seeds its database, litestream while it writes the config, starts
+// Litestream, and waits for the first sync. A worker in a startup phase is not
+// running yet and must not count toward gate readiness.
+const (
+	StartupPhasePopulate   = "populate"
+	StartupPhaseLitestream = "litestream"
+)
 
 // PreStart reports whether the runtime was captured before Litestream and the
 // load started.
