@@ -281,6 +281,8 @@ func normalizeInconclusiveRestoreFailure(payload *reporting.VerificationPayload)
 	switch {
 	case reporting.RestoreOutputDiskFull(payload.ErrorMessage):
 		classification = reporting.HarnessCapacityClassification(payload.RestoreMode)
+	case reporting.RestoredComparisonLocked(payload.ErrorMessage):
+		classification = reporting.RestoredComparisonLockedClassification(payload.RestoreMode)
 	case reporting.PinnedRestoreTargetUnavailable(payload.RestoreMode, payload.ErrorMessage), reporting.RestoreRequestCanceled(payload.ErrorMessage):
 	default:
 		return

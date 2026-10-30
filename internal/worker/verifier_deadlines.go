@@ -102,10 +102,14 @@ func (v *Verifier) failValidationResult(ctx context.Context, result *Verificatio
 	var boundary *unreplicatedBoundaryError
 	var evidence *restoreEvidenceInconclusiveError
 	var capacity *restoreCapacityInconclusiveError
-	if errors.As(err, &capacity) {
+	var locked *restoredComparisonLockedError
+	switch {
+	case errors.As(err, &capacity):
 		result.InconclusiveClassification = reporting.HarnessCapacityClassification(result.RestoreMode)
+	case errors.As(err, &locked):
+		result.InconclusiveClassification = reporting.RestoredComparisonLockedClassification(result.RestoreMode)
 	}
-	if (errors.As(err, &deadline) || errors.As(err, &boundary) || errors.As(err, &evidence) || capacity != nil) && result.Status != "aborted" {
+	if (errors.As(err, &deadline) || errors.As(err, &boundary) || errors.As(err, &evidence) || capacity != nil || locked != nil) && result.Status != "aborted" {
 		result.Status = "aborted"
 		result.Summary = "verification inconclusive: " + summarizeVerificationMessage(err.Error())
 	}
