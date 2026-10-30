@@ -80,6 +80,8 @@ func inferProbableSubsystem(stage, signature string) string {
 		return "Litestream DB sync executor"
 	case strings.Contains(text, "sync") || strings.Contains(text, "litestream_sync_socket_refused") || strings.Contains(text, "litestream_sync_timeout") || strings.Contains(text, "litestream_sync_fd_exhausted"):
 		return "Litestream sync/control socket"
+	case strings.Contains(text, reporting.SignatureLTXCoverageHole):
+		return "Litestream compaction / retention"
 	case strings.Contains(text, "restore") || strings.Contains(text, "replica_") || strings.Contains(text, "ltx"):
 		return "Replication or restore path"
 	case strings.Contains(text, "integrity") || strings.Contains(text, "sqlite_index_mismatch") || strings.Contains(text, "validation_failed") || strings.Contains(text, "validation"):

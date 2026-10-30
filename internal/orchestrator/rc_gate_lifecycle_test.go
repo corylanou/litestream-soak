@@ -238,6 +238,9 @@ func TestRCGateClosedLedgerServesBoundedSnapshot(t *testing.T) {
 			{gateRemoteProfile, ""},
 		} {
 			recordGateVerification(t, db, source, scenario.profile, scenario.identity, true, inside)
+			if scenario.profile != gateManyDB500Profile {
+				recordGateCoverageCheck(t, db, source, scenario.profile, scenario.identity, true, inside)
+			}
 		}
 	}
 	manager, _ := teardownGateManager(t, db, nil)

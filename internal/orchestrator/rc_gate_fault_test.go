@@ -821,7 +821,10 @@ func TestUpgradeGateWorkerFaultsUseTheSameRules(t *testing.T) {
 		for _, mode := range gateRotatingRestoreModes {
 			coverage = append(coverage, verification{source, gateUpgradeFollowProfile, "", "integrity", mode})
 		}
-		coverage = append(coverage, verification{source, gateUpgradeFollowProfile, "", gateCheckFollow, gateModeFollow})
+		coverage = append(coverage, verification{source, gateUpgradeFollowProfile, "", gateCheckFollow, gateModeFollow}, verification{source, gateUpgradeFollowProfile, "", gateCheckCoverage, gateModeCoverage})
+	}
+	for _, phase := range []string{upgradePhasePre, upgradePhasePost} {
+		coverage = append(coverage, verification{testUpgradeCandidate, gateUpgradeLaneProfile, phase, gateCheckCoverage, gateModeCoverage})
 	}
 	tests := []struct {
 		name          string
@@ -832,14 +835,14 @@ func TestUpgradeGateWorkerFaultsUseTheSameRules(t *testing.T) {
 		{
 			name:          "candidate follow worker disk exhaustion is a follow regression",
 			faultProfile:  gateUpgradeFollowProfile,
-			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictRegression},
-			wantReason:    map[string]string{"follow-l9": rcGateReasonDiskExhausted},
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictRegression, "upgrade-lane-ltx-coverage": rcGateVerdictPass, "follow-l9-ltx-coverage": rcGateVerdictRegression},
+			wantReason:    map[string]string{"follow-l9": rcGateReasonDiskExhausted, "follow-l9-ltx-coverage": rcGateReasonDiskExhausted},
 		},
 		{
 			name:          "lane worker disk exhaustion fails every lane scenario",
 			faultProfile:  gateUpgradeLaneProfile,
-			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictBothFailing, "upgrade-lane-historical": rcGateVerdictBothFailing, "upgrade-lane-follow": rcGateVerdictRegression, "follow-l9": rcGateVerdictPass},
-			wantReason:    map[string]string{"upgrade-lane": rcGateReasonDiskExhausted, "upgrade-lane-historical": rcGateReasonDiskExhausted, "upgrade-lane-follow": rcGateReasonDiskExhausted},
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictBothFailing, "upgrade-lane-historical": rcGateVerdictBothFailing, "upgrade-lane-follow": rcGateVerdictRegression, "follow-l9": rcGateVerdictPass, "upgrade-lane-ltx-coverage": rcGateVerdictBothFailing, "follow-l9-ltx-coverage": rcGateVerdictPass},
+			wantReason:    map[string]string{"upgrade-lane": rcGateReasonDiskExhausted, "upgrade-lane-historical": rcGateReasonDiskExhausted, "upgrade-lane-follow": rcGateReasonDiskExhausted, "upgrade-lane-ltx-coverage": rcGateReasonDiskExhausted},
 		},
 	}
 	for _, tt := range tests {
@@ -1010,20 +1013,19 @@ func TestRCGateStressPlannedPhaseRestartsAreNotCrashes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			db := openTestDB(t)
 			now := time.Now().UTC()
-			gate := registerTestGate(t, db, false, now.Add(-10*time.Hour))
-			createTestGateFleet(t, db, gate)
 			boundary := now.Add(-time.Hour).Truncate(phase)
-			if boundary.Before(gate.StartedAt.Add(4 * time.Hour)) {
-				boundary = boundary.Add(phase)
-			}
-			if boundary.After(now) || boundary.Before(gate.StartedAt) {
-				t.Fatalf("no usable phase boundary between %s and %s", gate.StartedAt, now)
+			gate := registerTestGate(t, db, false, boundary.Add(-5*time.Hour))
+			createTestGateFleet(t, db, gate)
+			if boundary.Add(10*time.Minute).After(now) || boundary.Before(gate.StartedAt.Add(4*time.Hour)) {
+				t.Fatalf("phase boundary %s leaves no room for its events between %s and %s", boundary, gate.StartedAt, now)
 			}
 			workerID := "worker-" + testGateCandidate + "-" + gateStressProfile
 			tt.arrange(db, workerID, boundary)
 			for _, scenario := range []string{"overload-truncate0", "pinned-reader"} {
-				recordGateVerification(t, db, testGateCandidate, gateStressProfile, scenario, true, gate.StartedAt.Add(time.Hour))
-				recordGateVerification(t, db, testGateBaseline, gateStressProfile, scenario, true, gate.StartedAt.Add(time.Hour))
+				for _, source := range []string{testGateCandidate, testGateBaseline} {
+					recordGateVerification(t, db, source, gateStressProfile, scenario, true, gate.StartedAt.Add(time.Hour))
+					recordGateCoverageCheck(t, db, source, gateStressProfile, scenario, true, gate.StartedAt.Add(time.Hour))
+				}
 			}
 			stored, err := db.GetRCGate(gate.ID)
 			if err != nil {
@@ -1043,7 +1045,7 @@ func TestRCGateStressPlannedPhaseRestartsAreNotCrashes(t *testing.T) {
 					t.Fatalf("%s candidate = %+v, want %s/%q", scenario.Scenario, scenario.Candidate, tt.wantStatus, tt.wantReason)
 				}
 			}
-			if seen != 2 {
+			if seen != 4 {
 				t.Fatalf("stress scenarios = %d", seen)
 			}
 		})
@@ -1057,8 +1059,10 @@ func TestRCGateStressFaultAppliesToEveryScenarioOnTheWorker(t *testing.T) {
 	createTestGateFleet(t, db, gate)
 	at := gate.StartedAt.Add(time.Hour)
 	for _, scenario := range []string{"overload-truncate0", "pinned-reader"} {
-		recordGateVerification(t, db, testGateCandidate, gateStressProfile, scenario, true, at)
-		recordGateVerification(t, db, testGateBaseline, gateStressProfile, scenario, true, at)
+		for _, source := range []string{testGateCandidate, testGateBaseline} {
+			recordGateVerification(t, db, source, gateStressProfile, scenario, true, at)
+			recordGateCoverageCheck(t, db, source, gateStressProfile, scenario, true, at)
+		}
 	}
 	if err := db.RecordEventAt("worker-"+testGateCandidate+"-"+gateStressProfile, "platform_disk_full", "Fly log reported disk pressure: no space left on device", "", at.Add(10*time.Minute)); err != nil {
 		t.Fatal(err)
@@ -1085,7 +1089,7 @@ func TestRCGateStressFaultAppliesToEveryScenarioOnTheWorker(t *testing.T) {
 			t.Fatalf("%s verdict = %q", scenario.Scenario, scenario.Verdict)
 		}
 	}
-	if seen != 2 || entry.Verdict != rcGateVerdictFail {
+	if seen != 4 || entry.Verdict != rcGateVerdictFail {
 		t.Fatalf("stress scenarios = %d gate verdict = %q", seen, entry.Verdict)
 	}
 }

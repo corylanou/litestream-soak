@@ -14,6 +14,7 @@ import (
 
 	"github.com/corylanou/litestream-soak/internal/model"
 	workerconfig "github.com/corylanou/litestream-soak/internal/worker"
+	"github.com/corylanou/litestream-soak/internal/workload"
 )
 
 const (
@@ -547,7 +548,7 @@ func TestRCGateLedgerEndpoint(t *testing.T) {
 	for _, scenario := range entry.Scenarios {
 		scenarios[scenario.Scenario] = scenario
 	}
-	if len(scenarios) != 5 {
+	if len(scenarios) != 9 {
 		t.Fatalf("scenarios = %+v", entry.Scenarios)
 	}
 }
@@ -599,6 +600,16 @@ func TestRCGateScenarioVerdicts(t *testing.T) {
 
 func recordGateVerification(t *testing.T, db *model.DB, source, profile, scenario string, passed bool, at time.Time) {
 	t.Helper()
+	recordGateCheck(t, db, source, profile, scenario, "integrity", "", passed, at)
+}
+
+func recordGateCoverageCheck(t *testing.T, db *model.DB, source, profile, scenario string, passed bool, at time.Time) {
+	t.Helper()
+	recordGateCheck(t, db, source, profile, scenario, gateCheckCoverage, gateModeCoverage, passed, at)
+}
+
+func recordGateCheck(t *testing.T, db *model.DB, source, profile, scenario, checkType, mode string, passed bool, at time.Time) {
+	t.Helper()
 	worker, err := db.GetWorker("worker-" + source + "-" + profile)
 	if err != nil {
 		t.Fatal(err)
@@ -614,7 +625,7 @@ func recordGateVerification(t *testing.T, db *model.DB, source, profile, scenari
 		status = "failed"
 	}
 	mustRecordVerification(t, db, &model.Verification{
-		WorkerID: worker.ID, StartedAt: at, CompletedAt: &at, Status: status, Passed: passed, CheckType: "integrity", Run: run, Attributed: true,
+		WorkerID: worker.ID, StartedAt: at, CompletedAt: &at, Status: status, Passed: passed, CheckType: checkType, RestoreMode: mode, Run: run, Attributed: true,
 	})
 }
 
@@ -642,6 +653,11 @@ func registerTestGateFor(t *testing.T, db *model.DB, duration string, tail bool,
 
 func createTestGateFleet(t *testing.T, db *model.DB, gate model.RCGate) {
 	t.Helper()
+	createTestGateFleetWith(t, db, gate, nil)
+}
+
+func createTestGateFleetWith(t *testing.T, db *model.DB, gate model.RCGate, mutate func(*workload.Config)) {
+	t.Helper()
 	for _, source := range gate.Sources() {
 		litestreamSHA, _ := gate.LitestreamSHAFor(source)
 		if err := db.UpsertReadyDeployment(&model.Deployment{
@@ -659,6 +675,9 @@ func createTestGateFleet(t *testing.T, db *model.DB, gate model.RCGate) {
 		for _, desired := range gateFleetForSource(gate, source, testGateSoakSHA, litestreamSHA).Workers {
 			cfg := normalizeWorkloadConfig(desired.Workload)
 			cfg.VolumeSizeGB = effectiveDesiredVolumeSize(desired, cfg)
+			if mutate != nil {
+				mutate(&cfg)
+			}
 			createTestWorker(t, db, model.Worker{
 				ID:            desired.WorkerID,
 				AppName:       "litestream-soak",

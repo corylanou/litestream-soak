@@ -301,6 +301,14 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 				r.sendVerification(context.WithoutCancel(ctx), extra, levels)
 				r.recordLocalResult(extra)
 			}
+			if r.ltxCoverageCheckEnabled() && ctx.Err() == nil {
+				coverage := r.checkLTXCoverage()
+				if coverage.Status == "failed" {
+					r.triggerProfile("verification-failed")
+				}
+				r.sendVerification(context.WithoutCancel(ctx), coverage, nil)
+				r.recordLocalResult(coverage)
+			}
 			if err != nil {
 				slog.Error("Verification cycle error", "error", err)
 			}

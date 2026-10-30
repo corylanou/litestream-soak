@@ -82,6 +82,7 @@ type Config struct {
 	CompactionProgressCheck                   bool    `json:"compaction_progress_check,omitempty"`
 	CompactionL0ObjectBound                   int     `json:"compaction_l0_object_bound,omitempty"`
 	CompactionL1ObjectBound                   int     `json:"compaction_l1_object_bound,omitempty"`
+	LTXCoverageCheck                          bool    `json:"ltx_coverage_check,omitempty"`
 	VolumeSizeGB                              int     `json:"volume_size_gb,omitempty"`
 	MemoryMB                                  int     `json:"memory_mb,omitempty"`
 	CPUs                                      int     `json:"cpus,omitempty"`

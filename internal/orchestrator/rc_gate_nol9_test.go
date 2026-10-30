@@ -110,7 +110,7 @@ func TestRegisterNoL9Gate(t *testing.T) {
 	if err != nil || stored.LaneVariant != upgradeLaneVariantNoL9 {
 		t.Fatalf("stored gate = %+v, %v", stored, err)
 	}
-	if scenarios := gateScenariosFor(*stored); len(scenarios) != 3 || scenarios[0].name != "upgrade-lane-nol9" {
+	if scenarios := gateScenariosFor(*stored); len(scenarios) != 4 || scenarios[0].name != "upgrade-lane-nol9" {
 		t.Fatalf("scenarios = %+v", scenarios)
 	}
 
@@ -154,7 +154,8 @@ func TestNoL9GateLedgerScoresLaneTrio(t *testing.T) {
 	baseFollow := func(status string) verification {
 		return verification{testNoL9Baseline, gateUpgradeFollowProfile, "", "", "follow", "follow", status}
 	}
-	full := append(append(rotation("pre-upgrade"), rotation("post-upgrade")...),
+	coverage := []verification{lane("pre-upgrade", "coverage", "coverage", "passed"), lane("post-upgrade", "coverage", "coverage", "passed")}
+	full := append(append(append(rotation("pre-upgrade"), rotation("post-upgrade")...), coverage...),
 		lane("post-upgrade", "pre-upgrade-restore", "txid", "passed"), lane("post-upgrade", "follow", "follow", "passed"), baseFollow("passed"))
 	tests := []struct {
 		name          string
@@ -166,32 +167,38 @@ func TestNoL9GateLedgerScoresLaneTrio(t *testing.T) {
 			name:          "full coverage passes",
 			verifications: full,
 			wantVerdict:   rcGateVerdictPass,
-			wantScenarios: map[string]string{"upgrade-lane-nol9": rcGateVerdictPass, "upgrade-lane-nol9-historical": rcGateVerdictPass, "upgrade-lane-nol9-follow": rcGateVerdictPass},
+			wantScenarios: map[string]string{"upgrade-lane-nol9": rcGateVerdictPass, "upgrade-lane-nol9-historical": rcGateVerdictPass, "upgrade-lane-nol9-follow": rcGateVerdictPass, "upgrade-lane-nol9-ltx-coverage": rcGateVerdictPass},
 		},
 		{
 			name:          "compaction stall after the purge is a regression",
 			verifications: append(append([]verification{}, full...), lane("post-upgrade", "integrity", "txid", "failed")),
 			wantVerdict:   rcGateVerdictFail,
-			wantScenarios: map[string]string{"upgrade-lane-nol9": rcGateVerdictRegression, "upgrade-lane-nol9-historical": rcGateVerdictPass, "upgrade-lane-nol9-follow": rcGateVerdictPass},
+			wantScenarios: map[string]string{"upgrade-lane-nol9": rcGateVerdictRegression, "upgrade-lane-nol9-historical": rcGateVerdictPass, "upgrade-lane-nol9-follow": rcGateVerdictPass, "upgrade-lane-nol9-ltx-coverage": rcGateVerdictPass},
 		},
 		{
 			name:          "historical restore failure is its own regression",
 			verifications: append(append([]verification{}, full...), lane("post-upgrade", "pre-upgrade-restore", "txid", "failed")),
 			wantVerdict:   rcGateVerdictFail,
-			wantScenarios: map[string]string{"upgrade-lane-nol9": rcGateVerdictPass, "upgrade-lane-nol9-historical": rcGateVerdictRegression, "upgrade-lane-nol9-follow": rcGateVerdictPass},
+			wantScenarios: map[string]string{"upgrade-lane-nol9": rcGateVerdictPass, "upgrade-lane-nol9-historical": rcGateVerdictRegression, "upgrade-lane-nol9-follow": rcGateVerdictPass, "upgrade-lane-nol9-ltx-coverage": rcGateVerdictPass},
 		},
 		{
 			name:          "follow never crossing an L9 is incomplete",
-			verifications: append(append(rotation("pre-upgrade"), rotation("post-upgrade")...), lane("post-upgrade", "pre-upgrade-restore", "txid", "passed"), lane("post-upgrade", "follow", "follow", "pending"), baseFollow("passed")),
+			verifications: append(append(append(rotation("pre-upgrade"), rotation("post-upgrade")...), coverage...), lane("post-upgrade", "pre-upgrade-restore", "txid", "passed"), lane("post-upgrade", "follow", "follow", "pending"), baseFollow("passed")),
 			wantVerdict:   rcGateVerdictIncomplete,
-			wantScenarios: map[string]string{"upgrade-lane-nol9": rcGateVerdictPass, "upgrade-lane-nol9-historical": rcGateVerdictPass, "upgrade-lane-nol9-follow": rcGateVerdictIncomplete},
+			wantScenarios: map[string]string{"upgrade-lane-nol9": rcGateVerdictPass, "upgrade-lane-nol9-historical": rcGateVerdictPass, "upgrade-lane-nol9-follow": rcGateVerdictIncomplete, "upgrade-lane-nol9-ltx-coverage": rcGateVerdictPass},
+		},
+		{
+			name:          "post-upgrade ltx coverage hole is a regression against the pre-upgrade phase",
+			verifications: append(append([]verification{}, full...), lane("post-upgrade", "coverage", "coverage", "failed")),
+			wantVerdict:   rcGateVerdictFail,
+			wantScenarios: map[string]string{"upgrade-lane-nol9": rcGateVerdictPass, "upgrade-lane-nol9-historical": rcGateVerdictPass, "upgrade-lane-nol9-follow": rcGateVerdictPass, "upgrade-lane-nol9-ltx-coverage": rcGateVerdictRegression},
 		},
 		{
 			name: "post-upgrade reports with the base SHA do not count",
 			verifications: append(append([]verification{}, full...),
 				verification{testNoL9Candidate, gateUpgradeLaneNoL9Profile, "post-upgrade", testGateBaselineSHA, "integrity", "txid", "failed"}),
 			wantVerdict:   rcGateVerdictPass,
-			wantScenarios: map[string]string{"upgrade-lane-nol9": rcGateVerdictPass, "upgrade-lane-nol9-historical": rcGateVerdictPass, "upgrade-lane-nol9-follow": rcGateVerdictPass},
+			wantScenarios: map[string]string{"upgrade-lane-nol9": rcGateVerdictPass, "upgrade-lane-nol9-historical": rcGateVerdictPass, "upgrade-lane-nol9-follow": rcGateVerdictPass, "upgrade-lane-nol9-ltx-coverage": rcGateVerdictPass},
 		},
 	}
 	for _, tt := range tests {
