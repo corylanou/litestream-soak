@@ -110,16 +110,17 @@ type Deployment struct {
 }
 
 type Event struct {
-	ID                   int        `json:"id"`
-	WorkerID             string     `json:"worker_id,omitempty"`
-	EventType            string     `json:"event_type"`
-	Message              string     `json:"message"`
-	Details              string     `json:"details,omitempty"`
-	CreatedAt            time.Time  `json:"created_at"`
-	Occurrences          int        `json:"occurrences,omitempty"`
-	CollapsedCount       int        `json:"collapsed_count,omitempty"`
-	CollapsedWindowStart *time.Time `json:"collapsed_window_start,omitempty"`
-	CollapsedWindowEnd   *time.Time `json:"collapsed_window_end,omitempty"`
+	ID                       int        `json:"id"`
+	WorkerID                 string     `json:"worker_id,omitempty"`
+	EventType                string     `json:"event_type"`
+	Message                  string     `json:"message"`
+	Details                  string     `json:"details,omitempty"`
+	CreatedAt                time.Time  `json:"created_at"`
+	Occurrences              int        `json:"occurrences,omitempty"`
+	RestoreOutputOccurrences int        `json:"restore_output_occurrences,omitempty"`
+	CollapsedCount           int        `json:"collapsed_count,omitempty"`
+	CollapsedWindowStart     *time.Time `json:"collapsed_window_start,omitempty"`
+	CollapsedWindowEnd       *time.Time `json:"collapsed_window_end,omitempty"`
 }
 
 type VolumeGCAttempt struct {

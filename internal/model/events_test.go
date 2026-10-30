@@ -52,6 +52,39 @@ func TestRecordWindowedEventAtCountsOnlyDistinctOccurrences(t *testing.T) {
 	}
 }
 
+func TestRecordWindowedEventAtTracksRestoreOutputProvenance(t *testing.T) {
+	t.Parallel()
+
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	worker := &Worker{ID: "worker-provenance", Name: "worker-provenance", Status: WorkerRunning, Source: "main", GitSHA: "abc123", ProfileName: "gate-stress", ProfileConfig: "{}"}
+	if err := db.CreateWorker(worker); err != nil {
+		t.Fatalf("CreateWorker() error = %v", err)
+	}
+
+	const message = "Fly log reported disk pressure: no space left on device"
+	first := time.Date(2026, time.October, 30, 2, 30, 0, 0, time.UTC)
+	staging := `{"message":"level=ERROR msg=\"disk full while staging ltx file\" error=\"write /data/.test.db-litestream/ltx/0/0000000000000042.ltx: no space left on device\""}`
+	restoreOutput := `{"message":"level=ERROR msg=\"Verification failed\" error=\"restore failed: validation failed (exit 1): Error: decode database: write page 501132: write /data/scenarios/overload-truncate0/test.db.restored.tmp: no space left on device\""}`
+	for replay := range 2 {
+		for i, line := range []string{staging, restoreOutput, restoreOutput} {
+			if _, err := db.RecordWindowedEventAt(worker.ID, "platform_disk_full", message, line, first.Add(time.Duration(i)*2*time.Minute), 10*time.Minute); err != nil {
+				t.Fatalf("replay %d line %d: %v", replay, i, err)
+			}
+		}
+	}
+	events, err := db.ListWorkerEvents(worker.ID, 10)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events = %+v, %v; want one coalesced row", events, err)
+	}
+	if events[0].Occurrences != 3 || events[0].RestoreOutputOccurrences != 2 {
+		t.Fatalf("occurrences = %d restore-output = %d, want 3 and 2", events[0].Occurrences, events[0].RestoreOutputOccurrences)
+	}
+}
+
 func TestRecordWindowedEventAtSeedsLegacyRowsBeforeCounting(t *testing.T) {
 	t.Parallel()
 

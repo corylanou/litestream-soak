@@ -4,9 +4,10 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"slices"
 	"strings"
 	"time"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
 func (d *DB) RecordEvent(workerID, eventType, message, details string) error {
@@ -100,7 +101,7 @@ func (d *DB) RecordWindowedEventAt(workerID, eventType, message, details string,
 			existingKeys = eventOccurrenceKey(existingAt, existingDetails)
 		}
 		seen := strings.Split(existingKeys, "\n")
-		if slices.Contains(seen, key) || slices.Contains(seen, eventOccurrenceKey(createdAt, compactDetails)) {
+		if seenEventOccurrence(seen, key) || seenEventOccurrence(seen, eventOccurrenceKey(createdAt, compactDetails)) {
 			release()
 			return false, nil
 		}
@@ -150,12 +151,52 @@ func (d *DB) RecordWindowedEventAt(workerID, eventType, message, details string,
 // row without counting again.
 func eventOccurrenceKey(createdAt time.Time, details string) string {
 	sum := sha256.Sum256([]byte(details))
-	return createdAt.UTC().Format(time.RFC3339Nano) + "|" + hex.EncodeToString(sum[:8])
+	key := createdAt.UTC().Format(time.RFC3339Nano) + "|" + hex.EncodeToString(sum[:8])
+	if reporting.RestoreOutputDiskFullPath(details) {
+		key += "|" + eventProvenanceRestoreOutput
+	}
+	return key
+}
+
+// eventProvenanceRestoreOutput tags an occurrence whose payload names an
+// ENOSPC on the verifier's own restore output, so a coalesced row can say how
+// many of its occurrences were harness capacity rather than real disk pressure.
+const eventProvenanceRestoreOutput = "restore_output"
+
+func sameEventOccurrence(a, b string) bool {
+	return occurrenceIdentity(a) == occurrenceIdentity(b)
+}
+
+func occurrenceIdentity(key string) string {
+	parts := strings.SplitN(key, "|", 3)
+	if len(parts) < 2 {
+		return key
+	}
+	return parts[0] + "|" + parts[1]
+}
+
+func seenEventOccurrence(seen []string, key string) bool {
+	for _, existing := range seen {
+		if sameEventOccurrence(existing, key) {
+			return true
+		}
+	}
+	return false
+}
+
+func restoreOutputOccurrences(keys string) int {
+	count := 0
+	for _, key := range strings.Split(keys, "\n") {
+		if strings.HasSuffix(key, "|"+eventProvenanceRestoreOutput) {
+			count++
+		}
+	}
+	return count
 }
 
 func (d *DB) ListEvents(limit int) ([]Event, error) {
 	defer d.blobs.hold()()
-	rows, err := d.query(`SELECT id, worker_id, event_type, message, details, created_at, occurrences FROM events ORDER BY created_at DESC LIMIT ?`, limit)
+	rows, err := d.query(`SELECT id, worker_id, event_type, message, details, created_at, occurrences, occurrence_keys FROM events ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -165,9 +206,11 @@ func (d *DB) ListEvents(limit int) ([]Event, error) {
 	for rows.Next() {
 		var e Event
 		var workerID sql.NullString
-		if err := rows.Scan(&e.ID, &workerID, &e.EventType, &e.Message, &e.Details, &e.CreatedAt, &e.Occurrences); err != nil {
+		var keys string
+		if err := rows.Scan(&e.ID, &workerID, &e.EventType, &e.Message, &e.Details, &e.CreatedAt, &e.Occurrences, &keys); err != nil {
 			return nil, err
 		}
+		e.RestoreOutputOccurrences = restoreOutputOccurrences(keys)
 		if workerID.Valid {
 			e.WorkerID = workerID.String
 		}
@@ -183,7 +226,7 @@ func (d *DB) ListEvents(limit int) ([]Event, error) {
 func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
 	defer d.blobs.hold()()
 	rows, err := d.query(`
-		SELECT id, worker_id, event_type, message, details, created_at, occurrences
+		SELECT id, worker_id, event_type, message, details, created_at, occurrences, occurrence_keys
 		FROM events
 		WHERE worker_id = ?
 		ORDER BY created_at DESC
@@ -199,9 +242,11 @@ func (d *DB) ListWorkerEvents(workerID string, limit int) ([]Event, error) {
 	for rows.Next() {
 		var e Event
 		var eventWorkerID sql.NullString
-		if err := rows.Scan(&e.ID, &eventWorkerID, &e.EventType, &e.Message, &e.Details, &e.CreatedAt, &e.Occurrences); err != nil {
+		var keys string
+		if err := rows.Scan(&e.ID, &eventWorkerID, &e.EventType, &e.Message, &e.Details, &e.CreatedAt, &e.Occurrences, &keys); err != nil {
 			return nil, err
 		}
+		e.RestoreOutputOccurrences = restoreOutputOccurrences(keys)
 		if eventWorkerID.Valid {
 			e.WorkerID = eventWorkerID.String
 		}
