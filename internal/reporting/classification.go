@@ -19,6 +19,7 @@ const (
 	SignatureHarnessCapacityInconclusive = "harness_capacity_inconclusive"
 
 	SignatureReplicaLevelReportIncomplete = "replica_level_report_incomplete"
+	SignatureLTXCoverageHole              = "ltx_coverage_hole"
 
 	StageHarnessLock                  = "harness_lock"
 	SignatureRestoredComparisonLocked = "restored_comparison_locked"
@@ -286,6 +287,8 @@ func inferFailureSignature(stage, text, original string) string {
 		return signatureStagePrefix(stage) + "_decode_error"
 	case strings.Contains(text, "restore plan") || strings.Contains(text, "calc restore"):
 		return signatureStagePrefix(stage) + "_plan_failed"
+	case strings.Contains(text, "ltx coverage hole"):
+		return SignatureLTXCoverageHole
 	case strings.Contains(text, "ltx continuity"):
 		return "ltx_continuity"
 	case strings.Contains(text, "validation failed"):

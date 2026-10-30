@@ -290,6 +290,13 @@ func TestUpgradeGateLedgerScoresPhasesAndFollow(t *testing.T) {
 	followRotation := func(source string) []verification {
 		return []verification{follow(source, "integrity", "txid", true), follow(source, "integrity", "timestamp", true), follow(source, "integrity", "latest", true)}
 	}
+	laneCoverage := func(phase string, passed bool) verification {
+		return verification{testUpgradeCandidate, gateUpgradeLaneProfile, phase, "", "coverage", "coverage", outcome(passed)}
+	}
+	followCoverage := func(source string, passed bool) verification {
+		return follow(source, "coverage", "coverage", passed)
+	}
+	coverage := []verification{laneCoverage("pre-upgrade", true), laneCoverage("post-upgrade", true), followCoverage(testUpgradeCandidate, true), followCoverage(testUpgradeBaseline, true)}
 	concat := func(groups ...[]verification) []verification {
 		var all []verification
 		for _, group := range groups {
@@ -302,7 +309,7 @@ func TestUpgradeGateLedgerScoresPhasesAndFollow(t *testing.T) {
 		follow(testUpgradeCandidate, "integrity", "txid", true), follow(testUpgradeCandidate, "integrity", "timestamp", true), follow(testUpgradeCandidate, "integrity", "latest", true), follow(testUpgradeCandidate, "follow", "follow", true),
 		follow(testUpgradeBaseline, "integrity", "txid", true), follow(testUpgradeBaseline, "integrity", "timestamp", true), follow(testUpgradeBaseline, "integrity", "latest", true), follow(testUpgradeBaseline, "follow", "follow", true),
 	}
-	fullCoverage = concat(laneRotation("pre-upgrade"), laneRotation("post-upgrade"), fullCoverage)
+	fullCoverage = concat(laneRotation("pre-upgrade"), laneRotation("post-upgrade"), coverage, fullCoverage)
 	tests := []struct {
 		name          string
 		verifications []verification
@@ -313,33 +320,33 @@ func TestUpgradeGateLedgerScoresPhasesAndFollow(t *testing.T) {
 			name:          "full coverage passes",
 			verifications: fullCoverage,
 			wantVerdict:   rcGateVerdictPass,
-			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass},
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass, "upgrade-lane-ltx-coverage": rcGateVerdictPass, "follow-l9-ltx-coverage": rcGateVerdictPass},
 		},
 		{
 			name:          "post-upgrade restore failure is a regression against the pre-upgrade phase",
 			verifications: append(append([]verification{}, fullCoverage...), laneRestore("post-upgrade", "latest", false)),
 			wantVerdict:   rcGateVerdictFail,
-			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictRegression, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass},
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictRegression, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass, "upgrade-lane-ltx-coverage": rcGateVerdictPass, "follow-l9-ltx-coverage": rcGateVerdictPass},
 		},
 		{
 			name:          "lane follow failure compares against the baseline follow worker",
 			verifications: append(append([]verification{}, fullCoverage...), laneFollow(false)),
 			wantVerdict:   rcGateVerdictFail,
-			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictRegression, "follow-l9": rcGateVerdictPass},
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictRegression, "follow-l9": rcGateVerdictPass, "upgrade-lane-ltx-coverage": rcGateVerdictPass, "follow-l9-ltx-coverage": rcGateVerdictPass},
 		},
 		{
 			name: "no post-upgrade evidence is incomplete",
-			verifications: concat(laneRotation("pre-upgrade"), followRotation(testUpgradeCandidate), followRotation(testUpgradeBaseline),
+			verifications: concat(coverage, laneRotation("pre-upgrade"), followRotation(testUpgradeCandidate), followRotation(testUpgradeBaseline),
 				[]verification{follow(testUpgradeCandidate, "follow", "follow", true), follow(testUpgradeBaseline, "follow", "follow", true)}),
 			wantVerdict:   rcGateVerdictIncomplete,
-			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictIncomplete, "upgrade-lane-historical": rcGateVerdictIncomplete, "upgrade-lane-follow": rcGateVerdictIncomplete, "follow-l9": rcGateVerdictPass},
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictIncomplete, "upgrade-lane-historical": rcGateVerdictIncomplete, "upgrade-lane-follow": rcGateVerdictIncomplete, "follow-l9": rcGateVerdictPass, "upgrade-lane-ltx-coverage": rcGateVerdictPass, "follow-l9-ltx-coverage": rcGateVerdictPass},
 		},
 		{
 			name: "follow workers without follow coverage are incomplete",
-			verifications: concat(laneRotation("pre-upgrade"), laneRotation("post-upgrade"), followRotation(testUpgradeCandidate), followRotation(testUpgradeBaseline),
+			verifications: concat(coverage, laneRotation("pre-upgrade"), laneRotation("post-upgrade"), followRotation(testUpgradeCandidate), followRotation(testUpgradeBaseline),
 				[]verification{laneFollow(true), historical("passed"), follow(testUpgradeBaseline, "follow", "follow", true)}),
 			wantVerdict:   rcGateVerdictIncomplete,
-			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictIncomplete},
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictIncomplete, "upgrade-lane-ltx-coverage": rcGateVerdictPass, "follow-l9-ltx-coverage": rcGateVerdictPass},
 		},
 		{
 			name: "post-upgrade failures reported with the base SHA do not count",
@@ -348,44 +355,62 @@ func TestUpgradeGateLedgerScoresPhasesAndFollow(t *testing.T) {
 				mislabelled("pre-upgrade", testGateCandidateSHA, "txid", false),
 				mislabelled("post-upgrade", "unknown", "latest", false)),
 			wantVerdict:   rcGateVerdictPass,
-			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass},
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass, "upgrade-lane-ltx-coverage": rcGateVerdictPass, "follow-l9-ltx-coverage": rcGateVerdictPass},
 		},
 		{
 			name: "post-upgrade passes reported with the base SHA do not give coverage",
-			verifications: concat(laneRotation("pre-upgrade"), followRotation(testUpgradeCandidate), followRotation(testUpgradeBaseline),
+			verifications: concat(coverage, laneRotation("pre-upgrade"), followRotation(testUpgradeCandidate), followRotation(testUpgradeBaseline),
 				[]verification{laneFollow(true), historical("passed"), follow(testUpgradeCandidate, "follow", "follow", true), follow(testUpgradeBaseline, "follow", "follow", true),
 					mislabelled("post-upgrade", testGateBaselineSHA, "txid", true), mislabelled("post-upgrade", testGateBaselineSHA, "timestamp", true), mislabelled("post-upgrade", testGateBaselineSHA, "latest", true)}),
 			wantVerdict:   rcGateVerdictIncomplete,
-			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictIncomplete, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass},
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictIncomplete, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass, "upgrade-lane-ltx-coverage": rcGateVerdictPass, "follow-l9-ltx-coverage": rcGateVerdictPass},
 		},
 		{
 			name: "historical pass does not stand in for aborted current txid coverage",
-			verifications: concat(laneRotation("pre-upgrade"), followRotation(testUpgradeCandidate), followRotation(testUpgradeBaseline),
+			verifications: concat(coverage, laneRotation("pre-upgrade"), followRotation(testUpgradeCandidate), followRotation(testUpgradeBaseline),
 				[]verification{
 					laneAborted("post-upgrade", "txid"), laneAborted("post-upgrade", "txid"), laneRestore("post-upgrade", "timestamp", true), laneRestore("post-upgrade", "latest", true),
 					historical("passed"), historical("passed"), laneFollow(true),
 					follow(testUpgradeCandidate, "follow", "follow", true), follow(testUpgradeBaseline, "follow", "follow", true),
 				}),
 			wantVerdict:   rcGateVerdictIncomplete,
-			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictIncomplete, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass},
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictIncomplete, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass, "upgrade-lane-ltx-coverage": rcGateVerdictPass, "follow-l9-ltx-coverage": rcGateVerdictPass},
 		},
 		{
 			name:          "historical restore failure is its own regression",
 			verifications: append(append([]verification{}, fullCoverage...), historical("failed")),
 			wantVerdict:   rcGateVerdictFail,
-			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictRegression, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass},
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictRegression, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass, "upgrade-lane-ltx-coverage": rcGateVerdictPass, "follow-l9-ltx-coverage": rcGateVerdictPass},
 		},
 		{
 			name:          "historical target lost is inconclusive, not failing",
 			verifications: append(append([]verification{}, fullCoverage...), historical("aborted")),
 			wantVerdict:   rcGateVerdictPass,
-			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass},
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass, "upgrade-lane-ltx-coverage": rcGateVerdictPass, "follow-l9-ltx-coverage": rcGateVerdictPass},
+		},
+		{
+			name:          "post-upgrade ltx coverage hole is a regression against the pre-upgrade phase",
+			verifications: append(append([]verification{}, fullCoverage...), laneCoverage("post-upgrade", false)),
+			wantVerdict:   rcGateVerdictFail,
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass, "upgrade-lane-ltx-coverage": rcGateVerdictRegression, "follow-l9-ltx-coverage": rcGateVerdictPass},
+		},
+		{
+			name:          "candidate follow worker hole is a regression and does not leak into follow-l9",
+			verifications: append(append([]verification{}, fullCoverage...), followCoverage(testUpgradeCandidate, false)),
+			wantVerdict:   rcGateVerdictFail,
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass, "upgrade-lane-ltx-coverage": rcGateVerdictPass, "follow-l9-ltx-coverage": rcGateVerdictRegression},
+		},
+		{
+			name:          "holes on both follow workers are both_failing",
+			verifications: append(append([]verification{}, fullCoverage...), followCoverage(testUpgradeCandidate, false), followCoverage(testUpgradeBaseline, false)),
+			wantVerdict:   rcGateVerdictFail,
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictPass, "upgrade-lane-ltx-coverage": rcGateVerdictPass, "follow-l9-ltx-coverage": rcGateVerdictBothFailing},
 		},
 		{
 			name:          "both follow lanes failing is not a regression",
 			verifications: append(append([]verification{}, fullCoverage...), follow(testUpgradeCandidate, "follow", "follow", false), follow(testUpgradeBaseline, "follow", "follow", false)),
 			wantVerdict:   rcGateVerdictFail,
-			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictBothFailing},
+			wantScenarios: map[string]string{"upgrade-lane": rcGateVerdictPass, "upgrade-lane-historical": rcGateVerdictPass, "upgrade-lane-follow": rcGateVerdictPass, "follow-l9": rcGateVerdictBothFailing, "upgrade-lane-ltx-coverage": rcGateVerdictPass, "follow-l9-ltx-coverage": rcGateVerdictPass},
 		},
 	}
 	for _, tt := range tests {

@@ -176,6 +176,10 @@ type Config struct {
 	CompactionL0ObjectBound int
 	CompactionL1ObjectBound int
 
+	// LTX coverage: fail a cycle when the union of L0-L8 txid ranges has a
+	// hole, which pinned and timestamp restores into it cannot be served from.
+	LTXCoverageCheck bool
+
 	// Replay
 	LoadMode       string  // "synthetic", "replay", "both"
 	ReplayDataset  string  // "taxi", "gharchive", "orders"
@@ -978,6 +982,9 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 	if parseBoolEnv(getenv("FOLLOW_CHECK")) {
 		c.FollowCheck = true
 	}
+	if parseBoolEnv(getenv("LTX_COVERAGE_CHECK")) {
+		c.LTXCoverageCheck = true
+	}
 	if parseBoolEnv(getenv("COMPACTION_PROGRESS_CHECK")) {
 		c.CompactionProgressCheck = true
 		c.ReplicaLevelReporting = true
@@ -1344,6 +1351,7 @@ func (c Config) WorkloadConfig() workload.Config {
 	}
 	cfg.FollowCheck = c.FollowCheck
 	cfg.CompactionProgressCheck = c.CompactionProgressCheck
+	cfg.LTXCoverageCheck = c.LTXCoverageCheck
 	cfg.CompactionL0ObjectBound = c.CompactionL0ObjectBound
 	cfg.CompactionL1ObjectBound = c.CompactionL1ObjectBound
 	if c.ManyDBEnabled() {

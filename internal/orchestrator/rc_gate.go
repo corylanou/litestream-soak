@@ -132,6 +132,7 @@ type RCGateSideResult struct {
 	RotationEnabled bool   `json:"rotation_enabled,omitempty"`
 	Reason          string `json:"reason,omitempty"`
 	ReasonDetail    string `json:"reason_detail,omitempty"`
+	coverageCheck   bool
 }
 
 type RCGateModeResult struct {
@@ -184,15 +185,18 @@ const (
 	gateCheckAny        = "*"
 	gateCheckFollow     = "follow"
 	gateCheckHistorical = "pre-upgrade-restore"
+	gateCheckCoverage   = "coverage"
+	gateModeCoverage    = "coverage"
 )
 
-var gateNonCurrentChecks = []string{gateCheckFollow, gateCheckHistorical}
+var gateNonCurrentChecks = []string{gateCheckFollow, gateCheckHistorical, gateCheckCoverage}
 
 type gateScenario struct {
 	name          string
 	profile       string
 	identity      string
 	txidOnly      bool
+	coverage      bool
 	requiredModes []string
 	candidate     gateSideFilter
 	baseline      gateSideFilter
@@ -205,6 +209,10 @@ var (
 		{name: "manydb-500", profile: gateManyDB500Profile, txidOnly: true},
 		{name: "large-db", profile: gateLargeDBProfile},
 		{name: "remote", profile: gateRemoteProfile},
+		ltxCoverageScenario(gateScenario{name: "overload-truncate0", profile: gateStressProfile, identity: "overload-truncate0"}),
+		ltxCoverageScenario(gateScenario{name: "pinned-reader", profile: gateStressProfile, identity: "pinned-reader"}),
+		ltxCoverageScenario(gateScenario{name: "large-db", profile: gateLargeDBProfile}),
+		ltxCoverageScenario(gateScenario{name: "remote", profile: gateRemoteProfile}),
 	}
 	// The upgrade gate scores the lane worker's post-upgrade restores against
 	// its own pre-upgrade restores, its historical pre-upgrade txid restores
@@ -239,6 +247,18 @@ var (
 			candidate:     gateSideFilter{role: gateRoleCandidate, checkType: gateCheckAny},
 			baseline:      gateSideFilter{role: gateRoleBaseline, checkType: gateCheckAny},
 		},
+		ltxCoverageScenario(gateScenario{
+			name:      "upgrade-lane",
+			profile:   gateUpgradeLaneProfile,
+			candidate: gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost},
+			baseline:  gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePre},
+		}),
+		ltxCoverageScenario(gateScenario{
+			name:      "follow-l9",
+			profile:   gateUpgradeFollowProfile,
+			candidate: gateSideFilter{role: gateRoleCandidate},
+			baseline:  gateSideFilter{role: gateRoleBaseline},
+		}),
 	}
 	gateRotatingRestoreModes = []string{"txid", "timestamp", "latest"}
 )
@@ -267,6 +287,24 @@ var upgradeGateNoL9Scenarios = []gateScenario{
 		candidate:     gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost, checkType: gateCheckFollow},
 		baseline:      gateSideFilter{role: gateRoleBaseline, profile: gateUpgradeFollowProfile, checkType: gateCheckFollow},
 	},
+	ltxCoverageScenario(gateScenario{
+		name:      "upgrade-lane-nol9",
+		profile:   gateUpgradeLaneNoL9Profile,
+		candidate: gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePost},
+		baseline:  gateSideFilter{role: gateRoleCandidate, phase: upgradePhasePre},
+	}),
+}
+
+// ltxCoverageScenario scores the L0-L8 coverage checks of the workers a
+// restore scenario runs on: the same profile, stress identity and phase
+// pairing, counting only coverage checks.
+func ltxCoverageScenario(base gateScenario) gateScenario {
+	base.name += "-ltx-coverage"
+	base.coverage = true
+	base.requiredModes = []string{gateModeCoverage}
+	base.candidate.checkType = gateCheckCoverage
+	base.baseline.checkType = gateCheckCoverage
+	return base
 }
 
 func gateScenariosFor(gate model.RCGate) []gateScenario {
@@ -332,7 +370,7 @@ func (f gateSideFilter) accepts(gate model.RCGate, verification model.Verificati
 	}
 	switch f.checkType {
 	case gateCheckAny:
-		return true
+		return verification.CheckType != gateCheckCoverage
 	case gateCheckCurrent:
 		return !slices.Contains(gateNonCurrentChecks, verification.CheckType)
 	default:
@@ -510,6 +548,7 @@ func GateFleetForSource(source, gitSHA, litestreamSHA string) FleetSpec {
 		// stops, so the gate sees one harness failure instead of a Fly crash
 		// loop. Only gate fleets set this; other fleets keep restart-on-failure.
 		workers[i].Workload.PopulateStopOnFailure = true
+		workers[i].Workload.LTXCoverageCheck = workers[i].Workload.LoadMode != "many-db"
 	}
 	return FleetSpec{Workers: withMeteringWindowObserveProxy(workers)}
 }
@@ -1134,6 +1173,15 @@ func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateR
 		if result.Verdict != rcGateVerdictIncomplete && len(result.Modes) > 0 {
 			result.Verdict = rcGateModesVerdict(result.Modes)
 		}
+		if scenario.coverage {
+			if !candidate.coverageCheck && !baseline.coverageCheck {
+				continue
+			}
+			for i := range result.Modes {
+				result.Modes[i].Verdict = rcGateCoverageVerdict(result.Modes[i].Verdict, result.Modes[i].Candidate, result.Modes[i].Baseline)
+			}
+			result.Verdict = rcGateCoverageVerdict(result.Verdict, candidate, baseline)
+		}
 		switch result.Verdict {
 		case rcGateVerdictRegression, rcGateVerdictBothFailing:
 			failing = true
@@ -1187,6 +1235,9 @@ func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter g
 		return side, modes, nil
 	}
 	side.WorkerID = worker.ID
+	if cfg, err := workload.ParseConfig(worker.ProfileConfig); err == nil {
+		side.coverageCheck = cfg.LTXCoverageCheck
+	}
 	verifications, err := db.ListVerificationsExcludingMeteringRuns(worker.ID, rcGateVerificationHistory)
 	if err != nil {
 		return side, modes, err
@@ -1204,7 +1255,7 @@ func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter g
 		if mode == "" {
 			mode = "txid"
 		}
-		if strings.TrimSpace(verification.RestoreMode) != "" && verification.RestoreModeFallback != "rotation_disabled" {
+		if strings.TrimSpace(verification.RestoreMode) != "" && mode != gateModeCoverage && verification.RestoreModeFallback != "rotation_disabled" {
 			side.RotationEnabled = true
 		}
 		if modes[mode] == nil {
@@ -1613,6 +1664,17 @@ func rcGateModesVerdict(modes []RCGateModeResult) string {
 		}
 	}
 	return rcGateVerdictPass
+}
+
+// rcGateCoverageVerdict makes an L0-L8 coverage hole a hard failure: a hole is
+// evidence on its own, so a candidate hole is a regression whenever the
+// baseline has none, even when the baseline has no coverage evidence yet.
+// Holes on both sides stay both_failing.
+func rcGateCoverageVerdict(verdict string, candidate, baseline RCGateSideResult) string {
+	if candidate.Failed > 0 && baseline.Failed == 0 && baseline.Status != rcGateSideFailing {
+		return rcGateVerdictRegression
+	}
+	return verdict
 }
 
 func rcGateOwnsWorker(gate model.RCGate, worker model.Worker) bool {
