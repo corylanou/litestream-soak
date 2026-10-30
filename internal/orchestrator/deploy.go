@@ -16,7 +16,7 @@ import (
 
 var validSHARe = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 var validImageRefRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`)
-var versionedWorkerImageRe = regexp.MustCompile(`(^|:)sha-([0-9a-fA-F]{7,40})(-pr-([1-9][0-9]*)|-((?:rc|rcbase|up|upbase)(?:-nol9)?-[0-9a-f]{8}))?-ls-([0-9a-fA-F]{7,40})(@sha256:[0-9a-fA-F]{32,})?$`)
+var versionedWorkerImageRe = regexp.MustCompile(`(^|:)sha-([0-9a-fA-F]{7,40})(-pr-([1-9][0-9]*)|-((?:rc|rcbase|up|upbase)(?:-nol9)?-[0-9a-f]{8}(?:-[0-9a-z]{1,8})?))?-ls-([0-9a-fA-F]{7,40})(@sha256:[0-9a-fA-F]{32,})?$`)
 
 const deploymentBuildTimeout = 10 * time.Minute
 

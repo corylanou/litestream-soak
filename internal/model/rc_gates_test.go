@@ -114,6 +114,67 @@ func TestRCGateRejectsOverlappingActiveSource(t *testing.T) {
 	}
 }
 
+func TestRCGateProfilesRoundTrip(t *testing.T) {
+	tests := []struct {
+		name     string
+		profiles []string
+		selects  map[string]bool
+	}{
+		{name: "empty selects every profile", selects: map[string]bool{"gate-stress": true, "gate-large-db": true}},
+		{name: "subset is stored and selects only itself", profiles: []string{"gate-large-db"}, selects: map[string]bool{"gate-stress": false, "gate-large-db": true}},
+		{name: "two profiles keep their order", profiles: []string{"gate-remote", "gate-large-db"}, selects: map[string]bool{"gate-remote": true, "gate-large-db": true, "gate-stress": false}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := openRCGateTestDB(t)
+			gate := testRCGate(time.Now().UTC())
+			gate.Profiles = tt.profiles
+			if err := db.CreateRCGate(&gate); err != nil {
+				t.Fatalf("CreateRCGate() error = %v", err)
+			}
+			stored, err := db.GetRCGate(gate.ID)
+			if err != nil {
+				t.Fatalf("GetRCGate() error = %v", err)
+			}
+			if len(stored.Profiles) != len(tt.profiles) {
+				t.Fatalf("Profiles = %v, want %v", stored.Profiles, tt.profiles)
+			}
+			for i := range tt.profiles {
+				if stored.Profiles[i] != tt.profiles[i] {
+					t.Fatalf("Profiles = %v, want %v", stored.Profiles, tt.profiles)
+				}
+			}
+			for profile, want := range tt.selects {
+				if got := stored.SelectsProfile(profile); got != want {
+					t.Fatalf("SelectsProfile(%s) = %v, want %v", profile, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestRCGateSuffixedSourcesRegisterWhileLegacyGateIsOpen(t *testing.T) {
+	db := openRCGateTestDB(t)
+	started := time.Now().UTC()
+	first := testRCGate(started)
+	if err := db.CreateRCGate(&first); err != nil {
+		t.Fatalf("CreateRCGate() error = %v", err)
+	}
+	second := testRCGate(started)
+	second.CandidateSource = "rc-aaaaaaaa-2dfdc1c3"
+	second.BaselineSource = "rcbase-bbbbbbbb-2dfdc1c3"
+	second.Profiles = []string{"gate-large-db"}
+	if err := db.CreateRCGate(&second); err != nil {
+		t.Fatalf("CreateRCGate() with suffixed sources error = %v", err)
+	}
+	for source, wantID := range map[string]int64{"rc-aaaaaaaa": first.ID, "rc-aaaaaaaa-2dfdc1c3": second.ID, "rcbase-bbbbbbbb-2dfdc1c3": second.ID} {
+		active, err := db.ActiveRCGateForSource(source)
+		if err != nil || active == nil || active.ID != wantID {
+			t.Fatalf("ActiveRCGateForSource(%s) = %+v, %v; want gate %d", source, active, err, wantID)
+		}
+	}
+}
+
 func TestRCGatePinBuildIsWriteOnceWhileOpen(t *testing.T) {
 	db := openRCGateTestDB(t)
 	gate := testRCGate(time.Now().UTC())

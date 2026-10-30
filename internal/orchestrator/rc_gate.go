@@ -84,7 +84,12 @@ var (
 )
 
 var (
-	gateSourceRe           = regexp.MustCompile(`^(rc|rcbase|up|upbase)(-nol9)?-[0-9a-f]{8}$`)
+	// gateSourceRe accepts the legacy <prefix>-<sha8> names and the per-gate
+	// <prefix>-<sha8>-<suffix> names, so two gates for the same commits can be
+	// open at once (a rerun of one profile while the original gate is still
+	// running) without colliding on sources.
+	gateSourceRe           = regexp.MustCompile(`^(rc|rcbase|up|upbase)(-nol9)?-[0-9a-f]{8}(-[0-9a-z]{1,8})?$`)
+	gateSourceSuffixRe     = regexp.MustCompile(`^[0-9a-z]{1,8}$`)
 	fullCommitSHARe        = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	errRCGateNotRegistered = errors.New("rc gate is not registered")
 	errRCGatePinned        = errors.New("rc gate source is pinned to a different build")
@@ -102,6 +107,12 @@ type RCGateRequest struct {
 	UpgradeWarmup string `json:"upgrade_warmup,omitempty"`
 	LaneVariant   string `json:"lane_variant,omitempty"`
 	Tail          bool   `json:"tail"`
+	// Profiles limits the gate to these fleet profiles; empty runs them all.
+	Profiles []string `json:"profiles,omitempty"`
+	// SourceSuffix is appended to both source names (rc-<sha8>-<suffix>) so
+	// the gate's sources are distinct from any other gate's for the same
+	// commits; empty keeps the legacy rc-<sha8> names.
+	SourceSuffix string `json:"source_suffix,omitempty"`
 }
 
 type RCGateSideResult struct {
@@ -325,8 +336,57 @@ func isGateSource(source string) bool {
 	return gateSourceRe.MatchString(strings.TrimSpace(source))
 }
 
-func gateSourceName(prefix, sha string) string {
-	return prefix + "-" + sha[:8]
+func gateSourceName(prefix, sha, suffix string) string {
+	name := prefix + "-" + sha[:8]
+	if suffix != "" {
+		name += "-" + suffix
+	}
+	return name
+}
+
+// gateFleetForSource is GateFleetForSource narrowed to the profiles the gate
+// selected; every per-gate fleet decision (resources, provisioning window,
+// readiness) goes through it so an unselected profile is never provisioned
+// or waited for.
+func gateFleetForSource(gate model.RCGate, source, gitSHA, litestreamSHA string) FleetSpec {
+	spec := GateFleetForSource(source, gitSHA, litestreamSHA)
+	selected := spec.Workers[:0]
+	for _, desired := range spec.Workers {
+		if gate.SelectsProfile(desired.ProfileName) {
+			selected = append(selected, desired)
+		}
+	}
+	spec.Workers = selected
+	return spec
+}
+
+// normalizeGateProfiles validates a requested profile subset against the
+// kind's fleet and returns it in fleet order; nil means the whole fleet.
+func normalizeGateProfiles(kind model.RCGateKind, laneVariant string, requested []string) ([]string, error) {
+	wanted := make(map[string]bool, len(requested))
+	for _, profile := range requested {
+		if profile = strings.TrimSpace(profile); profile != "" {
+			wanted[profile] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return nil, nil
+	}
+	candidatePrefix, baselinePrefix := gateSourcePrefixes(kind, laneVariant)
+	var selected []string
+	for _, source := range []string{candidatePrefix + "-00000000", baselinePrefix + "-00000000"} {
+		for _, desired := range GateFleetForSource(source, "", "").Workers {
+			if wanted[desired.ProfileName] && !slices.Contains(selected, desired.ProfileName) {
+				selected = append(selected, desired.ProfileName)
+			}
+		}
+	}
+	for profile := range wanted {
+		if !slices.Contains(selected, profile) {
+			return nil, fmt.Errorf("%w: profile %q is not part of the %s gate fleet", errRCGateInvalid, profile, kind)
+		}
+	}
+	return selected, nil
 }
 
 func gateKindForSource(source string) model.RCGateKind {
@@ -608,6 +668,17 @@ func (m *Manager) RegisterRCGate(request RCGateRequest, now time.Time) (model.RC
 	if err != nil {
 		return model.RCGate{}, false, err
 	}
+	profiles, err := normalizeGateProfiles(kind, laneVariant, request.Profiles)
+	if err != nil {
+		return model.RCGate{}, false, err
+	}
+	if request.Tail && profiles != nil && !slices.Contains(profiles, gateStressProfile) {
+		return model.RCGate{}, false, fmt.Errorf("%w: tail requires the %s profile", errRCGateInvalid, gateStressProfile)
+	}
+	suffix := strings.TrimSpace(request.SourceSuffix)
+	if suffix != "" && !gateSourceSuffixRe.MatchString(suffix) {
+		return model.RCGate{}, false, fmt.Errorf("%w: source_suffix must be 1 to 8 lowercase letters or digits", errRCGateInvalid)
+	}
 
 	now = now.UTC()
 	candidatePrefix, baselinePrefix := gateSourcePrefixes(kind, laneVariant)
@@ -616,13 +687,14 @@ func (m *Manager) RegisterRCGate(request RCGateRequest, now time.Time) (model.RC
 		LaneVariant:       laneVariant,
 		Repository:        repository,
 		CandidateRef:      strings.TrimSpace(request.CandidateRef),
-		CandidateSource:   gateSourceName(candidatePrefix, candidateSHA),
+		CandidateSource:   gateSourceName(candidatePrefix, candidateSHA, suffix),
 		CandidateSHA:      candidateSHA,
-		BaselineSource:    gateSourceName(baselinePrefix, baselineSHA),
+		BaselineSource:    gateSourceName(baselinePrefix, baselineSHA, suffix),
 		BaselineSHA:       baselineSHA,
 		Duration:          duration,
 		UpgradeWarmup:     warmup,
 		Tail:              request.Tail,
+		Profiles:          profiles,
 		Status:            model.RCGateRunning,
 		StartedAt:         now,
 		ExpiresAt:         now.Add(duration),
@@ -633,7 +705,7 @@ func (m *Manager) RegisterRCGate(request RCGateRequest, now time.Time) (model.RC
 	}
 	for _, source := range gate.Sources() {
 		litestreamSHA, _ := gate.LitestreamSHAFor(source)
-		for _, desired := range GateFleetForSource(source, "", litestreamSHA).Workers {
+		for _, desired := range gateFleetForSource(gate, source, "", litestreamSHA).Workers {
 			_, deadline := rcGateProfileWindow(gate, desired.ProfileName)
 			gate.Resources = append(gate.Resources, model.RCGateResource{
 				Source:     source,
@@ -658,18 +730,19 @@ func (m *Manager) RegisterRCGate(request RCGateRequest, now time.Time) (model.RC
 			return model.RCGate{}, false, errors.Join(err, lookupErr)
 		}
 		if existing != nil && existing.Kind == gate.Kind && existing.LaneVariant == gate.LaneVariant && existing.Repository == gate.Repository && existing.CandidateSHA == gate.CandidateSHA &&
-			existing.BaselineSHA == gate.BaselineSHA && existing.Duration == gate.Duration && existing.UpgradeWarmup == gate.UpgradeWarmup && existing.Tail == gate.Tail {
+			existing.BaselineSHA == gate.BaselineSHA && existing.Duration == gate.Duration && existing.UpgradeWarmup == gate.UpgradeWarmup && existing.Tail == gate.Tail &&
+			slices.Equal(existing.Profiles, gate.Profiles) {
 			return *existing, false, nil
 		}
 		return model.RCGate{}, false, err
 	}
-	_ = m.db.RecordEvent("", "rc_gate_registered", fmt.Sprintf("Registered %s gate %s vs %s for %s", gate.Kind, gate.CandidateSource, gate.BaselineSource, duration), fmt.Sprintf("gate_id=%d tail=%t upgrade_warmup=%s lane_variant=%s", gate.ID, gate.Tail, gate.UpgradeWarmup, gate.LaneVariant))
+	_ = m.db.RecordEvent("", "rc_gate_registered", fmt.Sprintf("Registered %s gate %s vs %s for %s", gate.Kind, gate.CandidateSource, gate.BaselineSource, duration), fmt.Sprintf("gate_id=%d tail=%t upgrade_warmup=%s lane_variant=%s profiles=%s", gate.ID, gate.Tail, gate.UpgradeWarmup, gate.LaneVariant, firstNonEmpty(strings.Join(gate.Profiles, ","), "all")))
 	return gate, true, nil
 }
 
 func gateHasProfile(gate model.RCGate, profile string) bool {
 	for _, source := range gate.Sources() {
-		for _, desired := range GateFleetForSource(source, "", "").Workers {
+		for _, desired := range gateFleetForSource(gate, source, "", "").Workers {
 			if desired.ProfileName == profile {
 				return true
 			}
@@ -745,7 +818,7 @@ func (m *Manager) rcGateFleetForSource(source, gitSHA, litestreamSHA string, now
 	if gate == nil {
 		return FleetSpec{}, fmt.Errorf("%w: %s has no open gate", errRCGateClosed, source)
 	}
-	spec := applyGateWorkload(*gate, GateFleetForSource(source, gitSHA, litestreamSHA))
+	spec := applyGateWorkload(*gate, gateFleetForSource(*gate, source, gitSHA, litestreamSHA))
 	permitted := spec.Workers[:0]
 	for _, desired := range spec.Workers {
 		if m.rcGateProfilePermitted(*gate, desired.ProfileName, now) {
@@ -885,7 +958,7 @@ func (m *Manager) rcGateSideReady(gate model.RCGate, source string) (bool, error
 	if err != nil {
 		return false, fmt.Errorf("list %s workers: %w", source, err)
 	}
-	for _, desired := range GateFleetForSource(source, pinnedGit, pinnedLitestream).Workers {
+	for _, desired := range gateFleetForSource(gate, source, pinnedGit, pinnedLitestream).Workers {
 		ready := false
 		for _, worker := range workers {
 			if worker.ProfileName == desired.ProfileName && worker.Status == model.WorkerRunning &&
@@ -1009,6 +1082,9 @@ func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateR
 	results := rcGateResults{ClosedAt: end.UTC()}
 	failing, incomplete := false, false
 	for _, scenario := range gateScenariosFor(gate) {
+		if !gate.SelectsProfile(scenario.profile) {
+			continue
+		}
 		candidateFilter, baselineFilter := scenario.candidate, scenario.baseline
 		if candidateFilter.role == "" {
 			candidateFilter.role = gateRoleCandidate
