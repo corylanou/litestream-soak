@@ -1013,14 +1013,11 @@ func TestRCGateStressPlannedPhaseRestartsAreNotCrashes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			db := openTestDB(t)
 			now := time.Now().UTC()
-			gate := registerTestGate(t, db, false, now.Add(-10*time.Hour))
-			createTestGateFleet(t, db, gate)
 			boundary := now.Add(-time.Hour).Truncate(phase)
-			if boundary.Before(gate.StartedAt.Add(4 * time.Hour)) {
-				boundary = boundary.Add(phase)
-			}
-			if boundary.After(now) || boundary.Before(gate.StartedAt) {
-				t.Fatalf("no usable phase boundary between %s and %s", gate.StartedAt, now)
+			gate := registerTestGate(t, db, false, boundary.Add(-5*time.Hour))
+			createTestGateFleet(t, db, gate)
+			if boundary.Add(10*time.Minute).After(now) || boundary.Before(gate.StartedAt.Add(4*time.Hour)) {
+				t.Fatalf("phase boundary %s leaves no room for its events between %s and %s", boundary, gate.StartedAt, now)
 			}
 			workerID := "worker-" + testGateCandidate + "-" + gateStressProfile
 			tt.arrange(db, workerID, boundary)
