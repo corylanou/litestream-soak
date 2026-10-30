@@ -122,6 +122,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := r.populate(runCtx); err != nil {
 		err = fmt.Errorf("populate: %w", err)
 		r.sendPreStartFailureEvent(err)
+		if runCtx.Err() == nil {
+			return &PopulateFailure{err: err}
+		}
 		return err
 	}
 	r.setStartupPhase(reporting.StartupPhaseLitestream)
@@ -264,7 +267,7 @@ func (r *Runner) populate(ctx context.Context) error {
 	if r.cfg.ManyDBEnabled() {
 		return populateManyDBs(ctx, r.cfg)
 	}
-	return populateSingleDB(ctx, r.cfg)
+	return populateSingleDBWithRetry(ctx, r.cfg, populateAttempts)
 }
 
 func (r *Runner) runVerifyLoop(ctx context.Context) error {

@@ -69,6 +69,10 @@ func main() {
 	default:
 		err = run(ctx, cfg)
 	}
+	if worker.IsPopulateFailure(err) {
+		slog.Error("Worker stopped: populate failed on every attempt and was reported; not restarting", "error", err)
+		return
+	}
 	if err != nil {
 		slog.Error("Worker failed", "error", err)
 		os.Exit(1)

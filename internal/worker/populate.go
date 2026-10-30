@@ -28,11 +28,19 @@ const (
 	populateCheckpointWALCeiling   int64 = 8 * populateCheckpointWALThreshold
 	populateCheckpointPollInterval       = 100 * time.Millisecond
 	populateCheckpointSpinLimit          = 10 * time.Second
-	// populateCheckpointLockHold caps how long the backfill may hold the WAL
-	// write lock. litestream-test populate opens SQLite through mattn/go-sqlite3,
-	// whose default busy timeout is 5s, so the hold stays well under it.
-	populateCheckpointLockHold    = 3 * time.Second
-	populateCheckpointMaxFailures = 5
+	// populateCheckpointLockSlice bounds one attempt at the WAL write lock.
+	// Every frame populate commits while the checkpointer waits is a frame the
+	// TRUNCATE must copy while holding the lock, so after a slice the WAL is
+	// backfilled again without the lock before the next attempt.
+	populateCheckpointLockSlice = 25 * time.Millisecond
+	// populateCheckpointResidualFrames is how many frames may still be
+	// un-backfilled when the write lock is taken (256 pages of 4 KiB is 1 MiB),
+	// and populateCheckpointResidualCap is the most the TRUNCATE may ever have
+	// to copy under the lock when the lock-free passes cannot converge.
+	populateCheckpointResidualFrames int64 = 256
+	populateCheckpointResidualCap    int64 = 4096
+	populateCheckpointMaxPasses            = 32
+	populateCheckpointMaxFailures          = 5
 )
 
 var (
@@ -56,19 +64,24 @@ type populateCheckpointer struct {
 	ceiling     int64
 	interval    time.Duration
 	spinLimit   time.Duration
-	lockHold    time.Duration
+	lockSlice   time.Duration
 	maxFailures int
+	// afterBackfillPass, when set, runs after each lock-free PASSIVE pass.
+	// Tests use it to inject slow storage.
+	afterBackfillPass func(pass int)
 
 	mu          sync.Mutex
 	checkpoints int
 	truncations int
 	peakWAL     int64
+	maxLockHold time.Duration
 }
 
 type populateCheckpointStats struct {
-	Checkpoints  int   `json:"checkpoints"`
-	Truncations  int   `json:"truncations"`
-	PeakWALBytes int64 `json:"peak_wal_bytes"`
+	Checkpoints   int   `json:"checkpoints"`
+	Truncations   int   `json:"truncations"`
+	PeakWALBytes  int64 `json:"peak_wal_bytes"`
+	MaxLockHoldMS int64 `json:"max_lock_hold_ms"`
 }
 
 func newPopulateCheckpointer(dbPath string) *populateCheckpointer {
@@ -78,7 +91,7 @@ func newPopulateCheckpointer(dbPath string) *populateCheckpointer {
 		ceiling:     populateCheckpointWALCeiling,
 		interval:    populateCheckpointPollInterval,
 		spinLimit:   populateCheckpointSpinLimit,
-		lockHold:    populateCheckpointLockHold,
+		lockSlice:   populateCheckpointLockSlice,
 		maxFailures: populateCheckpointMaxFailures,
 	}
 }
@@ -147,65 +160,145 @@ func (c *populateCheckpointer) checkpointOnce(ctx context.Context, conns **check
 	return c.checkpoint(ctx, *conns)
 }
 
-// checkpoint forces one bounded checkpoint while populate keeps writing.
+// checkpoint forces one bounded checkpoint while populate keeps writing,
+// without ever holding the WAL write lock for longer than a small, bounded
+// copy. populate opens SQLite through mattn/go-sqlite3 with a 5s busy
+// timeout; a hold that long fails populate with "database is locked".
 //
-// populate holds the WAL write lock for nearly its whole run, releasing it
-// only for microseconds between batches, and a checkpoint that waits on
-// SQLite's busy handler (millisecond sleeps between retries) starves. The
-// lock connection therefore has no busy timeout and spins on BEGIN IMMEDIATE,
-// which costs no I/O per attempt, until it lands in that gap. With populate
-// held off on its own busy handler, the checkpoint connection backfills every
-// committed frame, the lock is released, and TRUNCATE is attempted at once.
-// populate is asleep in its busy handler at that moment so the truncate almost
-// always wins; if it loses, populate's next transaction finds the WAL fully
-// backfilled and restarts it from frame zero anyway, so the file is bounded
-// either way. The backfill holds the write lock for at most lockHold so slow
-// storage cannot push populate past its own busy timeout; a backfill cut
-// short is retried on the next pass with less left to copy.
+// All the expensive work happens without the write lock: PASSIVE passes
+// backfill committed frames into the database while populate keeps writing,
+// repeated until only a small residual is left. populate holds the write lock
+// for nearly its whole run, releasing it only for microseconds between
+// batches, and a checkpoint that waits on SQLite's busy handler (millisecond
+// sleeps) starves, so the lock connection spins on BEGIN IMMEDIATE, which
+// costs no I/O, for one short slice; if the slice passes, the frames populate
+// committed meanwhile are backfilled again before the next slice. Once the
+// lock is won, populate is parked in its own busy handler, the lock is
+// released at once, and TRUNCATE runs immediately: it copies only the residual
+// (at most residualCap frames), fsyncs, and truncates, so the hold is the cost
+// of that small copy. If TRUNCATE loses the lock race, populate's next
+// transaction finds a backfilled WAL and the next cycle retries.
 func (c *populateCheckpointer) checkpoint(ctx context.Context, conns *checkpointConns) (bool, error) {
-	if err := c.acquireWriteLock(ctx, conns.lock); err != nil {
-		return false, err
+	deadline := time.Now().Add(c.spinLimit)
+	for {
+		if err := c.backfill(ctx, conns.checkpoint); err != nil {
+			return false, err
+		}
+		// TRUNCATE fsyncs the WAL before it copies and the database after.
+		// populate never fsyncs (synchronous=NORMAL), so after a catch-up the
+		// kernel can hold hundreds of megabytes of dirty WAL pages, and an fsync
+		// under the lock would wait for all of them. Drain both files here,
+		// without the lock, so the fsyncs under the lock see only the residual.
+		if err := syncFiles(c.dbPath, walPath(c.dbPath)); err != nil {
+			return false, err
+		}
+		acquired, err := c.acquireWriteLock(ctx, conns.lock)
+		if err != nil {
+			return false, err
+		}
+		if acquired {
+			break
+		}
+		if time.Now().After(deadline) {
+			return false, fmt.Errorf("wal write lock starved for %s", c.spinLimit)
+		}
 	}
-	holdCtx, releaseHold := context.WithTimeout(ctx, c.lockHold)
-	backfillErr := walCheckpoint(holdCtx, conns.checkpoint, "PASSIVE")
-	releaseHold()
+
+	held := time.Now()
 	if _, err := conns.lock.ExecContext(ctx, "COMMIT"); err != nil {
 		_, _ = conns.lock.ExecContext(context.WithoutCancel(ctx), "ROLLBACK")
 		return false, fmt.Errorf("release wal write lock: %w", err)
 	}
-	if backfillErr != nil {
-		return false, fmt.Errorf("backfill wal: %w", backfillErr)
-	}
-	switch err := walCheckpoint(ctx, conns.checkpoint, "TRUNCATE"); {
-	case err == nil:
+	truncateErr := walCheckpoint(ctx, conns.checkpoint, "TRUNCATE")
+	c.observeLockHold(time.Since(held))
+	switch {
+	case truncateErr == nil:
 		return true, nil
-	case errors.Is(err, errWALCheckpointBusy):
+	case errors.Is(truncateErr, errWALCheckpointBusy):
 		return false, nil
 	default:
-		return false, fmt.Errorf("truncate wal: %w", err)
+		return false, fmt.Errorf("truncate wal: %w", truncateErr)
 	}
 }
 
-func (c *populateCheckpointer) acquireWriteLock(ctx context.Context, lock *sql.Conn) error {
-	deadline := time.Now().Add(c.spinLimit)
-	for {
-		_, err := lock.ExecContext(ctx, "BEGIN IMMEDIATE")
-		if err == nil {
-			return nil
+// backfill runs lock-free PASSIVE checkpoints until the un-backfilled residual
+// is small enough for the TRUNCATE to copy quickly under the lock. If populate
+// outpaces the passes it still proceeds when the residual is under the cap,
+// and otherwise reports a failure so a storage device that cannot keep up
+// surfaces as an aborted populate rather than a long lock hold.
+func (c *populateCheckpointer) backfill(ctx context.Context, conn walCheckpointer) error {
+	var residual int64
+	for pass := 1; pass <= populateCheckpointMaxPasses; pass++ {
+		logFrames, checkpointed, err := walCheckpointFrames(ctx, conn, "PASSIVE")
+		if err != nil {
+			return fmt.Errorf("backfill wal: %w", err)
 		}
-		if !isSQLiteBusy(err) {
-			return fmt.Errorf("acquire wal write lock: %w", err)
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("wal write lock starved for %s", c.spinLimit)
+		if c.afterBackfillPass != nil {
+			c.afterBackfillPass(pass)
 		}
 		if err := c.checkCeiling(fileSizeOrZero(walPath(c.dbPath))); err != nil {
 			return err
 		}
+		residual = logFrames - checkpointed
+		if residual <= populateCheckpointResidualFrames {
+			return nil
+		}
+	}
+	if residual <= populateCheckpointResidualCap {
+		return nil
+	}
+	return fmt.Errorf("backfill cannot keep up with populate: %d frames still un-backfilled after %d passes", residual, populateCheckpointMaxPasses)
+}
+
+// acquireWriteLock spins on BEGIN IMMEDIATE for one lock slice. It reports
+// false when the slice passes without the lock, so the caller backfills again
+// before retrying; the ceiling is checked on every spin.
+func (c *populateCheckpointer) acquireWriteLock(ctx context.Context, lock *sql.Conn) (bool, error) {
+	deadline := time.Now().Add(c.lockSlice)
+	for {
+		_, err := lock.ExecContext(ctx, "BEGIN IMMEDIATE")
+		if err == nil {
+			return true, nil
+		}
+		if !isSQLiteBusy(err) {
+			return false, fmt.Errorf("acquire wal write lock: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+		if err := c.checkCeiling(fileSizeOrZero(walPath(c.dbPath))); err != nil {
+			return false, err
+		}
 		runtime.Gosched()
+	}
+}
+
+func syncFiles(paths ...string) error {
+	for _, path := range paths {
+		f, err := os.OpenFile(path, os.O_RDWR, 0)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("open %s for sync: %w", filepath.Base(path), err)
+		}
+		syncErr := f.Sync()
+		closeErr := f.Close()
+		if err := errors.Join(syncErr, closeErr); err != nil {
+			return fmt.Errorf("sync %s: %w", filepath.Base(path), err)
+		}
+	}
+	return nil
+}
+
+func (c *populateCheckpointer) observeLockHold(hold time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if hold > c.maxLockHold {
+		c.maxLockHold = hold
 	}
 }
 
@@ -241,7 +334,7 @@ func (c *populateCheckpointer) recordCheckpoint(truncated bool) {
 func (c *populateCheckpointer) stats() populateCheckpointStats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return populateCheckpointStats{Checkpoints: c.checkpoints, Truncations: c.truncations, PeakWALBytes: c.peakWAL}
+	return populateCheckpointStats{Checkpoints: c.checkpoints, Truncations: c.truncations, PeakWALBytes: c.peakWAL, MaxLockHoldMS: c.maxLockHold.Milliseconds()}
 }
 
 // checkpointConns holds the two connections the checkpointer needs: SQLite
@@ -307,14 +400,23 @@ type walCheckpointer interface {
 // could not complete the requested mode because another connection held the
 // lock it needed.
 func walCheckpoint(ctx context.Context, db walCheckpointer, mode string) error {
-	var busy, logFrames, checkpointed int64
+	_, _, err := walCheckpointFrames(ctx, db, mode)
+	return err
+}
+
+// walCheckpointFrames runs PRAGMA wal_checkpoint(mode) and returns the frame
+// count in the WAL and how many of them are now backfilled, so a caller can
+// size the residual. PASSIVE reports busy only when readers pinned frames; the
+// counts are still meaningful then, so busy is returned alongside them.
+func walCheckpointFrames(ctx context.Context, db walCheckpointer, mode string) (logFrames, checkpointed int64, err error) {
+	var busy int64
 	if err := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint("+mode+")").Scan(&busy, &logFrames, &checkpointed); err != nil {
-		return err
+		return 0, 0, err
 	}
-	if busy != 0 {
-		return errWALCheckpointBusy
+	if busy != 0 && mode != "PASSIVE" {
+		return logFrames, checkpointed, errWALCheckpointBusy
 	}
-	return nil
+	return max(logFrames, 0), max(checkpointed, 0), nil
 }
 
 // finalizePopulateCheckpoint folds whatever populate left in the WAL into the
@@ -382,6 +484,48 @@ func populateEnv(env []string) []string {
 		}
 	}
 	return append(env, "GODEBUG="+setting)
+}
+
+// populateAttempts is how many times the worker runs populate before it gives
+// up. One retry absorbs a transient failure; a deterministic one (no disk, a
+// lost WAL bound) fails both attempts and is then reported exactly once.
+const populateAttempts = 2
+
+// PopulateFailure is the error Run returns when populate failed on every
+// attempt. The failure has already been reported as a worker_failed event, and
+// retrying from a fresh process would only repeat it, so the worker process
+// exits cleanly on it instead of letting the platform restart it ten times.
+type PopulateFailure struct {
+	err error
+}
+
+func (e *PopulateFailure) Error() string { return e.err.Error() }
+
+func (e *PopulateFailure) Unwrap() error { return e.err }
+
+// IsPopulateFailure reports whether err is a reported, final populate failure.
+func IsPopulateFailure(err error) bool {
+	var failure *PopulateFailure
+	return errors.As(err, &failure)
+}
+
+// populateSingleDBWithRetry runs populateSingleDB up to attempts times. Each
+// failed attempt has already removed its partial seed, so a retry starts
+// clean; the returned error carries every attempt's failure.
+func populateSingleDBWithRetry(ctx context.Context, cfg Config, attempts int) error {
+	var errs []error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		err := populateSingleDB(ctx, cfg)
+		if err == nil {
+			return nil
+		}
+		errs = append(errs, fmt.Errorf("attempt %d of %d: %w", attempt, attempts, err))
+		if ctx.Err() != nil || attempt == attempts {
+			break
+		}
+		slog.Warn("Populate failed; retrying once from a clean database", "attempt", attempt, "error", err)
+	}
+	return errors.Join(errs...)
 }
 
 // populateMarker is the durable record that populate finished and its final

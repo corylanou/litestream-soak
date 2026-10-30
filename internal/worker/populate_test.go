@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -208,8 +210,31 @@ func TestRunPopulateCommandBoundsWALWithPinnedBinary(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	peak := sampleWALPeak(ctx, dbPath)
 	cmd := exec.CommandContext(ctx, binary, "populate", "-db", dbPath, "-target-size", target, "-index-ratio", ratio)
+	checkpointer := newPopulateCheckpointer(dbPath)
+	// POPULATE_SLOW_BACKFILL injects slow storage into the first two lock-free
+	// backfill passes (set it above populate's 5s busy timeout to reproduce the
+	// Fly failure end to end); POPULATE_WAL_CEILING raises the ceiling so the
+	// WAL that grows during the injected delay is not itself fatal.
+	if slow := os.Getenv("POPULATE_SLOW_BACKFILL"); slow != "" {
+		delay, err := time.ParseDuration(slow)
+		if err != nil {
+			t.Fatalf("POPULATE_SLOW_BACKFILL: %v", err)
+		}
+		checkpointer.afterBackfillPass = func(pass int) {
+			if pass <= 2 {
+				time.Sleep(delay)
+			}
+		}
+	}
+	if ceiling := os.Getenv("POPULATE_WAL_CEILING"); ceiling != "" {
+		bytes, err := strconv.ParseInt(ceiling, 10, 64)
+		if err != nil {
+			t.Fatalf("POPULATE_WAL_CEILING: %v", err)
+		}
+		checkpointer.ceiling = bytes
+	}
 	started := time.Now()
-	stats, err := runPopulateCommand(ctx, cmd, dbPath, newPopulateCheckpointer(dbPath))
+	stats, err := runPopulateCommand(ctx, cmd, dbPath, checkpointer)
 	elapsed := time.Since(started)
 	cancel()
 	observed := peak()
@@ -217,10 +242,10 @@ func TestRunPopulateCommandBoundsWALWithPinnedBinary(t *testing.T) {
 		t.Fatalf("runPopulateCommand() error = %v", err)
 	}
 	dbSize := fileSizeOrZero(dbPath)
-	t.Logf("target %s index-ratio %s: db %d bytes, sampled peak wal %d bytes, checkpointer peak wal %d bytes, checkpoints %d (%d truncations), elapsed %s",
-		target, ratio, dbSize, observed, stats.PeakWALBytes, stats.Checkpoints, stats.Truncations, elapsed.Round(time.Millisecond))
-	if observed >= 4*populateCheckpointWALThreshold {
-		t.Fatalf("sampled peak wal %d bytes exceeds 4x the %d byte threshold", observed, populateCheckpointWALThreshold)
+	t.Logf("target %s index-ratio %s: db %d bytes, sampled peak wal %d bytes, checkpointer peak wal %d bytes, checkpoints %d (%d truncations), max lock hold %dms, elapsed %s",
+		target, ratio, dbSize, observed, stats.PeakWALBytes, stats.Checkpoints, stats.Truncations, stats.MaxLockHoldMS, elapsed.Round(time.Millisecond))
+	if observed >= checkpointer.ceiling {
+		t.Fatalf("sampled peak wal %d bytes reached the %d byte ceiling", observed, checkpointer.ceiling)
 	}
 	if size := fileSizeOrZero(walPath(dbPath)); size != 0 {
 		t.Fatalf("wal after populate = %d bytes, want 0", size)
@@ -236,7 +261,7 @@ func testCheckpointer(dbPath string, threshold int64) *populateCheckpointer {
 		ceiling:     8 * threshold,
 		interval:    populateCheckpointPollInterval,
 		spinLimit:   populateCheckpointSpinLimit,
-		lockHold:    populateCheckpointLockHold,
+		lockSlice:   populateCheckpointLockSlice,
 		maxFailures: populateCheckpointMaxFailures,
 	}
 }
@@ -310,12 +335,6 @@ func TestPopulateCheckpointerAbortsWhenTheBoundIsLost(t *testing.T) {
 			tune:    func(c *populateCheckpointer) { c.ceiling = 1 },
 			wantErr: "at or above the 1 byte ceiling",
 		},
-		{
-			name:          "backfill lock hold deadline counts as a failure and releases the lock",
-			holdWriteLock: false,
-			tune:          func(c *populateCheckpointer) { c.ceiling = 64 << 20; c.lockHold = time.Nanosecond; c.maxFailures = 2 },
-			wantErr:       "2 consecutive wal checkpoints failed",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -350,6 +369,95 @@ func TestPopulateCheckpointerAbortsWhenTheBoundIsLost(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// TestPopulateCheckpointerNeverBlocksWriterPastBusyTimeout reproduces the
+// gate-large-db failure on Fly: a backfill slow enough to outlast populate's
+// SQLite busy timeout. The slow storage is injected into the lock-free
+// backfill passes, the writer has a 1s busy timeout (populate's is 5s), and
+// the writer must finish every batch without SQLITE_BUSY while the
+// checkpointer still truncates. The old design did the backfill while holding
+// the write lock, so this writer failed with "database is locked".
+func TestPopulateCheckpointerNeverBlocksWriterPastBusyTimeout(t *testing.T) {
+	const (
+		minRows           = 24_000
+		maxRows           = 400_000
+		batch             = 500
+		threshold         = int64(2 << 20)
+		writerBusyTimeout = time.Second
+	)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	checkpointer := testCheckpointer(dbPath, threshold)
+	checkpointer.ceiling = 1 << 30
+	checkpointer.interval = 5 * time.Millisecond
+	slowPasses := 2
+	checkpointer.afterBackfillPass = func(pass int) {
+		if pass <= slowPasses {
+			time.Sleep(writerBusyTimeout + 500*time.Millisecond)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- checkpointer.run(ctx) }()
+
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout("+strconv.FormatInt(writerBusyTimeout.Milliseconds(), 10)+")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+	for _, stmt := range []string{
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA wal_autocheckpoint = 0",
+		"PRAGMA synchronous = NORMAL",
+		"CREATE TABLE test_table_0 (id INTEGER PRIMARY KEY AUTOINCREMENT, data BLOB, int_field INTEGER)",
+		"CREATE INDEX idx_test_table_0_int ON test_table_0(int_field)",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	payload := make([]byte, 1024)
+	// The writer keeps going until the checkpointer has truncated at least once
+	// behind the slow passes, so the run is gated on progress, not on timing.
+	var longestBatch time.Duration
+	written := 0
+	for ; written < maxRows && (written < minRows || checkpointer.stats().Truncations == 0); written += batch {
+		started := time.Now()
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		for i := 0; i < batch; i++ {
+			if _, err := tx.Exec("INSERT INTO test_table_0 (data, int_field) VALUES (?, ?)", payload, rand.Int64()); err != nil {
+				t.Fatalf("insert at row %d: %v (populate would have exited with database is locked)", written+i, err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		longestBatch = max(longestBatch, time.Since(started))
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("checkpointer.run() error = %v", err)
+	}
+	stats := checkpointer.stats()
+	t.Logf("longest writer batch %s, checkpointer %+v", longestBatch, stats)
+	if stats.Truncations == 0 {
+		t.Fatalf("checkpointer never truncated behind a slow backfill within %d rows: %+v", written, stats)
+	}
+	if hold := time.Duration(stats.MaxLockHoldMS) * time.Millisecond; hold >= writerBusyTimeout {
+		t.Fatalf("write lock held for %s, at or above the writer's %s busy timeout", hold, writerBusyTimeout)
+	}
+	if err := finalizePopulateCheckpoint(context.Background(), dbPath); err != nil {
+		t.Fatalf("finalizePopulateCheckpoint() error = %v", err)
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM test_table_0").Scan(&count); err != nil || count != written {
+		t.Fatalf("rows = %d, %v; want %d", count, err, written)
 	}
 }
 
@@ -623,6 +731,91 @@ exit 1
 				if got := readFile(t, cfg.DBPath); got != tt.existingDB {
 					t.Fatalf("existing database was replaced: %q", got)
 				}
+			}
+		})
+	}
+}
+
+func TestPopulateSingleDBWithRetryReportsOnceAfterTwoAttempts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires Unix")
+	}
+	// The fake populate fails until the attempt counter reaches failUntil, then
+	// copies the fixture into place.
+	const script = `
+db=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-db" ]; then db="$2"; fi
+  shift
+done
+n=$(cat "$POPULATE_ATTEMPTS" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s' "$n" > "$POPULATE_ATTEMPTS"
+if [ "$n" -le "$POPULATE_FAIL_UNTIL" ]; then
+  printf 'partial' > "$db"
+  echo "populate database: insert row: database is locked" >&2
+  exit 1
+fi
+cp "$POPULATE_FIXTURE" "$db"
+`
+	tests := []struct {
+		name         string
+		failUntil    int
+		wantAttempts int
+		wantErr      bool
+	}{
+		{name: "first attempt succeeds", failUntil: 0, wantAttempts: 1},
+		{name: "transient failure is retried once from a clean database", failUntil: 1, wantAttempts: 2},
+		{name: "deterministic failure stops after two attempts", failUntil: 99, wantAttempts: 2, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binDir := filepath.Join(dir, "bin")
+			dataDir := filepath.Join(dir, "data")
+			for _, path := range []string{binDir, dataDir} {
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fixture := filepath.Join(dir, "fixture.db")
+			populateFixtureDB(t, fixture)
+			attempts := filepath.Join(dir, "attempts")
+			writeFakeLitestreamTest(t, binDir, script)
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("POPULATE_FIXTURE", fixture)
+			t.Setenv("POPULATE_ATTEMPTS", attempts)
+			t.Setenv("POPULATE_FAIL_UNTIL", strconv.Itoa(tt.failUntil))
+
+			cfg := DefaultConfig()
+			cfg.DataDir = dataDir
+			cfg.DBPath = filepath.Join(dataDir, "test.db")
+			cfg.InitialSize = "1MB"
+			cfg.PopulateIndexRatio = 1
+
+			err := populateSingleDBWithRetry(context.Background(), cfg, populateAttempts)
+			if got := readFile(t, attempts); got != strconv.Itoa(tt.wantAttempts) {
+				t.Fatalf("populate ran %s times, want %d", got, tt.wantAttempts)
+			}
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "attempt 1 of 2") || !strings.Contains(err.Error(), "attempt 2 of 2") {
+					t.Fatalf("error = %v, want both attempts reported", err)
+				}
+				if _, statErr := os.Stat(cfg.DBPath); !os.IsNotExist(statErr) {
+					t.Fatalf("partial database left behind: %v", statErr)
+				}
+				wrapped := &PopulateFailure{err: fmt.Errorf("populate: %w", err)}
+				if !IsPopulateFailure(wrapped) || !strings.HasPrefix(wrapped.Error(), "populate: ") || IsPopulateFailure(err) {
+					t.Fatalf("PopulateFailure wrapping = %q (%v), plain error classified %v", wrapped.Error(), IsPopulateFailure(wrapped), IsPopulateFailure(err))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("populateSingleDBWithRetry() error = %v", err)
+			}
+			marker, err := readPopulateMarker(cfg.DBPath)
+			if err != nil || marker == nil || !slices.Equal(marker.Indexes, []string{"idx_test_table_0_int"}) {
+				t.Fatalf("marker = %+v, %v; want a completed marker", marker, err)
 			}
 		})
 	}
