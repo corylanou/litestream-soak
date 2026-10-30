@@ -19,7 +19,9 @@ import (
 // writeUncheckpointedRows mimics litestream-test populate as the harness
 // builds it: WAL mode, auto-checkpoint disabled, batched inserts of 1 KiB rows
 // with a random-integer index that rewrites index pages on every batch.
-func writeUncheckpointedRows(t *testing.T, dbPath string, rows, batch int) {
+// afterBatch, when set, runs between commits so a test can gate the writer on
+// checkpointer progress.
+func writeUncheckpointedRows(t *testing.T, dbPath string, rows, batch int, afterBatch func()) {
 	t.Helper()
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(10000)")
 	if err != nil {
@@ -54,6 +56,9 @@ func writeUncheckpointedRows(t *testing.T, dbPath string, rows, batch int) {
 		}
 		if err := tx.Commit(); err != nil {
 			t.Fatalf("commit: %v", err)
+		}
+		if afterBatch != nil {
+			afterBatch()
 		}
 	}
 }
@@ -90,6 +95,13 @@ func sampleWALPeak(ctx context.Context, dbPath string) func() int64 {
 	}
 }
 
+// TestPopulateCheckpointerBoundsWAL asserts the hard bound the production
+// checkpointer enforces, not a timing-dependent figure: with the checkpointer
+// running, the WAL never reaches the ceiling (run returns no error and the
+// sampled peak stays under it), the checkpointer truncates, and the data
+// survives. The writer waits for a truncation whenever the WAL is past the
+// threshold, so how much it writes between checkpoints does not depend on
+// scheduling; the writer-only case shows the WAL would otherwise keep growing.
 func TestPopulateCheckpointerBoundsWAL(t *testing.T) {
 	const (
 		rows      = 24_000
@@ -100,10 +112,9 @@ func TestPopulateCheckpointerBoundsWAL(t *testing.T) {
 		name            string
 		checkpoint      bool
 		wantPeakAtLeast int64
-		wantPeakBelow   int64
 	}{
 		{name: "auto-checkpoint off keeps every frame in the wal", wantPeakAtLeast: 16 << 20},
-		{name: "checkpointer truncates the wal past its threshold", checkpoint: true, wantPeakBelow: 4 * threshold},
+		{name: "checkpointer holds the wal under its ceiling", checkpoint: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -112,15 +123,28 @@ func TestPopulateCheckpointerBoundsWAL(t *testing.T) {
 			peak := sampleWALPeak(ctx, dbPath)
 
 			checkpointer := testCheckpointer(dbPath, threshold)
-			checkpointer.interval = 5 * time.Millisecond
 			checkpointerDone := make(chan error, 1)
+			var afterBatch func()
 			if tt.checkpoint {
 				go func() { checkpointerDone <- checkpointer.run(ctx) }()
+				afterBatch = func() {
+					if fileSizeOrZero(walPath(dbPath)) < threshold {
+						return
+					}
+					seen := checkpointer.stats().Truncations
+					deadline := time.Now().Add(30 * time.Second)
+					for checkpointer.stats().Truncations == seen {
+						if time.Now().After(deadline) {
+							t.Fatalf("checkpointer did not truncate a %d byte wal within 30s", fileSizeOrZero(walPath(dbPath)))
+						}
+						runtime.Gosched()
+					}
+				}
 			} else {
 				checkpointerDone <- nil
 			}
 
-			writeUncheckpointedRows(t, dbPath, rows, batch)
+			writeUncheckpointedRows(t, dbPath, rows, batch, afterBatch)
 			cancel()
 			if err := <-checkpointerDone; err != nil {
 				t.Fatalf("checkpointer.run() error = %v", err)
@@ -131,18 +155,18 @@ func TestPopulateCheckpointerBoundsWAL(t *testing.T) {
 			if tt.wantPeakAtLeast > 0 && got < tt.wantPeakAtLeast {
 				t.Fatalf("peak wal = %d bytes, want at least %d", got, tt.wantPeakAtLeast)
 			}
-			if tt.wantPeakBelow > 0 && got >= tt.wantPeakBelow {
-				t.Fatalf("peak wal = %d bytes, want below %d", got, tt.wantPeakBelow)
-			}
 			if !tt.checkpoint {
 				return
 			}
-			stats := checkpointer.stats()
-			if stats.Checkpoints == 0 {
-				t.Fatalf("checkpointer never ran: %+v", stats)
+			if got >= checkpointer.ceiling {
+				t.Fatalf("peak wal = %d bytes, want below the %d byte ceiling", got, checkpointer.ceiling)
 			}
-			if stats.PeakWALBytes >= tt.wantPeakBelow {
-				t.Fatalf("checkpointer observed peak %d, want below %d", stats.PeakWALBytes, tt.wantPeakBelow)
+			stats := checkpointer.stats()
+			if stats.Checkpoints == 0 || stats.Truncations == 0 {
+				t.Fatalf("checkpointer never truncated: %+v", stats)
+			}
+			if stats.PeakWALBytes >= checkpointer.ceiling {
+				t.Fatalf("checkpointer observed peak %d, want below the %d byte ceiling", stats.PeakWALBytes, checkpointer.ceiling)
 			}
 			if err := finalizePopulateCheckpoint(context.Background(), dbPath); err != nil {
 				t.Fatalf("finalizePopulateCheckpoint() error = %v", err)
@@ -409,7 +433,7 @@ func TestRunPopulateCommandKillsPopulateWhenTheBoundIsLost(t *testing.T) {
 
 func TestWALCheckpointTruncateReportsBusy(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	writeUncheckpointedRows(t, dbPath, 200, 50)
+	writeUncheckpointedRows(t, dbPath, 200, 50, nil)
 
 	reader, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(50)")
 	if err != nil {
