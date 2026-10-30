@@ -1,6 +1,14 @@
 package worker
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/corylanou/litestream-soak/internal/reporting"
+)
 
 func TestSelectRestorePlanCandidatesCoversTarget(t *testing.T) {
 	candidates := parseRestorePlanCandidates(`
@@ -27,6 +35,99 @@ level min_txid max_txid size created
 	}
 	if entries[len(entries)-1].MaxTXID != "0000000000021289" {
 		t.Fatalf("last max txid=%q", entries[len(entries)-1].MaxTXID)
+	}
+}
+
+func TestCollectReplicaLevelReportStreamsTheWholeListing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires Unix")
+	}
+	dir := t.TempDir()
+	script := `#!/bin/sh
+[ "$1" = "ltx" ] || exit 2
+echo "level min_txid max_txid size created"
+i=0
+while [ $i -lt 3000 ]; do
+  printf '0 %016x %016x 207 2026-10-30T04:00:00Z\n' $i $i
+  i=$((i+1))
+done
+printf '1 0000000000000001 00000000000042b0 5159392 2026-10-30T04:02:01Z\n'
+printf '2 0000000000000001 0000000000003992 460226 2026-10-30T03:40:00Z\n'
+printf '9 0000000000000001 00000000000040ff 197156405 2026-10-30T03:33:00Z\n'
+`
+	if err := os.WriteFile(filepath.Join(dir, "litestream"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg := DefaultConfig()
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.DBPath = filepath.Join(dir, "test.db")
+
+	report := collectReplicaLevelReport(cfg, 0x4421)
+	if report.Error != "" || !report.Complete || report.Truncated {
+		t.Fatalf("report = error %q complete %v truncated %v", report.Error, report.Complete, report.Truncated)
+	}
+	if !usableReplicaLevelReport(report) {
+		t.Fatal("complete report must be usable")
+	}
+	l0, l1, l2, l9 := replicaLevelSummary(report, 0), replicaLevelSummary(report, 1), replicaLevelSummary(report, 2), replicaLevelSummary(report, 9)
+	if l0.ObjectCount != 3000 || l0.MaxTXIDDecimal != 2999 {
+		t.Fatalf("L0 = %+v", l0)
+	}
+	if l1.ObjectCount != 1 || l1.MaxTXID != "00000000000042b0" || l2.MaxTXID != "0000000000003992" || l9.ObjectCount != 1 || l9.MaxTXID != "00000000000040ff" {
+		t.Fatalf("high levels lost past the old 64 KB cap: L1=%+v L2=%+v L9=%+v", l1, l2, l9)
+	}
+	if len(report.OutputTail) != 0 {
+		t.Fatalf("complete listing should not store an output tail: %d bytes", len(report.OutputTail))
+	}
+	if err := compactionProgressError(cfg, levelReport(map[int]reporting.ReplicaLevelSummary{0: {ObjectCount: 10, MaxTXIDDecimal: 0x3ab7}, 1: {ObjectCount: 1, MaxTXIDDecimal: 0x3eb4}}), report); err != nil {
+		t.Fatalf("L1 advanced in the full listing but the check reported %v", err)
+	}
+
+	failing := `#!/bin/sh
+echo "0 0000000000000001 0000000000000002 207 2026-10-30T04:00:00Z"
+echo "replica unavailable" >&2
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(dir, "litestream"), []byte(failing), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	report = collectReplicaLevelReport(cfg, 0)
+	if report.Error == "" || report.Complete || usableReplicaLevelReport(report) || !strings.Contains(report.OutputTail, "replica unavailable") {
+		t.Fatalf("failed listing = %+v, want an unusable report with the stderr tail", report)
+	}
+}
+
+func TestCollectRestorePlanSnapshotRefusesPartialListing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires Unix")
+	}
+	dir := t.TempDir()
+	write := func(script string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "litestream"), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const covering = `echo "level min_txid max_txid size created"
+echo "9 0000000000000001 0000000000000100 197156405 2026-10-30T03:33:00Z"
+echo "0 0000000000000101 0000000000000110 3796 2026-10-30T04:00:00Z"
+`
+	write("#!/bin/sh\n" + covering + "echo 'listing interrupted' >&2\nexit 1\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg := DefaultConfig()
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.DBPath = filepath.Join(dir, "test.db")
+
+	partial := collectRestorePlanSnapshot(cfg, 0x110)
+	if partial.Complete || len(partial.Entries) != 0 || partial.Error == "" || !partial.Truncated || partial.CandidateCount != 2 || !strings.Contains(partial.OutputTail, "listing interrupted") {
+		t.Fatalf("partial listing that covers the target must not yield a plan: %+v", partial)
+	}
+
+	write("#!/bin/sh\n" + covering)
+	full := collectRestorePlanSnapshot(cfg, 0x110)
+	if !full.Complete || full.Error != "" || full.Truncated || len(full.Entries) != 2 {
+		t.Fatalf("complete listing = %+v, want a complete two-entry plan", full)
 	}
 }
 

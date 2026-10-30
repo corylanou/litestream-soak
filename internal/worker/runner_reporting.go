@@ -171,7 +171,7 @@ func (r *Runner) replicaLevelReport(result VerificationResult) *reporting.Replic
 		return nil
 	}
 	report := collectReplicaLevelReport(r.cfg, result.restoreTXID())
-	if report != nil && len(report.Levels) > 0 {
+	if usableReplicaLevelReport(report) {
 		SetReplicaLevelSummaries(report.Levels)
 	}
 	return report

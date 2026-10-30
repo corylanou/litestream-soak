@@ -21,8 +21,28 @@ func replicaLevelSummary(report *reporting.ReplicaLevelReport, level int) report
 	return reporting.ReplicaLevelSummary{Level: level, LevelName: fmt.Sprintf("%04d", level)}
 }
 
+// usableReplicaLevelReport accepts only a report built from a complete
+// listing: a summary parsed from truncated or failed output can miss the newest
+// L1-L9 objects and must never be judged.
 func usableReplicaLevelReport(report *reporting.ReplicaLevelReport) bool {
-	return report != nil && report.Error == "" && len(report.Levels) > 0
+	return report != nil && report.Error == "" && report.Complete && !report.Truncated && len(report.Levels) > 0
+}
+
+func replicaLevelReportProblem(report *reporting.ReplicaLevelReport) string {
+	switch {
+	case report == nil:
+		return "no replica level report"
+	case report.Error != "":
+		return report.Error
+	case report.Truncated:
+		return "listing truncated"
+	case !report.Complete:
+		return "listing incomplete"
+	case len(report.Levels) == 0:
+		return "no levels"
+	default:
+		return ""
+	}
 }
 
 // compactionProgressError judges one replica level report against the
@@ -58,7 +78,7 @@ func compactionProgressError(cfg Config, previous, current *reporting.ReplicaLev
 
 func compactionProgressSummary(report *reporting.ReplicaLevelReport) string {
 	if !usableReplicaLevelReport(report) {
-		return "replica levels unavailable"
+		return "replica levels unavailable: " + replicaLevelReportProblem(report)
 	}
 	l0, l1, l9 := replicaLevelSummary(report, 0), replicaLevelSummary(report, 1), replicaLevelSummary(report, 9)
 	return fmt.Sprintf("L0 objects=%d max_txid=%s; L1 objects=%d max_txid=%s; L9 objects=%d max_txid=%s", l0.ObjectCount, formatTXID(l0.MaxTXIDDecimal), l1.ObjectCount, formatTXID(l1.MaxTXIDDecimal), l9.ObjectCount, formatTXID(l9.MaxTXIDDecimal))
@@ -97,9 +117,31 @@ func (r *Runner) applyCompactionProgressGuard(result VerificationResult, levels 
 		step.Status = "error"
 		step.Error = err.Error()
 	}
+	if !usableReplicaLevelReport(levels) {
+		step.Status = "inconclusive"
+		step.Error = "replica level report incomplete: " + replicaLevelReportProblem(levels)
+	}
 	result.Steps = append(result.Steps, step)
-	if err == nil || !result.Passed {
+	if !result.Passed {
+		return result
+	}
+	if !usableReplicaLevelReport(levels) {
+		return inconclusiveReplicaLevelResult(result, step.Error)
+	}
+	if err == nil {
 		return result
 	}
 	return failedS3FaultGuardResult(result, "compaction progress check failed", err.Error())
+}
+
+// inconclusiveReplicaLevelResult turns a passing cycle whose compaction check
+// could not read the whole replica listing into an inconclusive result: the
+// build is not blamed, and the cycle gives no coverage.
+func inconclusiveReplicaLevelResult(result VerificationResult, message string) VerificationResult {
+	result.Status = "aborted"
+	result.Passed = false
+	result.ErrorMessage = "compaction progress check skipped: " + message
+	result.Summary = "verification inconclusive: " + result.ErrorMessage
+	result.InconclusiveClassification = &reporting.FailureClassification{Stage: compactionProgressStep, Signature: reporting.SignatureReplicaLevelReportIncomplete}
+	return result
 }

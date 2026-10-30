@@ -18,6 +18,8 @@ const (
 	StageHarnessCapacity                 = "harness_capacity"
 	SignatureHarnessCapacityInconclusive = "harness_capacity_inconclusive"
 
+	SignatureReplicaLevelReportIncomplete = "replica_level_report_incomplete"
+
 	soakFixtureSourceUsedPercent = 95.0
 	diskTelemetryMaxAge          = time.Minute
 )

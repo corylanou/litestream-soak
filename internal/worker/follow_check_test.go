@@ -179,6 +179,45 @@ func TestFollowCheckAcrossL9Boundary(t *testing.T) {
 	}
 }
 
+func TestFollowCheckIncompleteLevelsAreInconclusive(t *testing.T) {
+	f := newFollowFixture(t)
+	runWith := func(boundary uint64, report *reporting.ReplicaLevelReport) VerificationResult {
+		t.Helper()
+		if err := os.WriteFile(f.txidFile, []byte(formatTXID(boundary)+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f.v.replicaLevels = func(Config, uint64) *reporting.ReplicaLevelReport { return report }
+		snapshot, err := f.v.logicalValidation(context.Background(), f.cfg.DBPath, boundary)
+		if err != nil {
+			t.Fatalf("logicalValidation() error = %v", err)
+		}
+		return f.v.runFollowCheck(context.Background(), verificationBoundary{logicalSnapshot: snapshot, txid: boundary})
+	}
+	complete := func(boundary, l9 uint64) *reporting.ReplicaLevelReport {
+		return levelReport(map[int]reporting.ReplicaLevelSummary{0: {ObjectCount: 3, MaxTXIDDecimal: boundary}, 9: {ObjectCount: 1, MaxTXIDDecimal: l9}})
+	}
+
+	truncated := levelReportWith(complete(0x42, 100), func(report *reporting.ReplicaLevelReport) { report.Truncated = true })
+	result := runWith(0x42, truncated)
+	if result.Status != "pending" || result.Passed || !strings.Contains(result.Summary, "follow check inconclusive") || !strings.Contains(result.ErrorMessage, "replica levels unavailable: listing truncated") {
+		t.Fatalf("truncated baseline = status %q summary %q error %q", result.Status, result.Summary, result.ErrorMessage)
+	}
+	if f.v.follow != nil {
+		t.Fatal("follow session started from a truncated L9 baseline")
+	}
+
+	if result = runWith(0x42, complete(0x42, 100)); result.Status != "pending" || !strings.Contains(result.Summary, "awaiting a new L9 snapshot") {
+		t.Fatalf("complete baseline = status %q summary %q", result.Status, result.Summary)
+	}
+	failed := &reporting.ReplicaLevelReport{Error: "command timed out"}
+	if result = runWith(0x42, failed); result.Status != "pending" || result.Passed || !strings.Contains(result.Summary, "follow check inconclusive") || stepStatus(result, "follow_l9") != "error" {
+		t.Fatalf("failed L9 listing = status %q summary %q steps %+v", result.Status, result.Summary, result.Steps)
+	}
+	if result = runWith(250, complete(250, 200)); result.Status != "passed" {
+		t.Fatalf("complete listing after the incomplete ones = status %q summary %q", result.Status, result.Summary)
+	}
+}
+
 func TestFollowCheckDivergenceFailsAndRestarts(t *testing.T) {
 	fixture := newFollowFixture(t)
 	if result := fixture.cycle(t, 0x42, 100); result.Status != "pending" {

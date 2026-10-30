@@ -274,25 +274,27 @@ type restorePlanCandidate struct {
 
 func collectRestorePlanSnapshot(cfg Config, targetTXID uint64) *reporting.RestorePlanSnapshot {
 	command := []string{cfg.litestreamCommand(), "ltx", "-config", cfg.ConfigPath, "-level", "all", cfg.DBPath}
-	output := runDebugCommand("restore_plan_ltx_listing", command[0], command[1:]...)
+	listing := listReplicaLTX(command)
 	snapshot := &reporting.RestorePlanSnapshot{
 		CapturedAt:        time.Now().UTC(),
 		Command:           command,
 		TargetTXID:        formatTXID(targetTXID),
 		TargetTXIDDecimal: targetTXID,
-		Truncated:         output.Truncated,
 	}
-	candidates := parseRestorePlanCandidates(output.Output)
+	candidates := listing.candidates
 	snapshot.CandidateCount = len(candidates)
-	if output.Error != "" {
-		snapshot.Error = output.Error
-		snapshot.OutputTail = tailString(output.Output, 8192)
+	if listing.err != "" || !listing.complete {
+		// A listing that failed part-way may still have emitted entries that
+		// cover the target; a plan picked from them would be a guess, so the
+		// snapshot stays incomplete with the partial input flagged.
+		snapshot.Error = firstNonEmpty(listing.err, "listing incomplete")
+		snapshot.OutputTail = listing.tail
+		snapshot.Truncated = len(candidates) > 0
+		return snapshot
 	}
 	if len(candidates) == 0 {
-		if snapshot.Error == "" {
-			snapshot.Error = "no ltx entries parsed"
-			snapshot.OutputTail = tailString(output.Output, 8192)
-		}
+		snapshot.Error = "no ltx entries parsed"
+		snapshot.OutputTail = listing.tail
 		return snapshot
 	}
 
@@ -305,59 +307,149 @@ func collectRestorePlanSnapshot(cfg Config, targetTXID uint64) *reporting.Restor
 	return snapshot
 }
 
+// collectReplicaLevelReport summarizes every LTX object on the replica by
+// level. The listing is parsed as a stream with no size cap, so the summary is
+// built from the whole listing however long it is; only the raw evidence kept
+// in OutputTail is bounded. Complete is set only when the whole listing was
+// read and the command exited cleanly, and consumers must not judge compaction
+// or L9 progress from a report that is not Complete.
 func collectReplicaLevelReport(cfg Config, targetTXID uint64) *reporting.ReplicaLevelReport {
 	command := []string{cfg.litestreamCommand(), "ltx", "-config", cfg.ConfigPath, "-level", "all", cfg.DBPath}
-	output := runDebugCommand("verification_replica_levels", command[0], command[1:]...)
+	listing := listReplicaLTX(command)
 	report := &reporting.ReplicaLevelReport{
 		CapturedAt:        time.Now().UTC(),
 		Command:           command,
 		TargetTXID:        formatTXID(targetTXID),
 		TargetTXIDDecimal: targetTXID,
-		Truncated:         output.Truncated,
+		Levels:            replicaLevelSummaries(listing.candidates),
+		Complete:          listing.complete,
+		Error:             listing.err,
 	}
-	candidates := parseRestorePlanCandidates(output.Output)
-	report.Levels = replicaLevelSummaries(candidates)
-	if output.Error != "" {
-		report.Error = output.Error
-		report.OutputTail = tailString(output.Output, 8192)
-		return report
-	}
-	if len(candidates) == 0 {
+	if report.Error == "" && len(listing.candidates) == 0 {
 		report.Error = "no ltx entries parsed"
-		report.OutputTail = tailString(output.Output, 8192)
+	}
+	if report.Error != "" {
+		report.OutputTail = listing.tail
+		report.Complete = false
 	}
 	return report
+}
+
+// replicaLTXListing is the streamed result of one `litestream ltx -level all`
+// run: every parsed entry, a bounded tail of the raw output for evidence, and
+// whether the whole listing was read.
+type replicaLTXListing struct {
+	candidates []restorePlanCandidate
+	tail       string
+	complete   bool
+	err        string
+}
+
+const (
+	replicaLTXListingTimeout = 2 * time.Minute
+	replicaLTXListingTail    = 8192
+	replicaLTXMaxLineBytes   = 1 << 20
+)
+
+func listReplicaLTX(command []string) replicaLTXListing {
+	ctx, cancel := context.WithTimeout(context.Background(), replicaLTXListingTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &limitedBuffer{buf: &stderr, limit: debugOutputLimit / 4}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return replicaLTXListing{err: err.Error()}
+	}
+	if err := cmd.Start(); err != nil {
+		return replicaLTXListing{err: err.Error()}
+	}
+	listing := replicaLTXListing{candidates: make([]restorePlanCandidate, 0)}
+	tail := &tailBuffer{limit: replicaLTXListingTail}
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), replicaLTXMaxLineBytes)
+	for scanner.Scan() {
+		line := scanner.Text()
+		tail.add(line)
+		if candidate, ok := parseRestorePlanLine(line); ok {
+			listing.candidates = append(listing.candidates, candidate)
+		}
+	}
+	scanErr := scanner.Err()
+	waitErr := cmd.Wait()
+	listing.tail = tail.String()
+	if stderr.Len() > 0 {
+		listing.tail = strings.TrimRight(listing.tail, "\n") + "\nstderr:\n" + stderr.String()
+	}
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		listing.err = "command timed out"
+	case scanErr != nil:
+		listing.err = "read listing: " + scanErr.Error()
+	case waitErr != nil:
+		listing.err = waitErr.Error()
+	default:
+		listing.complete = true
+	}
+	return listing
+}
+
+// tailBuffer keeps the last limit bytes of appended lines.
+type tailBuffer struct {
+	limit int
+	lines []string
+	size  int
+}
+
+func (b *tailBuffer) add(line string) {
+	b.lines = append(b.lines, line)
+	b.size += len(line) + 1
+	for b.size > b.limit && len(b.lines) > 1 {
+		b.size -= len(b.lines[0]) + 1
+		b.lines = b.lines[1:]
+	}
+}
+
+func (b *tailBuffer) String() string {
+	return strings.Join(b.lines, "\n")
 }
 
 func parseRestorePlanCandidates(output string) []restorePlanCandidate {
 	candidates := make([]restorePlanCandidate, 0)
 	for _, line := range nonEmptyLines(output) {
-		fields := strings.Fields(line)
-		if len(fields) < 5 {
-			continue
+		if candidate, ok := parseRestorePlanLine(line); ok {
+			candidates = append(candidates, candidate)
 		}
-		level, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue
-		}
-		minTXID, err := strconv.ParseUint(fields[1], 16, 64)
-		if err != nil {
-			continue
-		}
-		maxTXID, err := strconv.ParseUint(fields[2], 16, 64)
-		if err != nil {
-			continue
-		}
-		sizeBytes, _ := strconv.ParseInt(fields[3], 10, 64)
-		candidates = append(candidates, restorePlanCandidate{
-			level:     level,
-			minTXID:   minTXID,
-			maxTXID:   maxTXID,
-			sizeBytes: sizeBytes,
-			createdAt: fields[4],
-		})
 	}
 	return candidates
+}
+
+func parseRestorePlanLine(line string) (restorePlanCandidate, bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 5 {
+		return restorePlanCandidate{}, false
+	}
+	level, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return restorePlanCandidate{}, false
+	}
+	minTXID, err := strconv.ParseUint(fields[1], 16, 64)
+	if err != nil {
+		return restorePlanCandidate{}, false
+	}
+	maxTXID, err := strconv.ParseUint(fields[2], 16, 64)
+	if err != nil {
+		return restorePlanCandidate{}, false
+	}
+	sizeBytes, _ := strconv.ParseInt(fields[3], 10, 64)
+	return restorePlanCandidate{
+		level:     level,
+		minTXID:   minTXID,
+		maxTXID:   maxTXID,
+		sizeBytes: sizeBytes,
+		createdAt: fields[4],
+	}, true
 }
 
 func replicaLevelSummaries(candidates []restorePlanCandidate) []reporting.ReplicaLevelSummary {
