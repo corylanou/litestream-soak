@@ -8,13 +8,20 @@ import (
 )
 
 func levelReport(levels map[int]reporting.ReplicaLevelSummary) *reporting.ReplicaLevelReport {
-	report := &reporting.ReplicaLevelReport{}
+	report := &reporting.ReplicaLevelReport{Complete: true}
 	for level := 0; level <= 9; level++ {
 		summary := levels[level]
 		summary.Level = level
 		report.Levels = append(report.Levels, summary)
 	}
 	return report
+}
+
+func levelReportWith(base *reporting.ReplicaLevelReport, mutate func(*reporting.ReplicaLevelReport)) *reporting.ReplicaLevelReport {
+	report := *base
+	report.Levels = append([]reporting.ReplicaLevelSummary(nil), base.Levels...)
+	mutate(&report)
+	return &report
 }
 
 func TestCompactionProgressError(t *testing.T) {
@@ -102,9 +109,24 @@ func TestCompactionProgressGuardFailsPassingCycleAndKeepsBaseline(t *testing.T) 
 	if !result.Passed || len(result.Steps) != 1 || result.Steps[0].Name != compactionProgressStep || result.Steps[0].Status != "ok" {
 		t.Fatalf("first cycle = %+v", result)
 	}
-	broken := &reporting.ReplicaLevelReport{Error: "command timed out"}
-	if result = r.applyCompactionProgressGuard(passed, broken); !result.Passed || r.lastReplicaLevels != first {
-		t.Fatalf("failed listing changed the verdict or baseline: %+v", result)
+	for name, broken := range map[string]*reporting.ReplicaLevelReport{
+		"failed listing":     {Error: "command timed out"},
+		"truncated listing":  levelReportWith(first, func(report *reporting.ReplicaLevelReport) { report.Truncated = true }),
+		"incomplete listing": levelReportWith(first, func(report *reporting.ReplicaLevelReport) { report.Complete = false }),
+	} {
+		result = r.applyCompactionProgressGuard(passed, broken)
+		if result.Passed || result.Status != "aborted" || !strings.HasPrefix(result.Summary, "verification inconclusive:") || !strings.Contains(result.ErrorMessage, "replica level report incomplete") {
+			t.Fatalf("%s: result = %+v, want inconclusive", name, result)
+		}
+		if result.InconclusiveClassification == nil || result.InconclusiveClassification.Signature != reporting.SignatureReplicaLevelReportIncomplete || result.InconclusiveClassification.Stage != compactionProgressStep {
+			t.Fatalf("%s: classification = %+v", name, result.InconclusiveClassification)
+		}
+		if strings.Contains(result.ErrorMessage, "stalled") || r.lastReplicaLevels != first {
+			t.Fatalf("%s: incomplete report was judged or became the baseline: %+v", name, result)
+		}
+		if err := compactionProgressError(cfg, first, broken); err != nil {
+			t.Fatalf("%s: compactionProgressError = %v, want nil", name, err)
+		}
 	}
 	stalled := levelReport(map[int]reporting.ReplicaLevelSummary{0: {ObjectCount: 30, MaxTXIDDecimal: 300}, 1: {ObjectCount: 5, MaxTXIDDecimal: 90}})
 	result = r.applyCompactionProgressGuard(passed, stalled)

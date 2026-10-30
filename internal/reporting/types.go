@@ -289,6 +289,7 @@ type ReplicaLevelReport struct {
 	OutputTail        string                `json:"output_tail,omitempty"`
 	Error             string                `json:"error,omitempty"`
 	Truncated         bool                  `json:"truncated,omitempty"`
+	Complete          bool                  `json:"complete,omitempty"`
 }
 
 type ReplicaLevelSummary struct {

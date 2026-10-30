@@ -29,7 +29,10 @@ const (
 
 var (
 	errFollowL9Pending = errors.New("follow restore has not crossed a new L9 snapshot yet")
-	errFollowBehindL9  = errors.New("follow restore verified behind the new L9 snapshot")
+	// errReplicaLevelsUnavailable marks a replica level listing that could not
+	// be read completely, which makes an L9 judgement inconclusive.
+	errReplicaLevelsUnavailable = errors.New("replica levels unavailable")
+	errFollowBehindL9           = errors.New("follow restore verified behind the new L9 snapshot")
 )
 
 // followSession is one long-running `litestream restore -f` that outlives the
@@ -258,6 +261,16 @@ func (v *Verifier) runFollowCheck(ctx context.Context, boundary verificationBoun
 	if v.follow == nil {
 		summary, failed := v.startFollowCheck(ctx, &result, boundary, path)
 		result.Steps = append(result.Steps, v.validationSteps...)
+		if errors.Is(failed, errReplicaLevelsUnavailable) {
+			// The L9 baseline could not be read completely; the follow check
+			// cannot judge anything this cycle and must not blame the build.
+			v.stopFollow()
+			result.Status = "pending"
+			result.Summary = "follow check inconclusive: " + summarizeVerificationMessage(failed.Error())
+			result.ErrorMessage = failed.Error()
+			v.finalizeResult(&result)
+			return result
+		}
 		if failed != nil {
 			v.stopFollow()
 			v.failResult(ctx, &result, failed.Error())
@@ -292,7 +305,7 @@ func (v *Verifier) runFollowCheck(ctx context.Context, boundary verificationBoun
 	l9Err := v.runValidationPhase(ctx, "follow_l9", followLevelsBudget, func(context.Context) error {
 		report := v.replicaLevels(v.cfg, boundary.txid)
 		if !usableReplicaLevelReport(report) {
-			return fmt.Errorf("replica levels unavailable: %s", firstNonEmpty(report.Error, "no levels"))
+			return fmt.Errorf("%w: %s", errReplicaLevelsUnavailable, replicaLevelReportProblem(report))
 		}
 		current = replicaLevelSummary(report, 9)
 		if !l9Advanced(session.l9, current) {
@@ -362,7 +375,7 @@ func (v *Verifier) startFollowCheck(ctx context.Context, result *VerificationRes
 		}
 		report := v.replicaLevels(v.cfg, boundary.txid)
 		if !usableReplicaLevelReport(report) {
-			return fmt.Errorf("replica levels unavailable: %s", firstNonEmpty(report.Error, "no levels"))
+			return fmt.Errorf("%w: %s", errReplicaLevelsUnavailable, replicaLevelReportProblem(report))
 		}
 		baseline = replicaLevelSummary(report, 9)
 		session, err := v.startFollowProcess(followArgs(configPath, 0, path, v.cfg.DBPath), path)
