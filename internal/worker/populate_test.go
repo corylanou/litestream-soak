@@ -127,15 +127,14 @@ func TestPopulateCheckpointerBoundsWAL(t *testing.T) {
 			var afterBatch func()
 			if tt.checkpoint {
 				go func() { checkpointerDone <- checkpointer.run(ctx) }()
+				// Wait until the checkpointer has brought the WAL back under the
+				// threshold. The size is rechecked on every spin, so a truncation
+				// that lands between any two reads still releases the writer.
 				afterBatch = func() {
-					if fileSizeOrZero(walPath(dbPath)) < threshold {
-						return
-					}
-					seen := checkpointer.stats().Truncations
 					deadline := time.Now().Add(30 * time.Second)
-					for checkpointer.stats().Truncations == seen {
+					for fileSizeOrZero(walPath(dbPath)) >= threshold {
 						if time.Now().After(deadline) {
-							t.Fatalf("checkpointer did not truncate a %d byte wal within 30s", fileSizeOrZero(walPath(dbPath)))
+							t.Fatalf("checkpointer did not truncate a %d byte wal within 30s (%+v)", fileSizeOrZero(walPath(dbPath)), checkpointer.stats())
 						}
 						runtime.Gosched()
 					}
