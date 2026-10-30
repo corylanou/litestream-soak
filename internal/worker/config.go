@@ -53,6 +53,11 @@ type Config struct {
 	// Only 0 and 1 give a schema that is fixed by construction; populate picks
 	// each index with its own random draw for anything in between.
 	PopulateIndexRatio float64
+	// PopulateStopOnFailure makes a deterministic initial-seed failure end the
+	// worker process cleanly after it is reported once, instead of letting the
+	// platform restart it. Only gate fleets set it; main sentinels and PR
+	// fleets keep restart-on-failure.
+	PopulateStopOnFailure bool
 
 	NumDatabases            int
 	MaxRowsPerDatabase      int
@@ -539,6 +544,7 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 	if v := getenv("INITIAL_SIZE"); v != "" {
 		c.InitialSize = v
 	}
+	c.PopulateStopOnFailure = parseBoolEnv(getenv("POPULATE_STOP_ON_FAILURE"))
 	if v := getenv("POPULATE_INDEX_RATIO"); v != "" {
 		n, err := strconv.ParseFloat(v, 64)
 		if err != nil {
@@ -1257,6 +1263,7 @@ func (c Config) WorkloadConfig() workload.Config {
 		Workers:                  c.Workers,
 		InitialSize:              c.InitialSize,
 		PopulateIndexRatio:       c.PopulateIndexRatio,
+		PopulateStopOnFailure:    c.PopulateStopOnFailure,
 		MonitorInterval:          c.MonitorInterval.String(),
 		VerifyInterval:           c.VerifyInterval.String(),
 		VerifyType:               c.VerifyType,

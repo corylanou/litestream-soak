@@ -605,23 +605,31 @@ n=$((n + 1))
 printf '%s' "$n" > "$POPULATE_ATTEMPTS"
 if [ "$n" -le "$POPULATE_FAIL_UNTIL" ]; then
   printf 'partial' > "$db"
-  echo "populate database: insert row: database is locked" >&2
+  if [ -n "$POPULATE_VARY_ERROR" ]; then
+    echo "populate database: insert row: transient failure $n" >&2
+  else
+    echo "populate database: insert row: database is locked" >&2
+  fi
   exit 1
 fi
 cp "$POPULATE_FIXTURE" "$db"
 `
 	tests := []struct {
-		name         string
-		failUntil    int
-		cancel       bool
-		wantAttempts int
-		wantErr      bool
-		wantFinal    bool
+		name          string
+		failUntil     int
+		stopOnFailure bool
+		varyError     bool
+		cancel        bool
+		wantAttempts  int
+		wantErr       bool
+		wantFinal     bool
 	}{
-		{name: "first attempt succeeds", failUntil: 0, wantAttempts: 1},
-		{name: "transient failure is retried once from a clean database", failUntil: 1, wantAttempts: 2},
-		{name: "deterministic failure stops after two attempts as a final failure", failUntil: 99, wantAttempts: 2, wantErr: true, wantFinal: true},
-		{name: "a cancelled run is not a final failure", failUntil: 99, cancel: true, wantAttempts: 0, wantErr: true},
+		{name: "first attempt succeeds", failUntil: 0, stopOnFailure: true, wantAttempts: 1},
+		{name: "transient failure is retried once from a clean database", failUntil: 1, stopOnFailure: true, wantAttempts: 2},
+		{name: "gate worker with the same failure twice stops as a final failure", failUntil: 99, stopOnFailure: true, wantAttempts: 2, wantErr: true, wantFinal: true},
+		{name: "gate worker with two different failures keeps restart-on-failure", failUntil: 99, stopOnFailure: true, varyError: true, wantAttempts: 2, wantErr: true},
+		{name: "main sentinel with the same failure twice keeps restart-on-failure", failUntil: 99, wantAttempts: 2, wantErr: true},
+		{name: "a cancelled gate run is not a final failure", failUntil: 99, stopOnFailure: true, cancel: true, wantAttempts: 0, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -644,12 +652,18 @@ cp "$POPULATE_FIXTURE" "$db"
 			t.Setenv("POPULATE_FIXTURE", fixture)
 			t.Setenv("POPULATE_ATTEMPTS", attempts)
 			t.Setenv("POPULATE_FAIL_UNTIL", strconv.Itoa(tt.failUntil))
+			if tt.varyError {
+				t.Setenv("POPULATE_VARY_ERROR", "1")
+			} else {
+				t.Setenv("POPULATE_VARY_ERROR", "")
+			}
 
 			cfg := DefaultConfig()
 			cfg.DataDir = dataDir
 			cfg.DBPath = filepath.Join(dataDir, "test.db")
 			cfg.InitialSize = "1MB"
 			cfg.PopulateIndexRatio = 1
+			cfg.PopulateStopOnFailure = tt.stopOnFailure
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -667,7 +681,7 @@ cp "$POPULATE_FIXTURE" "$db"
 				if err == nil {
 					t.Fatal("populateSingleDBWithRetry() error = nil, want failure")
 				}
-				if tt.wantFinal && (!strings.Contains(err.Error(), "attempt 1 of 2") || !strings.Contains(err.Error(), "attempt 2 of 2")) {
+				if tt.wantAttempts == 2 && (!strings.Contains(err.Error(), "attempt 1 of 2") || !strings.Contains(err.Error(), "attempt 2 of 2")) {
 					t.Fatalf("error = %v, want both attempts reported", err)
 				}
 				if _, statErr := os.Stat(cfg.DBPath); !os.IsNotExist(statErr) {
@@ -685,6 +699,28 @@ cp "$POPULATE_FIXTURE" "$db"
 			marker, err := readPopulateMarker(cfg.DBPath)
 			if err != nil || marker == nil || !slices.Equal(marker.Indexes, []string{"idx_test_table_0_int"}) {
 				t.Fatalf("marker = %+v, %v; want a completed marker", marker, err)
+			}
+		})
+	}
+}
+
+func TestDeterministicPopulateFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		errs []error
+		want bool
+	}{
+		{name: "no attempts", want: false},
+		{name: "same error twice", errs: []error{errors.New("exit status 1: database is locked"), errors.New("exit status 1: database is locked")}, want: true},
+		{name: "different errors", errs: []error{errors.New("insert row: transient failure 1"), errors.New("insert row: transient failure 2")}, want: false},
+		{name: "ceiling kills with different sizes", errs: []error{errors.New("aborted populate: wal is 536900000 bytes, at or above the 536870912 byte ceiling"), errors.New("aborted populate: wal is 537000000 bytes, at or above the 536870912 byte ceiling")}, want: true},
+		{name: "full disk with different paths", errs: []error{errors.New("write /data/test.db-wal: no space left on device"), errors.New("write /data/test.db: no space left on device")}, want: true},
+		{name: "one known class and one unknown", errs: []error{errors.New("aborted populate: wal ceiling"), errors.New("signal: killed")}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := deterministicPopulateFailure(tt.errs); got != tt.want {
+				t.Fatalf("deterministicPopulateFailure(%v) = %v, want %v", tt.errs, got, tt.want)
 			}
 		})
 	}

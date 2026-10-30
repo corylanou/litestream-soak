@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/model"
+	workerconfig "github.com/corylanou/litestream-soak/internal/worker"
 )
 
 const (
@@ -31,6 +32,55 @@ func testGateImage(source, litestreamSHA string) string {
 // decision: both sides of a gate read the same fleet definition, so the
 // candidate and baseline always seed the same indexes. gate-large-db takes the
 // heavier case with both indexes; the other profiles keep the default of none.
+// TestOnlyGateFleetsStopOnPopulateFailure runs each fleet's real config path:
+// desired worker, normalized workload, the machine env the control plane
+// writes, and the worker's own parsing of that env. Only gate workers carry
+// populate_stop_on_failure; main sentinels (worker-main-sentinel-single
+// included) and PR workers keep restart-on-failure.
+func TestOnlyGateFleetsStopOnPopulateFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		spec FleetSpec
+		want bool
+	}{
+		{name: "main sentinels", spec: DefaultFleetForSource("main", testGateSoakSHA, testGateCandidateSHA)},
+		{name: "pr fleet", spec: DefaultFleetForSource("pr-1514", testGateSoakSHA, testGateCandidateSHA)},
+		{name: "rc gate candidate", spec: GateFleetForSource(testGateCandidate, testGateSoakSHA, testGateCandidateSHA), want: true},
+		{name: "rc gate baseline with suffix", spec: GateFleetForSource(testGateBaseline+"-2dfdc1c3", testGateSoakSHA, testGateBaselineSHA), want: true},
+		{name: "upgrade gate", spec: GateFleetForSource(testUpgradeCandidate, testGateSoakSHA, testGateCandidateSHA), want: true},
+	}
+	mgr := &Manager{controlBaseURL: "https://litestream-soak-ctl.fly.dev"}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if len(tt.spec.Workers) == 0 {
+				t.Fatal("fleet has no workers")
+			}
+			seenSentinel := false
+			for _, desired := range tt.spec.Workers {
+				seenSentinel = seenSentinel || desired.WorkerID == "worker-main-sentinel-single"
+				cfg := normalizeWorkloadConfig(desired.Workload)
+				if cfg.PopulateStopOnFailure != tt.want {
+					t.Fatalf("%s populate_stop_on_failure = %v, want %v", desired.WorkerID, cfg.PopulateStopOnFailure, tt.want)
+				}
+				env := mgr.workerEnv(model.Worker{ID: desired.WorkerID, Name: desired.Name, Source: desired.Source}, cfg)
+				if _, set := env["POPULATE_STOP_ON_FAILURE"]; set != tt.want {
+					t.Fatalf("%s POPULATE_STOP_ON_FAILURE set = %v, want %v", desired.WorkerID, set, tt.want)
+				}
+				effective, err := workerconfig.WorkloadFromEnvironment(env)
+				if err != nil {
+					t.Fatalf("%s WorkloadFromEnvironment() error = %v", desired.WorkerID, err)
+				}
+				if effective.PopulateStopOnFailure != tt.want {
+					t.Fatalf("%s worker parsed populate_stop_on_failure = %v, want %v", desired.WorkerID, effective.PopulateStopOnFailure, tt.want)
+				}
+			}
+			if tt.name == "main sentinels" && !seenSentinel {
+				t.Fatal("main fleet no longer contains worker-main-sentinel-single; update this test")
+			}
+		})
+	}
+}
+
 func TestGateFleetPinsPopulateIndexRatio(t *testing.T) {
 	want := map[string]float64{
 		gateStressProfile:    0,

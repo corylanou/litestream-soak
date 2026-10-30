@@ -506,6 +506,10 @@ func GateFleetForSource(source, gitSHA, litestreamSHA string) FleetSpec {
 		workers[i].LitestreamSHA = litestreamSHA
 		workers[i].Name = workerNameForSource(source, workers[i].Name)
 		workers[i].WorkerID = workers[i].Name
+		// A gate worker whose seed fails deterministically reports it once and
+		// stops, so the gate sees one harness failure instead of a Fly crash
+		// loop. Only gate fleets set this; other fleets keep restart-on-failure.
+		workers[i].Workload.PopulateStopOnFailure = true
 	}
 	return FleetSpec{Workers: withMeteringWindowObserveProxy(workers)}
 }

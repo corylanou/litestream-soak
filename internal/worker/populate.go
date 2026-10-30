@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -46,12 +47,14 @@ const (
 
 var errWALCheckpointBusy = errors.New("wal checkpoint could not complete: database busy")
 
-// PopulateFailure is the error Run returns when the single-database initial
-// seed failed on every attempt without being cancelled. The failure has been
-// reported as a worker_failed event, and a fresh process would only repeat it,
-// so the worker exits cleanly on it instead of letting the platform restart it
-// ten times. Other populate paths (many-db, churn, FTS) return plain errors and
-// keep the normal restart-on-failure behaviour.
+// PopulateFailure is the error Run returns when a gate worker's single-database
+// initial seed failed deterministically on every attempt without being
+// cancelled. The failure has been reported as a worker_failed event, and a
+// fresh process would only repeat it, so the worker exits cleanly on it
+// instead of letting the platform restart it ten times. It is returned only
+// when the fleet set PopulateStopOnFailure (gate fleets do; main sentinels and
+// PR fleets do not) and the attempts failed the same way; every other populate
+// error, including many-db, churn and FTS, keeps restart-on-failure.
 type PopulateFailure struct {
 	err error
 }
@@ -145,8 +148,9 @@ func (w *walWatcher) stats() (peak, breach int64) {
 // aborted populate error so the worker reports a pre-start failure instead of
 // filling the volume.
 func runPopulateCommand(ctx context.Context, cmd *exec.Cmd, dbPath string, watcher *walWatcher) (populateStats, error) {
+	stderr := &tailBuffer{limit: 4096}
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = io.MultiWriter(os.Stderr, stderr)
 	if err := cmd.Start(); err != nil {
 		return populateStats{}, fmt.Errorf("start populate: %w", err)
 	}
@@ -179,12 +183,46 @@ func runPopulateCommand(ctx context.Context, cmd *exec.Cmd, dbPath string, watch
 	peak, _ := watcher.stats()
 	stats := populateStats{Binary: cmd.Path, PeakWALBytes: peak}
 	if waitErr != nil {
+		if last := stderr.lastLine(); last != "" {
+			return stats, fmt.Errorf("%w: %s", waitErr, last)
+		}
 		return stats, waitErr
 	}
 	if err := finalizePopulateCheckpoint(ctx, dbPath); err != nil {
 		return stats, fmt.Errorf("final checkpoint: %w", err)
 	}
 	return stats, nil
+}
+
+// tailBuffer keeps the last limit bytes written to it, so populate's final
+// stderr line (the reason it exited) can travel with the exit error into the
+// worker_failed event and the deterministic-failure comparison.
+type tailBuffer struct {
+	mu    sync.Mutex
+	limit int
+	buf   []byte
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.limit {
+		b.buf = b.buf[len(b.buf)-b.limit:]
+	}
+	return len(p), nil
+}
+
+func (b *tailBuffer) lastLine() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	lines := strings.Split(strings.TrimSpace(string(b.buf)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 func openCheckpointDB(dbPath string) (*sql.DB, error) {
@@ -284,9 +322,11 @@ func populateEnv(env []string) []string {
 
 // populateSingleDBWithRetry runs populateSingleDB up to attempts times. Each
 // failed attempt has already removed its partial seed, so a retry starts
-// clean. When every attempt fails and the run was not cancelled, the joined
-// error is returned as a PopulateFailure so the process stops instead of
-// restarting; a cancelled run returns the plain error.
+// clean. When every attempt fails, the run was not cancelled, the fleet asked
+// for stop-on-failure, and the failure is deterministic, the joined error is
+// returned as a PopulateFailure so the process stops instead of restarting;
+// otherwise the plain joined error is returned and the platform restarts the
+// worker as usual.
 func populateSingleDBWithRetry(ctx context.Context, cfg Config, attempts int) error {
 	var errs []error
 	for attempt := 1; attempt <= attempts; attempt++ {
@@ -294,15 +334,46 @@ func populateSingleDBWithRetry(ctx context.Context, cfg Config, attempts int) er
 		if err == nil {
 			return nil
 		}
-		errs = append(errs, fmt.Errorf("attempt %d of %d: %w", attempt, attempts, err))
+		errs = append(errs, err)
 		if ctx.Err() != nil {
-			return errors.Join(errs...)
+			break
 		}
 		if attempt < attempts {
 			slog.Warn("Populate failed; retrying once from a clean database", "attempt", attempt, "error", err)
 		}
 	}
-	return &PopulateFailure{err: errors.Join(errs...)}
+	joined := make([]error, 0, len(errs))
+	for i, err := range errs {
+		joined = append(joined, fmt.Errorf("attempt %d of %d: %w", i+1, attempts, err))
+	}
+	if ctx.Err() == nil && cfg.PopulateStopOnFailure && len(errs) == attempts && deterministicPopulateFailure(errs) {
+		return &PopulateFailure{err: errors.Join(joined...)}
+	}
+	return errors.Join(joined...)
+}
+
+// deterministicPopulateFailure reports whether repeated populate attempts
+// failed in a way a restart would only repeat: every attempt produced the same
+// error, or every attempt hit a known harness class (the WAL ceiling kill or a
+// full disk). Anything else is treated as possibly transient.
+func deterministicPopulateFailure(errs []error) bool {
+	if len(errs) == 0 {
+		return false
+	}
+	known := func(err error) bool {
+		message := err.Error()
+		return strings.Contains(message, "aborted populate") || strings.Contains(message, "no space left on device")
+	}
+	allKnown, allSame := true, true
+	for _, err := range errs {
+		if !known(err) {
+			allKnown = false
+		}
+		if err.Error() != errs[0].Error() {
+			allSame = false
+		}
+	}
+	return allKnown || allSame
 }
 
 // populateMarker is the durable record that populate finished and its final

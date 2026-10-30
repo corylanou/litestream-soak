@@ -139,6 +139,9 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	if workloadCfg.PopulateIndexRatio > 0 {
 		env["POPULATE_INDEX_RATIO"] = strconv.FormatFloat(workloadCfg.PopulateIndexRatio, 'f', -1, 64)
 	}
+	if workloadCfg.PopulateStopOnFailure {
+		env["POPULATE_STOP_ON_FAILURE"] = "true"
+	}
 	if workloadCfg.Workers > 0 {
 		env["LOAD_WORKERS"] = fmt.Sprintf("%d", workloadCfg.Workers)
 	}
