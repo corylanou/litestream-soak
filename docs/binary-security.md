@@ -1,8 +1,13 @@
 # Binary security evidence
 
 The harness owns soakctl, soakworker, flyctl, and the pinned litestream-test
-workload generator. Litestream is the candidate under test. Never modify its
-module graph or substitute a different SHA while retaining the original label.
+workload generator, which the worker image builds twice from the same
+`WORKLOAD_SHA`: `litestream-test` (load phase, SQLite automatic WAL checkpoint
+compiled off) and `litestream-test-populate` (initial seed, SQLite default
+autocheckpoint). Each ships with its `go version -m` output in
+`/opt/soak/<binary>.buildinfo`, and worker pprof evidence records both. Litestream
+is the candidate under test. Never modify its module graph or substitute a
+different SHA while retaining the original label.
 
 CI scans actual Linux image binaries on every PR and weekly using
 `govulncheck v1.7.0`. Each scanner invocation has a 300-second limit; image jobs

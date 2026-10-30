@@ -122,9 +122,6 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := r.populate(runCtx); err != nil {
 		err = fmt.Errorf("populate: %w", err)
 		r.sendPreStartFailureEvent(err)
-		if runCtx.Err() == nil {
-			return &PopulateFailure{err: err}
-		}
 		return err
 	}
 	r.setStartupPhase(reporting.StartupPhaseLitestream)

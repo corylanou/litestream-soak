@@ -105,10 +105,55 @@ func TestRuntimeStagesDropPrivilegesWithEntrypoint(t *testing.T) {
 	}
 }
 
-func TestWorkerDockerfileDisablesLitestreamTestWALAutocheckpoint(t *testing.T) {
+// TestWorkerDockerfileBuildsLoadAndPopulateWorkloadBinaries pins the two
+// workload builds from the same WORKLOAD_SHA: the load binary with SQLite's
+// automatic WAL checkpoint compiled off (Litestream checkpoints in steady
+// state) and the populate binary with SQLite's default autocheckpoint, so the
+// initial seed bounds its own WAL with no second writer. Both ship with their
+// build info.
+func TestWorkerDockerfileBuildsLoadAndPopulateWorkloadBinaries(t *testing.T) {
 	content := string(readFile(t, "Dockerfile.worker"))
-	if !strings.Contains(content, "SQLITE_DEFAULT_WAL_AUTOCHECKPOINT=0") {
-		t.Fatal("Dockerfile.worker must build litestream-test with WAL autocheckpoint disabled")
+	tests := []struct {
+		name       string
+		build      string
+		disabled   bool
+		copies     []string
+		buildinfos []string
+	}{
+		{
+			name:       "load binary disables autocheckpoint",
+			build:      "-o /usr/local/bin/litestream-test ./cmd/litestream-test",
+			disabled:   true,
+			copies:     []string{"COPY --from=workload-builder /usr/local/bin/litestream-test /usr/local/bin/litestream-test"},
+			buildinfos: []string{"go version -m /usr/local/bin/litestream-test >/tmp/litestream-test.buildinfo", "COPY --from=workload-builder /tmp/litestream-test.buildinfo /opt/soak/litestream-test.buildinfo"},
+		},
+		{
+			name:       "populate binary keeps SQLite autocheckpoint",
+			build:      "-o /usr/local/bin/litestream-test-populate ./cmd/litestream-test",
+			copies:     []string{"COPY --from=workload-builder /usr/local/bin/litestream-test-populate /usr/local/bin/litestream-test-populate"},
+			buildinfos: []string{"go version -m /usr/local/bin/litestream-test-populate >/tmp/litestream-test-populate.buildinfo", "COPY --from=workload-builder /tmp/litestream-test-populate.buildinfo /opt/soak/litestream-test-populate.buildinfo"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			index := strings.Index(content, tt.build)
+			if index < 0 {
+				t.Fatalf("Dockerfile.worker is missing the build %q", tt.build)
+			}
+			runStart := strings.LastIndex(content[:index], "RUN ")
+			instruction := content[runStart:index]
+			if hasFlag := strings.Contains(instruction, "SQLITE_DEFAULT_WAL_AUTOCHECKPOINT=0"); hasFlag != tt.disabled {
+				t.Fatalf("build %q autocheckpoint disabled = %v, want %v:\n%s", tt.build, hasFlag, tt.disabled, instruction)
+			}
+			if !strings.Contains(instruction, `-X 'main.Version=${WORKLOAD_SHA}'`) {
+				t.Fatalf("build %q must stamp the pinned WORKLOAD_SHA:\n%s", tt.build, instruction)
+			}
+			for _, want := range append(tt.copies, tt.buildinfos...) {
+				if !strings.Contains(content, want) {
+					t.Fatalf("Dockerfile.worker is missing %q", want)
+				}
+			}
+		})
 	}
 }
 
@@ -471,6 +516,7 @@ func TestWorkerWorkloadBuildIsIndependentFromCandidate(t *testing.T) {
 		"ARG WORKLOAD_SHA=ae88b164dd6304bcbb654a681df767ee59042eed",
 		`git checkout --detach "${WORKLOAD_SHA}"`,
 		"COPY --from=workload-builder /usr/local/bin/litestream-test",
+		"COPY --from=workload-builder /usr/local/bin/litestream-test-populate",
 		"ENV WORKLOAD_SHA=${WORKLOAD_SHA}",
 	} {
 		if !strings.Contains(content, want) {

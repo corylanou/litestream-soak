@@ -21,7 +21,8 @@ build-deps:
 	git -C "$(LITESTREAM_REPO)" rev-parse HEAD
 	cd $(LITESTREAM_REPO) && go build -o $(CURDIR)/bin/litestream ./cmd/litestream
 	cd $(LITESTREAM_REPO) && go build -o $(CURDIR)/bin/litestream-test ./cmd/litestream-test
-	go version -m bin/litestream bin/litestream-test
+	cd $(LITESTREAM_REPO) && go build -o $(CURDIR)/bin/litestream-test-populate ./cmd/litestream-test
+	go version -m bin/litestream bin/litestream-test bin/litestream-test-populate
 
 build-all: build build-deps
 
