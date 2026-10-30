@@ -70,6 +70,11 @@ const (
 	rcGateCrashLoopEvents        = 2
 	rcGateDiskExhaustedUsedPct   = 98.0
 	rcGateFlyNotRestartingMarker = "not restarting"
+	rcGateStaleWorkerMessage     = "worker missed heartbeat deadline"
+	rcGateStaleGrace             = 30 * time.Minute
+	rcGateStaleBurstWorkers      = 3
+	rcGateStaleBurstWindow       = 90 * time.Second
+	rcGatePlannedRestartWindow   = 10 * time.Minute
 )
 
 var (
@@ -79,6 +84,9 @@ var (
 		reporting.WorkerEventDiskFullRecoveryFailed,
 	}
 	rcGateCrashEventTypes = []string{"platform_restart", "platform_oom", "platform_killed", "worker_failed"}
+	// Planned restarts the worker reports as worker_failed on images that predate
+	// the phaseEnded check in internal/worker/runner.go.
+	rcGatePlannedLifecycleMarkers = []string{"stress scenario phase ended", "upgrade warm-up ended"}
 	// Fatal runner errors raised before Litestream is launched (internal/worker/runner.go).
 	rcGatePreStartFailurePrefixes = []string{"populate:", "prepare disk-full recovery reserve:", "write litestream config:", "start litestream:"}
 )
@@ -1236,7 +1244,10 @@ func rcGateSideFault(db *model.DB, gate model.RCGate, worker model.Worker, obser
 		}
 		inWindow = append(inWindow, event)
 	}
-	reason, detail := rcGateWorkerFault(worker, inWindow)
+	reason, detail, err := rcGateWorkerFault(db, worker, inWindow, end)
+	if err != nil {
+		return "", "", err
+	}
 	if reason == "" {
 		return "", "", nil
 	}
@@ -1284,26 +1295,42 @@ func rcGatePreStartEvidence(worker model.Worker, events []model.Event) (string, 
 	return evidence, true
 }
 
-func rcGateWorkerFault(worker model.Worker, events []model.Event) (string, string) {
+func rcGateWorkerFault(db *model.DB, worker model.Worker, events []model.Event, end time.Time) (string, string, error) {
 	degraded := worker.Status == model.WorkerDegraded || worker.Status == model.WorkerFailed
+	planned := rcGatePlannedRestartTimes(worker, events)
 	var (
 		diskDetail, crashDetail, staleDetail string
 		crashes                              int
-		terminalCrash                        bool
+		terminalCrash, staleEventSeen        bool
 	)
 	for _, event := range events {
 		switch {
 		case slices.Contains(rcGateDiskFullEventTypes, event.EventType):
 			diskDetail = firstNonEmpty(event.Message, event.EventType)
 		case slices.Contains(rcGateCrashEventTypes, event.EventType):
+			if rcGatePlannedLifecycleEvent(event) || (event.EventType == "platform_restart" && rcGateNearPlannedRestart(event.CreatedAt, planned)) {
+				continue
+			}
 			crashes += max(1, event.Occurrences)
 			crashDetail = firstNonEmpty(event.Message, event.EventType)
 			if strings.Contains(strings.ToLower(event.Message), rcGateFlyNotRestartingMarker) {
 				terminalCrash = true
 			}
 		case event.EventType == "worker_stale":
-			staleDetail = firstNonEmpty(event.Message, event.EventType)
+			staleEventSeen = true
+			detail, fault, err := rcGateStaleFault(db, worker, event, end)
+			if err != nil {
+				return "", "", err
+			}
+			if fault {
+				staleDetail = detail
+			}
 		}
+	}
+	if degraded && worker.ErrorMessage == rcGateStaleWorkerMessage {
+		// A stale-only degradation is judged by its worker_stale event; without
+		// one in the window it counts only while the worker is still silent.
+		degraded = !staleEventSeen && rcGateCurrentlyStale(worker, end)
 	}
 	if diskDetail == "" && degraded && reporting.IsDiskCapacityMessage(worker.ErrorMessage) {
 		diskDetail = worker.ErrorMessage
@@ -1316,16 +1343,105 @@ func rcGateWorkerFault(worker model.Worker, events []model.Event) (string, strin
 	}
 	switch {
 	case diskDetail != "":
-		return rcGateReasonDiskExhausted, diskDetail
+		return rcGateReasonDiskExhausted, diskDetail, nil
 	case crashLoop:
-		return rcGateReasonWorkerCrashLoop, fmt.Sprintf("%d crash events in the gate window; last: %s", crashes, crashDetail)
+		return rcGateReasonWorkerCrashLoop, fmt.Sprintf("%d crash events in the gate window; last: %s", crashes, crashDetail), nil
 	case degraded:
-		return rcGateReasonWorkerDegraded, firstNonEmpty(worker.ErrorMessage, string(worker.Status))
+		return rcGateReasonWorkerDegraded, firstNonEmpty(worker.ErrorMessage, string(worker.Status)), nil
 	case staleDetail != "":
-		return rcGateReasonWorkerDegraded, staleDetail
+		return rcGateReasonWorkerDegraded, staleDetail, nil
 	default:
-		return "", ""
+		return "", "", nil
 	}
+}
+
+// rcGateStaleFault decides whether one worker_stale event is a worker fault. A
+// stale burst that hits several workers in the same minute is a control-plane
+// restart, and a worker whose heartbeats resumed within the grace period only
+// missed a deadline, so neither counts. Staleness counts when the worker never
+// heartbeated again or stayed silent past the grace period.
+func rcGateStaleFault(db *model.DB, worker model.Worker, event model.Event, end time.Time) (string, bool, error) {
+	burst, err := db.CountWorkersWithEventBetween("worker_stale", event.CreatedAt.Add(-rcGateStaleBurstWindow), event.CreatedAt.Add(rcGateStaleBurstWindow))
+	if err != nil {
+		return "", false, fmt.Errorf("count stale workers: %w", err)
+	}
+	if burst >= rcGateStaleBurstWorkers {
+		return "", false, nil
+	}
+	resumedAt, resumed, err := db.FirstHeartbeatAfter(worker.Source, worker.ID, event.CreatedAt)
+	if err != nil {
+		return "", false, fmt.Errorf("find heartbeat after stale: %w", err)
+	}
+	if !resumed && worker.LastHeartbeatAt != nil && worker.LastHeartbeatAt.After(event.CreatedAt) {
+		resumedAt, resumed = worker.LastHeartbeatAt.UTC(), true
+	}
+	switch {
+	case !resumed && end.Sub(event.CreatedAt) < rcGateStaleGrace:
+		return "", false, nil
+	case !resumed:
+		return fmt.Sprintf("%s; no heartbeat since %s", firstNonEmpty(event.Message, event.EventType), event.CreatedAt.UTC().Format(time.RFC3339)), true, nil
+	case resumedAt.Sub(event.CreatedAt) > rcGateStaleGrace:
+		return fmt.Sprintf("%s; heartbeats resumed after %s", firstNonEmpty(event.Message, event.EventType), resumedAt.Sub(event.CreatedAt).Round(time.Minute)), true, nil
+	default:
+		return "", false, nil
+	}
+}
+
+func rcGateCurrentlyStale(worker model.Worker, end time.Time) bool {
+	return worker.LastHeartbeatAt == nil || end.Sub(*worker.LastHeartbeatAt) >= rcGateStaleGrace
+}
+
+func rcGatePlannedLifecycleEvent(event model.Event) bool {
+	if event.EventType != "worker_failed" {
+		return false
+	}
+	message := strings.ToLower(event.Message)
+	for _, marker := range rcGatePlannedLifecycleMarkers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// rcGatePlannedRestartTimes lists the moments the worker restarted on purpose:
+// every planned lifecycle event it reported, plus each wall-clock stress phase
+// boundary inside the window for the gate-stress worker, whose Litestream and
+// harness restart between scenario phases.
+func rcGatePlannedRestartTimes(worker model.Worker, events []model.Event) []time.Time {
+	var planned []time.Time
+	var earliest, latest time.Time
+	for _, event := range events {
+		if rcGatePlannedLifecycleEvent(event) {
+			planned = append(planned, event.CreatedAt)
+		}
+		if earliest.IsZero() || event.CreatedAt.Before(earliest) {
+			earliest = event.CreatedAt
+		}
+		if event.CreatedAt.After(latest) {
+			latest = event.CreatedAt
+		}
+	}
+	if worker.ProfileName != gateStressProfile || earliest.IsZero() {
+		return planned
+	}
+	phase, err := time.ParseDuration(rcGateStressPhase)
+	if err != nil || phase <= 0 {
+		return planned
+	}
+	for boundary := earliest.UTC().Truncate(phase); !boundary.After(latest.Add(phase)); boundary = boundary.Add(phase) {
+		planned = append(planned, boundary)
+	}
+	return planned
+}
+
+func rcGateNearPlannedRestart(at time.Time, planned []time.Time) bool {
+	for _, moment := range planned {
+		if delta := at.Sub(moment); delta >= -rcGatePlannedRestartWindow && delta <= rcGatePlannedRestartWindow {
+			return true
+		}
+	}
+	return false
 }
 
 func rcGateRequiredModes(scenario gateScenario, candidate, baseline RCGateSideResult) []string {
