@@ -283,15 +283,18 @@ func collectRestorePlanSnapshot(cfg Config, targetTXID uint64) *reporting.Restor
 	}
 	candidates := listing.candidates
 	snapshot.CandidateCount = len(candidates)
-	if listing.err != "" {
-		snapshot.Error = listing.err
+	if listing.err != "" || !listing.complete {
+		// A listing that failed part-way may still have emitted entries that
+		// cover the target; a plan picked from them would be a guess, so the
+		// snapshot stays incomplete with the partial input flagged.
+		snapshot.Error = firstNonEmpty(listing.err, "listing incomplete")
 		snapshot.OutputTail = listing.tail
+		snapshot.Truncated = len(candidates) > 0
+		return snapshot
 	}
 	if len(candidates) == 0 {
-		if snapshot.Error == "" {
-			snapshot.Error = "no ltx entries parsed"
-			snapshot.OutputTail = listing.tail
-		}
+		snapshot.Error = "no ltx entries parsed"
+		snapshot.OutputTail = listing.tail
 		return snapshot
 	}
 

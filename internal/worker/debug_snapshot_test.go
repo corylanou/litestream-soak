@@ -98,6 +98,39 @@ exit 1
 	}
 }
 
+func TestCollectRestorePlanSnapshotRefusesPartialListing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires Unix")
+	}
+	dir := t.TempDir()
+	write := func(script string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "litestream"), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const covering = `echo "level min_txid max_txid size created"
+echo "9 0000000000000001 0000000000000100 197156405 2026-10-30T03:33:00Z"
+echo "0 0000000000000101 0000000000000110 3796 2026-10-30T04:00:00Z"
+`
+	write("#!/bin/sh\n" + covering + "echo 'listing interrupted' >&2\nexit 1\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg := DefaultConfig()
+	cfg.ConfigPath = filepath.Join(dir, "litestream.yml")
+	cfg.DBPath = filepath.Join(dir, "test.db")
+
+	partial := collectRestorePlanSnapshot(cfg, 0x110)
+	if partial.Complete || len(partial.Entries) != 0 || partial.Error == "" || !partial.Truncated || partial.CandidateCount != 2 || !strings.Contains(partial.OutputTail, "listing interrupted") {
+		t.Fatalf("partial listing that covers the target must not yield a plan: %+v", partial)
+	}
+
+	write("#!/bin/sh\n" + covering)
+	full := collectRestorePlanSnapshot(cfg, 0x110)
+	if !full.Complete || full.Error != "" || full.Truncated || len(full.Entries) != 2 {
+		t.Fatalf("complete listing = %+v, want a complete two-entry plan", full)
+	}
+}
+
 func TestReplicaLevelSummariesIncludeEmptyLevels(t *testing.T) {
 	candidates := parseRestorePlanCandidates(`
 level min_txid max_txid size created
