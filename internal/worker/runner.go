@@ -173,7 +173,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.churnLoad = load
 		defer load.Stop()
 	} else if r.cfg.ManyDBEnabled() {
-		r.loadReplayManager.manyDBStateEvent = r.sendManyDBStateEvent
+		r.manyDBStateEvent = r.sendManyDBStateEvent
 		if err := r.startManyDBLoad(runCtx); err != nil {
 			return fmt.Errorf("start many database load: %w", err)
 		}
