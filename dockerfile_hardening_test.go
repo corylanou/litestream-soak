@@ -524,6 +524,8 @@ func TestWorkerDockerfileBuildsVFSExtensionFromCandidate(t *testing.T) {
 		"src/litestream-vfs.c /tmp/litestream-vfs.a -lpthread -ldl -lm",
 		"COPY --from=litestream-builder /usr/local/lib/litestream-vfs.so /usr/local/lib/litestream-vfs.so",
 		`RUN sqlite3 :memory: ".load /usr/local/lib/litestream-vfs.so"`,
+		`-cmd ".load /usr/local/lib/litestream-vfs.so" -cmd '.open "file:/tmp/vfs-check.db?vfs=litestream&mode=ro"'`,
+		`*"no such vfs"*) echo "litestream vfs not registered before .open" >&2; exit 1;;`,
 		"ENV LITESTREAM_VFS_EXTENSION=/usr/local/lib/litestream-vfs.so",
 	} {
 		if !strings.Contains(content, want) {
