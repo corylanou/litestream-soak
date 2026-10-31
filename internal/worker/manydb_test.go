@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -459,7 +460,9 @@ func TestManyDBWritePersistsIntentBeforeTheRowCommits(t *testing.T) {
 		order = append(order, "write "+filepath.Base(dbPath))
 		return nil
 	}
-	load.performWrite(context.Background(), manyDBWrite{dbPath: paths[1], rowSlot: 1})
+	if err := load.performWrite(context.Background(), manyDBWrite{dbPath: paths[1], rowSlot: 1}); err != nil {
+		t.Fatal(err)
+	}
 	if !slices.Equal(order, []string{"write " + filepath.Base(paths[1])}) {
 		t.Fatalf("order = %v", order)
 	}
@@ -468,9 +471,107 @@ func TestManyDBWritePersistsIntentBeforeTheRowCommits(t *testing.T) {
 		t.Fatalf("a crash right after the commit lost the write: %+v %+v", coverage, crashed.pendingManyDBChanges()[0])
 	}
 	load.writeRow = func(context.Context, string, int, int64) error { return errors.New("database is locked") }
-	load.performWrite(context.Background(), manyDBWrite{dbPath: paths[2], rowSlot: 1})
+	if err := load.performWrite(context.Background(), manyDBWrite{dbPath: paths[2], rowSlot: 1}); err == nil || !strings.Contains(err.Error(), "database is locked") {
+		t.Fatalf("row write failure not returned: %v", err)
+	}
 	if written, err := readManyDBWrittenState(&cfg); err != nil || !slices.Equal(written, []string{paths[1], paths[2]}) {
 		t.Fatalf("a failed write must stay recorded as written: %v, %v", written, err)
+	}
+}
+
+func TestManyDBSecondWriterWaitsForTheSaveInFlight(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.NumDatabases = 2
+	manyDBWrittenStateDir(t, &cfg)
+	paths := cfg.ManyDBPaths()
+	load := newManyDBLoad(&cfg)
+	saving := make(chan struct{})
+	release := make(chan struct{})
+	var saveReturned atomic.Bool
+	var saves atomic.Int32
+	load.saveState = func(written []string) error {
+		if saves.Add(1) == 1 {
+			close(saving)
+			<-release
+			saveReturned.Store(true)
+		}
+		return writeManyDBWrittenState(cfg, written)
+	}
+	var mu sync.Mutex
+	var rows []string
+	load.writeRow = func(_ context.Context, dbPath string, _ int, _ int64) error {
+		if !saveReturned.Load() {
+			t.Errorf("row write to %s ran before the first save returned", filepath.Base(dbPath))
+		}
+		mu.Lock()
+		rows = append(rows, filepath.Base(dbPath))
+		mu.Unlock()
+		return nil
+	}
+	errs := make(chan error, 2)
+	go func() { errs <- load.performWrite(context.Background(), manyDBWrite{dbPath: paths[0], rowSlot: 1}) }()
+	<-saving
+	go func() { errs <- load.performWrite(context.Background(), manyDBWrite{dbPath: paths[0], rowSlot: 2}) }()
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	started := len(rows)
+	mu.Unlock()
+	if started != 0 {
+		t.Fatalf("%d row writes ran while the save was still in flight", started)
+	}
+	close(release)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(rows) != 2 || saves.Load() != 1 {
+		t.Fatalf("rows=%v saves=%d, want both rows after one save", rows, saves.Load())
+	}
+	if err := load.performWrite(context.Background(), manyDBWrite{dbPath: paths[0], rowSlot: 3}); err != nil || saves.Load() != 1 {
+		t.Fatalf("a durable entry must write without saving again: err=%v saves=%d", err, saves.Load())
+	}
+}
+
+func TestManyDBWriteRefusedWhileWrittenSetCannotBeSavedOrRemoved(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.NumDatabases = 2
+	manyDBWrittenStateDir(t, &cfg)
+	paths := cfg.ManyDBPaths()
+	load := newManyDBLoad(&cfg)
+	var events []string
+	load.onStateEvent = func(eventType, _ string) { events = append(events, eventType) }
+	statePath := manyDBWrittenStatePath(&cfg)
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(statePath, "busy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	load.saveState = func([]string) error { return errors.New("read-only file system") }
+	rowWrites := 0
+	load.writeRow = func(context.Context, string, int, int64) error { rowWrites++; return nil }
+	for i := range 3 {
+		err := load.performWrite(context.Background(), manyDBWrite{dbPath: paths[1], rowSlot: int64(i + 1)})
+		if err == nil || !strings.Contains(err.Error(), "write to "+filepath.Base(paths[1])+" refused") {
+			t.Fatalf("attempt %d: err = %v, want the write refused", i, err)
+		}
+	}
+	if rowWrites != 0 || !load.stateIsDirty() || !slices.Equal(events, []string{manyDBStateDirtyEvent}) {
+		t.Fatalf("rowWrites=%d dirty=%v events=%v", rowWrites, load.stateIsDirty(), events)
+	}
+	if err := os.RemoveAll(statePath); err != nil {
+		t.Fatal(err)
+	}
+	load.saveState = func(written []string) error { return writeManyDBWrittenState(cfg, written) }
+	if err := load.performWrite(context.Background(), manyDBWrite{dbPath: paths[1], rowSlot: 4}); err != nil {
+		t.Fatal(err)
+	}
+	if rowWrites != 1 || load.stateIsDirty() || !slices.Equal(events, []string{manyDBStateDirtyEvent, manyDBStateRecoveredEvent}) {
+		t.Fatalf("after recovery rowWrites=%d dirty=%v events=%v", rowWrites, load.stateIsDirty(), events)
+	}
+	if written, err := readManyDBWrittenState(&cfg); err != nil || !slices.Equal(written, []string{paths[1]}) {
+		t.Fatalf("recovered written set = %v, %v", written, err)
 	}
 }
 

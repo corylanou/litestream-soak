@@ -33,7 +33,7 @@ type manyDBLoad struct {
 	changeGeneration uint64
 	lastAttempt      string
 	stateMu          sync.Mutex
-	stateDirty       bool
+	stateDirty       atomic.Bool
 	saveState        func([]string) error
 	writeRow         func(context.Context, string, int, int64) error
 	onStateEvent     func(eventType, message string)
@@ -246,20 +246,22 @@ const (
 	manyDBStateRecoveredEvent = "many_db_written_state_recovered"
 )
 
-// persistWrittenState rewrites the written set on the volume. It runs when a
-// path enters or leaves the set, and again on every later mark or
-// acknowledgement while a save has failed, and only once the database
-// directory exists, so an unpopulated configuration never writes anything.
-// The snapshot and the save happen under stateMu, so a save never writes an
-// older view of the set than one already on disk. A failed save marks the
-// state dirty and removes the stale file, so a restart before a save
-// succeeds takes the all-written fallback instead of trusting old contents.
-func (l *manyDBLoad) persistWrittenState() {
+type manyDBStateEvent struct {
+	eventType string
+	message   string
+}
+
+// saveWrittenStateLocked saves the written set with stateMu held. The
+// snapshot is taken under the same lock, so a save never writes an older view
+// than one already on disk, and every entry in a saved snapshot is marked
+// durable. A failed save removes the stale file and marks the state dirty;
+// the returned error is set only when the save and the removal both failed,
+// which is when a write must not proceed. Events are returned, not emitted,
+// so the caller reports them after releasing the lock.
+func (l *manyDBLoad) saveWrittenStateLocked() ([]manyDBStateEvent, error) {
 	if _, err := os.Stat(l.cfg.ManyDBDir()); err != nil {
-		return
+		return nil, nil
 	}
-	l.stateMu.Lock()
-	defer l.stateMu.Unlock()
 	l.changedMu.Lock()
 	written := make([]string, 0, len(l.changed))
 	for path, change := range l.changed {
@@ -269,35 +271,58 @@ func (l *manyDBLoad) persistWrittenState() {
 	}
 	l.changedMu.Unlock()
 	sort.Strings(written)
+	var events []manyDBStateEvent
 	if err := l.saveState(written); err != nil {
-		if removeErr := os.Remove(manyDBWrittenStatePath(l.cfg)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			slog.Warn("Failed to remove stale many database written set", "error", removeErr)
+		removeErr := os.Remove(manyDBWrittenStatePath(l.cfg))
+		if errors.Is(removeErr, os.ErrNotExist) {
+			removeErr = nil
 		}
-		if !l.stateDirty {
-			l.stateDirty = true
-			message := fmt.Sprintf("many database written set could not be saved; a restart before it recovers treats every database as written: %v", err)
+		if !l.stateDirty.Swap(true) {
 			slog.Warn("Many database written set dirty", "error", err)
-			l.emitStateEvent(manyDBStateDirtyEvent, message)
+			events = append(events, manyDBStateEvent{manyDBStateDirtyEvent, fmt.Sprintf("many database written set could not be saved; a restart before it recovers treats every database as written: %v", err)})
 		}
-		return
+		if removeErr != nil {
+			return events, fmt.Errorf("save written set: %w; remove stale written set: %v", err, removeErr)
+		}
+		return events, nil
 	}
-	if l.stateDirty {
-		l.stateDirty = false
+	l.changedMu.Lock()
+	for _, path := range written {
+		if change, ok := l.changed[path]; ok && change.written {
+			change.durable = true
+			l.changed[path] = change
+		}
+	}
+	l.changedMu.Unlock()
+	if l.stateDirty.Swap(false) {
 		slog.Info("Many database written set recovered", "written", len(written))
-		l.emitStateEvent(manyDBStateRecoveredEvent, fmt.Sprintf("many database written set saved again with %d written databases", len(written)))
+		events = append(events, manyDBStateEvent{manyDBStateRecoveredEvent, fmt.Sprintf("many database written set saved again with %d written databases", len(written))})
 	}
+	return events, nil
 }
 
-func (l *manyDBLoad) emitStateEvent(eventType, message string) {
-	if l.onStateEvent != nil {
-		l.onStateEvent(eventType, message)
+// persistWrittenState saves the written set and reports any state events.
+// It runs when a path enters or leaves the set and again on every later mark
+// or acknowledgement while a save has failed.
+func (l *manyDBLoad) persistWrittenState() error {
+	l.stateMu.Lock()
+	events, err := l.saveWrittenStateLocked()
+	l.stateMu.Unlock()
+	l.emitStateEvents(events)
+	return err
+}
+
+func (l *manyDBLoad) emitStateEvents(events []manyDBStateEvent) {
+	if l.onStateEvent == nil {
+		return
+	}
+	for _, event := range events {
+		l.onStateEvent(event.eventType, event.message)
 	}
 }
 
 func (l *manyDBLoad) stateIsDirty() bool {
-	l.stateMu.Lock()
-	defer l.stateMu.Unlock()
-	return l.stateDirty
+	return l.stateDirty.Load()
 }
 
 func (l *manyDBLoad) Start(ctx context.Context) error {
@@ -409,22 +434,59 @@ func (l *manyDBLoad) writeWorker(ctx context.Context) {
 			if !l.beginWrite(ctx) {
 				return
 			}
-			l.performWrite(ctx, write)
+			if err := l.performWrite(ctx, write); err != nil {
+				slog.Warn("Many database write failed", "db", write.dbPath, "error", err)
+			}
 			l.endWrite()
 		}
 	}
 }
 
-// performWrite records the database as written, persisting the written set
-// when it enters, before the row is committed: a crash between the commit and
-// the record would otherwise leave a valid file that omits the write. A write
-// that then fails leaves the database marked written, and it is verified
+// performWrite records the database as written before the row is committed,
+// so a crash between the commit and the record cannot leave a valid written
+// set that omits the write. A database whose written entry is already on disk
+// (durable) goes straight to the row write while no save has failed;
+// otherwise the write takes stateMu, so a second writer to the same database
+// waits for the save in flight, saves, and only then writes the row. When the
+// save and the removal of the stale file both fail the write is refused, so
+// a broken state disk shows up as write errors rather than lost coverage. A
+// row write that fails leaves the database marked written, and it is verified
 // anyway.
-func (l *manyDBLoad) performWrite(ctx context.Context, write manyDBWrite) {
-	l.markChanged(write.dbPath)
-	if err := l.writeRow(ctx, write.dbPath, l.cfg.PayloadSize, write.rowSlot); err != nil {
-		slog.Warn("Many database write failed", "db", write.dbPath, "error", err)
+func (l *manyDBLoad) performWrite(ctx context.Context, write manyDBWrite) error {
+	if !l.markDurableWrite(write.dbPath) {
+		l.stateMu.Lock()
+		var events []manyDBStateEvent
+		var err error
+		if !l.markDurableWrite(write.dbPath) {
+			l.mark(write.dbPath, true)
+			events, err = l.saveWrittenStateLocked()
+		}
+		l.stateMu.Unlock()
+		l.emitStateEvents(events)
+		if err != nil {
+			return fmt.Errorf("written set not durable, write to %s refused: %w", filepath.Base(write.dbPath), err)
+		}
 	}
+	return l.writeRow(ctx, write.dbPath, l.cfg.PayloadSize, write.rowSlot)
+}
+
+// markDurableWrite bumps the generation of a database whose written entry is
+// already saved and reports whether it did; a dirty state or an entry that is
+// not yet durable leaves the write to the saving path.
+func (l *manyDBLoad) markDurableWrite(dbPath string) bool {
+	if l.stateDirty.Load() {
+		return false
+	}
+	l.changedMu.Lock()
+	defer l.changedMu.Unlock()
+	change, ok := l.changed[dbPath]
+	if !ok || !change.written || !change.durable {
+		return false
+	}
+	l.changeGeneration++
+	change.generation = l.changeGeneration
+	l.changed[dbPath] = change
+	return true
 }
 
 func (l *manyDBLoad) beginWrite(ctx context.Context) bool {
@@ -542,15 +604,24 @@ type manyDBChange struct {
 	generation uint64
 	since      time.Time
 	written    bool
+	durable    bool
 }
 
+// markChanged records a workload write and saves the written set when the
+// database enters it, or when an earlier save failed and must be retried.
 func (l *manyDBLoad) markChanged(dbPath string) {
-	l.mark(dbPath, true)
+	if l.mark(dbPath, true) || l.stateIsDirty() {
+		if err := l.persistWrittenState(); err != nil {
+			slog.Warn("Many database written set not saved", "error", err)
+		}
+	}
 }
 
-func (l *manyDBLoad) mark(dbPath string, written bool) {
+// mark bumps the database's generation and flags it written; it reports
+// whether the database entered the written set, which the caller persists.
+func (l *manyDBLoad) mark(dbPath string, written bool) bool {
 	if dbPath == "" {
-		return
+		return false
 	}
 	l.changedMu.Lock()
 	defer l.changedMu.Unlock()
@@ -565,12 +636,11 @@ func (l *manyDBLoad) mark(dbPath string, written bool) {
 	change.generation = l.changeGeneration
 	entered := written && !change.written
 	change.written = change.written || written
-	l.changed[dbPath] = change
-	l.changedMu.Unlock()
-	if entered || l.stateIsDirty() {
-		l.persistWrittenState()
+	if entered {
+		change.durable = false
 	}
-	l.changedMu.Lock()
+	l.changed[dbPath] = change
+	return entered
 }
 
 // pendingManyDBChanges lists the pending set with written databases ahead of
@@ -611,7 +681,9 @@ func (l *manyDBLoad) acknowledgeManyDBChange(change manyDBChange) {
 	}
 	l.changedMu.Unlock()
 	if (verified && current.written) || l.stateIsDirty() {
-		l.persistWrittenState()
+		if err := l.persistWrittenState(); err != nil {
+			slog.Warn("Many database written set not saved", "error", err)
+		}
 	}
 }
 
