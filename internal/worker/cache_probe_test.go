@@ -125,45 +125,64 @@ func TestCacheProbeWriterPauseWaitsForInFlightWrite(t *testing.T) {
 	}
 }
 
-func TestCacheProbeWriterRecordsCommitLandingTXIDs(t *testing.T) {
+func TestCacheProbeWriterUpdateRespectsVerifierPauseAndHold(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "test.db")
 	if err := ensureCacheProbe(ctx, path); err != nil {
 		t.Fatal(err)
 	}
-	writer := newCacheProbeWriter(path, time.Hour)
-	positions := []uint64{40, 41}
-	writer.position = func(context.Context) (uint64, error) {
-		if len(positions) == 0 {
-			return 0, errors.New("socket closed")
+	writer := newCacheProbeWriter(path, time.Millisecond)
+
+	writer.Hold()
+	writer.Start(ctx)
+	defer writer.Stop()
+	time.Sleep(30 * time.Millisecond)
+	if held, err := readCacheProbe(ctx, path); err != nil || held != "2048|0|0|0" {
+		t.Fatalf("held ticker wrote: %q err %v", held, err)
+	}
+	expected, err := writer.Update(ctx)
+	if err != nil || expected != "2048|0|1|128" {
+		t.Fatalf("Update() = %q, %v", expected, err)
+	}
+
+	if err := writer.Pause(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Update(ctx); !errors.Is(err, errCacheProbePaused) {
+		t.Fatalf("Update() during a verifier pause = %v, want errCacheProbePaused", err)
+	}
+	if err := writer.Pause(ctx); err != nil {
+		t.Fatal(err)
+	}
+	writer.Resume()
+	if _, err := writer.Update(ctx); !errors.Is(err, errCacheProbePaused) {
+		t.Fatalf("one Resume lifted two Pauses: %v", err)
+	}
+	writer.Resume()
+	writer.Release()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		current, err := readCacheProbe(ctx, path)
+		if err != nil {
+			t.Fatal(err)
 		}
-		position := positions[0]
-		positions = positions[1:]
-		return position, nil
-	}
-	for i := 0; i < 3; i++ {
-		writer.writeOnce(ctx)
-	}
-	commits := writer.Commits()
-	if len(commits) != 3 || commits[0].txid != 41 || commits[1].txid != 42 || commits[2].txid != 0 {
-		t.Fatalf("commits = %+v, want landing txids 41, 42 and unknown", commits)
-	}
-	for _, commit := range commits {
-		if commit.at.IsZero() {
-			t.Fatalf("commit without a time: %+v", commit)
+		if current != "2048|0|1|128" {
+			break
 		}
+		if time.Now().After(deadline) {
+			t.Fatal("released writer never resumed the ticker")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	queries, err := primaryReadQueries(ctx, path)
+	if err := writer.Pause(ctx); err != nil {
+		t.Fatal(err)
+	}
+	paused, err := readCacheProbe(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if queries[0].primary != "2048|0|1|384" {
-		t.Fatalf("three stripes should have committed: %s", queries[0].primary)
-	}
-	failing := newCacheProbeWriter(path, time.Hour)
-	failing.bump = func(context.Context, string, int) error { return errors.New("database is locked") }
-	failing.writeOnce(ctx)
-	if len(failing.Commits()) != 0 {
-		t.Fatalf("failed update recorded a commit: %+v", failing.Commits())
+	time.Sleep(30 * time.Millisecond)
+	if again, err := readCacheProbe(ctx, path); err != nil || again != paused {
+		t.Fatalf("ticker wrote after Pause: %q -> %q err %v", paused, again, err)
 	}
 }

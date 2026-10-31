@@ -113,9 +113,49 @@ func (f *fakeVFSReader) count(statement string) int {
 	return n
 }
 
-func newTestVFSReaderCheck(t *testing.T, reader *fakeVFSReader, startErr error) *vfsReaderCheck {
+// fakeProbeWriter stands in for the cache probe writer: Update hands out the
+// scripted primary aggregates (or the paused error) and counts holds.
+type fakeProbeWriter struct {
+	mu        sync.Mutex
+	updates   []string
+	updateErr error
+	holds     int
+	releases  int
+	calls     int
+}
+
+func (f *fakeProbeWriter) hold() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holds++
+}
+
+func (f *fakeProbeWriter) release() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.releases++
+}
+
+func (f *fakeProbeWriter) update(context.Context) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.updateErr != nil {
+		return "", f.updateErr
+	}
+	f.calls++
+	return next(&f.updates), nil
+}
+
+func newTestVFSReaderCheck(t *testing.T, reader *fakeVFSReader, startErr error) (*vfsReaderCheck, *fakeProbeWriter) {
 	t.Helper()
 	check := newVFSReaderCheck(Config{DBPath: t.TempDir() + "/test.db"})
+	writer := &fakeProbeWriter{updates: []string{"2048|0|1|128"}}
+	check.holdProbe = writer.hold
+	check.releaseProbe = writer.release
+	check.updateProbe = writer.update
+	check.sync = func(context.Context) (uint64, error) { return 12, nil }
+	check.writeBudget = 50 * time.Millisecond
+	check.writePoll = time.Millisecond
 	check.repeats = 2
 	check.repeatInterval = 0
 	check.pause = 0
@@ -131,9 +171,8 @@ func newTestVFSReaderCheck(t *testing.T, reader *fakeVFSReader, startErr error) 
 		}
 		return reader, nil
 	}
-	check.probeCommits = func() []cacheProbeCommit { return []cacheProbeCommit{{txid: 9}, {txid: 11}} }
 	t.Cleanup(check.Stop)
-	return check
+	return check, writer
 }
 
 func TestParseVFSProbe(t *testing.T) {
@@ -149,65 +188,75 @@ func TestParseVFSProbe(t *testing.T) {
 }
 
 func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
-	const first = "2048|0|0|0"
+	const (
+		first   = "2048|0|0|0"
+		updated = "2048|0|1|128"
+	)
 	tests := []struct {
 		name          string
 		reader        *fakeVFSReader
-		commits       []cacheProbeCommit
+		writer        *fakeProbeWriter
+		sync          func(context.Context) (uint64, error)
 		startErr      error
 		wantStatus    string
 		wantSignature string
 		wantMessage   string
 		wantDropped   bool
+		wantUpdates   int
 	}{
 		{
-			name:       "repeats match after a probe update landed mid-transaction and the reader advances after commit",
-			reader:     &fakeVFSReader{probes: []string{first, first, first, "2048|0|1|128"}, txids: []uint64{10, 11, 11, 12}, progress: []float64{100}},
-			wantStatus: "passed",
+			name:        "repeats match after the reader applied the cycle's probe update and the post-commit read shows it",
+			reader:      &fakeVFSReader{probes: []string{first, first, first, updated}, txids: []uint64{10, 11, 12, 12, 12, 13}, progress: []float64{100}},
+			wantStatus:  "passed",
+			wantUpdates: 1,
 		},
 		{
-			name:          "a probe update that lands only after the last repeat is no evidence",
-			reader:        &fakeVFSReader{probes: []string{first, first, first, "2048|0|1|128"}, txids: []uint64{10, 10, 11, 12}, progress: []float64{100}},
-			wantStatus:    "aborted",
-			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
-			wantMessage:   "probe update landing by txid 000000000000000b was not observed before the last repeat",
-		},
-		{
-			name:          "synthetic writes replicating mid-transaction are no evidence without a probe update",
-			reader:        &fakeVFSReader{probes: []string{first, first, first, "2048|0|1|128"}, txids: []uint64{10, 11, 12, 13}, progress: []float64{100}},
-			commits:       []cacheProbeCommit{{txid: 9}, {txid: 13}},
-			wantStatus:    "aborted",
-			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
-			wantMessage:   "probe update landing by txid 000000000000000d was not observed before the last repeat",
-		},
-		{
-			name:          "a replica that never moves during the transaction is no evidence",
-			reader:        &fakeVFSReader{probes: []string{first, first, first, "2048|0|1|128"}, txids: []uint64{10, 10, 10, 12}, progress: []float64{100}},
-			wantStatus:    "aborted",
-			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
-			wantMessage:   "probe update landing by txid 000000000000000b was not observed before the last repeat",
-		},
-		{
-			name:          "no probe commit past the first read is no evidence even when the reader advances",
-			reader:        &fakeVFSReader{probes: []string{first, first, first, "2048|0|1|128"}, txids: []uint64{10, 11, 12, 13}, progress: []float64{100}},
-			commits:       []cacheProbeCommit{{txid: 9}, {txid: 0}},
-			wantStatus:    "aborted",
-			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
-			wantMessage:   "no probe update landed past the first read at txid 000000000000000a",
-		},
-		{
-			name:          "a repeat that sees replicated updates is snapshot drift",
-			reader:        &fakeVFSReader{probes: []string{first, first, "2048|0|1|128", "2048|0|1|256"}, txids: []uint64{10, 10, 11, 12}, progress: []float64{100}},
+			name:          "a repeat that sees the probe update is snapshot drift",
+			reader:        &fakeVFSReader{probes: []string{first, first, updated, updated}, txids: []uint64{10, 12, 12, 12, 12}, progress: []float64{100}},
 			wantStatus:    "failed",
 			wantSignature: reporting.SignatureVFSSnapshotDrift,
-			wantMessage:   "vfs snapshot drift: repeat 2 of 2 inside one read transaction returned 2048|0|1|128@000000000000000b, first read returned 2048|0|0|0@000000000000000a (1 of 2 repeats differ)",
+			wantMessage:   "vfs snapshot drift: repeat 2 of 2 inside one read transaction returned 2048|0|1|128@000000000000000c, first read returned 2048|0|0|0@000000000000000a (1 of 2 repeats differ)",
+			wantUpdates:   1,
 		},
 		{
-			name:          "no advance after commit gives no evidence",
+			name:          "a reader that never reaches the synced txid is not judged",
 			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10, 11}, progress: []float64{100}},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
-			wantMessage:   "probe after COMMIT 2048|0|0|0@000000000000000b did not advance past the first read",
+			wantMessage:   "reader at txid 000000000000000b after",
+			wantUpdates:   1,
+		},
+		{
+			name:          "a failed sync after the probe update is inconclusive",
+			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10}, progress: []float64{100}},
+			sync:          func(context.Context) (uint64, error) { return 0, errors.New("sync returned 503: busy") },
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureVFSReaderUnavailable,
+			wantMessage:   "sync after probe update: sync returned 503: busy",
+			wantUpdates:   1,
+		},
+		{
+			name:          "a post-commit read that does not show the probe update is inconclusive",
+			reader:        &fakeVFSReader{probes: []string{first, first, first, first}, txids: []uint64{10, 12, 12, 12, 12}, progress: []float64{100}},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
+			wantMessage:   "probe after COMMIT 2048|0|0|0@000000000000000c did not match the primary 2048|0|1|128 after the update synced at txid 000000000000000c",
+			wantUpdates:   1,
+		},
+		{
+			name:          "a verifier pause that outlasts the write budget commits no probe update",
+			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10}, progress: []float64{100}},
+			writer:        &fakeProbeWriter{updateErr: errCacheProbePaused},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
+			wantMessage:   "load stayed paused for verification",
+		},
+		{
+			name:          "hydration still running keeps the session for the next cycle",
+			reader:        &fakeVFSReader{probes: []string{first}, progress: []float64{40}},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureVFSHydrationIncomplete,
+			wantMessage:   "40.0% after",
 		},
 		{
 			name:          "a hydration statement that times out drops the desynchronized session",
@@ -218,18 +267,12 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 			wantDropped:   true,
 		},
 		{
-			name:          "hydration still running keeps the session for the next cycle",
-			reader:        &fakeVFSReader{probes: []string{first}, progress: []float64{40}},
-			wantStatus:    "aborted",
-			wantSignature: reporting.SignatureVFSHydrationIncomplete,
-			wantMessage:   "40.0% after",
-		},
-		{
 			name:          "a statement failure mid-transaction drops the session",
-			reader:        &fakeVFSReader{probes: []string{first}, progress: []float64{100}, failAt: "COMMIT"},
+			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10, 12}, progress: []float64{100}, failAt: "COMMIT"},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderUnavailable,
 			wantDropped:   true,
+			wantUpdates:   1,
 		},
 		{
 			name:          "a reader that cannot start is unavailable",
@@ -242,9 +285,13 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			check := newTestVFSReaderCheck(t, tt.reader, tt.startErr)
-			if tt.commits != nil {
-				check.probeCommits = func() []cacheProbeCommit { return tt.commits }
+			check, writer := newTestVFSReaderCheck(t, tt.reader, tt.startErr)
+			if tt.writer != nil {
+				writer = tt.writer
+				check.holdProbe, check.releaseProbe, check.updateProbe = writer.hold, writer.release, writer.update
+			}
+			if tt.sync != nil {
+				check.sync = tt.sync
 			}
 			result := check.snapshotCycle(context.Background())
 			if result.Status != tt.wantStatus || result.Passed != (tt.wantStatus == "passed") || result.CheckType != vfsCheckType || result.RestoreMode != vfsSnapshotRestoreMode {
@@ -272,12 +319,30 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 					t.Fatalf("inconclusive result = %+v", result)
 				}
 			default:
-				if result.InconclusiveClassification != nil || !strings.Contains(result.Summary, "2 repeats matched the first read across 2 replica txids") {
+				if result.InconclusiveClassification != nil || !strings.Contains(result.Summary, "2 repeats matched the first read after the reader applied the probe update synced at txid 000000000000000c") {
 					t.Fatalf("passed result = %+v", result)
 				}
 			}
-			if tt.startErr == nil && tt.reader.count("BEGIN") != tt.reader.count("COMMIT") {
+			if tt.startErr == nil && tt.reader.count("BEGIN") != tt.reader.count("COMMIT")+tt.reader.count("ROLLBACK") {
 				t.Fatalf("transactions unbalanced: %v", tt.reader.statements)
+			}
+			if updates := min(writer.calls, 1); updates != tt.wantUpdates {
+				t.Fatalf("probe updates = %d, want %d", updates, tt.wantUpdates)
+			}
+			if writer.holds != writer.releases {
+				t.Fatalf("probe writer holds %d != releases %d", writer.holds, writer.releases)
+			}
+			if tt.startErr == nil {
+				probeIndex, updateCalled := -1, writer.calls > 0
+				for i, statement := range tt.reader.statements {
+					if statement == cacheProbeQuery {
+						probeIndex = i
+						break
+					}
+				}
+				if updateCalled && probeIndex < 0 {
+					t.Fatalf("probe update committed before the first read: %v", tt.reader.statements)
+				}
 			}
 			check.mu.Lock()
 			_, kept := check.sessions[vfsSnapshotSession]
@@ -289,6 +354,36 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 				t.Fatalf("step output = %q", result.Steps[0].OutputTail)
 			}
 		})
+	}
+}
+
+func TestVFSSnapshotCycleUpdatesProbeOnlyAfterTheFirstRead(t *testing.T) {
+	reader := &fakeVFSReader{probes: []string{"2048|0|0|0", "2048|0|0|0", "2048|0|0|0", "2048|0|1|128"}, txids: []uint64{10, 12, 12, 12, 12}, progress: []float64{100}}
+	check, writer := newTestVFSReaderCheck(t, reader, nil)
+	var order []string
+	check.updateProbe = func(ctx context.Context) (string, error) {
+		order = append(order, "update")
+		return writer.update(ctx)
+	}
+	check.sync = func(context.Context) (uint64, error) {
+		order = append(order, "sync")
+		return 12, nil
+	}
+	if result := check.snapshotCycle(context.Background()); !result.Passed {
+		t.Fatalf("result = %+v", result)
+	}
+	if strings.Join(order, ",") != "update,sync" {
+		t.Fatalf("order = %v", order)
+	}
+	var firstRead, update int
+	for i, statement := range reader.statements {
+		if statement == cacheProbeQuery && firstRead == 0 {
+			firstRead = i + 1
+		}
+	}
+	update = firstRead + 1
+	if firstRead == 0 || reader.statements[0] != "BEGIN" || update <= firstRead {
+		t.Fatalf("first read must precede the probe update: %v", reader.statements)
 	}
 }
 
@@ -363,7 +458,7 @@ func TestVFSReadCheckComparesReaderWithPrimaryAtBoundary(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			check := newTestVFSReaderCheck(t, tt.reader, nil)
+			check, _ := newTestVFSReaderCheck(t, tt.reader, nil)
 			check.primaryQueries = func(context.Context) ([]vfsReadQuery, error) { return tt.primary, tt.primaryErr }
 			result := check.ReadCheck(context.Background(), tt.boundary)
 			if result.Status != tt.wantStatus || result.Passed != (tt.wantStatus == "passed") || result.CheckType != vfsCheckType || result.RestoreMode != vfsReadRestoreMode || result.BoundaryTXID != tt.boundary {

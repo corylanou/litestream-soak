@@ -211,11 +211,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	var vfs *vfsReaderCheck
 	if r.vfsReaderCheckEnabled() {
 		cacheProbe = newCacheProbeWriter(r.cfg.DBPath, cacheProbeInterval)
-		cacheProbe.position = litestreamPosition(r.cfg)
 		cacheProbe.Start(runCtx)
 		defer cacheProbe.Stop()
 		vfs = newVFSReaderCheck(r.cfg)
-		vfs.probeCommits = cacheProbe.Commits
+		vfs.useProbeWriter(cacheProbe)
 		vfs.StartSnapshotLoop(runCtx, func(result VerificationResult) { r.reportVFSResult(runCtx, result) })
 		defer vfs.Stop()
 	}

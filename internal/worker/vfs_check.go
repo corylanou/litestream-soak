@@ -32,6 +32,9 @@ const (
 	vfsHydrationPoll          = 5 * time.Second
 	vfsCatchUpBudget          = 5 * time.Minute
 	vfsCatchUpPoll            = time.Second
+	vfsProbeWriteBudget       = 10 * time.Minute
+	vfsProbeWritePoll         = time.Second
+	vfsSyncBudget             = 2 * time.Minute
 	vfsStatementTimeout       = 2 * time.Minute
 	vfsReadTableLimit         = 64
 )
@@ -44,6 +47,9 @@ var (
 	// shell's late rows and sentinel are still in the stream, so the session
 	// cannot be reused.
 	errVFSStatementTimeout = errors.New("vfs reader statement timed out")
+	// errVFSProbeSyncFailed marks a Litestream sync that could not vouch for
+	// the cycle's probe update; the reader session itself is still clean.
+	errVFSProbeSyncFailed = errors.New("vfs probe sync failed")
 	// vfsReaderPragmas size the reader the way issue 1608 does: a 1 MiB page
 	// cache that a scan of the probe table overflows, and no mmap.
 	vfsReaderPragmas = []string{"PRAGMA cache_size=-1024", "PRAGMA mmap_size=0"}
@@ -83,19 +89,23 @@ func (p vfsProbe) String() string {
 	return p.raw + "@" + formatTXID(p.txid)
 }
 
-// vfsSnapshotOutcome is one held read transaction: the first probe inside it,
-// every repeat of the same query before COMMIT, and a probe taken after
-// COMMIT. Repeatable reads hold when every repeat equals the first; the check
-// has evidence only when the reader's replica position advanced while the
-// transaction was still open and at least one repeat ran after that, and the
-// post-COMMIT probe shows the primary's updates reached the reader.
+// vfsSnapshotOutcome is one held read transaction. The cycle takes the first
+// probe inside the transaction, then commits one probe update on the primary
+// and syncs Litestream, so syncTXID is a position that holds the update and
+// that the first read could not have seen. It waits inside the transaction
+// for the reader to reach syncTXID, re-reads the same query, commits and
+// reads once more. Repeatable reads hold when every repeat equals the first;
+// the post-COMMIT read must equal the primary's aggregate after the update
+// (expected) or the cycle proved nothing about the reader.
 type vfsSnapshotOutcome struct {
 	hydration float64
 	first     vfsProbe
+	expected  string
+	syncTXID  uint64
+	reached   uint64
 	repeats   []vfsProbe
 	after     vfsProbe
 	committed bool
-	commits   []cacheProbeCommit
 	err       error
 	logTail   string
 }
@@ -110,51 +120,17 @@ func (o vfsSnapshotOutcome) drifted() []int {
 	return drifted
 }
 
-func (o vfsSnapshotOutcome) advanced() bool {
-	return o.committed && o.after.sum > o.first.sum && o.probeLandedInTransaction()
-}
-
-// probeLandTXID is the earliest txid by which a probe update the first read
-// could not have seen is in the replica: the smallest commit txid above the
-// reader's position at the first read. Zero when no such commit is known.
-func (o vfsSnapshotOutcome) probeLandTXID() uint64 {
-	var land uint64
-	for _, commit := range o.commits {
-		if commit.txid > o.first.txid && (land == 0 || commit.txid < land) {
-			land = commit.txid
-		}
-	}
-	return land
-}
-
-// probeLandedInTransaction reports whether a repeat other than the last saw
-// the reader's position at or past a probe commit the first read could not
-// include, so the repeats after it re-read probe pages the VFS had already
-// replaced underneath the transaction. Advances carried only by the synthetic
-// load do not count.
-func (o vfsSnapshotOutcome) probeLandedInTransaction() bool {
-	land := o.probeLandTXID()
-	if land == 0 {
-		return false
-	}
-	for _, repeat := range o.repeats[:max(len(o.repeats)-1, 0)] {
-		if repeat.txid >= land {
-			return true
-		}
-	}
-	return false
+// confirmed reports whether the post-COMMIT read shows the probe update the
+// cycle committed, which proves the reader applied the txid it waited for.
+func (o vfsSnapshotOutcome) confirmed() bool {
+	return o.committed && o.expected != "" && o.expected != o.first.raw && o.after.raw == o.expected
 }
 
 func (o vfsSnapshotOutcome) noEvidence() string {
-	land := o.probeLandTXID()
-	switch {
-	case land == 0:
-		return fmt.Sprintf("no probe update landed past the first read at txid %s", formatTXID(o.first.txid))
-	case !o.probeLandedInTransaction():
-		return fmt.Sprintf("probe update landing by txid %s was not observed before the last repeat", formatTXID(land))
-	default:
-		return fmt.Sprintf("probe after COMMIT %s did not advance past the first read %s", o.after, o.first)
+	if o.expected == o.first.raw {
+		return fmt.Sprintf("probe update left the aggregate at %s", o.expected)
 	}
+	return fmt.Sprintf("probe after COMMIT %s did not match the primary %s after the update synced at txid %s", o.after, o.expected, formatTXID(o.syncTXID))
 }
 
 func (o vfsSnapshotOutcome) driftError() string {
@@ -169,13 +145,16 @@ func (o vfsSnapshotOutcome) driftError() string {
 func (o vfsSnapshotOutcome) summary() string {
 	parts := []string{fmt.Sprintf("hydration=%.1f%%", o.hydration)}
 	if o.first.raw != "" {
-		parts = append(parts, "first="+o.first.String(), fmt.Sprintf("repeats=%d drifted=%d", len(o.repeats), len(o.drifted())))
+		parts = append(parts, "first="+o.first.String())
+	}
+	if o.expected != "" {
+		parts = append(parts, "primary_after_update="+o.expected, "sync_txid="+formatTXID(o.syncTXID), "reader_reached="+formatTXID(o.reached))
 	}
 	if len(o.repeats) > 0 {
-		parts = append(parts, "last_repeat="+o.repeats[len(o.repeats)-1].String())
+		parts = append(parts, fmt.Sprintf("repeats=%d drifted=%d last_repeat=%s", len(o.repeats), len(o.drifted()), o.repeats[len(o.repeats)-1]))
 	}
 	if o.committed {
-		parts = append(parts, "after_commit="+o.after.String(), fmt.Sprintf("probe_commits=%d probe_land_txid=%s advanced=%t", len(o.commits), formatTXID(o.probeLandTXID()), o.advanced()))
+		parts = append(parts, "after_commit="+o.after.String(), fmt.Sprintf("confirmed=%t", o.confirmed()))
 	}
 	if o.err != nil {
 		parts = append(parts, "error="+o.err.Error())
@@ -190,12 +169,12 @@ func vfsSnapshotResult(outcome vfsSnapshotOutcome, startedAt, completedAt time.T
 		vfsInconclusive(&result, vfsSnapshotStep, "vfs snapshot check skipped: "+outcome.err.Error(), vfsInconclusiveSignature(outcome.err))
 	case len(outcome.drifted()) > 0:
 		vfsFailed(&result, outcome.driftError(), "vfs snapshot check failed")
-	case !outcome.advanced():
+	case !outcome.confirmed():
 		vfsInconclusive(&result, vfsSnapshotStep, fmt.Sprintf("vfs snapshot check skipped: %s: %s", errVFSReaderNotCaughtUp, outcome.noEvidence()), reporting.SignatureVFSReaderNotCaughtUp)
 	default:
 		result.Status = "passed"
 		result.Passed = true
-		result.Summary = fmt.Sprintf("vfs snapshot check passed: %d repeats matched the first read across %d replica txids", len(outcome.repeats), outcome.after.txid-min(outcome.after.txid, outcome.first.txid))
+		result.Summary = fmt.Sprintf("vfs snapshot check passed: %d repeats matched the first read after the reader applied the probe update synced at txid %s", len(outcome.repeats), formatTXID(outcome.syncTXID))
 	}
 	return result
 }
@@ -332,7 +311,10 @@ type vfsReaderCheck struct {
 	cfg              Config
 	start            func(context.Context, string) (vfsReader, error)
 	primaryQueries   func(context.Context) ([]vfsReadQuery, error)
-	probeCommits     func() []cacheProbeCommit
+	holdProbe        func()
+	releaseProbe     func()
+	updateProbe      func(context.Context) (string, error)
+	sync             func(context.Context) (uint64, error)
 	clock            func() time.Time
 	repeats          int
 	repeatInterval   time.Duration
@@ -342,6 +324,8 @@ type vfsReaderCheck struct {
 	hydrationPoll    time.Duration
 	catchUpBudget    time.Duration
 	catchUpPoll      time.Duration
+	writeBudget      time.Duration
+	writePoll        time.Duration
 	statementTimeout time.Duration
 
 	mu       sync.Mutex
@@ -362,6 +346,8 @@ func newVFSReaderCheck(cfg Config) *vfsReaderCheck {
 		hydrationPoll:    vfsHydrationPoll,
 		catchUpBudget:    vfsCatchUpBudget,
 		catchUpPoll:      vfsCatchUpPoll,
+		writeBudget:      vfsProbeWriteBudget,
+		writePoll:        vfsProbeWritePoll,
 		statementTimeout: vfsStatementTimeout,
 		sessions:         map[string]vfsReader{},
 	}
@@ -373,8 +359,28 @@ func newVFSReaderCheck(cfg Config) *vfsReaderCheck {
 		return startVFSSession(startCtx, name, spec)
 	}
 	check.primaryQueries = func(ctx context.Context) ([]vfsReadQuery, error) { return primaryReadQueries(ctx, cfg.DBPath) }
-	check.probeCommits = func() []cacheProbeCommit { return nil }
+	check.holdProbe = func() {}
+	check.releaseProbe = func() {}
+	check.updateProbe = func(context.Context) (string, error) { return "", errCacheProbePaused }
+	check.sync = func(ctx context.Context) (uint64, error) {
+		response, err := requestLitestreamSync(ctx, newIPCClient(cfg.SocketPath, vfsSyncBudget+30*time.Second), cfg.DBPath, vfsSyncBudget)
+		if err != nil {
+			return 0, err
+		}
+		if response.TXID == 0 {
+			return 0, errors.New("sync returned no txid")
+		}
+		return response.TXID, nil
+	}
 	return check
+}
+
+// useProbeWriter lets snapshot cycles own the probe updates: the background
+// ticker is held while a cycle runs and each cycle commits its own update.
+func (c *vfsReaderCheck) useProbeWriter(writer *cacheProbeWriter) {
+	c.holdProbe = writer.Hold
+	c.releaseProbe = writer.Release
+	c.updateProbe = writer.Update
 }
 
 func (c *vfsReaderCheck) session(ctx context.Context, name string) (vfsReader, error) {
@@ -454,7 +460,13 @@ func (c *vfsReaderCheck) runSnapshot(ctx context.Context) (outcome vfsSnapshotOu
 		outcome.err = err
 		return outcome
 	}
+	inTransaction := false
 	defer func() {
+		if inTransaction && vfsSessionReusable(outcome.err) {
+			if _, err := c.exec(ctx, session, "ROLLBACK"); err != nil {
+				outcome.err = err
+			}
+		}
 		outcome.logTail = session.logTail()
 		if !vfsSessionReusable(outcome.err) {
 			c.drop(vfsSnapshotSession)
@@ -463,10 +475,23 @@ func (c *vfsReaderCheck) runSnapshot(ctx context.Context) (outcome vfsSnapshotOu
 	if outcome.hydration, outcome.err = c.waitHydrated(ctx, session, c.hydrationBudget); outcome.err != nil {
 		return outcome
 	}
+	c.holdProbe()
+	defer c.releaseProbe()
 	if _, outcome.err = c.exec(ctx, session, "BEGIN"); outcome.err != nil {
 		return outcome
 	}
+	inTransaction = true
 	if outcome.first, outcome.err = c.probe(ctx, session); outcome.err != nil {
+		return outcome
+	}
+	if outcome.expected, outcome.err = c.writeProbe(ctx); outcome.err != nil {
+		return outcome
+	}
+	if outcome.syncTXID, outcome.err = c.sync(ctx); outcome.err != nil {
+		outcome.err = fmt.Errorf("%w: sync after probe update: %v", errVFSProbeSyncFailed, outcome.err)
+		return outcome
+	}
+	if outcome.reached, outcome.err = c.waitTXID(ctx, session, outcome.syncTXID); outcome.err != nil {
 		return outcome
 	}
 	for i := 0; i < c.repeats; i++ {
@@ -483,10 +508,32 @@ func (c *vfsReaderCheck) runSnapshot(ctx context.Context) (outcome vfsSnapshotOu
 	if _, outcome.err = c.exec(ctx, session, "COMMIT"); outcome.err != nil {
 		return outcome
 	}
+	inTransaction = false
 	outcome.committed = true
 	outcome.after, outcome.err = c.probe(ctx, session)
-	outcome.commits = c.probeCommits()
 	return outcome
+}
+
+// writeProbe commits one probe update on the primary once the verifier is not
+// holding the load paused, and returns the primary's aggregate after it.
+func (c *vfsReaderCheck) writeProbe(ctx context.Context) (string, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, c.writeBudget)
+	defer cancel()
+	for {
+		expected, err := c.updateProbe(ctx)
+		if err == nil {
+			return expected, nil
+		}
+		if !errors.Is(err, errCacheProbePaused) {
+			return "", fmt.Errorf("%w: probe update: %v", errVFSReaderUnavailable, err)
+		}
+		if err := sleepContext(waitCtx, c.writePoll); err != nil {
+			if ctx.Err() != nil {
+				return "", fmt.Errorf("%w: %v", errVFSReaderUnavailable, ctx.Err())
+			}
+			return "", fmt.Errorf("%w: load stayed paused for verification for %s, no probe update committed", errVFSReaderNotCaughtUp, c.writeBudget)
+		}
+	}
 }
 
 // ReadCheck compares the VFS reader with the primary at a verification
@@ -547,7 +594,7 @@ func vfsSessionReusable(err error) bool {
 	if errors.Is(err, errVFSStatementTimeout) {
 		return false
 	}
-	return errors.Is(err, errVFSHydrationIncomplete) || errors.Is(err, errVFSReaderNotCaughtUp)
+	return errors.Is(err, errVFSHydrationIncomplete) || errors.Is(err, errVFSReaderNotCaughtUp) || errors.Is(err, errVFSProbeSyncFailed)
 }
 
 func (c *vfsReaderCheck) exec(ctx context.Context, session vfsReader, statement string) ([]string, error) {

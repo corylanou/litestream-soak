@@ -525,6 +525,12 @@ func syncLagNotResolvedError(cfg Config, txid, replicatedTXID uint64) error {
 }
 
 func (v *Verifier) syncOnceDB(ctx context.Context, budget time.Duration, dbPath string) (syncResponse, error) {
+	return requestLitestreamSync(ctx, v.httpClient, dbPath, budget)
+}
+
+// requestLitestreamSync asks Litestream to sync dbPath and wait for the
+// result; the returned txid covers every WAL frame committed before the call.
+func requestLitestreamSync(ctx context.Context, httpClient *http.Client, dbPath string, budget time.Duration) (syncResponse, error) {
 	requestBody, err := json.Marshal(map[string]any{
 		"path":    dbPath,
 		"wait":    true,
@@ -540,11 +546,11 @@ func (v *Verifier) syncOnceDB(ctx context.Context, budget time.Duration, dbPath 
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := v.httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return syncResponse{}, fmt.Errorf("sync request: %w", err)
 	}
-	defer v.httpClient.CloseIdleConnections()
+	defer httpClient.CloseIdleConnections()
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {

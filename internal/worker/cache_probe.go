@@ -3,11 +3,9 @@ package worker
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"sync"
 	"time"
@@ -83,66 +81,29 @@ func bumpCacheProbe(ctx context.Context, path string, stripe int) error {
 // verification cycles. It implements loadPauser so the verifier can quiesce
 // it with the rest of the load: every write runs under the writer's lock, so
 // Pause returns only once no write is in flight and nothing commits after it.
+// Pauses are counted, so the verifier's pause stands while a snapshot cycle
+// holds and releases the background ticker. Update runs one probe write on
+// demand and refuses while the verifier has the load paused.
 type cacheProbeWriter struct {
 	dbPath   string
 	interval time.Duration
 	bump     func(context.Context, string, int) error
-	position func(context.Context) (uint64, error)
 
-	mu      sync.Mutex
-	paused  bool
-	stripe  int
-	commits []cacheProbeCommit
-	stop    context.CancelFunc
-	done    chan struct{}
+	mu     sync.Mutex
+	pauses int
+	holds  int
+	stripe int
+	stop   context.CancelFunc
+	done   chan struct{}
 }
 
-// cacheProbeCommit is one committed probe update and the Litestream txid by
-// which it must be in the replica: the position Litestream reported after the
-// commit plus one, since the next sync after a commit carries its frames. A
-// zero txid means the position could not be read.
-type cacheProbeCommit struct {
-	txid uint64
-	at   time.Time
-}
-
-const cacheProbeCommitHistory = 256
+var errCacheProbePaused = errors.New("cache probe writer paused for verification")
 
 func newCacheProbeWriter(dbPath string, interval time.Duration) *cacheProbeWriter {
 	if interval <= 0 {
 		interval = cacheProbeInterval
 	}
-	return &cacheProbeWriter{dbPath: dbPath, interval: interval, bump: bumpCacheProbe, position: func(context.Context) (uint64, error) { return 0, errors.New("litestream position unavailable") }}
-}
-
-// litestreamPosition reads the primary's current Litestream txid over IPC.
-func litestreamPosition(cfg Config) func(context.Context) (uint64, error) {
-	client := newIPCClient(cfg.SocketPath, cacheProbeBusyTimeout)
-	return func(ctx context.Context) (uint64, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/txid?path="+cfg.DBPath, nil)
-		if err != nil {
-			return 0, err
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return 0, fmt.Errorf("read txid: %w", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-		var result struct {
-			TXID uint64 `json:"txid"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return 0, fmt.Errorf("decode txid: %w", err)
-		}
-		return result.TXID, nil
-	}
-}
-
-// Commits returns the recent probe commits, oldest first.
-func (w *cacheProbeWriter) Commits() []cacheProbeCommit {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return append([]cacheProbeCommit(nil), w.commits...)
+	return &cacheProbeWriter{dbPath: dbPath, interval: interval, bump: bumpCacheProbe}
 }
 
 func (w *cacheProbeWriter) Start(ctx context.Context) {
@@ -167,14 +128,57 @@ func (w *cacheProbeWriter) Stop() {
 func (w *cacheProbeWriter) Pause(context.Context) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.paused = true
+	w.pauses++
 	return nil
 }
 
 func (w *cacheProbeWriter) Resume() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.paused = false
+	w.pauses = max(w.pauses-1, 0)
+}
+
+// Hold stops the background ticker from writing until Release, so a snapshot
+// cycle owns every probe update while it runs. It waits for an in-flight
+// write like Pause does but does not block Update.
+func (w *cacheProbeWriter) Hold() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.holds++
+}
+
+func (w *cacheProbeWriter) Release() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.holds = max(w.holds-1, 0)
+}
+
+// Update commits one probe write now and returns the primary's probe
+// aggregate after it. It fails with errCacheProbePaused while the verifier
+// holds the load paused, so nothing lands inside a verification boundary.
+func (w *cacheProbeWriter) Update(ctx context.Context) (string, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.pauses > 0 {
+		return "", errCacheProbePaused
+	}
+	stripe := w.stripe
+	w.stripe++
+	if err := w.bump(ctx, w.dbPath, stripe); err != nil {
+		return "", err
+	}
+	return readCacheProbe(ctx, w.dbPath)
+}
+
+func readCacheProbe(ctx context.Context, path string) (string, error) {
+	uri := url.URL{Scheme: "file", Path: path, RawQuery: fmt.Sprintf("mode=ro&_pragma=busy_timeout(%d)", cacheProbeBusyTimeout.Milliseconds())}
+	db, err := sql.Open("sqlite", uri.String())
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+	return queryListRows(ctx, db, cacheProbeQuery)
 }
 
 func (w *cacheProbeWriter) run(ctx context.Context) {
@@ -194,25 +198,12 @@ func (w *cacheProbeWriter) run(ctx context.Context) {
 func (w *cacheProbeWriter) writeOnce(ctx context.Context) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.paused {
+	if w.pauses > 0 || w.holds > 0 {
 		return
 	}
 	stripe := w.stripe
 	w.stripe++
-	if err := w.bump(ctx, w.dbPath, stripe); err != nil {
-		if ctx.Err() == nil {
-			slog.Warn("Cache probe update failed", "error", err)
-		}
-		return
-	}
-	commit := cacheProbeCommit{at: time.Now().UTC()}
-	if position, err := w.position(ctx); err == nil {
-		commit.txid = position + 1
-	} else if ctx.Err() == nil {
-		slog.Warn("Cache probe commit position unavailable", "error", err)
-	}
-	w.commits = append(w.commits, commit)
-	if len(w.commits) > cacheProbeCommitHistory {
-		w.commits = w.commits[len(w.commits)-cacheProbeCommitHistory:]
+	if err := w.bump(ctx, w.dbPath, stripe); err != nil && ctx.Err() == nil {
+		slog.Warn("Cache probe update failed", "error", err)
 	}
 }
