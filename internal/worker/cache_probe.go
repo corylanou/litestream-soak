@@ -78,10 +78,12 @@ func bumpCacheProbe(ctx context.Context, path string, stripe int) error {
 
 // cacheProbeWriter advances the probe table on the primary between
 // verification cycles. It implements loadPauser so the verifier can quiesce
-// it with the rest of the load.
+// it with the rest of the load: every write runs under the writer's lock, so
+// Pause returns only once no write is in flight and nothing commits after it.
 type cacheProbeWriter struct {
 	dbPath   string
 	interval time.Duration
+	bump     func(context.Context, string, int) error
 
 	mu     sync.Mutex
 	paused bool
@@ -94,7 +96,7 @@ func newCacheProbeWriter(dbPath string, interval time.Duration) *cacheProbeWrite
 	if interval <= 0 {
 		interval = cacheProbeInterval
 	}
-	return &cacheProbeWriter{dbPath: dbPath, interval: interval}
+	return &cacheProbeWriter{dbPath: dbPath, interval: interval, bump: bumpCacheProbe}
 }
 
 func (w *cacheProbeWriter) Start(ctx context.Context) {
@@ -139,15 +141,19 @@ func (w *cacheProbeWriter) run(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		w.mu.Lock()
-		paused, stripe := w.paused, w.stripe
-		w.stripe++
-		w.mu.Unlock()
-		if paused {
-			continue
-		}
-		if err := bumpCacheProbe(ctx, w.dbPath, stripe); err != nil && ctx.Err() == nil {
-			slog.Warn("Cache probe update failed", "error", err)
-		}
+		w.writeOnce(ctx)
+	}
+}
+
+func (w *cacheProbeWriter) writeOnce(ctx context.Context) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.paused {
+		return
+	}
+	stripe := w.stripe
+	w.stripe++
+	if err := w.bump(ctx, w.dbPath, stripe); err != nil && ctx.Err() == nil {
+		slog.Warn("Cache probe update failed", "error", err)
 	}
 }

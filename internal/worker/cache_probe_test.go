@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -79,4 +80,46 @@ func TestCacheProbeWriterPausesWithTheLoad(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	writer.Stop()
+}
+
+func TestCacheProbeWriterPauseWaitsForInFlightWrite(t *testing.T) {
+	ctx := context.Background()
+	writer := newCacheProbeWriter(filepath.Join(t.TempDir(), "test.db"), time.Millisecond)
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var writes atomic.Int32
+	writer.bump = func(context.Context, string, int) error {
+		if writes.Add(1) == 1 {
+			started <- struct{}{}
+			<-release
+		}
+		return nil
+	}
+	writer.Start(ctx)
+	defer writer.Stop()
+	<-started
+
+	paused := make(chan struct{})
+	go func() {
+		if err := writer.Pause(ctx); err != nil {
+			t.Error(err)
+		}
+		close(paused)
+	}()
+	select {
+	case <-paused:
+		t.Fatal("Pause returned while a probe write was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-paused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Pause did not return once the in-flight write finished")
+	}
+	committed := writes.Load()
+	time.Sleep(30 * time.Millisecond)
+	if writes.Load() != committed {
+		t.Fatalf("probe writes continued after Pause returned: %d -> %d", committed, writes.Load())
+	}
 }

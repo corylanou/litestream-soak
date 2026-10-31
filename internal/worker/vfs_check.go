@@ -40,6 +40,10 @@ var (
 	errVFSReaderUnavailable   = errors.New("vfs reader unavailable")
 	errVFSHydrationIncomplete = errors.New("vfs hydration incomplete")
 	errVFSReaderNotCaughtUp   = errors.New("vfs reader not caught up")
+	// errVFSStatementTimeout marks a statement whose output never arrived: the
+	// shell's late rows and sentinel are still in the stream, so the session
+	// cannot be reused.
+	errVFSStatementTimeout = errors.New("vfs reader statement timed out")
 	// vfsReaderPragmas size the reader the way issue 1608 does: a 1 MiB page
 	// cache that a scan of the probe table overflows, and no mmap.
 	vfsReaderPragmas = []string{"PRAGMA cache_size=-1024", "PRAGMA mmap_size=0"}
@@ -82,8 +86,9 @@ func (p vfsProbe) String() string {
 // vfsSnapshotOutcome is one held read transaction: the first probe inside it,
 // every repeat of the same query before COMMIT, and a probe taken after
 // COMMIT. Repeatable reads hold when every repeat equals the first; the check
-// has evidence only when the post-COMMIT probe shows the primary's updates
-// reached the reader.
+// has evidence only when the reader's replica position advanced while the
+// transaction was still open and at least one repeat ran after that, and the
+// post-COMMIT probe shows the primary's updates reached the reader.
 type vfsSnapshotOutcome struct {
 	hydration float64
 	first     vfsProbe
@@ -105,7 +110,26 @@ func (o vfsSnapshotOutcome) drifted() []int {
 }
 
 func (o vfsSnapshotOutcome) advanced() bool {
-	return o.committed && o.after.sum > o.first.sum
+	return o.committed && o.after.sum > o.first.sum && o.advancedInTransaction()
+}
+
+// advancedInTransaction reports whether a repeat other than the last observed
+// the reader's position past the first read, so the repeats after it re-read
+// the table with new LTX files already applied underneath the transaction.
+func (o vfsSnapshotOutcome) advancedInTransaction() bool {
+	for _, repeat := range o.repeats[:max(len(o.repeats)-1, 0)] {
+		if repeat.txid > o.first.txid {
+			return true
+		}
+	}
+	return false
+}
+
+func (o vfsSnapshotOutcome) noEvidence() string {
+	if !o.advancedInTransaction() {
+		return fmt.Sprintf("no replica txid past %s was observed before the last repeat", formatTXID(o.first.txid))
+	}
+	return fmt.Sprintf("probe after COMMIT %s did not advance past the first read %s", o.after, o.first)
 }
 
 func (o vfsSnapshotOutcome) driftError() string {
@@ -142,7 +166,7 @@ func vfsSnapshotResult(outcome vfsSnapshotOutcome, startedAt, completedAt time.T
 	case len(outcome.drifted()) > 0:
 		vfsFailed(&result, outcome.driftError(), "vfs snapshot check failed")
 	case !outcome.advanced():
-		vfsInconclusive(&result, vfsSnapshotStep, fmt.Sprintf("vfs snapshot check skipped: %s: probe after COMMIT %s did not advance past the first read %s", errVFSReaderNotCaughtUp, outcome.after, outcome.first), reporting.SignatureVFSReaderNotCaughtUp)
+		vfsInconclusive(&result, vfsSnapshotStep, fmt.Sprintf("vfs snapshot check skipped: %s: %s", errVFSReaderNotCaughtUp, outcome.noEvidence()), reporting.SignatureVFSReaderNotCaughtUp)
 	default:
 		result.Status = "passed"
 		result.Passed = true
@@ -405,7 +429,7 @@ func (c *vfsReaderCheck) runSnapshot(ctx context.Context) (outcome vfsSnapshotOu
 	}
 	defer func() {
 		outcome.logTail = session.logTail()
-		if outcome.err != nil && !errors.Is(outcome.err, errVFSHydrationIncomplete) {
+		if !vfsSessionReusable(outcome.err) {
 			c.drop(vfsSnapshotSession)
 		}
 	}()
@@ -459,7 +483,7 @@ func (c *vfsReaderCheck) runRead(ctx context.Context, boundary uint64) (outcome 
 	}
 	defer func() {
 		outcome.logTail = session.logTail()
-		if outcome.err != nil && !errors.Is(outcome.err, errVFSHydrationIncomplete) && !errors.Is(outcome.err, errVFSReaderNotCaughtUp) {
+		if !vfsSessionReusable(outcome.err) {
 			c.drop(vfsReadSession)
 		}
 	}()
@@ -484,6 +508,18 @@ func (c *vfsReaderCheck) runRead(ctx context.Context, boundary uint64) (outcome 
 	}
 	outcome.queries = queries
 	return outcome
+}
+
+// vfsSessionReusable reports whether the session that produced err still has
+// a clean stream: only a budget that ran out between statements keeps it.
+func vfsSessionReusable(err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, errVFSStatementTimeout) {
+		return false
+	}
+	return errors.Is(err, errVFSHydrationIncomplete) || errors.Is(err, errVFSReaderNotCaughtUp)
 }
 
 func (c *vfsReaderCheck) exec(ctx context.Context, session vfsReader, statement string) ([]string, error) {
@@ -528,7 +564,7 @@ func (c *vfsReaderCheck) waitHydrated(ctx context.Context, session vfsReader, bu
 		var err error
 		if pct, err = session.hydrationProgress(waitCtx); err != nil {
 			if ctx.Err() == nil && waitCtx.Err() != nil {
-				return pct, fmt.Errorf("%w: hydration progress not readable within %s: %v", errVFSHydrationIncomplete, budget, err)
+				return pct, fmt.Errorf("%w: %w: hydration progress not readable within %s: %v", errVFSHydrationIncomplete, errVFSStatementTimeout, budget, err)
 			}
 			return pct, fmt.Errorf("%w: %v", errVFSReaderUnavailable, err)
 		}
@@ -552,7 +588,7 @@ func (c *vfsReaderCheck) waitTXID(ctx context.Context, session vfsReader, bounda
 		var err error
 		if seen, err = session.txid(waitCtx); err != nil {
 			if ctx.Err() == nil && waitCtx.Err() != nil {
-				return seen, fmt.Errorf("%w: reader at txid %s, waiting for %s: %v", errVFSReaderNotCaughtUp, formatTXID(seen), formatTXID(boundary), err)
+				return seen, fmt.Errorf("%w: %w: reader at txid %s, waiting for %s: %v", errVFSReaderNotCaughtUp, errVFSStatementTimeout, formatTXID(seen), formatTXID(boundary), err)
 			}
 			return seen, fmt.Errorf("%w: %v", errVFSReaderUnavailable, err)
 		}

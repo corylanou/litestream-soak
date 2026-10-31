@@ -23,6 +23,8 @@ type fakeVFSReader struct {
 	progress   []float64
 	rows       map[string][]string
 	failAt     string
+	hangTXID   bool
+	hangPct    bool
 	statements []string
 	closed     bool
 }
@@ -47,20 +49,28 @@ func (f *fakeVFSReader) exec(_ context.Context, statement string) ([]string, err
 	return nil, nil
 }
 
-func (f *fakeVFSReader) txid(context.Context) (uint64, error) {
+func (f *fakeVFSReader) txid(ctx context.Context) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
 		return 0, errVFSSessionClosed
 	}
+	if f.hangTXID {
+		<-ctx.Done()
+		return 0, fmt.Errorf("vfs reader statement %q: %w", "PRAGMA litestream_txid", ctx.Err())
+	}
 	return next(&f.txids), nil
 }
 
-func (f *fakeVFSReader) hydrationProgress(context.Context) (float64, error) {
+func (f *fakeVFSReader) hydrationProgress(ctx context.Context) (float64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
 		return 0, errVFSSessionClosed
+	}
+	if f.hangPct {
+		<-ctx.Done()
+		return 0, fmt.Errorf("vfs reader statement %q: %w", "PRAGMA litestream_hydration_progress", ctx.Err())
 	}
 	return next(&f.progress), nil
 }
@@ -149,9 +159,23 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 		wantDropped   bool
 	}{
 		{
-			name:       "repeats match and the reader advances after commit",
-			reader:     &fakeVFSReader{probes: []string{first, first, first, "2048|0|1|128"}, txids: []uint64{10, 10, 11, 12}, progress: []float64{100}},
+			name:       "repeats match after new ltx arrived mid-transaction and the reader advances after commit",
+			reader:     &fakeVFSReader{probes: []string{first, first, first, "2048|0|1|128"}, txids: []uint64{10, 11, 11, 12}, progress: []float64{100}},
 			wantStatus: "passed",
+		},
+		{
+			name:          "ltx that arrives only after the last repeat is no evidence",
+			reader:        &fakeVFSReader{probes: []string{first, first, first, "2048|0|1|128"}, txids: []uint64{10, 10, 11, 12}, progress: []float64{100}},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
+			wantMessage:   "no replica txid past 000000000000000a was observed before the last repeat",
+		},
+		{
+			name:          "a replica that never moves during the transaction is no evidence",
+			reader:        &fakeVFSReader{probes: []string{first, first, first, "2048|0|1|128"}, txids: []uint64{10, 10, 10, 12}, progress: []float64{100}},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
+			wantMessage:   "no replica txid past 000000000000000a was observed before the last repeat",
 		},
 		{
 			name:          "a repeat that sees replicated updates is snapshot drift",
@@ -162,9 +186,18 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 		},
 		{
 			name:          "no advance after commit gives no evidence",
-			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10}, progress: []float64{100}},
+			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10, 11}, progress: []float64{100}},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
+			wantMessage:   "probe after COMMIT 2048|0|0|0@000000000000000b did not advance past the first read",
+		},
+		{
+			name:          "a hydration statement that times out drops the desynchronized session",
+			reader:        &fakeVFSReader{probes: []string{first}, hangPct: true},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureVFSHydrationIncomplete,
+			wantMessage:   "vfs reader statement timed out",
+			wantDropped:   true,
 		},
 		{
 			name:          "hydration still running keeps the session for the next cycle",
@@ -254,6 +287,7 @@ func TestVFSReadCheckComparesReaderWithPrimaryAtBoundary(t *testing.T) {
 		wantStatus    string
 		wantSignature string
 		wantMessage   string
+		wantDropped   bool
 	}{
 		{
 			name:       "reader at the boundary matches the primary",
@@ -272,13 +306,23 @@ func TestVFSReadCheckComparesReaderWithPrimaryAtBoundary(t *testing.T) {
 			wantMessage:   `vfs read mismatch: load_test count returned vfs="499" primary="500" at txid 0000000000000014 (1 of 2 queries differ)`,
 		},
 		{
-			name:          "a reader behind the boundary is not judged",
+			name:          "a reader behind the boundary is not judged and keeps its session",
 			boundary:      20,
 			reader:        &fakeVFSReader{probes: []string{"2048|3|4|7000"}, txids: []uint64{15}, progress: []float64{100}},
 			primary:       queries("500"),
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
 			wantMessage:   "reader at txid 000000000000000f after",
+		},
+		{
+			name:          "a txid statement that times out drops the desynchronized session",
+			boundary:      20,
+			reader:        &fakeVFSReader{probes: []string{"2048|3|4|7000"}, hangTXID: true, progress: []float64{100}},
+			primary:       queries("500"),
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
+			wantMessage:   "vfs reader statement timed out",
+			wantDropped:   true,
 		},
 		{
 			name:          "an unknown boundary is not judged",
@@ -293,6 +337,7 @@ func TestVFSReadCheckComparesReaderWithPrimaryAtBoundary(t *testing.T) {
 			primaryErr:    errors.New("database is locked"),
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderUnavailable,
+			wantDropped:   true,
 		},
 	}
 	for _, tt := range tests {
@@ -319,6 +364,12 @@ func TestVFSReadCheckComparesReaderWithPrimaryAtBoundary(t *testing.T) {
 				if !strings.Contains(result.Summary, "2 queries matched the primary at txid 0000000000000014") {
 					t.Fatalf("summary = %q", result.Summary)
 				}
+			}
+			check.mu.Lock()
+			_, kept := check.sessions[vfsReadSession]
+			check.mu.Unlock()
+			if tt.boundary != 0 && kept == tt.wantDropped {
+				t.Fatalf("read session kept = %v, want dropped %v", kept, tt.wantDropped)
 			}
 		})
 	}
