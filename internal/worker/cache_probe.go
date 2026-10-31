@@ -24,7 +24,7 @@ const (
 	cacheProbeRows         = 2048
 	cacheProbePayloadBytes = 3500
 	cacheProbeStripes      = 16
-	cacheProbeInterval     = 5 * time.Second
+	cacheProbeInterval     = time.Minute
 	cacheProbeBusyTimeout  = 5 * time.Second
 	cacheProbeQuery        = "SELECT count(*), min(generation), max(generation), sum(generation) FROM " + cacheProbeTable + " NOT INDEXED"
 )

@@ -25,7 +25,11 @@ const (
 	vfsReaderFile           = "replica.db"
 	vfsSentinelPrefix       = "soak-vfs-sentinel-"
 	vfsLogTail              = 4096
-	vfsMaxLineBytes         = 1 << 20
+	// vfsLogTrimBytes bounds the DEBUG log the VFS writes: at DEBUG it logs
+	// every page read, so a session truncates the file once hydration is known
+	// complete and the file passes this size.
+	vfsLogTrimBytes = 8 << 20
+	vfsMaxLineBytes = 1 << 20
 )
 
 var errVFSSessionClosed = errors.New("vfs reader session closed")
@@ -37,15 +41,16 @@ var errVFSSessionClosed = errors.New("vfs reader session closed")
 // ends. The shell runs with -bail, so the first SQL error ends the process
 // and the session reports every later statement as closed.
 type vfsSession struct {
-	name  string
-	dir   string
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
-	lines chan string
-	done  chan struct{}
-	mu    sync.Mutex
-	next  uint64
-	exit  error
+	name     string
+	dir      string
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	lines    chan string
+	done     chan struct{}
+	mu       sync.Mutex
+	next     uint64
+	exit     error
+	hydrated bool
 }
 
 // vfsSessionSpec is everything needed to start a session: where the shell and
@@ -116,14 +121,36 @@ func (s vfsSessionSpec) args() []string {
 // be used.
 var vfsOpenFailure = regexp.MustCompile(`^(Error: |Notice: using substitute in-memory database)`)
 
+// resetVFSSessionDir gives a new session a fresh hydration and a log of its
+// own, so the hydration markers the session waits for are its own. Leftover
+// snapshot files from a killed shell go too.
+func resetVFSSessionDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create vfs reader dir: %w", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("list vfs reader dir: %w", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == vfsHydrationFile || strings.HasPrefix(name, vfsHydrationFile+".") || strings.HasPrefix(name, ".litestream-snapshot-") || name == vfsLogFile {
+			if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("reset vfs reader dir: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
 func startVFSSession(ctx context.Context, name string, spec vfsSessionSpec) (*vfsSession, error) {
 	if spec.extension != "" {
 		if _, err := os.Stat(spec.extension); err != nil {
 			return nil, fmt.Errorf("vfs extension unavailable: %w", err)
 		}
 	}
-	if err := os.MkdirAll(spec.dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create vfs reader dir: %w", err)
+	if err := resetVFSSessionDir(spec.dir); err != nil {
+		return nil, err
 	}
 	cmd := exec.Command(spec.shell, spec.args()...)
 	cmd.Env = spec.env
@@ -251,16 +278,69 @@ func (s *vfsSession) txid(ctx context.Context) (uint64, error) {
 	return txid, nil
 }
 
-func (s *vfsSession) hydrationProgress(ctx context.Context) (float64, error) {
-	row, err := s.queryRow(ctx, "PRAGMA litestream_hydration_progress")
-	if err != nil {
-		return 0, err
+// vfsHydration is what the VFS has logged about this session's hydration.
+// PRAGMA litestream_hydration_progress cannot stand in for it: it reports the
+// restore compactor's progress, which reaches 100 before the catch-up that
+// precedes completion and stays 0 on the resume path, so a reader judged
+// ready by it still serves every page from the replica.
+type vfsHydration struct {
+	complete bool
+	failure  string
+}
+
+var vfsHydrationFailureMarkers = []string{`msg="hydration failed"`, `msg="hydration catch-up failed"`, `msg="hydration initialization failed`, `msg="hydration truncate failed"`}
+
+const vfsHydrationCompleteMarker = `msg="hydration complete"`
+
+func parseVFSHydration(log string) vfsHydration {
+	var state vfsHydration
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, vfsHydrationCompleteMarker) {
+			state.complete = true
+		}
+		for _, marker := range vfsHydrationFailureMarkers {
+			if strings.Contains(line, marker) && state.failure == "" {
+				state.failure = strings.TrimSpace(line)
+			}
+		}
 	}
-	pct, err := strconv.ParseFloat(strings.TrimSpace(row), 64)
-	if err != nil {
-		return 0, fmt.Errorf("parse litestream_hydration_progress %q: %w", row, err)
+	return state
+}
+
+func (s *vfsSession) logPath() string {
+	return filepath.Join(s.dir, vfsLogFile)
+}
+
+// hydration reads the session's VFS log for the hydration outcome. The log is
+// small until hydration completes, because page reads are what fill it.
+func (s *vfsSession) hydration() (vfsHydration, error) {
+	s.mu.Lock()
+	complete := s.hydrated
+	s.mu.Unlock()
+	if complete {
+		return vfsHydration{complete: true}, nil
 	}
-	return pct, nil
+	body, err := os.ReadFile(s.logPath())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return vfsHydration{}, err
+	}
+	state := parseVFSHydration(string(body))
+	if state.complete {
+		s.mu.Lock()
+		s.hydrated = true
+		s.mu.Unlock()
+	}
+	return state, nil
+}
+
+// trimLog empties the VFS log once it passes vfsLogTrimBytes. The extension
+// appends, so writes continue at the new end.
+func (s *vfsSession) trimLog() {
+	info, err := os.Stat(s.logPath())
+	if err != nil || info.Size() <= vfsLogTrimBytes {
+		return
+	}
+	_ = os.Truncate(s.logPath(), 0)
 }
 
 func (s *vfsSession) logTail() string {

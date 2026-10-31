@@ -20,12 +20,12 @@ type fakeVFSReader struct {
 	mu         sync.Mutex
 	probes     []string
 	txids      []uint64
-	progress   []float64
+	hydrations []vfsHydration
 	rows       map[string][]string
 	failAt     string
 	hangTXID   bool
-	hangPct    bool
 	statements []string
+	trims      int
 	closed     bool
 }
 
@@ -62,17 +62,19 @@ func (f *fakeVFSReader) txid(ctx context.Context) (uint64, error) {
 	return next(&f.txids), nil
 }
 
-func (f *fakeVFSReader) hydrationProgress(ctx context.Context) (float64, error) {
+func (f *fakeVFSReader) hydration() (vfsHydration, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.closed {
-		return 0, errVFSSessionClosed
+	if len(f.hydrations) == 0 {
+		return vfsHydration{complete: true}, nil
 	}
-	if f.hangPct {
-		<-ctx.Done()
-		return 0, fmt.Errorf("vfs reader statement %q: %w", "PRAGMA litestream_hydration_progress", ctx.Err())
-	}
-	return next(&f.progress), nil
+	return next(&f.hydrations), nil
+}
+
+func (f *fakeVFSReader) trimLog() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.trims++
 }
 
 func (f *fakeVFSReader) alive() bool {
@@ -206,13 +208,13 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 	}{
 		{
 			name:        "repeats match after the reader applied the cycle's probe update and the post-commit read shows it",
-			reader:      &fakeVFSReader{probes: []string{first, first, first, updated}, txids: []uint64{10, 11, 12, 12, 12, 13}, progress: []float64{100}},
+			reader:      &fakeVFSReader{probes: []string{first, first, first, updated}, txids: []uint64{10, 11, 12, 12, 12, 13}},
 			wantStatus:  "passed",
 			wantUpdates: 1,
 		},
 		{
 			name:          "a repeat that sees the probe update is snapshot drift",
-			reader:        &fakeVFSReader{probes: []string{first, first, updated, updated}, txids: []uint64{10, 12, 12, 12, 12}, progress: []float64{100}},
+			reader:        &fakeVFSReader{probes: []string{first, first, updated, updated}, txids: []uint64{10, 12, 12, 12, 12}},
 			wantStatus:    "failed",
 			wantSignature: reporting.SignatureVFSSnapshotDrift,
 			wantMessage:   "vfs snapshot drift: repeat 2 of 2 inside one read transaction returned 2048|0|1|128@000000000000000c, first read returned 2048|0|0|0@000000000000000a (1 of 2 repeats differ)",
@@ -220,7 +222,7 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 		},
 		{
 			name:          "a reader that never reaches the synced txid is not judged",
-			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10, 11}, progress: []float64{100}},
+			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10, 11}},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
 			wantMessage:   "reader at txid 000000000000000b after",
@@ -228,7 +230,7 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 		},
 		{
 			name:          "a failed sync after the probe update is inconclusive",
-			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10}, progress: []float64{100}},
+			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10}},
 			sync:          func(context.Context) (uint64, error) { return 0, errors.New("sync returned 503: busy") },
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderUnavailable,
@@ -237,7 +239,7 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 		},
 		{
 			name:          "a post-commit read that does not show the probe update is inconclusive",
-			reader:        &fakeVFSReader{probes: []string{first, first, first, first}, txids: []uint64{10, 12, 12, 12, 12}, progress: []float64{100}},
+			reader:        &fakeVFSReader{probes: []string{first, first, first, first}, txids: []uint64{10, 12, 12, 12, 12}},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
 			wantMessage:   "probe after COMMIT 2048|0|0|0@000000000000000c did not match the primary 2048|0|1|128 after the update synced at txid 000000000000000c",
@@ -245,7 +247,7 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 		},
 		{
 			name:          "a verifier pause that outlasts the write budget commits no probe update",
-			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10}, progress: []float64{100}},
+			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10}},
 			writer:        &fakeProbeWriter{updateErr: errCacheProbePaused},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
@@ -253,22 +255,22 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 		},
 		{
 			name:          "hydration still running keeps the session for the next cycle",
-			reader:        &fakeVFSReader{probes: []string{first}, progress: []float64{40}},
+			reader:        &fakeVFSReader{probes: []string{first}, hydrations: []vfsHydration{{}}},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSHydrationIncomplete,
-			wantMessage:   "40.0% after",
+			wantMessage:   "not complete after",
 		},
 		{
-			name:          "a hydration statement that times out drops the desynchronized session",
-			reader:        &fakeVFSReader{probes: []string{first}, hangPct: true},
+			name:          "a hydration the vfs gave up on drops the session",
+			reader:        &fakeVFSReader{probes: []string{first}, hydrations: []vfsHydration{{failure: `time=2026-10-31T17:06:00Z level=ERROR msg="hydration failed" error="open ltx file: no such key"`}}},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSHydrationIncomplete,
-			wantMessage:   "vfs reader statement timed out",
+			wantMessage:   `vfs hydration failed: time=2026-10-31T17:06:00Z level=ERROR msg="hydration failed"`,
 			wantDropped:   true,
 		},
 		{
 			name:          "a statement failure mid-transaction drops the session",
-			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10, 12}, progress: []float64{100}, failAt: "COMMIT"},
+			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10, 12}, failAt: "COMMIT"},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderUnavailable,
 			wantDropped:   true,
@@ -353,12 +355,15 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 			if !strings.Contains(result.Steps[0].OutputTail, "hydration=") {
 				t.Fatalf("step output = %q", result.Steps[0].OutputTail)
 			}
+			if tt.startErr == nil && (tt.reader.trims > 0) != strings.Contains(result.Steps[0].OutputTail, "hydration=complete") {
+				t.Fatalf("log trimmed %d times for %q", tt.reader.trims, result.Steps[0].OutputTail)
+			}
 		})
 	}
 }
 
 func TestVFSSnapshotCycleUpdatesProbeOnlyAfterTheFirstRead(t *testing.T) {
-	reader := &fakeVFSReader{probes: []string{"2048|0|0|0", "2048|0|0|0", "2048|0|0|0", "2048|0|1|128"}, txids: []uint64{10, 12, 12, 12, 12}, progress: []float64{100}}
+	reader := &fakeVFSReader{probes: []string{"2048|0|0|0", "2048|0|0|0", "2048|0|0|0", "2048|0|1|128"}, txids: []uint64{10, 12, 12, 12, 12}}
 	check, writer := newTestVFSReaderCheck(t, reader, nil)
 	var order []string
 	check.updateProbe = func(ctx context.Context) (string, error) {
@@ -408,14 +413,14 @@ func TestVFSReadCheckComparesReaderWithPrimaryAtBoundary(t *testing.T) {
 		{
 			name:       "reader at the boundary matches the primary",
 			boundary:   20,
-			reader:     &fakeVFSReader{probes: []string{"2048|3|4|7000"}, txids: []uint64{18, 20}, progress: []float64{100}, rows: map[string][]string{`SELECT count(*) FROM "load_test"`: {"500"}}},
+			reader:     &fakeVFSReader{probes: []string{"2048|3|4|7000"}, txids: []uint64{18, 20}, rows: map[string][]string{`SELECT count(*) FROM "load_test"`: {"500"}}},
 			primary:    queries("500"),
 			wantStatus: "passed",
 		},
 		{
 			name:          "a differing row count is a read mismatch",
 			boundary:      20,
-			reader:        &fakeVFSReader{probes: []string{"2048|3|4|7000"}, txids: []uint64{20}, progress: []float64{100}, rows: map[string][]string{`SELECT count(*) FROM "load_test"`: {"499"}}},
+			reader:        &fakeVFSReader{probes: []string{"2048|3|4|7000"}, txids: []uint64{20}, rows: map[string][]string{`SELECT count(*) FROM "load_test"`: {"499"}}},
 			primary:       queries("500"),
 			wantStatus:    "failed",
 			wantSignature: reporting.SignatureVFSReadMismatch,
@@ -424,7 +429,7 @@ func TestVFSReadCheckComparesReaderWithPrimaryAtBoundary(t *testing.T) {
 		{
 			name:          "a reader behind the boundary is not judged and keeps its session",
 			boundary:      20,
-			reader:        &fakeVFSReader{probes: []string{"2048|3|4|7000"}, txids: []uint64{15}, progress: []float64{100}},
+			reader:        &fakeVFSReader{probes: []string{"2048|3|4|7000"}, txids: []uint64{15}},
 			primary:       queries("500"),
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
@@ -433,7 +438,7 @@ func TestVFSReadCheckComparesReaderWithPrimaryAtBoundary(t *testing.T) {
 		{
 			name:          "a txid statement that times out drops the desynchronized session",
 			boundary:      20,
-			reader:        &fakeVFSReader{probes: []string{"2048|3|4|7000"}, hangTXID: true, progress: []float64{100}},
+			reader:        &fakeVFSReader{probes: []string{"2048|3|4|7000"}, hangTXID: true},
 			primary:       queries("500"),
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
@@ -442,14 +447,14 @@ func TestVFSReadCheckComparesReaderWithPrimaryAtBoundary(t *testing.T) {
 		},
 		{
 			name:          "an unknown boundary is not judged",
-			reader:        &fakeVFSReader{progress: []float64{100}},
+			reader:        &fakeVFSReader{},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
 		},
 		{
 			name:          "an unreadable primary is unavailable",
 			boundary:      20,
-			reader:        &fakeVFSReader{txids: []uint64{20}, progress: []float64{100}},
+			reader:        &fakeVFSReader{txids: []uint64{20}},
 			primaryErr:    errors.New("database is locked"),
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderUnavailable,
