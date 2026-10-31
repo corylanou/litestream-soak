@@ -158,6 +158,7 @@ func newTestVFSReaderCheck(t *testing.T, reader *fakeVFSReader, startErr error) 
 	check.sync = func(context.Context) (uint64, error) { return 12, nil }
 	check.writeBudget = 50 * time.Millisecond
 	check.writePoll = time.Millisecond
+	check.logSettle = 0
 	check.repeats = 2
 	check.repeatInterval = 0
 	check.pause = 0
@@ -374,6 +375,30 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 				t.Fatalf("step output = %q", result.Steps[0].OutputTail)
 			}
 		})
+	}
+}
+
+func TestVFSReaderCheckSettlesPastOnePollBeforeTheFinalLogScan(t *testing.T) {
+	check := newVFSReaderCheck(Config{DBPath: t.TempDir() + "/test.db"})
+	if check.logSettle != vfsLogSettle || vfsLogSettle < 2*time.Second {
+		t.Fatalf("log settle = %s, want at least one 1s poll interval plus margin", check.logSettle)
+	}
+	check.logSettle = 40 * time.Millisecond
+	reader := &fakeVFSReader{probes: []string{"2048|0|0|0", "2048|0|0|0", "2048|0|0|0", "2048|0|1|128"}, txids: []uint64{10, 11, 12, 12, 12, 13}, hydrations: []vfsHydration{{complete: true}, {complete: true}, {complete: true, failure: `level=ERROR msg="cannot fetch new ltx files" error="apply hydration updates: fetch updated page 5: unexpected EOF"`}}}
+	check.repeats, check.repeatInterval, check.pause, check.hydrationPoll, check.catchUpPoll, check.writePoll = 2, 0, 0, time.Millisecond, time.Millisecond, time.Millisecond
+	check.statementTimeout, check.hydrationBudget, check.catchUpBudget, check.writeBudget = time.Second, 50*time.Millisecond, 50*time.Millisecond, 50*time.Millisecond
+	writer := &fakeProbeWriter{updates: []string{"2048|0|1|128"}}
+	check.holdProbe, check.releaseProbe, check.updateProbe = writer.hold, writer.release, writer.update
+	check.sync = func(context.Context) (uint64, error) { return 12, nil }
+	check.start = func(context.Context, string) (vfsReader, error) { return reader, nil }
+	t.Cleanup(check.Stop)
+	started := time.Now()
+	result := check.snapshotCycle(context.Background())
+	if result.Passed || result.Status != "aborted" || !strings.Contains(result.ErrorMessage, "apply hydration updates") {
+		t.Fatalf("failure logged during the settle still passed: %+v", result)
+	}
+	if time.Since(started) < 40*time.Millisecond {
+		t.Fatal("final log scan ran before the settle elapsed")
 	}
 }
 

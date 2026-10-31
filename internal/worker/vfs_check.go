@@ -35,6 +35,11 @@ const (
 	vfsProbeWriteBudget       = 10 * time.Minute
 	vfsProbeWritePoll         = time.Second
 	vfsSyncBudget             = 2 * time.Minute
+	// vfsLogSettle is how long a check waits after its last read before the
+	// final log scan: the VFS logs a failed page apply only after the poll
+	// that hit it releases the file mutex, so a scan taken right after a
+	// statement can run ahead of the line. One poll interval (1s) plus margin.
+	vfsLogSettle = 3 * time.Second
 	// vfsStatementTimeout bounds one shell statement. The VFS applies every
 	// poll's page updates to the hydrated file under its file mutex with one
 	// remote fetch per page, and a compaction that moves pages to a new level
@@ -336,6 +341,7 @@ type vfsReaderCheck struct {
 	catchUpPoll      time.Duration
 	writeBudget      time.Duration
 	writePoll        time.Duration
+	logSettle        time.Duration
 	statementTimeout time.Duration
 
 	mu       sync.Mutex
@@ -358,6 +364,7 @@ func newVFSReaderCheck(cfg Config) *vfsReaderCheck {
 		catchUpPoll:      vfsCatchUpPoll,
 		writeBudget:      vfsProbeWriteBudget,
 		writePoll:        vfsProbeWritePoll,
+		logSettle:        vfsLogSettle,
 		statementTimeout: vfsStatementTimeout,
 		sessions:         map[string]vfsReader{},
 	}
@@ -529,8 +536,18 @@ func (c *vfsReaderCheck) runSnapshot(ctx context.Context) (outcome vfsSnapshotOu
 	if outcome.after, outcome.err = c.probe(ctx, session); outcome.err != nil {
 		return outcome
 	}
-	outcome.err = c.hydrationActive(session)
+	outcome.err = c.settledHydrationActive(ctx, session)
 	return outcome
+}
+
+// settledHydrationActive waits out one poll interval before the final log
+// scan, so a page-apply failure the VFS logs only after its poll releases the
+// file mutex is seen before the cycle is judged.
+func (c *vfsReaderCheck) settledHydrationActive(ctx context.Context, session vfsReader) error {
+	if err := sleepContext(ctx, c.logSettle); err != nil {
+		return fmt.Errorf("%w: %v", errVFSReaderUnavailable, err)
+	}
+	return c.hydrationActive(session)
 }
 
 // hydrationActive folds the log written since the reader was judged ready and
@@ -618,7 +635,7 @@ func (c *vfsReaderCheck) runRead(ctx context.Context, boundary uint64) (outcome 
 		queries[i].vfs = strings.Join(rows, "\n")
 	}
 	outcome.queries = queries
-	outcome.err = c.hydrationActive(session)
+	outcome.err = c.settledHydrationActive(ctx, session)
 	return outcome
 }
 
