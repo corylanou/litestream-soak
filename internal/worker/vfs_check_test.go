@@ -25,9 +25,7 @@ type fakeVFSReader struct {
 	failAt     string
 	hangTXID   bool
 	statements []string
-	trims      int
-	frozenFile bool
-	fileReads  int
+	oversized  bool
 	closed     bool
 }
 
@@ -73,19 +71,10 @@ func (f *fakeVFSReader) hydration() (vfsHydration, error) {
 	return next(&f.hydrations), nil
 }
 
-func (f *fakeVFSReader) hydratedAt() time.Time {
+func (f *fakeVFSReader) logOversized() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.frozenFile {
-		f.fileReads++
-	}
-	return time.Unix(1_700_000_000+int64(f.fileReads), 0)
-}
-
-func (f *fakeVFSReader) trimLog() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.trims++
+	return f.oversized
 }
 
 func (f *fakeVFSReader) alive() bool {
@@ -290,15 +279,6 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 			wantUpdates:   1,
 		},
 		{
-			name:          "a hydrated file the probe update did not move means hydrated reads are off",
-			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10, 12}, frozenFile: true},
-			wantStatus:    "aborted",
-			wantSignature: reporting.SignatureVFSHydrationIncomplete,
-			wantMessage:   "hydrated file unchanged after the probe update reached the reader at txid 000000000000000c",
-			wantDropped:   true,
-			wantUpdates:   1,
-		},
-		{
 			name:          "a hydration the vfs gave up on drops the session",
 			reader:        &fakeVFSReader{probes: []string{first}, hydrations: []vfsHydration{{failure: `time=2026-10-31T17:06:00Z level=ERROR msg="hydration failed" error="open ltx file: no such key"`}}},
 			wantStatus:    "aborted",
@@ -393,10 +373,39 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 			if !strings.Contains(result.Steps[0].OutputTail, "hydration=") {
 				t.Fatalf("step output = %q", result.Steps[0].OutputTail)
 			}
-			if tt.startErr == nil && (tt.reader.trims > 0) != strings.Contains(result.Steps[0].OutputTail, "hydration=complete") {
-				t.Fatalf("log trimmed %d times for %q", tt.reader.trims, result.Steps[0].OutputTail)
-			}
 		})
+	}
+}
+
+func TestVFSReaderCheckRetiresASessionWhoseLogPassedTheCap(t *testing.T) {
+	first := &fakeVFSReader{probes: []string{"2048|0|0|0", "2048|0|0|0", "2048|0|0|0", "2048|0|1|128"}, txids: []uint64{10, 11, 12, 12, 12, 13}, oversized: true}
+	second := &fakeVFSReader{probes: []string{"2048|0|0|0", "2048|0|0|0", "2048|0|0|0", "2048|0|1|128"}, txids: []uint64{10, 11, 12, 12, 12, 13}}
+	check, writer := newTestVFSReaderCheck(t, first, nil)
+	writer.updates = []string{"2048|0|1|128", "2048|0|2|256"}
+	starts := 0
+	check.start = func(context.Context, string) (vfsReader, error) {
+		starts++
+		if starts == 1 {
+			return first, nil
+		}
+		return second, nil
+	}
+	if result := check.snapshotCycle(context.Background()); !result.Passed {
+		t.Fatalf("first cycle = %+v", result)
+	}
+	if starts != 1 || first.closed {
+		t.Fatalf("first cycle starts=%d closed=%v", starts, first.closed)
+	}
+	second.probes = []string{"2048|0|1|128", "2048|0|1|128", "2048|0|1|128", "2048|0|2|256"}
+	second.txids = []uint64{13, 14, 15, 15, 15, 16}
+	if result := check.snapshotCycle(context.Background()); !result.Passed {
+		t.Fatalf("second cycle = %+v", result)
+	}
+	if starts != 2 || !first.closed || second.closed {
+		t.Fatalf("oversized log did not retire the session: starts=%d first closed=%v second closed=%v", starts, first.closed, second.closed)
+	}
+	if len(first.statements) == 0 || first.statements[len(first.statements)-1] == "BEGIN" {
+		t.Fatalf("first session left mid-transaction: %v", first.statements)
 	}
 }
 

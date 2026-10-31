@@ -307,8 +307,7 @@ type vfsReader interface {
 	exec(context.Context, string) ([]string, error)
 	txid(context.Context) (uint64, error)
 	hydration() (vfsHydration, error)
-	hydratedAt() time.Time
-	trimLog()
+	logOversized() bool
 	alive() bool
 	logTail() string
 	close()
@@ -397,10 +396,13 @@ func (c *vfsReaderCheck) useProbeWriter(writer *cacheProbeWriter) {
 func (c *vfsReaderCheck) session(ctx context.Context, name string) (vfsReader, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if session := c.sessions[name]; session != nil && session.alive() {
+	if session := c.sessions[name]; session != nil && session.alive() && !session.logOversized() {
 		return session, nil
 	}
 	if session := c.sessions[name]; session != nil {
+		if session.alive() {
+			slog.Info("VFS reader log reached its cap; starting a fresh session", "session", name)
+		}
 		session.close()
 		delete(c.sessions, name)
 	}
@@ -495,7 +497,6 @@ func (c *vfsReaderCheck) runSnapshot(ctx context.Context) (outcome vfsSnapshotOu
 	if outcome.first, outcome.err = c.probe(ctx, session); outcome.err != nil {
 		return outcome
 	}
-	hydratedBefore := session.hydratedAt()
 	if outcome.expected, outcome.err = c.writeProbe(ctx); outcome.err != nil {
 		return outcome
 	}
@@ -507,10 +508,6 @@ func (c *vfsReaderCheck) runSnapshot(ctx context.Context) (outcome vfsSnapshotOu
 		return outcome
 	}
 	if outcome.err = c.hydrationActive(session); outcome.err != nil {
-		return outcome
-	}
-	if !session.hydratedAt().After(hydratedBefore) {
-		outcome.err = fmt.Errorf("%w: hydrated file unchanged after the probe update reached the reader at txid %s, hydrated reads are off", errVFSHydrationFailed, formatTXID(outcome.reached))
 		return outcome
 	}
 	for i := 0; i < c.repeats; i++ {
@@ -686,7 +683,6 @@ func (c *vfsReaderCheck) waitHydrated(ctx context.Context, session vfsReader, bu
 			return "failed", fmt.Errorf("%w: %s", errVFSHydrationFailed, state.failure)
 		}
 		if state.complete {
-			session.trimLog()
 			return "complete", nil
 		}
 		if err := sleepContext(waitCtx, c.hydrationPoll); err != nil {

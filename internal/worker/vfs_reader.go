@@ -25,10 +25,14 @@ const (
 	vfsReaderFile           = "replica.db"
 	vfsSentinelPrefix       = "soak-vfs-sentinel-"
 	vfsLogTail              = 4096
-	// vfsLogTrimBytes bounds the DEBUG log the VFS writes: at DEBUG it logs
-	// every page read, so a session truncates the file once hydration is known
-	// complete and the file passes this size.
-	vfsLogTrimBytes = 8 << 20
+	// vfsLogCapBytes bounds the DEBUG log the VFS writes. The hydration markers
+	// the harness depends on ("hydration complete", the time-travel disable)
+	// are DEBUG lines, and at DEBUG the VFS also logs every page read, roughly
+	// 100 MiB an hour for the snapshot reader. The log is never truncated in
+	// place, since the VFS could append a marker between a scan and the
+	// truncate; once it passes the cap the session is dropped at its next cycle
+	// and a fresh one starts with a new hydration directory and log.
+	vfsLogCapBytes  = 256 << 20
 	vfsMaxLineBytes = 1 << 20
 )
 
@@ -332,8 +336,7 @@ func (s *vfsSession) logPath() string {
 }
 
 // hydration folds the VFS log written since the last call into the session's
-// hydration state, so a failure logged after completion is seen as well. A
-// log that shrank was trimmed and is scanned again from its start.
+// hydration state, so a failure logged after completion is seen as well.
 func (s *vfsSession) hydration() (vfsHydration, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -349,10 +352,7 @@ func (s *vfsSession) hydration() (vfsHydration, error) {
 	if err != nil {
 		return s.hydrationState, err
 	}
-	if info.Size() < s.logOffset {
-		s.logOffset, s.logRest = 0, nil
-	}
-	if info.Size() == s.logOffset {
+	if info.Size() <= s.logOffset {
 		return s.hydrationState, nil
 	}
 	chunk := make([]byte, info.Size()-s.logOffset)
@@ -369,35 +369,11 @@ func (s *vfsSession) hydration() (vfsHydration, error) {
 	return s.hydrationState, nil
 }
 
-// trimLog empties the VFS log once it passes vfsLogTrimBytes, after folding
-// everything written so far into the hydration state so the trim drops no
-// marker that was already on disk. The extension appends, so writes continue
-// at the new end.
-func (s *vfsSession) trimLog() {
-	if _, err := s.hydration(); err != nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// logOversized reports whether the VFS log has passed vfsLogCapBytes, which
+// retires the session at its next cycle.
+func (s *vfsSession) logOversized() bool {
 	info, err := os.Stat(s.logPath())
-	if err != nil || info.Size() <= vfsLogTrimBytes {
-		return
-	}
-	if err := os.Truncate(s.logPath(), 0); err == nil {
-		s.logOffset, s.logRest = 0, nil
-	}
-}
-
-// hydratedAt is the hydration file's modification time. While hydrated reads
-// are on, every poll that carries changed pages writes them into this file,
-// so a probe update the reader has reached must have moved it; this does not
-// depend on the log and catches a disable the trim could have swallowed.
-func (s *vfsSession) hydratedAt() time.Time {
-	info, err := os.Stat(filepath.Join(s.dir, vfsHydrationFile))
-	if err != nil {
-		return time.Time{}
-	}
-	return info.ModTime()
+	return err == nil && info.Size() > vfsLogCapBytes
 }
 
 func (s *vfsSession) logTail() string {

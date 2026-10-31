@@ -228,46 +228,16 @@ func TestVFSSessionKeepsWatchingTheLogAfterHydrationCompletes(t *testing.T) {
 	}
 
 	fresh := &vfsSession{name: "fresh", dir: t.TempDir()}
-	appendTo := func(s *vfsSession, text string) {
-		f, err := os.OpenFile(s.logPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := f.WriteString(text); err != nil {
-			t.Fatal(err)
-		}
-		if err := f.Close(); err != nil {
-			t.Fatal(err)
-		}
+	if fresh.logOversized() {
+		t.Fatal("a missing log counted as oversized")
 	}
-	appendTo(fresh, `level=DEBUG msg="hydration complete"`+"\n")
-	if state, err := fresh.hydration(); err != nil || !state.complete {
-		t.Fatalf("fresh complete = %+v, %v", state, err)
-	}
-	filler := strings.Repeat(`level=DEBUG msg="reading at" off=36331520 len=4096`+"\n", vfsLogTrimBytes/48+1)
-	appendTo(fresh, filler+`level=ERROR msg="hydration failed" error="write page 3: no space left on device"`+"\n")
-	fresh.trimLog()
-	if info, err := os.Stat(fresh.logPath()); err != nil || info.Size() != 0 {
-		t.Fatalf("log after trim = %v, %v", info, err)
-	}
-	if state, err := fresh.hydration(); err != nil || !state.complete || !strings.Contains(state.failure, `msg="hydration failed"`) {
-		t.Fatalf("trim lost a marker that was on disk: %+v, %v", state, err)
-	}
-	appendTo(fresh, `level=DEBUG msg="file control" pragma=litestream_txid`+"\n")
-	if state, err := fresh.hydration(); err != nil || !state.complete || state.failure == "" {
-		t.Fatalf("state lost after the trim: %+v, %v", state, err)
-	}
-	fresh.trimLog()
-	if info, err := os.Stat(fresh.logPath()); err != nil || info.Size() == 0 {
-		t.Fatalf("small log trimmed again: %v, %v", info, err)
-	}
-	if fresh.hydratedAt() != (time.Time{}) {
-		t.Fatal("hydratedAt reported a time for a missing hydration file")
-	}
-	if err := os.WriteFile(filepath.Join(fresh.dir, vfsHydrationFile), []byte("db"), 0o600); err != nil {
+	if err := os.WriteFile(fresh.logPath(), make([]byte, vfsLogCapBytes+1), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if fresh.hydratedAt().IsZero() {
-		t.Fatal("hydratedAt did not read the hydration file")
+	if !fresh.logOversized() {
+		t.Fatal("a log past the cap was not reported")
+	}
+	if state, err := fresh.hydration(); err != nil || state.complete || state.failure != "" {
+		t.Fatalf("filler judged as a marker: %+v, %v", state, err)
 	}
 }
