@@ -575,6 +575,40 @@ func TestManyDBWriteRefusedWhileWrittenSetCannotBeSavedOrRemoved(t *testing.T) {
 	}
 }
 
+func TestManyDBWriteRefusedWhileStaleStateRemovalIsNotSynced(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.NumDatabases = 2
+	manyDBWrittenStateDir(t, &cfg)
+	paths := cfg.ManyDBPaths()
+	load := newManyDBLoad(&cfg)
+	load.saveState = func([]string) error { return errors.New("read-only file system") }
+	syncs := 0
+	load.syncDir = func(dir string) error {
+		syncs++
+		if dir != cfg.ManyDBDir() {
+			t.Fatalf("synced %s, want the database directory", dir)
+		}
+		return errors.New("input/output error")
+	}
+	rowWrites := 0
+	load.writeRow = func(context.Context, string, int, int64) error { rowWrites++; return nil }
+	err := load.performWrite(context.Background(), manyDBWrite{dbPath: paths[0], rowSlot: 1})
+	if err == nil || !strings.Contains(err.Error(), "sync directory after removing stale written set") {
+		t.Fatalf("err = %v, want the write refused for the unsynced removal", err)
+	}
+	if rowWrites != 0 || syncs != 1 || !load.stateIsDirty() {
+		t.Fatalf("rowWrites=%d syncs=%d dirty=%v", rowWrites, syncs, load.stateIsDirty())
+	}
+	load.syncDir = syncDir
+	load.saveState = func(written []string) error { return writeManyDBWrittenState(cfg, written) }
+	if err := load.performWrite(context.Background(), manyDBWrite{dbPath: paths[0], rowSlot: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if rowWrites != 1 || load.stateIsDirty() {
+		t.Fatalf("after recovery rowWrites=%d dirty=%v", rowWrites, load.stateIsDirty())
+	}
+}
+
 func TestManyDBWrittenSetFailureGoesDirtyAndFallsBackOnRestart(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.NumDatabases = 4

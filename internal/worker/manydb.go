@@ -36,6 +36,7 @@ type manyDBLoad struct {
 	stateDirty       atomic.Bool
 	saveState        func([]string) error
 	writeRow         func(context.Context, string, int, int64) error
+	syncDir          func(string) error
 	onStateEvent     func(eventType, message string)
 
 	mu      sync.Mutex
@@ -197,6 +198,7 @@ func manyDBDSN(dbPath string) string {
 func newManyDBLoad(cfg *Config) *manyDBLoad {
 	load := &manyDBLoad{cfg: cfg, now: time.Now, changed: make(map[string]manyDBChange), writeRow: writeManyDBRow}
 	load.saveState = func(written []string) error { return writeManyDBWrittenState(*cfg, written) }
+	load.syncDir = syncDir
 	for _, path := range cfg.ManyDBPaths() {
 		load.mark(path, false)
 	}
@@ -276,6 +278,11 @@ func (l *manyDBLoad) saveWrittenStateLocked() ([]manyDBStateEvent, error) {
 		removeErr := os.Remove(manyDBWrittenStatePath(l.cfg))
 		if errors.Is(removeErr, os.ErrNotExist) {
 			removeErr = nil
+		}
+		if removeErr == nil {
+			if syncErr := l.syncDir(l.cfg.ManyDBDir()); syncErr != nil {
+				removeErr = fmt.Errorf("sync directory after removing stale written set: %w", syncErr)
+			}
 		}
 		if !l.stateDirty.Swap(true) {
 			slog.Warn("Many database written set dirty", "error", err)
