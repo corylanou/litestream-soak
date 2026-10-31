@@ -26,6 +26,8 @@ type fakeVFSReader struct {
 	hangTXID   bool
 	statements []string
 	trims      int
+	frozenFile bool
+	fileReads  int
 	closed     bool
 }
 
@@ -69,6 +71,15 @@ func (f *fakeVFSReader) hydration() (vfsHydration, error) {
 		return vfsHydration{complete: true}, nil
 	}
 	return next(&f.hydrations), nil
+}
+
+func (f *fakeVFSReader) hydratedAt() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.frozenFile {
+		f.fileReads++
+	}
+	return time.Unix(1_700_000_000+int64(f.fileReads), 0)
 }
 
 func (f *fakeVFSReader) trimLog() {
@@ -261,6 +272,33 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 			wantMessage:   "not complete after",
 		},
 		{
+			name:          "a hydration failure logged mid-cycle is inconclusive, never a pass",
+			reader:        &fakeVFSReader{probes: []string{first, first, first, updated}, txids: []uint64{10, 11, 12, 12, 12, 13}, hydrations: []vfsHydration{{complete: true}, {complete: true}, {complete: true, failure: `time=2026-10-31T18:15:44.327Z level=ERROR msg="cannot fetch new ltx files" vfs=true error="apply hydration updates: fetch updated page 8904: open ltx file: file does not exist"`}}},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureVFSHydrationIncomplete,
+			wantMessage:   `vfs hydration failed: time=2026-10-31T18:15:44.327Z level=ERROR msg="cannot fetch new ltx files"`,
+			wantDropped:   true,
+			wantUpdates:   1,
+		},
+		{
+			name:          "a hydration failure logged while the reader caught up is inconclusive",
+			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10, 12}, hydrations: []vfsHydration{{complete: true}, {complete: true, failure: `level=ERROR msg="cannot fetch new ltx files" error="apply hydration updates: fetch updated page 7: context deadline exceeded"`}}},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureVFSHydrationIncomplete,
+			wantMessage:   "apply hydration updates",
+			wantDropped:   true,
+			wantUpdates:   1,
+		},
+		{
+			name:          "a hydrated file the probe update did not move means hydrated reads are off",
+			reader:        &fakeVFSReader{probes: []string{first}, txids: []uint64{10, 12}, frozenFile: true},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureVFSHydrationIncomplete,
+			wantMessage:   "hydrated file unchanged after the probe update reached the reader at txid 000000000000000c",
+			wantDropped:   true,
+			wantUpdates:   1,
+		},
+		{
 			name:          "a hydration the vfs gave up on drops the session",
 			reader:        &fakeVFSReader{probes: []string{first}, hydrations: []vfsHydration{{failure: `time=2026-10-31T17:06:00Z level=ERROR msg="hydration failed" error="open ltx file: no such key"`}}},
 			wantStatus:    "aborted",
@@ -325,7 +363,7 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 					t.Fatalf("passed result = %+v", result)
 				}
 			}
-			if tt.startErr == nil && tt.reader.count("BEGIN") != tt.reader.count("COMMIT")+tt.reader.count("ROLLBACK") {
+			if tt.startErr == nil && !tt.wantDropped && tt.reader.count("BEGIN") != tt.reader.count("COMMIT")+tt.reader.count("ROLLBACK") {
 				t.Fatalf("transactions unbalanced: %v", tt.reader.statements)
 			}
 			if updates := min(writer.calls, 1); updates != tt.wantUpdates {
@@ -425,6 +463,16 @@ func TestVFSReadCheckComparesReaderWithPrimaryAtBoundary(t *testing.T) {
 			wantStatus:    "failed",
 			wantSignature: reporting.SignatureVFSReadMismatch,
 			wantMessage:   `vfs read mismatch: load_test count returned vfs="499" primary="500" at txid 0000000000000014 (1 of 2 queries differ)`,
+		},
+		{
+			name:          "a hydration failure logged during the read check is inconclusive",
+			boundary:      20,
+			reader:        &fakeVFSReader{probes: []string{"2048|3|4|7000"}, txids: []uint64{20}, rows: map[string][]string{`SELECT count(*) FROM "load_test"`: {"500"}}, hydrations: []vfsHydration{{complete: true}, {complete: true}, {complete: true, failure: `level=ERROR msg="cannot fetch new ltx files" error="apply hydration updates: fetch updated page 9: no such key"`}}},
+			primary:       queries("500"),
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureVFSHydrationIncomplete,
+			wantMessage:   "apply hydration updates",
+			wantDropped:   true,
 		},
 		{
 			name:          "a reader behind the boundary is not judged and keeps its session",

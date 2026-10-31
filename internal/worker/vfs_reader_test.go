@@ -182,33 +182,92 @@ time=2026-10-31T17:50:47.000Z level=ERROR msg="hydration catch-up failed" vfs=tr
 	if state := parseVFSHydration(failed); state.complete || !strings.HasSuffix(state.failure, `msg="hydration catch-up failed" vfs=true error="fetch page 12: context canceled"`) {
 		t.Fatalf("failed log parsed as %+v", state)
 	}
+	disabled := complete + "\n" + `time=2026-10-31T18:15:44.327Z level=ERROR msg="cannot fetch new ltx files" vfs=true name=/data/vfs/snapshot/replica.db error="apply hydration updates: fetch updated page 8904: open ltx file: file does not exist"`
+	if state := parseVFSHydration(disabled); !state.complete || !strings.Contains(state.failure, "apply hydration updates") {
+		t.Fatalf("disabled log parsed as %+v", state)
+	}
+	pollOnly := complete + "\n" + `time=2026-10-31T18:15:44.327Z level=ERROR msg="cannot fetch new ltx files" vfs=true error="poll L0: ltx files: context deadline exceeded"`
+	if state := parseVFSHydration(pollOnly); !state.complete || state.failure != "" {
+		t.Fatalf("a poll error that leaves hydration on parsed as %+v", state)
+	}
 	if state := parseVFSHydration(""); state.complete || state.failure != "" {
 		t.Fatalf("empty log parsed as %+v", state)
 	}
+}
 
+func TestVFSSessionKeepsWatchingTheLogAfterHydrationCompletes(t *testing.T) {
 	dir := t.TempDir()
 	session := &vfsSession{name: "test", dir: dir}
 	if state, err := session.hydration(); err != nil || state.complete {
 		t.Fatalf("missing log = %+v, %v", state, err)
 	}
-	if err := os.WriteFile(session.logPath(), []byte(complete), 0o600); err != nil {
-		t.Fatal(err)
+	appendLog := func(text string) {
+		f, err := os.OpenFile(session.logPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(text); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if state, err := session.hydration(); err != nil || !state.complete {
+	appendLog(`time=2026-10-31T17:50:46.604Z level=DEBUG msg="hydration complete" vfs=true txid=0000000000000001` + "\n")
+	if state, err := session.hydration(); err != nil || !state.complete || state.failure != "" {
 		t.Fatalf("complete log = %+v, %v", state, err)
 	}
-	if err := os.WriteFile(session.logPath(), make([]byte, vfsLogTrimBytes+1), 0o600); err != nil {
-		t.Fatal(err)
+	appendLog(`time=2026-10-31T18:15:44.327Z level=ERROR msg="cannot fetch new ltx files" vfs=true error="apply hydration`)
+	if state, err := session.hydration(); err != nil || state.failure != "" {
+		t.Fatalf("partial line judged early: %+v, %v", state, err)
 	}
-	session.trimLog()
-	if info, err := os.Stat(session.logPath()); err != nil || info.Size() != 0 {
+	appendLog(` updates: fetch updated page 8904: open ltx file: file does not exist"` + "\n")
+	state, err := session.hydration()
+	if err != nil || !state.complete || !strings.Contains(state.failure, `msg="cannot fetch new ltx files"`) || !strings.Contains(state.failure, "page 8904") {
+		t.Fatalf("disable after completion missed: %+v, %v", state, err)
+	}
+
+	fresh := &vfsSession{name: "fresh", dir: t.TempDir()}
+	appendTo := func(s *vfsSession, text string) {
+		f, err := os.OpenFile(s.logPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(text); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendTo(fresh, `level=DEBUG msg="hydration complete"`+"\n")
+	if state, err := fresh.hydration(); err != nil || !state.complete {
+		t.Fatalf("fresh complete = %+v, %v", state, err)
+	}
+	filler := strings.Repeat(`level=DEBUG msg="reading at" off=36331520 len=4096`+"\n", vfsLogTrimBytes/48+1)
+	appendTo(fresh, filler+`level=ERROR msg="hydration failed" error="write page 3: no space left on device"`+"\n")
+	fresh.trimLog()
+	if info, err := os.Stat(fresh.logPath()); err != nil || info.Size() != 0 {
 		t.Fatalf("log after trim = %v, %v", info, err)
 	}
-	if state, err := session.hydration(); err != nil || !state.complete {
-		t.Fatalf("completion forgotten after the log was trimmed: %+v, %v", state, err)
+	if state, err := fresh.hydration(); err != nil || !state.complete || !strings.Contains(state.failure, `msg="hydration failed"`) {
+		t.Fatalf("trim lost a marker that was on disk: %+v, %v", state, err)
 	}
-	session.trimLog()
-	if info, err := os.Stat(session.logPath()); err != nil || info.Size() != 0 {
+	appendTo(fresh, `level=DEBUG msg="file control" pragma=litestream_txid`+"\n")
+	if state, err := fresh.hydration(); err != nil || !state.complete || state.failure == "" {
+		t.Fatalf("state lost after the trim: %+v, %v", state, err)
+	}
+	fresh.trimLog()
+	if info, err := os.Stat(fresh.logPath()); err != nil || info.Size() == 0 {
 		t.Fatalf("small log trimmed again: %v, %v", info, err)
+	}
+	if fresh.hydratedAt() != (time.Time{}) {
+		t.Fatal("hydratedAt reported a time for a missing hydration file")
+	}
+	if err := os.WriteFile(filepath.Join(fresh.dir, vfsHydrationFile), []byte("db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if fresh.hydratedAt().IsZero() {
+		t.Fatal("hydratedAt did not read the hydration file")
 	}
 }

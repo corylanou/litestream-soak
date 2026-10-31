@@ -307,6 +307,7 @@ type vfsReader interface {
 	exec(context.Context, string) ([]string, error)
 	txid(context.Context) (uint64, error)
 	hydration() (vfsHydration, error)
+	hydratedAt() time.Time
 	trimLog()
 	alive() bool
 	logTail() string
@@ -494,6 +495,7 @@ func (c *vfsReaderCheck) runSnapshot(ctx context.Context) (outcome vfsSnapshotOu
 	if outcome.first, outcome.err = c.probe(ctx, session); outcome.err != nil {
 		return outcome
 	}
+	hydratedBefore := session.hydratedAt()
 	if outcome.expected, outcome.err = c.writeProbe(ctx); outcome.err != nil {
 		return outcome
 	}
@@ -502,6 +504,13 @@ func (c *vfsReaderCheck) runSnapshot(ctx context.Context) (outcome vfsSnapshotOu
 		return outcome
 	}
 	if outcome.reached, outcome.err = c.waitTXID(ctx, session, outcome.syncTXID); outcome.err != nil {
+		return outcome
+	}
+	if outcome.err = c.hydrationActive(session); outcome.err != nil {
+		return outcome
+	}
+	if !session.hydratedAt().After(hydratedBefore) {
+		outcome.err = fmt.Errorf("%w: hydrated file unchanged after the probe update reached the reader at txid %s, hydrated reads are off", errVFSHydrationFailed, formatTXID(outcome.reached))
 		return outcome
 	}
 	for i := 0; i < c.repeats; i++ {
@@ -520,8 +529,25 @@ func (c *vfsReaderCheck) runSnapshot(ctx context.Context) (outcome vfsSnapshotOu
 	}
 	inTransaction = false
 	outcome.committed = true
-	outcome.after, outcome.err = c.probe(ctx, session)
+	if outcome.after, outcome.err = c.probe(ctx, session); outcome.err != nil {
+		return outcome
+	}
+	outcome.err = c.hydrationActive(session)
 	return outcome
+}
+
+// hydrationActive folds the log written since the reader was judged ready and
+// fails the cycle when the VFS has since turned hydrated reads off: a cycle
+// that ran on replica reads proves nothing about the hydrated reader.
+func (c *vfsReaderCheck) hydrationActive(session vfsReader) error {
+	state, err := session.hydration()
+	if err != nil {
+		return fmt.Errorf("%w: read vfs log: %v", errVFSReaderUnavailable, err)
+	}
+	if state.failure != "" {
+		return fmt.Errorf("%w: %s", errVFSHydrationFailed, state.failure)
+	}
+	return nil
 }
 
 // writeProbe commits one probe update on the primary once the verifier is not
@@ -578,6 +604,9 @@ func (c *vfsReaderCheck) runRead(ctx context.Context, boundary uint64) (outcome 
 	if outcome.txid, outcome.err = c.waitTXID(ctx, session, boundary); outcome.err != nil {
 		return outcome
 	}
+	if outcome.err = c.hydrationActive(session); outcome.err != nil {
+		return outcome
+	}
 	queries, err := c.primaryQueries(ctx)
 	if err != nil {
 		outcome.err = fmt.Errorf("%w: read primary: %v", errVFSReaderUnavailable, err)
@@ -592,6 +621,7 @@ func (c *vfsReaderCheck) runRead(ctx context.Context, boundary uint64) (outcome 
 		queries[i].vfs = strings.Join(rows, "\n")
 	}
 	outcome.queries = queries
+	outcome.err = c.hydrationActive(session)
 	return outcome
 }
 
