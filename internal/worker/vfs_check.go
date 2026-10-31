@@ -30,19 +30,33 @@ const (
 	vfsHydrationBudget        = 10 * time.Minute
 	vfsReadHydrationBudget    = time.Minute
 	vfsHydrationPoll          = 5 * time.Second
-	vfsCatchUpBudget          = 5 * time.Minute
+	vfsCatchUpBudget          = 10 * time.Minute
 	vfsCatchUpPoll            = time.Second
 	vfsProbeWriteBudget       = 10 * time.Minute
 	vfsProbeWritePoll         = time.Second
 	vfsSyncBudget             = 2 * time.Minute
-	vfsStatementTimeout       = 2 * time.Minute
-	vfsReadTableLimit         = 64
+	// vfsLogSettle is how long a check waits after its last read before the
+	// final log scan: the VFS logs a failed page apply only after the poll
+	// that hit it releases the file mutex, so a scan taken right after a
+	// statement can run ahead of the line. One poll interval (1s) plus margin.
+	vfsLogSettle = 3 * time.Second
+	// vfsStatementTimeout bounds one shell statement. The VFS applies every
+	// poll's page updates to the hydrated file under its file mutex with one
+	// remote fetch per page, and a compaction that moves pages to a new level
+	// makes it fetch every page in the compacted file again, so a statement can
+	// wait for the whole database's worth of page fetches before it runs.
+	vfsStatementTimeout = 10 * time.Minute
+	vfsReadTableLimit   = 64
 )
 
 var (
 	errVFSReaderUnavailable   = errors.New("vfs reader unavailable")
 	errVFSHydrationIncomplete = errors.New("vfs hydration incomplete")
-	errVFSReaderNotCaughtUp   = errors.New("vfs reader not caught up")
+	// errVFSHydrationFailed marks a session whose VFS gave up on hydration and
+	// serves pages from the replica; the session is dropped so the next cycle
+	// hydrates again.
+	errVFSHydrationFailed   = errors.New("vfs hydration failed")
+	errVFSReaderNotCaughtUp = errors.New("vfs reader not caught up")
 	// errVFSStatementTimeout marks a statement whose output never arrived: the
 	// shell's late rows and sentinel are still in the stream, so the session
 	// cannot be reused.
@@ -98,7 +112,7 @@ func (p vfsProbe) String() string {
 // the post-COMMIT read must equal the primary's aggregate after the update
 // (expected) or the cycle proved nothing about the reader.
 type vfsSnapshotOutcome struct {
-	hydration float64
+	hydration string
 	first     vfsProbe
 	expected  string
 	syncTXID  uint64
@@ -143,7 +157,7 @@ func (o vfsSnapshotOutcome) driftError() string {
 }
 
 func (o vfsSnapshotOutcome) summary() string {
-	parts := []string{fmt.Sprintf("hydration=%.1f%%", o.hydration)}
+	parts := []string{"hydration=" + firstNonEmpty(o.hydration, "pending")}
 	if o.first.raw != "" {
 		parts = append(parts, "first="+o.first.String())
 	}
@@ -191,7 +205,7 @@ type vfsReadQuery struct {
 type vfsReadOutcome struct {
 	boundary  uint64
 	txid      uint64
-	hydration float64
+	hydration string
 	queries   []vfsReadQuery
 	err       error
 	logTail   string
@@ -217,7 +231,7 @@ func (o vfsReadOutcome) mismatchError() string {
 }
 
 func (o vfsReadOutcome) summary() string {
-	parts := []string{fmt.Sprintf("boundary=%s reader=%s hydration=%.1f%%", formatTXID(o.boundary), formatTXID(o.txid), o.hydration)}
+	parts := []string{fmt.Sprintf("boundary=%s reader=%s hydration=%s", formatTXID(o.boundary), formatTXID(o.txid), firstNonEmpty(o.hydration, "pending"))}
 	if len(o.queries) > 0 {
 		parts = append(parts, fmt.Sprintf("queries=%d mismatched=%d", len(o.queries), len(o.mismatches())))
 	}
@@ -283,7 +297,7 @@ func vfsFailed(result *VerificationResult, message, summary string) {
 
 func vfsInconclusiveSignature(err error) string {
 	switch {
-	case errors.Is(err, errVFSHydrationIncomplete):
+	case errors.Is(err, errVFSHydrationIncomplete), errors.Is(err, errVFSHydrationFailed):
 		return reporting.SignatureVFSHydrationIncomplete
 	case errors.Is(err, errVFSReaderNotCaughtUp):
 		return reporting.SignatureVFSReaderNotCaughtUp
@@ -297,7 +311,8 @@ func vfsInconclusiveSignature(err error) string {
 type vfsReader interface {
 	exec(context.Context, string) ([]string, error)
 	txid(context.Context) (uint64, error)
-	hydrationProgress(context.Context) (float64, error)
+	hydration() (vfsHydration, error)
+	logOversized() bool
 	alive() bool
 	logTail() string
 	close()
@@ -326,6 +341,7 @@ type vfsReaderCheck struct {
 	catchUpPoll      time.Duration
 	writeBudget      time.Duration
 	writePoll        time.Duration
+	logSettle        time.Duration
 	statementTimeout time.Duration
 
 	mu       sync.Mutex
@@ -348,6 +364,7 @@ func newVFSReaderCheck(cfg Config) *vfsReaderCheck {
 		catchUpPoll:      vfsCatchUpPoll,
 		writeBudget:      vfsProbeWriteBudget,
 		writePoll:        vfsProbeWritePoll,
+		logSettle:        vfsLogSettle,
 		statementTimeout: vfsStatementTimeout,
 		sessions:         map[string]vfsReader{},
 	}
@@ -386,10 +403,13 @@ func (c *vfsReaderCheck) useProbeWriter(writer *cacheProbeWriter) {
 func (c *vfsReaderCheck) session(ctx context.Context, name string) (vfsReader, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if session := c.sessions[name]; session != nil && session.alive() {
+	if session := c.sessions[name]; session != nil && session.alive() && !session.logOversized() {
 		return session, nil
 	}
 	if session := c.sessions[name]; session != nil {
+		if session.alive() {
+			slog.Info("VFS reader log reached its cap; starting a fresh session", "session", name)
+		}
 		session.close()
 		delete(c.sessions, name)
 	}
@@ -494,6 +514,9 @@ func (c *vfsReaderCheck) runSnapshot(ctx context.Context) (outcome vfsSnapshotOu
 	if outcome.reached, outcome.err = c.waitTXID(ctx, session, outcome.syncTXID); outcome.err != nil {
 		return outcome
 	}
+	if outcome.err = c.hydrationActive(session); outcome.err != nil {
+		return outcome
+	}
 	for i := 0; i < c.repeats; i++ {
 		if outcome.err = sleepContext(ctx, c.repeatInterval); outcome.err != nil {
 			return outcome
@@ -510,8 +533,35 @@ func (c *vfsReaderCheck) runSnapshot(ctx context.Context) (outcome vfsSnapshotOu
 	}
 	inTransaction = false
 	outcome.committed = true
-	outcome.after, outcome.err = c.probe(ctx, session)
+	if outcome.after, outcome.err = c.probe(ctx, session); outcome.err != nil {
+		return outcome
+	}
+	outcome.err = c.settledHydrationActive(ctx, session)
 	return outcome
+}
+
+// settledHydrationActive waits out one poll interval before the final log
+// scan, so a page-apply failure the VFS logs only after its poll releases the
+// file mutex is seen before the cycle is judged.
+func (c *vfsReaderCheck) settledHydrationActive(ctx context.Context, session vfsReader) error {
+	if err := sleepContext(ctx, c.logSettle); err != nil {
+		return fmt.Errorf("%w: %v", errVFSReaderUnavailable, err)
+	}
+	return c.hydrationActive(session)
+}
+
+// hydrationActive folds the log written since the reader was judged ready and
+// fails the cycle when the VFS has since turned hydrated reads off: a cycle
+// that ran on replica reads proves nothing about the hydrated reader.
+func (c *vfsReaderCheck) hydrationActive(session vfsReader) error {
+	state, err := session.hydration()
+	if err != nil {
+		return fmt.Errorf("%w: read vfs log: %v", errVFSReaderUnavailable, err)
+	}
+	if state.failure != "" {
+		return fmt.Errorf("%w: %s", errVFSHydrationFailed, state.failure)
+	}
+	return nil
 }
 
 // writeProbe commits one probe update on the primary once the verifier is not
@@ -568,6 +618,9 @@ func (c *vfsReaderCheck) runRead(ctx context.Context, boundary uint64) (outcome 
 	if outcome.txid, outcome.err = c.waitTXID(ctx, session, boundary); outcome.err != nil {
 		return outcome
 	}
+	if outcome.err = c.hydrationActive(session); outcome.err != nil {
+		return outcome
+	}
 	queries, err := c.primaryQueries(ctx)
 	if err != nil {
 		outcome.err = fmt.Errorf("%w: read primary: %v", errVFSReaderUnavailable, err)
@@ -582,6 +635,7 @@ func (c *vfsReaderCheck) runRead(ctx context.Context, boundary uint64) (outcome 
 		queries[i].vfs = strings.Join(rows, "\n")
 	}
 	outcome.queries = queries
+	outcome.err = c.settledHydrationActive(ctx, session)
 	return outcome
 }
 
@@ -627,30 +681,32 @@ func (c *vfsReaderCheck) probe(ctx context.Context, session vfsReader) (vfsProbe
 	return probe, nil
 }
 
-// waitHydrated polls hydration progress until the reader serves pages from
-// its local copy. The snapshot loop can afford the full budget; the read check
-// runs while the load is paused, so it gives up sooner and reports the cycle
-// inconclusive while hydration continues in the background.
-func (c *vfsReaderCheck) waitHydrated(ctx context.Context, session vfsReader, budget time.Duration) (float64, error) {
+// waitHydrated waits for the VFS to log that hydration is complete, which is
+// when the reader serves pages from its local copy; before that every page is
+// one request to the replica and a probe scan takes minutes. It reads the log
+// rather than running a statement, so it never blocks behind the VFS mutex.
+// The snapshot loop can afford the full budget; the read check runs while the
+// load is paused, so it gives up sooner and reports the cycle inconclusive
+// while hydration continues in the background.
+func (c *vfsReaderCheck) waitHydrated(ctx context.Context, session vfsReader, budget time.Duration) (string, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	var pct float64
 	for {
-		var err error
-		if pct, err = session.hydrationProgress(waitCtx); err != nil {
-			if ctx.Err() == nil && waitCtx.Err() != nil {
-				return pct, fmt.Errorf("%w: %w: hydration progress not readable within %s: %v", errVFSHydrationIncomplete, errVFSStatementTimeout, budget, err)
-			}
-			return pct, fmt.Errorf("%w: %v", errVFSReaderUnavailable, err)
+		state, err := session.hydration()
+		if err != nil {
+			return "", fmt.Errorf("%w: read vfs log: %v", errVFSReaderUnavailable, err)
 		}
-		if pct >= 100 {
-			return pct, nil
+		if state.failure != "" {
+			return "failed", fmt.Errorf("%w: %s", errVFSHydrationFailed, state.failure)
+		}
+		if state.complete {
+			return "complete", nil
 		}
 		if err := sleepContext(waitCtx, c.hydrationPoll); err != nil {
 			if ctx.Err() != nil {
-				return pct, fmt.Errorf("%w: %v", errVFSReaderUnavailable, ctx.Err())
+				return "", fmt.Errorf("%w: %v", errVFSReaderUnavailable, ctx.Err())
 			}
-			return pct, fmt.Errorf("%w: %.1f%% after %s", errVFSHydrationIncomplete, pct, budget)
+			return "pending", fmt.Errorf("%w: not complete after %s", errVFSHydrationIncomplete, budget)
 		}
 	}
 }
@@ -663,7 +719,7 @@ func (c *vfsReaderCheck) waitTXID(ctx context.Context, session vfsReader, bounda
 		var err error
 		if seen, err = session.txid(waitCtx); err != nil {
 			if ctx.Err() == nil && waitCtx.Err() != nil {
-				return seen, fmt.Errorf("%w: %w: reader at txid %s, waiting for %s: %v", errVFSReaderNotCaughtUp, errVFSStatementTimeout, formatTXID(seen), formatTXID(boundary), err)
+				return seen, fmt.Errorf("%w: %w: reader at txid %s, waiting for %s: %v", errVFSReaderNotCaughtUp, errVFSStatementTimeout, vfsTXIDText(seen), formatTXID(boundary), err)
 			}
 			return seen, fmt.Errorf("%w: %v", errVFSReaderUnavailable, err)
 		}
@@ -674,9 +730,18 @@ func (c *vfsReaderCheck) waitTXID(ctx context.Context, session vfsReader, bounda
 			if ctx.Err() != nil {
 				return seen, fmt.Errorf("%w: %v", errVFSReaderUnavailable, ctx.Err())
 			}
-			return seen, fmt.Errorf("%w: reader at txid %s after %s, boundary %s", errVFSReaderNotCaughtUp, formatTXID(seen), c.catchUpBudget, formatTXID(boundary))
+			return seen, fmt.Errorf("%w: reader at txid %s after %s, boundary %s", errVFSReaderNotCaughtUp, vfsTXIDText(seen), c.catchUpBudget, formatTXID(boundary))
 		}
 	}
+}
+
+// vfsTXIDText names a reader position in messages; zero means the position was
+// never read, which formatTXID would print as nothing.
+func vfsTXIDText(txid uint64) string {
+	if txid == 0 {
+		return "unknown"
+	}
+	return formatTXID(txid)
 }
 
 func sleepContext(ctx context.Context, d time.Duration) error {

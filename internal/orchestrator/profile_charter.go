@@ -130,7 +130,7 @@ var profileCharters = map[string]ProfileCharter{
 		WhyItMatters:  "Users replicate from many regions; the gate keeps one remote pairing in every release decision.",
 	},
 	"gate-vfs": {
-		Synopsis:      "RC gate VFS reader lane (opt-in): steady writes at 50 writes/s with 30-second L1 compaction and 10-minute snapshots while a hydrated read-only Litestream VFS connection to the replica holds 4-minute read transactions on an 8 MiB probe table with a 1 MiB page cache, and a second VFS connection is compared with the primary at every verification boundary.",
+		Synopsis:      "RC gate VFS reader lane (opt-in): steady writes at 10 writes/s with 30-second L1 compaction and 10-minute snapshots while a hydrated read-only Litestream VFS connection to the replica holds 4-minute read transactions on an 8 MiB probe table with a 1 MiB page cache, and a second VFS connection is compared with the primary at every verification boundary. The rate stays low because the VFS fetches every replicated page one by one from the replica while holding its file lock, and a heavier primary starves the reader.",
 		Stresses:      "Repeatable reads inside an explicit VFS read transaction while hydration applies new LTX files underneath it, and VFS read correctness against the quiesced primary.",
 		GuardsAgainst: "Hydrated readers that see replicated updates mid-transaction once the table outgrows SQLite's page cache, and VFS reads that disagree with the primary at a known txid.",
 		WhyItMatters:  "Guards the benbjohnson/litestream#1608 fix: a reporting query that spans several statements must see one snapshot, and only the VFS path exercises hydration under a live writer.",

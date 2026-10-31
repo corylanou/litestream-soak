@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -64,6 +65,37 @@ func TestVFSSessionRequiresTheExtension(t *testing.T) {
 	spec := vfsSessionSpec{shell: vfsSQLiteCommand, extension: filepath.Join(t.TempDir(), "missing.so"), dir: t.TempDir()}
 	if _, err := startVFSSession(context.Background(), "test", spec); err == nil || !strings.Contains(err.Error(), "vfs extension unavailable") {
 		t.Fatalf("startVFSSession() error = %v", err)
+	}
+}
+
+func TestVFSSessionStartsFromAFreshHydration(t *testing.T) {
+	if _, err := exec.LookPath(vfsSQLiteCommand); err != nil {
+		t.Skip("sqlite3 shell not installed")
+	}
+	dir := t.TempDir()
+	stale := []string{vfsHydrationFile, vfsHydrationFile + ".meta", ".litestream-snapshot-2965982544", vfsLogFile}
+	for _, name := range stale {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	session, err := startVFSSession(ctx, "test", vfsSessionSpec{shell: vfsSQLiteCommand, dir: dir, readerURI: "file:" + filepath.Join(dir, "plain.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.close()
+	for _, name := range stale {
+		if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s survived the session reset: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "keep.txt")); err != nil {
+		t.Fatalf("unrelated file removed: %v", err)
 	}
 }
 
@@ -130,5 +162,82 @@ func TestVFSSessionOpenHonorsURIParameters(t *testing.T) {
 	_, err = reader.exec(ctx, "INSERT INTO t VALUES (8)")
 	if !errors.Is(err, errVFSSessionClosed) || !strings.Contains(err.Error(), "readonly") {
 		t.Fatalf("write on a mode=ro .open URI = %v, want a readonly error", err)
+	}
+}
+
+func TestVFSSessionReadsHydrationOutcomeFromTheLog(t *testing.T) {
+	complete := `time=2026-10-31T17:50:46.432Z level=DEBUG msg="opening ltx file for hydration" vfs=true level=9
+time=2026-10-31T17:50:46.604Z level=DEBUG msg="hydration complete" vfs=true name=/data/vfs/snapshot/replica.db path=/data/vfs/snapshot/hydrated.db txid=0000000000000001
+time=2026-10-31T17:50:46.605Z level=DEBUG msg="file control" vfs=true pragma=litestream_txid value=<nil>`
+	if state := parseVFSHydration(complete); !state.complete || state.failure != "" {
+		t.Fatalf("complete log parsed as %+v", state)
+	}
+	pending := `time=2026-10-31T17:50:46.432Z level=DEBUG msg="opening ltx file for hydration" vfs=true level=9
+time=2026-10-31T17:50:46.433Z level=DEBUG msg="file control" vfs=true pragma=litestream_hydration_progress value=<nil>`
+	if state := parseVFSHydration(pending); state.complete || state.failure != "" {
+		t.Fatalf("pending log parsed as %+v", state)
+	}
+	failed := `time=2026-10-31T17:50:46.432Z level=DEBUG msg="opening ltx file for hydration" vfs=true level=9
+time=2026-10-31T17:50:47.000Z level=ERROR msg="hydration catch-up failed" vfs=true error="fetch page 12: context canceled"`
+	if state := parseVFSHydration(failed); state.complete || !strings.HasSuffix(state.failure, `msg="hydration catch-up failed" vfs=true error="fetch page 12: context canceled"`) {
+		t.Fatalf("failed log parsed as %+v", state)
+	}
+	disabled := complete + "\n" + `time=2026-10-31T18:15:44.327Z level=ERROR msg="cannot fetch new ltx files" vfs=true name=/data/vfs/snapshot/replica.db error="apply hydration updates: fetch updated page 8904: open ltx file: file does not exist"`
+	if state := parseVFSHydration(disabled); !state.complete || !strings.Contains(state.failure, "apply hydration updates") {
+		t.Fatalf("disabled log parsed as %+v", state)
+	}
+	pollOnly := complete + "\n" + `time=2026-10-31T18:15:44.327Z level=ERROR msg="cannot fetch new ltx files" vfs=true error="poll L0: ltx files: context deadline exceeded"`
+	if state := parseVFSHydration(pollOnly); !state.complete || state.failure != "" {
+		t.Fatalf("a poll error that leaves hydration on parsed as %+v", state)
+	}
+	if state := parseVFSHydration(""); state.complete || state.failure != "" {
+		t.Fatalf("empty log parsed as %+v", state)
+	}
+}
+
+func TestVFSSessionKeepsWatchingTheLogAfterHydrationCompletes(t *testing.T) {
+	dir := t.TempDir()
+	session := &vfsSession{name: "test", dir: dir}
+	if state, err := session.hydration(); err != nil || state.complete {
+		t.Fatalf("missing log = %+v, %v", state, err)
+	}
+	appendLog := func(text string) {
+		f, err := os.OpenFile(session.logPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(text); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendLog(`time=2026-10-31T17:50:46.604Z level=DEBUG msg="hydration complete" vfs=true txid=0000000000000001` + "\n")
+	if state, err := session.hydration(); err != nil || !state.complete || state.failure != "" {
+		t.Fatalf("complete log = %+v, %v", state, err)
+	}
+	appendLog(`time=2026-10-31T18:15:44.327Z level=ERROR msg="cannot fetch new ltx files" vfs=true error="apply hydration`)
+	if state, err := session.hydration(); err != nil || state.failure != "" {
+		t.Fatalf("partial line judged early: %+v, %v", state, err)
+	}
+	appendLog(` updates: fetch updated page 8904: open ltx file: file does not exist"` + "\n")
+	state, err := session.hydration()
+	if err != nil || !state.complete || !strings.Contains(state.failure, `msg="cannot fetch new ltx files"`) || !strings.Contains(state.failure, "page 8904") {
+		t.Fatalf("disable after completion missed: %+v, %v", state, err)
+	}
+
+	fresh := &vfsSession{name: "fresh", dir: t.TempDir()}
+	if fresh.logOversized() {
+		t.Fatal("a missing log counted as oversized")
+	}
+	if err := os.WriteFile(fresh.logPath(), make([]byte, vfsLogCapBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !fresh.logOversized() {
+		t.Fatal("a log past the cap was not reported")
+	}
+	if state, err := fresh.hydration(); err != nil || state.complete || state.failure != "" {
+		t.Fatalf("filler judged as a marker: %+v, %v", state, err)
 	}
 }

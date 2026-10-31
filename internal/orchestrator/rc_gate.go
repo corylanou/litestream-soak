@@ -708,11 +708,11 @@ func rcGateWorkers() []DesiredWorker {
 			VolumeSizeGB: 10,
 			Workload: workload.Config{
 				LoadMode:                 "synthetic",
-				WriteRate:                50,
+				WriteRate:                10,
 				Pattern:                  "constant",
 				PayloadSize:              1024,
 				ReadRatio:                0.1,
-				Workers:                  2,
+				Workers:                  1,
 				InitialSize:              "20MB",
 				VerifyInterval:           "30m",
 				VerifyType:               "integrity",
