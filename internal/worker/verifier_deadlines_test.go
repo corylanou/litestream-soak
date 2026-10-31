@@ -97,6 +97,19 @@ func TestVerificationCooldown(t *testing.T) {
 	if got := verificationCooldown(30*time.Minute, 40*time.Minute); got != 80*time.Minute {
 		t.Fatalf("cooldown=%s", got)
 	}
+	single := DefaultConfig()
+	single.VerifyInterval = 30 * time.Minute
+	if got := single.verificationCooldown(40 * time.Minute); got != 80*time.Minute {
+		t.Fatalf("single-database cooldown = %s, want twice the elapsed time", got)
+	}
+	manyDB := single
+	manyDB.NumDatabases = 500
+	if got := manyDB.verificationCooldown(40 * time.Minute); got != 30*time.Minute {
+		t.Fatalf("many-database cooldown = %s, want the plain interval", got)
+	}
+	if got := manyDB.verificationCooldown(time.Minute); got != 30*time.Minute {
+		t.Fatalf("many-database cooldown after a short batch = %s, want the plain interval", got)
+	}
 	if got := verificationCooldown(30*time.Minute, time.Minute); got != 30*time.Minute {
 		t.Fatalf("floor=%s", got)
 	}

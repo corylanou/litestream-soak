@@ -14,6 +14,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/corylanou/litestream-soak/internal/reporting"
 	_ "modernc.org/sqlite"
 )
 
@@ -184,10 +185,151 @@ func TestManyDBPendingFairness(t *testing.T) {
 			t.Fatalf("attempt %d: first=%s", i, changes[0].path)
 		}
 		load.attemptManyDBChange(changes[0])
-		load.markChanged(paths[0])
+	}
+	load.markChanged(paths[3])
+	for i, want := range []int{0, 1, 2, 4, 0, 1} {
+		changes := load.pendingManyDBChanges()
+		if changes[0].path != paths[3] || !changes[0].written {
+			t.Fatalf("attempt %d: written database not first: %+v", i, changes[0])
+		}
+		if changes[1].path != paths[want] {
+			t.Fatalf("attempt %d: backlog round robin = %s, want %s", i, changes[1].path, paths[want])
+		}
+		load.attemptManyDBChange(changes[1])
 	}
 	if got := len(load.pendingManyDBChanges()); got != 5 {
 		t.Fatalf("failed work lost: %d", got)
+	}
+}
+
+func TestManyDBPendingOrdersWrittenAheadOfSeededBacklog(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.NumDatabases = 6
+	cfg.VerifyChangedLimit = 3
+	load := newManyDBLoad(&cfg)
+	paths := cfg.ManyDBPaths()
+	if load.manyDBWrittenPending() != 0 {
+		t.Fatalf("seeded set counted as written: %d", load.manyDBWrittenPending())
+	}
+	load.markChanged(paths[4])
+	load.markChanged(paths[1])
+	got := load.pendingManyDBChanges()
+	var order []string
+	for _, change := range got {
+		order = append(order, filepath.Base(change.path))
+	}
+	want := []string{filepath.Base(paths[1]), filepath.Base(paths[4]), filepath.Base(paths[0]), filepath.Base(paths[2]), filepath.Base(paths[3]), filepath.Base(paths[5])}
+	if !slices.Equal(order, want) {
+		t.Fatalf("order = %v, want written first then backlog %v", order, want)
+	}
+	if !got[0].written || !got[1].written || got[2].written {
+		t.Fatalf("written flags = %v %v %v", got[0].written, got[1].written, got[2].written)
+	}
+	if load.manyDBWrittenPending() != 2 {
+		t.Fatalf("written pending = %d, want 2", load.manyDBWrittenPending())
+	}
+
+	var changed []string
+	for _, change := range got {
+		changed = append(changed, change.path)
+	}
+	targets, total := selectManyDBVerificationTargets(cfg, changed)
+	if total != 6 || !slices.Equal(targets, []string{paths[1], paths[4], paths[0]}) {
+		t.Fatalf("targets = %v (total %d), want both written databases then the first backlog entry", targets, total)
+	}
+
+	load.attemptManyDBChange(got[2])
+	order = order[:0]
+	for _, change := range load.pendingManyDBChanges() {
+		order = append(order, filepath.Base(change.path))
+	}
+	want = []string{filepath.Base(paths[1]), filepath.Base(paths[4]), filepath.Base(paths[2]), filepath.Base(paths[3]), filepath.Base(paths[5]), filepath.Base(paths[0])}
+	if !slices.Equal(order, want) {
+		t.Fatalf("round robin after an attempt = %v, want %v", order, want)
+	}
+	load.acknowledgeManyDBChange(got[0])
+	load.acknowledgeManyDBChange(got[1])
+	if load.manyDBWrittenPending() != 0 {
+		t.Fatalf("acknowledged written databases still counted: %d", load.manyDBWrittenPending())
+	}
+	if count, _ := load.manyDBPendingCoverage(); count != 4 {
+		t.Fatalf("backlog = %d, want 4", count)
+	}
+	load.markChanged(paths[0])
+	if load.manyDBWrittenPending() != 1 || load.pendingManyDBChanges()[0].path != paths[0] {
+		t.Fatalf("a write to a backlog database must move it to the front: %+v", load.pendingManyDBChanges()[0])
+	}
+}
+
+func TestManyDBBatchOutcome(t *testing.T) {
+	stats := manyDBStepStats{sync: manyDBDurationStats{count: 2, total: 3 * time.Second, max: 2 * time.Second}, restore: manyDBDurationStats{count: 2, total: 20 * time.Second, max: 12 * time.Second}}
+	tests := []struct {
+		name        string
+		batch       manyDBBatch
+		wantStatus  string
+		wantSummary []string
+	}{
+		{
+			name:        "written databases beyond the cap keep coverage pending",
+			batch:       manyDBBatch{targets: 100, truncated: 40, coverage: manyDBCoverage{pending: 440, written: 40, oldestAge: 90.5}, stats: stats},
+			wantStatus:  "pending",
+			wantSummary: []string{"verified batch of 100 databases", "coverage pending for 40 written databases", "440 pending in all", "oldest 90.500s", "sync_mean_seconds=1.5 sync_max_seconds=2.0", "restore_mean_seconds=10.0 restore_max_seconds=12.0"},
+		},
+		{
+			name:        "seeded backlog alone passes and is reported",
+			batch:       manyDBBatch{targets: 100, truncated: 300, coverage: manyDBCoverage{pending: 300, oldestAge: 1800}, stats: stats},
+			wantStatus:  "passed",
+			wantSummary: []string{"verification passed (100 databases verified", "0 written databases still pending", "seeded backlog 300", "oldest 1800.000s", "restore_max_seconds=12.0"},
+		},
+		{
+			name:        "drained set passes with no backlog",
+			batch:       manyDBBatch{targets: 12},
+			wantStatus:  "passed",
+			wantSummary: []string{"verification passed (12 databases verified", "seeded backlog 0", "sync_mean_seconds=0.0"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, summary := tt.batch.outcome()
+			if status != tt.wantStatus {
+				t.Fatalf("status = %s, want %s (%s)", status, tt.wantStatus, summary)
+			}
+			for _, want := range tt.wantSummary {
+				if !strings.Contains(summary, want) {
+					t.Fatalf("summary %q is missing %q", summary, want)
+				}
+			}
+			step := tt.batch.String()
+			for _, want := range []string{fmt.Sprintf("targets=%d truncated=%d", tt.batch.targets, tt.batch.truncated), fmt.Sprintf("pending_databases=%d written_pending=%d", tt.batch.coverage.pending, tt.batch.coverage.written)} {
+				if !strings.Contains(step, want) {
+					t.Fatalf("step output %q is missing %q", step, want)
+				}
+			}
+		})
+	}
+}
+
+func TestManyDBBatchStatsAggregatePerDatabaseSteps(t *testing.T) {
+	steps := []reporting.VerificationStep{
+		{Name: "pause_load", DurationMS: 5000},
+		{Name: "sync db-0001.db", DurationMS: 1000},
+		{Name: "restore_validate db-0001.db", DurationMS: 8000},
+		{Name: "sync db-0002.db", DurationMS: 3000},
+		{Name: "restore_validate db-0002.db", DurationMS: 12000},
+		{Name: "checkpoint db-0002.db", DurationMS: 9000},
+	}
+	stats := manyDBBatchStats(steps)
+	if stats.sync.count != 2 || stats.sync.mean() != 2*time.Second || stats.sync.max != 3*time.Second {
+		t.Fatalf("sync stats = %+v", stats.sync)
+	}
+	if stats.restore.count != 2 || stats.restore.mean() != 10*time.Second || stats.restore.max != 12*time.Second {
+		t.Fatalf("restore stats = %+v", stats.restore)
+	}
+	if got := stats.String(); got != "sync_mean_seconds=2.0 sync_max_seconds=3.0 restore_mean_seconds=10.0 restore_max_seconds=12.0" {
+		t.Fatalf("stats text = %q", got)
+	}
+	if got := manyDBTruncatedMessage(440, 100, 100); got != "many database changed set truncated: 440 pending databases, 100 verified this cycle (limit 100)" {
+		t.Fatalf("truncation message = %q", got)
 	}
 }
 
@@ -602,6 +744,10 @@ func TestManyDBPendingMetricsAgeWithoutActivity(t *testing.T) {
 			case "soak_many_db_oldest_pending_age_seconds":
 				if value < 3600+elapsed {
 					t.Fatalf("oldest=%f", value)
+				}
+			case "soak_many_db_written_pending_count":
+				if value != 0 {
+					t.Fatalf("written pending=%f, want 0 for a seeded-only set", value)
 				}
 			default:
 				t.Fatalf("unexpected metric %s", metric.GetName())

@@ -248,6 +248,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.verifier.SetStartHook(r.sendVerificationStarted)
 	r.verifier.onProfileIncident = r.triggerProfile
+	r.verifier.onManyDBTruncated = r.sendManyDBTruncatedEvent
 	defer r.verifier.stopFollow()
 
 	if err := r.runVerifyLoop(runCtx); err != nil {
@@ -336,7 +337,7 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 			if err != nil {
 				slog.Error("Verification cycle error", "error", err)
 			}
-			timer.Reset(verificationCooldown(r.cfg.VerifyInterval, time.Since(cycleStarted)))
+			timer.Reset(r.cfg.verificationCooldown(time.Since(cycleStarted)))
 			switch result.Status {
 			case "failed":
 				slog.Error("VERIFICATION FAILED — replication integrity compromised")

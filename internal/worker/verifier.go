@@ -75,10 +75,12 @@ type manyDBChangeTracker interface {
 	attemptManyDBChange(manyDBChange)
 	acknowledgeManyDBChange(manyDBChange)
 	manyDBPendingCoverage() (int, float64)
+	manyDBWrittenPending() int
 }
 
 type Verifier struct {
 	onProfileIncident  func(string)
+	onManyDBTruncated  func(changed, targets, limit int)
 	validationSteps    []reporting.VerificationStep
 	logicalEvidence    string
 	logicalWorkloadSHA string

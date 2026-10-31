@@ -128,10 +128,13 @@ func manyDBDSN(dbPath string) string {
 	return dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 }
 
+// newManyDBLoad seeds every database into the pending set so each one is
+// verified at least once; seeded entries are not written, so they are a
+// backlog the verifier drains behind the databases the workload touched.
 func newManyDBLoad(cfg *Config) *manyDBLoad {
 	load := &manyDBLoad{cfg: cfg, now: time.Now, changed: make(map[string]manyDBChange)}
 	for _, path := range cfg.ManyDBPaths() {
-		load.markChanged(path)
+		load.mark(path, false)
 	}
 	return load
 }
@@ -362,13 +365,21 @@ func (l *manyDBLoad) Stop() {
 	SetLoadRunning(false)
 }
 
+// manyDBChange is one database awaiting verification of its current
+// generation. written is set once the workload wrote to it since it was last
+// verified; a seeded entry that was never written is backlog, not a change.
 type manyDBChange struct {
 	path       string
 	generation uint64
 	since      time.Time
+	written    bool
 }
 
 func (l *manyDBLoad) markChanged(dbPath string) {
+	l.mark(dbPath, true)
+}
+
+func (l *manyDBLoad) mark(dbPath string, written bool) {
 	if dbPath == "" {
 		return
 	}
@@ -383,9 +394,13 @@ func (l *manyDBLoad) markChanged(dbPath string) {
 	}
 	l.changeGeneration++
 	change.generation = l.changeGeneration
+	change.written = change.written || written
 	l.changed[dbPath] = change
 }
 
+// pendingManyDBChanges lists the pending set with written databases ahead of
+// the seeded backlog, each group in round-robin order from the last attempt,
+// so a truncated batch always covers what the workload touched first.
 func (l *manyDBLoad) pendingManyDBChanges() []manyDBChange {
 	l.changedMu.Lock()
 	defer l.changedMu.Unlock()
@@ -394,6 +409,9 @@ func (l *manyDBLoad) pendingManyDBChanges() []manyDBChange {
 		changes = append(changes, change)
 	}
 	sort.Slice(changes, func(i, j int) bool {
+		if changes[i].written != changes[j].written {
+			return changes[i].written
+		}
 		afterI, afterJ := changes[i].path > l.lastAttempt, changes[j].path > l.lastAttempt
 		if afterI != afterJ {
 			return afterI
@@ -430,6 +448,20 @@ func (l *manyDBLoad) manyDBPendingCoverage() (int, float64) {
 	return len(l.changed), max(0, now.Sub(oldest).Seconds())
 }
 
+// manyDBWrittenPending counts pending databases the workload wrote to since
+// their last successful verification.
+func (l *manyDBLoad) manyDBWrittenPending() int {
+	l.changedMu.Lock()
+	defer l.changedMu.Unlock()
+	written := 0
+	for _, change := range l.changed {
+		if change.written {
+			written++
+		}
+	}
+	return written
+}
+
 func selectManyDBVerificationTargets(cfg Config, changed []string) ([]string, int) {
 	if len(changed) == 0 {
 		changed = cfg.ManyDBActivePaths()
@@ -464,21 +496,24 @@ func selectManyDBVerificationTargets(cfg Config, changed []string) ([]string, in
 	return targets, totalChanged
 }
 
-func (l *manyDBLoad) coverageDescriptors() (*prometheus.Desc, *prometheus.Desc) {
+func (l *manyDBLoad) coverageDescriptors() (*prometheus.Desc, *prometheus.Desc, *prometheus.Desc) {
 	labels := prometheus.Labels{"worker_id": l.cfg.WorkerID, "profile": l.cfg.ProfileName, "source": l.cfg.Source, "region": l.cfg.Region}
 	return prometheus.NewDesc("soak_many_db_pending_count", "Databases awaiting successful verification of their current generation, including untouched databases.", nil, labels),
-		prometheus.NewDesc("soak_many_db_oldest_pending_age_seconds", "Seconds since the oldest outstanding database first required verification; zero when coverage is current.", nil, labels)
+		prometheus.NewDesc("soak_many_db_oldest_pending_age_seconds", "Seconds since the oldest outstanding database first required verification; zero when coverage is current.", nil, labels),
+		prometheus.NewDesc("soak_many_db_written_pending_count", "Databases the workload wrote to that still await successful verification of their current generation.", nil, labels)
 }
 
 func (l *manyDBLoad) Describe(ch chan<- *prometheus.Desc) {
-	count, age := l.coverageDescriptors()
+	count, age, written := l.coverageDescriptors()
 	ch <- count
 	ch <- age
+	ch <- written
 }
 
 func (l *manyDBLoad) Collect(ch chan<- prometheus.Metric) {
-	countDesc, ageDesc := l.coverageDescriptors()
+	countDesc, ageDesc, writtenDesc := l.coverageDescriptors()
 	count, age := l.manyDBPendingCoverage()
 	ch <- prometheus.MustNewConstMetric(countDesc, prometheus.GaugeValue, float64(count))
 	ch <- prometheus.MustNewConstMetric(ageDesc, prometheus.GaugeValue, age)
+	ch <- prometheus.MustNewConstMetric(writtenDesc, prometheus.GaugeValue, float64(l.manyDBWrittenPending()))
 }

@@ -249,7 +249,7 @@ func TestManyDBLogicalVerification(t *testing.T) {
 	}{
 		{"equal", false, 2, ""},
 		{"missing committed row", true, 2, "source_rows=2 restored_rows=1"},
-		{"truncated targets", false, 1, "pending"},
+		{"truncated seeded backlog", false, 1, "backlog"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -294,9 +294,12 @@ cp "$LOGICAL_FIXTURES/$(basename "$source")" "$restored"
 			}))
 			pauser := &fakePauser{}
 			result, err := NewVerifier(cfg, pauser).RunCycle(context.Background())
-			if tt.want == "pending" {
-				if err != nil || result.Passed || result.Status != "pending" {
-					t.Fatalf("cycle=%+v, %v", result, err)
+			if tt.want == "backlog" {
+				if err != nil || !result.Passed || result.Status != "passed" || !strings.Contains(result.Summary, "seeded backlog 1,") {
+					t.Fatalf("seeded backlog must pass with the backlog reported: %+v, %v", result, err)
+				}
+				if step := result.Steps[len(result.Steps)-2]; step.Name != "pending_coverage" || !strings.Contains(step.OutputTail, "targets=1 truncated=1 pending_databases=1 written_pending=0") {
+					t.Fatalf("pending_coverage step = %+v", step)
 				}
 			} else if tt.want == "" {
 				if err != nil || !result.Passed {
@@ -317,7 +320,7 @@ cp "$LOGICAL_FIXTURES/$(basename "$source")" "$restored"
 			if !found {
 				t.Fatal("missing independent validator/workload evidence")
 			}
-			if tt.want != "" && tt.want != "pending" && !strings.Contains(readFile(t, filepath.Join(dir, "verification.log")), "FAIL") {
+			if tt.want != "" && tt.want != "backlog" && !strings.Contains(readFile(t, filepath.Join(dir, "verification.log")), "FAIL") {
 				t.Fatal("failure not retained")
 			}
 		})
@@ -499,6 +502,10 @@ cp "$LOGICAL_FIXTURES/$(basename "$source")" "$restored"
 		}
 	}))
 	verifier := NewVerifier(cfg, load)
+	var truncations [][3]int
+	verifier.onManyDBTruncated = func(changed, targets, limit int) {
+		truncations = append(truncations, [3]int{changed, targets, limit})
+	}
 	first, err := verifier.RunCycle(context.Background())
 	if err == nil || first.Status != "failed" {
 		t.Fatalf("first failure=%+v, %v", first, err)
@@ -506,9 +513,15 @@ cp "$LOGICAL_FIXTURES/$(basename "$source")" "$restored"
 	if count, _ := load.manyDBPendingCoverage(); count != 3 {
 		t.Fatalf("first failure lost work: %d", count)
 	}
+	if len(truncations) != 1 || truncations[0] != [3]int{3, 2, 2} {
+		t.Fatalf("truncation events = %v, want one for 3 pending, 2 verified, limit 2", truncations)
+	}
 	second, err := verifier.RunCycle(context.Background())
-	if err != nil || second.Status != "pending" || second.Passed {
-		t.Fatalf("later paths=%+v, %v", second, err)
+	if err != nil || second.Status != "passed" || !second.Passed {
+		t.Fatalf("seeded backlog alone must not hold the batch pending: %+v, %v", second, err)
+	}
+	if !strings.Contains(second.Summary, "seeded backlog 1,") || !strings.Contains(second.Summary, "0 written databases still pending") {
+		t.Fatalf("summary = %q", second.Summary)
 	}
 	if changes := load.pendingManyDBChanges(); len(changes) != 1 || changes[0].path != paths[0] {
 		t.Fatalf("pending=%+v", changes)
@@ -528,16 +541,19 @@ cp "$LOGICAL_FIXTURES/$(basename "$source")" "$restored"
 	}
 	mode.Store(0)
 	later, err := verifier.RunCycle(context.Background())
-	if err != nil || later.Status != "pending" {
+	if err != nil || later.Status != "passed" {
 		t.Fatalf("progress after cancellation=%+v, %v", later, err)
 	}
-	if changes := load.pendingManyDBChanges(); len(changes) != 1 || changes[0].path != paths[0] {
-		t.Fatalf("canceled path lost: %+v", changes)
+	if changes := load.pendingManyDBChanges(); len(changes) != 1 || changes[0].path != paths[0] || changes[0].written {
+		t.Fatalf("written databases must be verified ahead of the seeded backlog: %+v", changes)
 	}
 	mode.Store(2)
 	newer, err := verifier.RunCycle(context.Background())
 	if err != nil || newer.Status != "pending" || newer.Passed {
 		t.Fatalf("new generation=%+v, %v", newer, err)
+	}
+	if !strings.Contains(newer.Summary, "coverage pending for 1 written databases") {
+		t.Fatalf("pending summary = %q", newer.Summary)
 	}
 	mode.Store(0)
 	recovered, err := verifier.RunCycle(context.Background())
