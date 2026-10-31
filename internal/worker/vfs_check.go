@@ -30,16 +30,17 @@ const (
 	vfsHydrationBudget        = 10 * time.Minute
 	vfsReadHydrationBudget    = time.Minute
 	vfsHydrationPoll          = 5 * time.Second
-	vfsCatchUpBudget          = 5 * time.Minute
+	vfsCatchUpBudget          = 10 * time.Minute
 	vfsCatchUpPoll            = time.Second
 	vfsProbeWriteBudget       = 10 * time.Minute
 	vfsProbeWritePoll         = time.Second
 	vfsSyncBudget             = 2 * time.Minute
 	// vfsStatementTimeout bounds one shell statement. The VFS applies every
 	// poll's page updates to the hydrated file under its file mutex with one
-	// remote fetch per page, so a statement can wait for a whole poll's worth
-	// of page fetches before it runs.
-	vfsStatementTimeout = 5 * time.Minute
+	// remote fetch per page, and a compaction that moves pages to a new level
+	// makes it fetch every page in the compacted file again, so a statement can
+	// wait for the whole database's worth of page fetches before it runs.
+	vfsStatementTimeout = 10 * time.Minute
 	vfsReadTableLimit   = 64
 )
 
