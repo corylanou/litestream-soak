@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -30,6 +32,7 @@ type manyDBLoad struct {
 	changed          map[string]manyDBChange
 	changeGeneration uint64
 	lastAttempt      string
+	stateMu          sync.Mutex
 
 	mu      sync.Mutex
 	paused  bool
@@ -48,8 +51,10 @@ func populateManyDBs(ctx context.Context, cfg Config) error {
 	if err := os.MkdirAll(cfg.ManyDBDir(), 0755); err != nil {
 		return fmt.Errorf("create many database dir: %w", err)
 	}
+	fresh := true
 	for _, dbPath := range cfg.ManyDBPaths() {
 		if _, err := os.Stat(dbPath); err == nil {
+			fresh = false
 			if err := pruneManyDBRows(ctx, dbPath, cfg.manyDBMaxRowsPerDatabase()); err != nil {
 				return fmt.Errorf("prune many database %s: %w", dbPath, err)
 			}
@@ -61,7 +66,58 @@ func populateManyDBs(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("seed many database %s: %w", dbPath, err)
 		}
 	}
+	if fresh {
+		if err := writeManyDBWrittenState(cfg, nil); err != nil {
+			return fmt.Errorf("record empty written set: %w", err)
+		}
+	}
 	return nil
+}
+
+// manyDBWrittenStateFile records, on the data volume, the databases the
+// workload wrote to that have not been verified since. A worker restart
+// builds a new tracker, and without this file every one of those writes
+// would come back as seeded backlog and could leave a batch without ever
+// being verified.
+const manyDBWrittenStateFile = ".written-pending.json"
+
+type manyDBWrittenState struct {
+	Written []string `json:"written"`
+}
+
+func manyDBWrittenStatePath(cfg *Config) string {
+	return filepath.Join(cfg.ManyDBDir(), manyDBWrittenStateFile)
+}
+
+func writeManyDBWrittenState(cfg Config, written []string) error {
+	body, err := json.Marshal(manyDBWrittenState{Written: written})
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(manyDBWrittenStatePath(&cfg), body)
+}
+
+func readManyDBWrittenState(cfg *Config) ([]string, error) {
+	body, err := os.ReadFile(manyDBWrittenStatePath(cfg))
+	if err != nil {
+		return nil, err
+	}
+	var state manyDBWrittenState
+	if err := json.Unmarshal(body, &state); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", manyDBWrittenStatePath(cfg), err)
+	}
+	return state.Written, nil
+}
+
+// manyDBStateOnVolume reports whether any database already exists, which
+// tells a restart apart from a fresh volume.
+func manyDBStateOnVolume(cfg *Config) bool {
+	for _, dbPath := range cfg.ManyDBPaths() {
+		if _, err := os.Stat(dbPath); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func pruneManyDBRows(ctx context.Context, dbPath string, maxRows int) error {
@@ -130,13 +186,77 @@ func manyDBDSN(dbPath string) string {
 
 // newManyDBLoad seeds every database into the pending set so each one is
 // verified at least once; seeded entries are not written, so they are a
-// backlog the verifier drains behind the databases the workload touched.
+// backlog the verifier drains behind the databases the workload touched. The
+// written set a previous run left on the volume is restored on top; when the
+// volume holds databases but the written set cannot be read, every database
+// counts as written until it is verified, so no write is lost to a restart.
 func newManyDBLoad(cfg *Config) *manyDBLoad {
 	load := &manyDBLoad{cfg: cfg, now: time.Now, changed: make(map[string]manyDBChange)}
 	for _, path := range cfg.ManyDBPaths() {
 		load.mark(path, false)
 	}
+	load.restoreWrittenState()
 	return load
+}
+
+func (l *manyDBLoad) restoreWrittenState() {
+	written, err := readManyDBWrittenState(l.cfg)
+	switch {
+	case err == nil:
+		known := make(map[string]struct{}, len(l.changed))
+		for path := range l.changed {
+			known[path] = struct{}{}
+		}
+		for _, path := range written {
+			if _, ok := known[path]; ok {
+				l.setWritten(path)
+			}
+		}
+		if len(written) > 0 {
+			slog.Info("Restored many database written set", "written", len(written))
+		}
+	case !manyDBStateOnVolume(l.cfg):
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		slog.Warn("Many database written set unreadable on an empty volume", "error", err)
+	default:
+		slog.Warn("Many database written set unavailable with databases on the volume; treating every database as written until verified", "error", err)
+		for path := range l.changed {
+			l.setWritten(path)
+		}
+	}
+}
+
+func (l *manyDBLoad) setWritten(path string) {
+	l.changedMu.Lock()
+	change := l.changed[path]
+	change.written = true
+	l.changed[path] = change
+	l.changedMu.Unlock()
+}
+
+// persistWrittenState rewrites the written set on the volume. It runs only
+// when a path enters or leaves the set, and only once the database directory
+// exists, so an unpopulated configuration never writes anything.
+func (l *manyDBLoad) persistWrittenState() {
+	if _, err := os.Stat(l.cfg.ManyDBDir()); err != nil {
+		return
+	}
+	l.changedMu.Lock()
+	written := make([]string, 0, len(l.changed))
+	for path, change := range l.changed {
+		if change.written {
+			written = append(written, path)
+		}
+	}
+	l.changedMu.Unlock()
+	sort.Strings(written)
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
+	if err := writeManyDBWrittenState(*l.cfg, written); err != nil {
+		slog.Warn("Failed to persist many database written set", "error", err)
+	}
 }
 
 func (l *manyDBLoad) Start(ctx context.Context) error {
@@ -394,8 +514,14 @@ func (l *manyDBLoad) mark(dbPath string, written bool) {
 	}
 	l.changeGeneration++
 	change.generation = l.changeGeneration
+	entered := written && !change.written
 	change.written = change.written || written
 	l.changed[dbPath] = change
+	if entered {
+		l.changedMu.Unlock()
+		l.persistWrittenState()
+		l.changedMu.Lock()
+	}
 }
 
 // pendingManyDBChanges lists the pending set with written databases ahead of
@@ -429,37 +555,42 @@ func (l *manyDBLoad) attemptManyDBChange(change manyDBChange) {
 
 func (l *manyDBLoad) acknowledgeManyDBChange(change manyDBChange) {
 	l.changedMu.Lock()
-	defer l.changedMu.Unlock()
-	if current, ok := l.changed[change.path]; ok && current.generation == change.generation {
+	current, ok := l.changed[change.path]
+	verified := ok && current.generation == change.generation
+	if verified {
 		delete(l.changed, change.path)
+	}
+	l.changedMu.Unlock()
+	if verified && current.written {
+		l.persistWrittenState()
 	}
 }
 
-func (l *manyDBLoad) manyDBPendingCoverage() (int, float64) {
+// manyDBCoverage is the pending set at one instant: every database awaiting
+// verification, how many of them the workload wrote to, and the age of the
+// oldest. All three are read under one lock so they describe the same set.
+type manyDBCoverage struct {
+	pending   int
+	written   int
+	oldestAge float64
+}
+
+func (l *manyDBLoad) manyDBPendingCoverage() manyDBCoverage {
 	l.changedMu.Lock()
 	defer l.changedMu.Unlock()
 	now := l.now()
 	oldest := now
+	coverage := manyDBCoverage{pending: len(l.changed)}
 	for _, change := range l.changed {
 		if change.since.Before(oldest) {
 			oldest = change.since
 		}
-	}
-	return len(l.changed), max(0, now.Sub(oldest).Seconds())
-}
-
-// manyDBWrittenPending counts pending databases the workload wrote to since
-// their last successful verification.
-func (l *manyDBLoad) manyDBWrittenPending() int {
-	l.changedMu.Lock()
-	defer l.changedMu.Unlock()
-	written := 0
-	for _, change := range l.changed {
 		if change.written {
-			written++
+			coverage.written++
 		}
 	}
-	return written
+	coverage.oldestAge = max(0, now.Sub(oldest).Seconds())
+	return coverage
 }
 
 func selectManyDBVerificationTargets(cfg Config, changed []string) ([]string, int) {
@@ -512,8 +643,8 @@ func (l *manyDBLoad) Describe(ch chan<- *prometheus.Desc) {
 
 func (l *manyDBLoad) Collect(ch chan<- prometheus.Metric) {
 	countDesc, ageDesc, writtenDesc := l.coverageDescriptors()
-	count, age := l.manyDBPendingCoverage()
-	ch <- prometheus.MustNewConstMetric(countDesc, prometheus.GaugeValue, float64(count))
-	ch <- prometheus.MustNewConstMetric(ageDesc, prometheus.GaugeValue, age)
-	ch <- prometheus.MustNewConstMetric(writtenDesc, prometheus.GaugeValue, float64(l.manyDBWrittenPending()))
+	coverage := l.manyDBPendingCoverage()
+	ch <- prometheus.MustNewConstMetric(countDesc, prometheus.GaugeValue, float64(coverage.pending))
+	ch <- prometheus.MustNewConstMetric(ageDesc, prometheus.GaugeValue, coverage.oldestAge)
+	ch <- prometheus.MustNewConstMetric(writtenDesc, prometheus.GaugeValue, float64(coverage.written))
 }

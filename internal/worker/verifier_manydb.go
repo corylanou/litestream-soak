@@ -57,7 +57,7 @@ func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResul
 			generations[change.path] = change
 		}
 		defer func() {
-			batch.coverage = v.manyDBCoverage()
+			batch.coverage = v.manyDBChanges.manyDBPendingCoverage()
 			batch.stats = manyDBBatchStats(result.Steps)
 			_ = recordVerificationStep(&result, "pending_coverage", func() error { return nil })
 			result.Steps[len(result.Steps)-1].OutputTail = batch.String()
@@ -153,7 +153,7 @@ func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResul
 	}
 
 	if v.manyDBChanges != nil {
-		batch.coverage = v.manyDBCoverage()
+		batch.coverage = v.manyDBChanges.manyDBPendingCoverage()
 	}
 	batch.stats = manyDBBatchStats(result.Steps)
 	result.Status, result.Summary = batch.outcome()
@@ -164,20 +164,6 @@ func (v *Verifier) runManyDBCycle(ctx context.Context) (result VerificationResul
 		v.logResult(start, true, "")
 	}
 	return result, nil
-}
-
-// manyDBCoverage is the pending set after a batch: every database awaiting
-// verification, how many of them the workload wrote to, and the age of the
-// oldest.
-type manyDBCoverage struct {
-	pending   int
-	written   int
-	oldestAge float64
-}
-
-func (v *Verifier) manyDBCoverage() manyDBCoverage {
-	count, age := v.manyDBChanges.manyDBPendingCoverage()
-	return manyDBCoverage{pending: count, written: v.manyDBChanges.manyDBWrittenPending(), oldestAge: age}
 }
 
 // manyDBBatch describes one verification batch for the summary and the

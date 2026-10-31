@@ -275,7 +275,7 @@ func (r *Runner) sendManyDBTruncatedEvent(changed, targets, limit int) {
 const manyDBTruncatedEventType = "many_db_changed_set_truncated"
 
 func manyDBTruncatedMessage(changed, targets, limit int) string {
-	return fmt.Sprintf("many database changed set truncated: %d pending databases, %d verified this cycle (limit %d)", changed, targets, limit)
+	return fmt.Sprintf("many database changed set truncated: %d pending databases, %d selected this cycle (limit %d)", changed, targets, limit)
 }
 
 func (r *Runner) sendWorkerFailureEvent(err error) {

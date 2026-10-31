@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -208,8 +209,8 @@ func TestManyDBPendingOrdersWrittenAheadOfSeededBacklog(t *testing.T) {
 	cfg.VerifyChangedLimit = 3
 	load := newManyDBLoad(&cfg)
 	paths := cfg.ManyDBPaths()
-	if load.manyDBWrittenPending() != 0 {
-		t.Fatalf("seeded set counted as written: %d", load.manyDBWrittenPending())
+	if written := load.manyDBPendingCoverage().written; written != 0 {
+		t.Fatalf("seeded set counted as written: %d", written)
 	}
 	load.markChanged(paths[4])
 	load.markChanged(paths[1])
@@ -225,8 +226,8 @@ func TestManyDBPendingOrdersWrittenAheadOfSeededBacklog(t *testing.T) {
 	if !got[0].written || !got[1].written || got[2].written {
 		t.Fatalf("written flags = %v %v %v", got[0].written, got[1].written, got[2].written)
 	}
-	if load.manyDBWrittenPending() != 2 {
-		t.Fatalf("written pending = %d, want 2", load.manyDBWrittenPending())
+	if written := load.manyDBPendingCoverage().written; written != 2 {
+		t.Fatalf("written pending = %d, want 2", written)
 	}
 
 	var changed []string
@@ -249,16 +250,168 @@ func TestManyDBPendingOrdersWrittenAheadOfSeededBacklog(t *testing.T) {
 	}
 	load.acknowledgeManyDBChange(got[0])
 	load.acknowledgeManyDBChange(got[1])
-	if load.manyDBWrittenPending() != 0 {
-		t.Fatalf("acknowledged written databases still counted: %d", load.manyDBWrittenPending())
-	}
-	if count, _ := load.manyDBPendingCoverage(); count != 4 {
-		t.Fatalf("backlog = %d, want 4", count)
+	if coverage := load.manyDBPendingCoverage(); coverage.written != 0 || coverage.pending != 4 {
+		t.Fatalf("coverage after acknowledging the written databases = %+v, want 4 pending none written", coverage)
 	}
 	load.markChanged(paths[0])
-	if load.manyDBWrittenPending() != 1 || load.pendingManyDBChanges()[0].path != paths[0] {
+	if load.manyDBPendingCoverage().written != 1 || load.pendingManyDBChanges()[0].path != paths[0] {
 		t.Fatalf("a write to a backlog database must move it to the front: %+v", load.pendingManyDBChanges()[0])
 	}
+}
+
+func manyDBWrittenStateDir(t *testing.T, cfg *Config) {
+	t.Helper()
+	cfg.DataDir = t.TempDir()
+	if err := os.MkdirAll(cfg.ManyDBDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range cfg.ManyDBPaths() {
+		if err := os.WriteFile(path, []byte("db"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeManyDBWrittenState(*cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManyDBWrittenSetSurvivesRestart(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.NumDatabases = 5
+	cfg.VerifyChangedLimit = 2
+	manyDBWrittenStateDir(t, &cfg)
+	paths := cfg.ManyDBPaths()
+
+	before := newManyDBLoad(&cfg)
+	if coverage := before.manyDBPendingCoverage(); coverage.written != 0 || coverage.pending != 5 {
+		t.Fatalf("fresh volume with an empty written set = %+v", coverage)
+	}
+	before.markChanged(paths[2])
+	before.markChanged(paths[2])
+	before.markChanged(paths[4])
+	written, err := readManyDBWrittenState(&cfg)
+	if err != nil || !slices.Equal(written, []string{paths[2], paths[4]}) {
+		t.Fatalf("persisted written set = %v, %v", written, err)
+	}
+	for _, change := range before.pendingManyDBChanges() {
+		if change.path == paths[4] {
+			before.acknowledgeManyDBChange(change)
+		}
+	}
+	if written, err = readManyDBWrittenState(&cfg); err != nil || !slices.Equal(written, []string{paths[2]}) {
+		t.Fatalf("acknowledged database still persisted: %v, %v", written, err)
+	}
+
+	after := newManyDBLoad(&cfg)
+	coverage := after.manyDBPendingCoverage()
+	if coverage.written != 1 || coverage.pending != 5 {
+		t.Fatalf("restarted tracker = %+v, want the one outstanding write restored", coverage)
+	}
+	pending := after.pendingManyDBChanges()
+	if pending[0].path != paths[2] || !pending[0].written {
+		t.Fatalf("restored write not first: %+v", pending[0])
+	}
+	var changed []string
+	for _, change := range pending {
+		changed = append(changed, change.path)
+	}
+	targets, _ := selectManyDBVerificationTargets(cfg, changed)
+	if targets[0] != paths[2] {
+		t.Fatalf("truncated batch left out the restored write: %v", targets)
+	}
+	for _, change := range pending[1:] {
+		after.acknowledgeManyDBChange(change)
+	}
+	if status, summary := (manyDBBatch{targets: 2, coverage: after.manyDBPendingCoverage()}).outcome(); status != "pending" {
+		t.Fatalf("batch excluding the restored write passed: %s %s", status, summary)
+	}
+	after.acknowledgeManyDBChange(pending[0])
+	if status, _ := (manyDBBatch{targets: 1, coverage: after.manyDBPendingCoverage()}).outcome(); status != "passed" {
+		t.Fatalf("status after verifying the restored write = %s", status)
+	}
+}
+
+func TestManyDBWrittenSetFallsBackToEveryDatabase(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.NumDatabases = 4
+	manyDBWrittenStateDir(t, &cfg)
+	statePath := manyDBWrittenStatePath(&cfg)
+
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	missing := newManyDBLoad(&cfg)
+	if coverage := missing.manyDBPendingCoverage(); coverage.written != 4 || coverage.pending != 4 {
+		t.Fatalf("missing state with databases on the volume = %+v, want every database written", coverage)
+	}
+
+	if err := os.WriteFile(statePath, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := newManyDBLoad(&cfg)
+	if coverage := corrupt.manyDBPendingCoverage(); coverage.written != 4 {
+		t.Fatalf("corrupt state = %+v, want every database written", coverage)
+	}
+
+	fresh := DefaultConfig()
+	fresh.NumDatabases = 4
+	fresh.DataDir = t.TempDir()
+	empty := newManyDBLoad(&fresh)
+	if coverage := empty.manyDBPendingCoverage(); coverage.written != 0 || coverage.pending != 4 {
+		t.Fatalf("fresh volume = %+v, want seeded only", coverage)
+	}
+	empty.markChanged(fresh.ManyDBPaths()[0])
+	if _, err := os.Stat(manyDBWrittenStatePath(&fresh)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("written set persisted before the database directory exists: %v", err)
+	}
+}
+
+func TestPopulateManyDBsRecordsEmptyWrittenSetOnAFreshVolume(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.NumDatabases = 2
+	if err := populateManyDBs(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	written, err := readManyDBWrittenState(&cfg)
+	if err != nil || len(written) != 0 {
+		t.Fatalf("written set after a fresh populate = %v, %v", written, err)
+	}
+	load := newManyDBLoad(&cfg)
+	load.markChanged(cfg.ManyDBPaths()[1])
+	if err := populateManyDBs(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if written, err = readManyDBWrittenState(&cfg); err != nil || !slices.Equal(written, []string{cfg.ManyDBPaths()[1]}) {
+		t.Fatalf("re-populate on a restart overwrote the written set: %v, %v", written, err)
+	}
+}
+
+func TestManyDBPendingCoverageIsReadUnderOneLock(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.NumDatabases = 8
+	load := newManyDBLoad(&cfg)
+	paths := cfg.ManyDBPaths()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			load.markChanged(paths[i%len(paths)])
+			if change, ok := load.changed[paths[(i+3)%len(paths)]]; ok {
+				load.acknowledgeManyDBChange(change)
+			}
+		}
+	}()
+	for i := 0; i < 2000; i++ {
+		coverage := load.manyDBPendingCoverage()
+		if coverage.written > coverage.pending {
+			t.Fatalf("written %d exceeds pending %d", coverage.written, coverage.pending)
+		}
+		if coverage.pending == 0 && (coverage.written != 0 || coverage.oldestAge != 0) {
+			t.Fatalf("empty set reported %+v", coverage)
+		}
+	}
+	<-done
 }
 
 func TestManyDBBatchOutcome(t *testing.T) {
@@ -328,7 +481,7 @@ func TestManyDBBatchStatsAggregatePerDatabaseSteps(t *testing.T) {
 	if got := stats.String(); got != "sync_mean_seconds=2.0 sync_max_seconds=3.0 restore_mean_seconds=10.0 restore_max_seconds=12.0" {
 		t.Fatalf("stats text = %q", got)
 	}
-	if got := manyDBTruncatedMessage(440, 100, 100); got != "many database changed set truncated: 440 pending databases, 100 verified this cycle (limit 100)" {
+	if got := manyDBTruncatedMessage(440, 100, 100); got != "many database changed set truncated: 440 pending databases, 100 selected this cycle (limit 100)" {
 		t.Fatalf("truncation message = %q", got)
 	}
 }
@@ -757,7 +910,7 @@ func TestManyDBPendingMetricsAgeWithoutActivity(t *testing.T) {
 	for _, change := range load.pendingManyDBChanges() {
 		load.acknowledgeManyDBChange(change)
 	}
-	if count, age := load.manyDBPendingCoverage(); count != 0 || age != 0 {
-		t.Fatalf("drained=%d/%f", count, age)
+	if coverage := load.manyDBPendingCoverage(); coverage.pending != 0 || coverage.written != 0 || coverage.oldestAge != 0 {
+		t.Fatalf("drained=%+v", coverage)
 	}
 }

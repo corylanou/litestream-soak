@@ -271,6 +271,9 @@ func TestManyDBLogicalVerification(t *testing.T) {
 				}
 				logicalTestDB(t, filepath.Join(fixtures, filepath.Base(path)), schema)
 			}
+			if err := writeManyDBWrittenState(cfg, nil); err != nil {
+				t.Fatal(err)
+			}
 			writeFakePinnedRestore(t, dir, `
 while [ "$#" -gt 0 ]; do
  case "$1" in
@@ -470,6 +473,9 @@ func TestManyDBPendingCyclesRetainFailuresAndNewWrites(t *testing.T) {
 			}
 		}
 	}
+	if err := writeManyDBWrittenState(cfg, nil); err != nil {
+		t.Fatal(err)
+	}
 	writeFakePinnedRestore(t, dir, `
 while [ "$#" -gt 0 ]; do
  case "$1" in
@@ -510,7 +516,7 @@ cp "$LOGICAL_FIXTURES/$(basename "$source")" "$restored"
 	if err == nil || first.Status != "failed" {
 		t.Fatalf("first failure=%+v, %v", first, err)
 	}
-	if count, _ := load.manyDBPendingCoverage(); count != 3 {
+	if count := load.manyDBPendingCoverage().pending; count != 3 {
 		t.Fatalf("first failure lost work: %d", count)
 	}
 	if len(truncations) != 1 || truncations[0] != [3]int{3, 2, 2} {
@@ -533,7 +539,7 @@ cp "$LOGICAL_FIXTURES/$(basename "$source")" "$restored"
 	if err == nil || canceled.Status != "aborted" {
 		t.Fatalf("cancel=%+v, %v", canceled, err)
 	}
-	if count, _ := load.manyDBPendingCoverage(); count != 3 {
+	if count := load.manyDBPendingCoverage().pending; count != 3 {
 		t.Fatalf("cancellation lost work: %d", count)
 	}
 	if _, err := damaged.Exec("INSERT INTO t VALUES(2)"); err != nil {
@@ -560,8 +566,8 @@ cp "$LOGICAL_FIXTURES/$(basename "$source")" "$restored"
 	if err != nil || !recovered.Passed {
 		t.Fatalf("recovered=%+v, %v", recovered, err)
 	}
-	if count, age := load.manyDBPendingCoverage(); count != 0 || age != 0 {
-		t.Fatalf("coverage=%d, %f", count, age)
+	if coverage := load.manyDBPendingCoverage(); coverage.pending != 0 || coverage.oldestAge != 0 {
+		t.Fatalf("coverage=%+v", coverage)
 	}
 	if !strings.Contains(readFile(t, filepath.Join(dir, "verification.log")), "FAIL") {
 		t.Fatal("failure evidence lost after recovery")
@@ -660,6 +666,6 @@ cp "$LOGICAL_FIXTURES/$(basename "$source")" "$restored"
 			return
 		}
 	}
-	count, age := load.manyDBPendingCoverage()
-	t.Fatalf("statuses=%v never finalized; pending_databases=%d oldest_pending_age_seconds=%.3f", statuses, count, age)
+	coverage := load.manyDBPendingCoverage()
+	t.Fatalf("statuses=%v never finalized; pending_databases=%d oldest_pending_age_seconds=%.3f", statuses, coverage.pending, coverage.oldestAge)
 }

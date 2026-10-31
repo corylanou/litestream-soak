@@ -74,8 +74,7 @@ type manyDBChangeTracker interface {
 	pendingManyDBChanges() []manyDBChange
 	attemptManyDBChange(manyDBChange)
 	acknowledgeManyDBChange(manyDBChange)
-	manyDBPendingCoverage() (int, float64)
-	manyDBWrittenPending() int
+	manyDBPendingCoverage() manyDBCoverage
 }
 
 type Verifier struct {
