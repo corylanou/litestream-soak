@@ -538,7 +538,7 @@ func TestVFSReaderCheckConfig(t *testing.T) {
 		}
 	}
 	args := strings.Join(spec.args(), " ")
-	if args != "-batch -bail -list -noheader -cmd .load /opt/vfs/litestream-vfs.so file:/data/vfs/snapshot/replica.db?vfs=litestream&mode=ro" {
+	if args != `-batch -bail -list -noheader -cmd .load /opt/vfs/litestream-vfs.so -cmd .open "file:/data/vfs/snapshot/replica.db?vfs=litestream&mode=ro"` {
 		t.Fatalf("args = %q", args)
 	}
 	if strings.Contains(args, "secret") {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -98,13 +99,22 @@ func (c Config) vfsSessionSpec(name string) vfsSessionSpec {
 	}
 }
 
+// args starts the shell with no database and opens the reader URI only after
+// the extension is loaded. The shell opens a database named on the command
+// line as soon as .load runs, before the extension has registered its VFS, so
+// a vfs=litestream URI there fails with "no such vfs".
 func (s vfsSessionSpec) args() []string {
 	args := []string{"-batch", "-bail", "-list", "-noheader"}
 	if s.extension != "" {
 		args = append(args, "-cmd", ".load "+s.extension)
 	}
-	return append(args, s.readerURI)
+	return append(args, "-cmd", `.open "`+s.readerURI+`"`)
 }
+
+// vfsOpenFailure matches the shell's report of a .open that failed; the shell
+// then continues on a substitute in-memory database, so the session must not
+// be used.
+var vfsOpenFailure = regexp.MustCompile(`^(Error: |Notice: using substitute in-memory database)`)
 
 func startVFSSession(ctx context.Context, name string, spec vfsSessionSpec) (*vfsSession, error) {
 	if spec.extension != "" {
@@ -132,6 +142,17 @@ func startVFSSession(ctx context.Context, name string, spec vfsSessionSpec) (*vf
 	}
 	session := &vfsSession{name: name, dir: spec.dir, cmd: cmd, stdin: stdin, lines: make(chan string, 64), done: make(chan struct{})}
 	go session.read(stdout)
+	rows, err := session.exec(ctx, "SELECT 1")
+	if err != nil {
+		session.close()
+		return nil, err
+	}
+	for _, row := range rows {
+		if vfsOpenFailure.MatchString(row) {
+			session.close()
+			return nil, fmt.Errorf("open reader %s: %s", spec.readerURI, row)
+		}
+	}
 	for _, pragma := range spec.pragmas {
 		if _, err := session.exec(ctx, pragma); err != nil {
 			session.close()

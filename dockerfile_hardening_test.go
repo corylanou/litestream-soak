@@ -524,6 +524,12 @@ func TestWorkerDockerfileBuildsVFSExtensionFromCandidate(t *testing.T) {
 		"src/litestream-vfs.c /tmp/litestream-vfs.a -lpthread -ldl -lm",
 		"COPY --from=litestream-builder /usr/local/lib/litestream-vfs.so /usr/local/lib/litestream-vfs.so",
 		`RUN sqlite3 :memory: ".load /usr/local/lib/litestream-vfs.so"`,
+		`uri='file:/tmp/vfs-check.db?vfs=litestream&mode=ro'`,
+		`timeout 60 sqlite3 -batch -list -noheader -cmd ".load /usr/local/lib/litestream-vfs.so" -cmd ".open \"${uri}\"" </dev/null 2>&1)"; status=$?;`,
+		`*"no such vfs"*) echo "litestream vfs not registered before .open" >&2; exit 1;;`,
+		`if [ "${status}" -eq 124 ]; then echo "vfs open check timed out" >&2; exit 1; fi;`,
+		`if [ "${status}" -ne 0 ]; then echo "vfs open check exited ${status}" >&2; exit 1; fi;`,
+		`*"Error: unable to open database \"${uri}\": SQL logic error"*) ;; *) echo "vfs open check did not report the missing-replica error" >&2; exit 1;;`,
 		"ENV LITESTREAM_VFS_EXTENSION=/usr/local/lib/litestream-vfs.so",
 	} {
 		if !strings.Contains(content, want) {
