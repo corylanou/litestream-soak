@@ -17,6 +17,18 @@ RUN go build \
     -tags osusergo,netgo,sqlite_omit_load_extension \
     -o /usr/local/bin/litestream ./cmd/litestream
 RUN go version -m /usr/local/bin/litestream >/tmp/litestream.buildinfo && cat /tmp/litestream.buildinfo
+# The SQLite loadable VFS extension from the same checkout, built the way the
+# upstream Dockerfile and Makefile build it: a cgo c-archive linked into a
+# shared object with the vendored sqlite3ext.h entry point.
+RUN CGO_ENABLED=1 go build \
+    -tags vfs,SQLITE3VFS_LOADABLE_EXT \
+    -buildmode=c-archive \
+    -o /tmp/litestream-vfs.a ./cmd/litestream-vfs && \
+    cp /tmp/litestream-vfs.h src/litestream-vfs.h && \
+    gcc -DSQLITE3VFS_LOADABLE_EXT -g -fPIC -shared \
+    -o /usr/local/lib/litestream-vfs.so \
+    src/litestream-vfs.c /tmp/litestream-vfs.a -lpthread -ldl -lm && \
+    { echo "litestream-vfs.so"; echo "	litestream	$(cat /tmp/litestream.sha)"; echo "	$(go version)"; } >/tmp/litestream-vfs.buildinfo && cat /tmp/litestream-vfs.buildinfo
 
 # Stage 1b: Optional second litestream build for the upgrade gate lane. With an
 # empty LITESTREAM_BASE_SHA the stage produces an empty /out and the runtime
@@ -95,6 +107,8 @@ RUN apt-get update && \
     mkdir -p /data && \
     chown soak:soak /data
 COPY --from=litestream-builder /usr/local/bin/litestream /usr/local/bin/litestream
+COPY --from=litestream-builder /usr/local/lib/litestream-vfs.so /usr/local/lib/litestream-vfs.so
+RUN sqlite3 :memory: ".load /usr/local/lib/litestream-vfs.so" "SELECT 'vfs extension loads'"
 COPY --from=workload-builder /usr/local/bin/litestream-test /usr/local/bin/litestream-test
 COPY --from=workload-builder /usr/local/bin/litestream-test-populate /usr/local/bin/litestream-test-populate
 COPY --from=litestream-builder /tmp/litestream.sha /opt/soak/litestream.sha
@@ -102,6 +116,7 @@ COPY --from=litestream-base-builder /out/ /opt/soak/base/
 COPY --from=soakworker-builder /usr/local/bin/soakworker /usr/local/bin/soakworker
 COPY --from=soakworker-builder /src/soak/datasets /opt/soak/datasets
 COPY --from=litestream-builder /tmp/litestream.buildinfo /opt/soak/litestream.buildinfo
+COPY --from=litestream-builder /tmp/litestream-vfs.buildinfo /opt/soak/litestream-vfs.buildinfo
 COPY --from=workload-builder /tmp/litestream-test.buildinfo /opt/soak/litestream-test.buildinfo
 COPY --from=workload-builder /tmp/litestream-test-populate.buildinfo /opt/soak/litestream-test-populate.buildinfo
 COPY --from=soakworker-builder /tmp/soakworker.buildinfo /opt/soak/soakworker.buildinfo
@@ -110,6 +125,7 @@ RUN chmod 0755 /usr/local/bin/docker-entrypoint
 ARG WORKLOAD_SHA
 ENV WORKLOAD_SHA=${WORKLOAD_SHA}
 ENV LITESTREAM_SHA_FILE=/opt/soak/litestream.sha
+ENV LITESTREAM_VFS_EXTENSION=/usr/local/lib/litestream-vfs.so
 ENV LITESTREAM_BASE_BINARY=/opt/soak/base/litestream-base
 ENV LITESTREAM_BASE_SHA_FILE=/opt/soak/base/litestream-base.sha
 ENV SOAK_DATA_DB=/data/test.db

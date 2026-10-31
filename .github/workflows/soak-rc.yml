@@ -29,7 +29,7 @@ on:
         type: boolean
         default: false
       profiles:
-        description: Comma-separated subset of gate profiles to run (gate-stress, gate-manydb-500, gate-large-db, gate-remote); empty runs all four
+        description: Comma-separated subset of gate profiles to run (gate-stress, gate-manydb-500, gate-large-db, gate-remote, gate-vfs); empty runs the default four (gate-vfs only when named)
         required: false
         type: string
         default: ""
@@ -76,10 +76,10 @@ jobs:
           tail="${TAIL}"
           profiles="${PROFILES//[[:space:]]/}"
           upstream_repo="benbjohnson/litestream"
-          gate_profile="gate-stress|gate-manydb-500|gate-large-db|gate-remote"
+          gate_profile="gate-stress|gate-manydb-500|gate-large-db|gate-remote|gate-vfs"
 
           if [ -n "${profiles}" ] && [[ ! "${profiles}" =~ ^(${gate_profile})(,(${gate_profile}))*$ ]]; then
-            echo "profiles must be a comma-separated subset of gate-stress, gate-manydb-500, gate-large-db, gate-remote" >&2
+            echo "profiles must be a comma-separated subset of gate-stress, gate-manydb-500, gate-large-db, gate-remote, gate-vfs" >&2
             exit 1
           fi
           if [ "${tail}" = "true" ] && [ -n "${profiles}" ] && [[ ! ",${profiles}," == *",gate-stress,"* ]]; then
@@ -160,7 +160,7 @@ jobs:
             echo "Candidate: ${repo_full_name}@${candidate_ref} -> ${candidate_sha} (source rc-${candidate_sha::8}-${source_suffix})"
             echo "Baseline: ${upstream_repo}@${baseline_ref} -> ${baseline_sha} (source rcbase-${baseline_sha::8}-${source_suffix})"
             echo "Duration: ${duration} (tail: ${tail})"
-            echo "Profiles: ${profiles:-all four}"
+            echo "Profiles: ${profiles:-default four}"
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
   build-worker-images:

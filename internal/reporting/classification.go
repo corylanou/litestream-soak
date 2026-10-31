@@ -22,6 +22,12 @@ const (
 	SignatureLTXCoverageHole              = "ltx_coverage_hole"
 	SignatureLTXCoverageFloorUnknown      = "ltx_coverage_floor_unknown"
 
+	SignatureVFSSnapshotDrift       = "vfs_snapshot_drift"
+	SignatureVFSReadMismatch        = "vfs_read_mismatch"
+	SignatureVFSReaderUnavailable   = "vfs_reader_unavailable"
+	SignatureVFSHydrationIncomplete = "vfs_hydration_incomplete"
+	SignatureVFSReaderNotCaughtUp   = "vfs_reader_not_caught_up"
+
 	StageHarnessLock                  = "harness_lock"
 	SignatureRestoredComparisonLocked = "restored_comparison_locked"
 	restoredComparisonMarker          = "restored comparison:"
@@ -290,6 +296,10 @@ func inferFailureSignature(stage, text, original string) string {
 		return signatureStagePrefix(stage) + "_plan_failed"
 	case strings.Contains(text, "ltx coverage hole"):
 		return SignatureLTXCoverageHole
+	case strings.Contains(text, "vfs snapshot drift"):
+		return SignatureVFSSnapshotDrift
+	case strings.Contains(text, "vfs read mismatch"):
+		return SignatureVFSReadMismatch
 	case strings.Contains(text, "ltx continuity"):
 		return "ltx_continuity"
 	case strings.Contains(text, "validation failed"):

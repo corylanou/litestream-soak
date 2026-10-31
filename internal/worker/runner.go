@@ -207,6 +207,17 @@ func (r *Runner) Run(ctx context.Context) error {
 		defer pinned.Stop()
 	}
 
+	var cacheProbe *cacheProbeWriter
+	var vfs *vfsReaderCheck
+	if r.vfsReaderCheckEnabled() {
+		cacheProbe = newCacheProbeWriter(r.cfg.DBPath, cacheProbeInterval)
+		cacheProbe.Start(runCtx)
+		defer cacheProbe.Stop()
+		vfs = newVFSReaderCheck(r.cfg)
+		vfs.StartSnapshotLoop(runCtx, func(result VerificationResult) { r.reportVFSResult(runCtx, result) })
+		defer vfs.Stop()
+	}
+
 	var pausers []loadPauser
 	if r.churnLoad != nil {
 		pausers = append(pausers, r.churnLoad.engine)
@@ -226,8 +237,14 @@ func (r *Runner) Run(ctx context.Context) error {
 	if pinned != nil {
 		pausers = append(pausers, pinned)
 	}
+	if cacheProbe != nil {
+		pausers = append(pausers, cacheProbe)
+	}
 	r.verifier = NewVerifier(r.cfg, pausers...)
 	r.verifier.objectStore = r.objectStore
+	if vfs != nil {
+		r.verifier.vfsRead = vfs.ReadCheck
+	}
 	r.verifier.SetStartHook(r.sendVerificationStarted)
 	r.verifier.onProfileIncident = r.triggerProfile
 	defer r.verifier.stopFollow()
@@ -264,7 +281,13 @@ func (r *Runner) populate(ctx context.Context) error {
 	if r.cfg.ManyDBEnabled() {
 		return populateManyDBs(ctx, r.cfg)
 	}
-	return populateSingleDBWithRetry(ctx, r.cfg, populateAttempts)
+	if err := populateSingleDBWithRetry(ctx, r.cfg, populateAttempts); err != nil {
+		return err
+	}
+	if r.vfsReaderCheckEnabled() {
+		return ensureCacheProbe(ctx, r.cfg.DBPath)
+	}
+	return nil
 }
 
 func (r *Runner) runVerifyLoop(ctx context.Context) error {

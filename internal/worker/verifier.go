@@ -92,6 +92,7 @@ type Verifier struct {
 	replicaLevels      func(Config, uint64) *reporting.ReplicaLevelReport
 	boundary           *verificationBoundary
 	follow             *followSession
+	vfsRead            func(context.Context, uint64) VerificationResult
 	extraResults       []VerificationResult
 
 	checkpointAttempts    int
@@ -254,6 +255,9 @@ func (v *Verifier) RunCycle(ctx context.Context) (result VerificationResult, ret
 		}
 		if v.cfg.FollowCheck {
 			v.extraResults = append(v.extraResults, v.runFollowCheck(ctx, *v.boundary))
+		}
+		if v.vfsRead != nil {
+			v.extraResults = append(v.extraResults, v.vfsRead(ctx, v.boundary.txid))
 		}
 	}
 	if validateErr != nil {

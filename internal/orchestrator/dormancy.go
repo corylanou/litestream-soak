@@ -290,6 +290,9 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	if workloadCfg.LTXCoverageCheck {
 		env["LTX_COVERAGE_CHECK"] = "true"
 	}
+	if workloadCfg.VFSReaderCheck {
+		env["VFS_READER_CHECK"] = "true"
+	}
 	if workloadCfg.CompactionL0ObjectBound > 0 {
 		env["COMPACTION_L0_OBJECT_BOUND"] = fmt.Sprintf("%d", workloadCfg.CompactionL0ObjectBound)
 	}
