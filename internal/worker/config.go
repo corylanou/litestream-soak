@@ -180,6 +180,12 @@ type Config struct {
 	// hole, which pinned and timestamp restores into it cannot be served from.
 	LTXCoverageCheck bool
 
+	// VFS reader: hold long read transactions on a hydrated read-only
+	// Litestream VFS connection to the replica while the primary writes, and
+	// compare VFS reads with the primary at each verification boundary.
+	VFSReaderCheck   bool
+	VFSExtensionPath string
+
 	// Replay
 	LoadMode       string  // "synthetic", "replay", "both"
 	ReplayDataset  string  // "taxi", "gharchive", "orders"
@@ -985,6 +991,12 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 	if parseBoolEnv(getenv("LTX_COVERAGE_CHECK")) {
 		c.LTXCoverageCheck = true
 	}
+	if parseBoolEnv(getenv("VFS_READER_CHECK")) {
+		c.VFSReaderCheck = true
+	}
+	if v := strings.TrimSpace(getenv("LITESTREAM_VFS_EXTENSION")); v != "" {
+		c.VFSExtensionPath = v
+	}
 	if parseBoolEnv(getenv("COMPACTION_PROGRESS_CHECK")) {
 		c.CompactionProgressCheck = true
 		c.ReplicaLevelReporting = true
@@ -1352,6 +1364,7 @@ func (c Config) WorkloadConfig() workload.Config {
 	cfg.FollowCheck = c.FollowCheck
 	cfg.CompactionProgressCheck = c.CompactionProgressCheck
 	cfg.LTXCoverageCheck = c.LTXCoverageCheck
+	cfg.VFSReaderCheck = c.VFSReaderCheck
 	cfg.CompactionL0ObjectBound = c.CompactionL0ObjectBound
 	cfg.CompactionL1ObjectBound = c.CompactionL1ObjectBound
 	if c.ManyDBEnabled() {

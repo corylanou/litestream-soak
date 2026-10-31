@@ -510,6 +510,32 @@ func TestLocalBuildsPinAndAttributeToolchain(t *testing.T) {
 	}
 }
 
+// TestWorkerDockerfileBuildsVFSExtensionFromCandidate pins the SQLite loadable
+// VFS extension to the same Litestream checkout as the litestream binary, built
+// the way upstream builds it (cgo c-archive linked by gcc), shipped where the
+// worker expects it, and load-tested with the runtime image's sqlite3 shell.
+func TestWorkerDockerfileBuildsVFSExtensionFromCandidate(t *testing.T) {
+	content := string(readFile(t, "Dockerfile.worker"))
+	for _, want := range []string{
+		"-tags vfs,SQLITE3VFS_LOADABLE_EXT",
+		"-buildmode=c-archive",
+		"./cmd/litestream-vfs",
+		"gcc -DSQLITE3VFS_LOADABLE_EXT -g -fPIC -shared",
+		"src/litestream-vfs.c /tmp/litestream-vfs.a -lpthread -ldl -lm",
+		"COPY --from=litestream-builder /usr/local/lib/litestream-vfs.so /usr/local/lib/litestream-vfs.so",
+		`RUN sqlite3 :memory: ".load /usr/local/lib/litestream-vfs.so"`,
+		"ENV LITESTREAM_VFS_EXTENSION=/usr/local/lib/litestream-vfs.so",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("Dockerfile.worker VFS extension build is missing %q", want)
+		}
+	}
+	stage := strings.Join(finalDockerfileStage(readDockerfileLines(t, "Dockerfile.worker")), "\n")
+	if !strings.Contains(stage, "sqlite3") || !strings.Contains(stage, "litestream-vfs.so") {
+		t.Fatal("Dockerfile.worker runtime stage must ship sqlite3 and the VFS extension")
+	}
+}
+
 func TestWorkerWorkloadBuildIsIndependentFromCandidate(t *testing.T) {
 	content := string(readFile(t, "Dockerfile.worker"))
 	for _, want := range []string{

@@ -88,6 +88,7 @@ func TestGateFleetPinsPopulateIndexRatio(t *testing.T) {
 		gateManyDB500Profile: 0,
 		gateLargeDBProfile:   1,
 		gateRemoteProfile:    0,
+		gateVFSProfile:       0,
 	}
 	for _, source := range []string{testGateCandidate, testGateBaseline} {
 		for _, worker := range GateFleetForSource(source, testGateSoakSHA, testGateCandidateSHA).Workers {
@@ -110,7 +111,7 @@ func TestGateFleetPinsPopulateIndexRatio(t *testing.T) {
 	}
 }
 
-func TestGateFleetSpecHasFourSizedWorkersPerSource(t *testing.T) {
+func TestGateFleetSpecHasSizedWorkersPerSource(t *testing.T) {
 	type size struct {
 		region   string
 		cpus     int
@@ -122,6 +123,7 @@ func TestGateFleetSpecHasFourSizedWorkersPerSource(t *testing.T) {
 		gateManyDB500Profile: {"ord", 2, 3072, 15},
 		gateLargeDBProfile:   {"ord", 2, 4096, 40},
 		gateRemoteProfile:    {"ams", 1, 1024, 10},
+		gateVFSProfile:       {"ord", 2, 2048, 10},
 	}
 	configs := map[string]string{}
 	for _, tc := range []struct {
@@ -132,8 +134,8 @@ func TestGateFleetSpecHasFourSizedWorkersPerSource(t *testing.T) {
 		{testGateBaseline, testGateBaselineSHA},
 	} {
 		spec := GateFleetForSource(tc.source, testGateSoakSHA, tc.litestreamSHA)
-		if len(spec.Workers) != 4 {
-			t.Fatalf("%s workers = %d, want 4", tc.source, len(spec.Workers))
+		if len(spec.Workers) != len(want) {
+			t.Fatalf("%s workers = %d, want %d", tc.source, len(spec.Workers), len(want))
 		}
 		seen := map[string]bool{}
 		for _, worker := range spec.Workers {
@@ -158,7 +160,7 @@ func TestGateFleetSpecHasFourSizedWorkersPerSource(t *testing.T) {
 			}
 			configs[worker.ProfileName] = cfg.JSON()
 		}
-		if len(seen) != 4 {
+		if len(seen) != len(want) {
 			t.Fatalf("%s profiles = %v", tc.source, seen)
 		}
 	}

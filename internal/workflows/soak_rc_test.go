@@ -94,6 +94,7 @@ func TestSoakRCResolvesRefsToPinnedFullSHAs(t *testing.T) {
 		"explicit baseline":   {"BASELINE_REF": "1234567", "TAIL": "true", "DURATION": "24h"},
 		"large-db only":       {"PROFILES": "gate-large-db", "DURATION": "24h"},
 		"two profiles spaced": {"PROFILES": " gate-stress, gate-remote ", "TAIL": "true"},
+		"vfs only":            {"PROFILES": "gate-vfs", "DURATION": "2h"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

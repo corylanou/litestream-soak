@@ -22,6 +22,7 @@ const (
 	gateManyDB500Profile       = "gate-manydb-500"
 	gateLargeDBProfile         = "gate-large-db"
 	gateRemoteProfile          = "gate-remote"
+	gateVFSProfile             = "gate-vfs"
 	gateUpgradeLaneProfile     = "gate-upgrade-lane"
 	gateUpgradeLaneNoL9Profile = "gate-upgrade-lane-nol9"
 	gateUpgradeFollowProfile   = "gate-upgrade-follow"
@@ -133,6 +134,7 @@ type RCGateSideResult struct {
 	Reason          string `json:"reason,omitempty"`
 	ReasonDetail    string `json:"reason_detail,omitempty"`
 	coverageCheck   bool
+	vfsCheck        bool
 }
 
 type RCGateModeResult struct {
@@ -187,9 +189,22 @@ const (
 	gateCheckHistorical = "pre-upgrade-restore"
 	gateCheckCoverage   = "coverage"
 	gateModeCoverage    = "coverage"
+	gateCheckVFS        = "vfs"
+	gateModeVFSSnapshot = "vfs-snapshot"
+	gateModeVFSRead     = "vfs-read"
 )
 
-var gateNonCurrentChecks = []string{gateCheckFollow, gateCheckHistorical, gateCheckCoverage}
+var (
+	// gateStandaloneChecks are scored only by their own scenarios: they never
+	// count as restore coverage and a wildcard filter skips them.
+	gateStandaloneChecks = []string{gateCheckCoverage, gateCheckVFS}
+	gateNonCurrentChecks = append([]string{gateCheckFollow, gateCheckHistorical}, gateStandaloneChecks...)
+	gateStandaloneModes  = []string{gateModeCoverage, gateModeVFSSnapshot, gateModeVFSRead}
+	gateVFSModes         = []string{gateModeVFSSnapshot, gateModeVFSRead}
+	// gateOptInProfiles are part of the gate fleet but run only when a request
+	// names them, so the default gate keeps its four-profile fleet.
+	gateOptInProfiles = []string{gateVFSProfile}
+)
 
 type gateScenario struct {
 	name          string
@@ -197,6 +212,7 @@ type gateScenario struct {
 	identity      string
 	txidOnly      bool
 	coverage      bool
+	vfs           bool
 	requiredModes []string
 	candidate     gateSideFilter
 	baseline      gateSideFilter
@@ -209,10 +225,13 @@ var (
 		{name: "manydb-500", profile: gateManyDB500Profile, txidOnly: true},
 		{name: "large-db", profile: gateLargeDBProfile},
 		{name: "remote", profile: gateRemoteProfile},
+		{name: "vfs", profile: gateVFSProfile},
 		ltxCoverageScenario(gateScenario{name: "overload-truncate0", profile: gateStressProfile, identity: "overload-truncate0"}),
 		ltxCoverageScenario(gateScenario{name: "pinned-reader", profile: gateStressProfile, identity: "pinned-reader"}),
 		ltxCoverageScenario(gateScenario{name: "large-db", profile: gateLargeDBProfile}),
 		ltxCoverageScenario(gateScenario{name: "remote", profile: gateRemoteProfile}),
+		ltxCoverageScenario(gateScenario{name: "vfs", profile: gateVFSProfile}),
+		vfsReaderScenario(gateScenario{name: "vfs", profile: gateVFSProfile}),
 	}
 	// The upgrade gate scores the lane worker's post-upgrade restores against
 	// its own pre-upgrade restores, its historical pre-upgrade txid restores
@@ -307,6 +326,28 @@ func ltxCoverageScenario(base gateScenario) gateScenario {
 	return base
 }
 
+// vfsReaderScenario scores the VFS reader checks of the worker a restore
+// scenario runs on, one mode per check: held read transactions
+// (vfs-snapshot) and boundary reads against the primary (vfs-read).
+func vfsReaderScenario(base gateScenario) gateScenario {
+	base.name += "-vfs-reader"
+	base.vfs = true
+	base.requiredModes = slices.Clone(gateVFSModes)
+	base.candidate.checkType = gateCheckVFS
+	base.baseline.checkType = gateCheckVFS
+	return base
+}
+
+// gateSelectsProfile reports whether the gate runs and scores the profile: a
+// requested subset selects exactly its members, and the default whole fleet
+// leaves the opt-in profiles out.
+func gateSelectsProfile(gate model.RCGate, profile string) bool {
+	if len(gate.Profiles) == 0 {
+		return !slices.Contains(gateOptInProfiles, profile)
+	}
+	return gate.SelectsProfile(profile)
+}
+
 func gateScenariosFor(gate model.RCGate) []gateScenario {
 	switch {
 	case gate.Kind == model.RCGateKindUpgrade && gate.LaneVariant == upgradeLaneVariantNoL9:
@@ -370,7 +411,7 @@ func (f gateSideFilter) accepts(gate model.RCGate, verification model.Verificati
 	}
 	switch f.checkType {
 	case gateCheckAny:
-		return verification.CheckType != gateCheckCoverage
+		return !slices.Contains(gateStandaloneChecks, verification.CheckType)
 	case gateCheckCurrent:
 		return !slices.Contains(gateNonCurrentChecks, verification.CheckType)
 	default:
@@ -398,7 +439,7 @@ func gateFleetForSource(gate model.RCGate, source, gitSHA, litestreamSHA string)
 	spec := GateFleetForSource(source, gitSHA, litestreamSHA)
 	selected := spec.Workers[:0]
 	for _, desired := range spec.Workers {
-		if gate.SelectsProfile(desired.ProfileName) {
+		if gateSelectsProfile(gate, desired.ProfileName) {
 			selected = append(selected, desired)
 		}
 	}
@@ -658,6 +699,35 @@ func rcGateWorkers() []DesiredWorker {
 				VolumeSizeGB:     10,
 				MemoryMB:         1024,
 				CPUs:             1,
+			},
+		},
+		{
+			Name:         "worker-gate-vfs",
+			ProfileName:  gateVFSProfile,
+			Region:       "ord",
+			VolumeSizeGB: 10,
+			Workload: workload.Config{
+				LoadMode:                 "synthetic",
+				WriteRate:                50,
+				Pattern:                  "constant",
+				PayloadSize:              1024,
+				ReadRatio:                0.1,
+				Workers:                  2,
+				InitialSize:              "20MB",
+				VerifyInterval:           "30m",
+				VerifyType:               "integrity",
+				SnapshotInterval:         "10m",
+				SyncInterval:             "1s",
+				L1CompactionInterval:     "30s",
+				L2CompactionInterval:     "5m",
+				L3CompactionInterval:     "1h",
+				L0Retention:              "10m",
+				L0RetentionCheckInterval: "1m",
+				ReplicaLevelReporting:    true,
+				VFSReaderCheck:           true,
+				VolumeSizeGB:             10,
+				MemoryMB:                 2048,
+				CPUs:                     2,
 			},
 		},
 	}
@@ -1144,7 +1214,7 @@ func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateR
 	results := rcGateResults{ClosedAt: end.UTC()}
 	failing, incomplete := false, false
 	for _, scenario := range gateScenariosFor(gate) {
-		if !gate.SelectsProfile(scenario.profile) {
+		if !gateSelectsProfile(gate, scenario.profile) {
 			continue
 		}
 		candidateFilter, baselineFilter := scenario.candidate, scenario.baseline
@@ -1173,8 +1243,11 @@ func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateR
 		if result.Verdict != rcGateVerdictIncomplete && len(result.Modes) > 0 {
 			result.Verdict = rcGateModesVerdict(result.Modes)
 		}
-		if scenario.coverage {
-			if !candidate.coverageCheck && !baseline.coverageCheck {
+		if scenario.coverage || scenario.vfs {
+			if scenario.coverage && !candidate.coverageCheck && !baseline.coverageCheck {
+				continue
+			}
+			if scenario.vfs && !candidate.vfsCheck && !baseline.vfsCheck {
 				continue
 			}
 			for i := range result.Modes {
@@ -1237,6 +1310,7 @@ func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter g
 	side.WorkerID = worker.ID
 	if cfg, err := workload.ParseConfig(worker.ProfileConfig); err == nil {
 		side.coverageCheck = cfg.LTXCoverageCheck
+		side.vfsCheck = cfg.VFSReaderCheck
 	}
 	verifications, err := db.ListVerificationsExcludingMeteringRuns(worker.ID, rcGateVerificationHistory)
 	if err != nil {
@@ -1255,7 +1329,7 @@ func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter g
 		if mode == "" {
 			mode = "txid"
 		}
-		if strings.TrimSpace(verification.RestoreMode) != "" && mode != gateModeCoverage && verification.RestoreModeFallback != "rotation_disabled" {
+		if strings.TrimSpace(verification.RestoreMode) != "" && !slices.Contains(gateStandaloneModes, mode) && verification.RestoreModeFallback != "rotation_disabled" {
 			side.RotationEnabled = true
 		}
 		if modes[mode] == nil {
@@ -1666,10 +1740,10 @@ func rcGateModesVerdict(modes []RCGateModeResult) string {
 	return rcGateVerdictPass
 }
 
-// rcGateCoverageVerdict makes an L0-L8 coverage hole a hard failure: a hole is
-// evidence on its own, so a candidate hole is a regression whenever the
-// baseline has none, even when the baseline has no coverage evidence yet.
-// Holes on both sides stay both_failing.
+// rcGateCoverageVerdict makes an L0-L8 coverage hole or a VFS reader failure
+// a hard failure: each is evidence on its own, so a candidate failure is a
+// regression whenever the baseline has none, even when the baseline has no
+// evidence yet. Failures on both sides stay both_failing.
 func rcGateCoverageVerdict(verdict string, candidate, baseline RCGateSideResult) string {
 	if candidate.Failed > 0 && baseline.Failed == 0 && baseline.Status != rcGateSideFailing {
 		return rcGateVerdictRegression
