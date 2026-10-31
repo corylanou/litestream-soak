@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -30,6 +32,12 @@ type manyDBLoad struct {
 	changed          map[string]manyDBChange
 	changeGeneration uint64
 	lastAttempt      string
+	stateMu          sync.Mutex
+	stateDirty       atomic.Bool
+	saveState        func([]string) error
+	writeRow         func(context.Context, string, int, int64) error
+	syncDir          func(string) error
+	onStateEvent     func(eventType, message string)
 
 	mu      sync.Mutex
 	paused  bool
@@ -48,8 +56,10 @@ func populateManyDBs(ctx context.Context, cfg Config) error {
 	if err := os.MkdirAll(cfg.ManyDBDir(), 0755); err != nil {
 		return fmt.Errorf("create many database dir: %w", err)
 	}
+	fresh := true
 	for _, dbPath := range cfg.ManyDBPaths() {
 		if _, err := os.Stat(dbPath); err == nil {
+			fresh = false
 			if err := pruneManyDBRows(ctx, dbPath, cfg.manyDBMaxRowsPerDatabase()); err != nil {
 				return fmt.Errorf("prune many database %s: %w", dbPath, err)
 			}
@@ -61,7 +71,58 @@ func populateManyDBs(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("seed many database %s: %w", dbPath, err)
 		}
 	}
+	if fresh {
+		if err := writeManyDBWrittenState(cfg, nil); err != nil {
+			return fmt.Errorf("record empty written set: %w", err)
+		}
+	}
 	return nil
+}
+
+// manyDBWrittenStateFile records, on the data volume, the databases the
+// workload wrote to that have not been verified since. A worker restart
+// builds a new tracker, and without this file every one of those writes
+// would come back as seeded backlog and could leave a batch without ever
+// being verified.
+const manyDBWrittenStateFile = ".written-pending.json"
+
+type manyDBWrittenState struct {
+	Written []string `json:"written"`
+}
+
+func manyDBWrittenStatePath(cfg *Config) string {
+	return filepath.Join(cfg.ManyDBDir(), manyDBWrittenStateFile)
+}
+
+func writeManyDBWrittenState(cfg Config, written []string) error {
+	body, err := json.Marshal(manyDBWrittenState{Written: written})
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(manyDBWrittenStatePath(&cfg), body)
+}
+
+func readManyDBWrittenState(cfg *Config) ([]string, error) {
+	body, err := os.ReadFile(manyDBWrittenStatePath(cfg))
+	if err != nil {
+		return nil, err
+	}
+	var state manyDBWrittenState
+	if err := json.Unmarshal(body, &state); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", manyDBWrittenStatePath(cfg), err)
+	}
+	return state.Written, nil
+}
+
+// manyDBStateOnVolume reports whether any database already exists, which
+// tells a restart apart from a fresh volume.
+func manyDBStateOnVolume(cfg *Config) bool {
+	for _, dbPath := range cfg.ManyDBPaths() {
+		if _, err := os.Stat(dbPath); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func pruneManyDBRows(ctx context.Context, dbPath string, maxRows int) error {
@@ -128,12 +189,147 @@ func manyDBDSN(dbPath string) string {
 	return dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 }
 
+// newManyDBLoad seeds every database into the pending set so each one is
+// verified at least once; seeded entries are not written, so they are a
+// backlog the verifier drains behind the databases the workload touched. The
+// written set a previous run left on the volume is restored on top; when the
+// volume holds databases but the written set cannot be read, every database
+// counts as written until it is verified, so no write is lost to a restart.
 func newManyDBLoad(cfg *Config) *manyDBLoad {
-	load := &manyDBLoad{cfg: cfg, now: time.Now, changed: make(map[string]manyDBChange)}
+	load := &manyDBLoad{cfg: cfg, now: time.Now, changed: make(map[string]manyDBChange), writeRow: writeManyDBRow}
+	load.saveState = func(written []string) error { return writeManyDBWrittenState(*cfg, written) }
+	load.syncDir = syncDir
 	for _, path := range cfg.ManyDBPaths() {
-		load.markChanged(path)
+		load.mark(path, false)
 	}
+	load.restoreWrittenState()
 	return load
+}
+
+func (l *manyDBLoad) restoreWrittenState() {
+	written, err := readManyDBWrittenState(l.cfg)
+	switch {
+	case err == nil:
+		known := make(map[string]struct{}, len(l.changed))
+		for path := range l.changed {
+			known[path] = struct{}{}
+		}
+		for _, path := range written {
+			if _, ok := known[path]; ok {
+				l.setWritten(path)
+			}
+		}
+		if len(written) > 0 {
+			slog.Info("Restored many database written set", "written", len(written))
+		}
+	case !manyDBStateOnVolume(l.cfg):
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		slog.Warn("Many database written set unreadable on an empty volume", "error", err)
+	default:
+		slog.Warn("Many database written set unavailable with databases on the volume; treating every database as written until verified", "error", err)
+		for path := range l.changed {
+			l.setWritten(path)
+		}
+	}
+}
+
+func (l *manyDBLoad) setWritten(path string) {
+	l.changedMu.Lock()
+	change := l.changed[path]
+	change.written = true
+	l.changed[path] = change
+	l.changedMu.Unlock()
+}
+
+const (
+	manyDBStateDirtyEvent     = "many_db_written_state_dirty"
+	manyDBStateRecoveredEvent = "many_db_written_state_recovered"
+)
+
+type manyDBStateEvent struct {
+	eventType string
+	message   string
+}
+
+// saveWrittenStateLocked saves the written set with stateMu held. The
+// snapshot is taken under the same lock, so a save never writes an older view
+// than one already on disk, and every entry in a saved snapshot is marked
+// durable. A failed save removes the stale file and marks the state dirty;
+// the returned error is set only when the save and the removal both failed,
+// which is when a write must not proceed. Events are returned, not emitted,
+// so the caller reports them after releasing the lock.
+func (l *manyDBLoad) saveWrittenStateLocked() ([]manyDBStateEvent, error) {
+	if _, err := os.Stat(l.cfg.ManyDBDir()); err != nil {
+		return nil, nil
+	}
+	l.changedMu.Lock()
+	written := make([]string, 0, len(l.changed))
+	for path, change := range l.changed {
+		if change.written {
+			written = append(written, path)
+		}
+	}
+	l.changedMu.Unlock()
+	sort.Strings(written)
+	var events []manyDBStateEvent
+	if err := l.saveState(written); err != nil {
+		removeErr := os.Remove(manyDBWrittenStatePath(l.cfg))
+		if errors.Is(removeErr, os.ErrNotExist) {
+			removeErr = nil
+		}
+		if removeErr == nil {
+			if syncErr := l.syncDir(l.cfg.ManyDBDir()); syncErr != nil {
+				removeErr = fmt.Errorf("sync directory after removing stale written set: %w", syncErr)
+			}
+		}
+		if !l.stateDirty.Swap(true) {
+			slog.Warn("Many database written set dirty", "error", err)
+			events = append(events, manyDBStateEvent{manyDBStateDirtyEvent, fmt.Sprintf("many database written set could not be saved; a restart before it recovers treats every database as written: %v", err)})
+		}
+		if removeErr != nil {
+			return events, fmt.Errorf("save written set: %w; remove stale written set: %v", err, removeErr)
+		}
+		return events, nil
+	}
+	l.changedMu.Lock()
+	for _, path := range written {
+		if change, ok := l.changed[path]; ok && change.written {
+			change.durable = true
+			l.changed[path] = change
+		}
+	}
+	l.changedMu.Unlock()
+	if l.stateDirty.Swap(false) {
+		slog.Info("Many database written set recovered", "written", len(written))
+		events = append(events, manyDBStateEvent{manyDBStateRecoveredEvent, fmt.Sprintf("many database written set saved again with %d written databases", len(written))})
+	}
+	return events, nil
+}
+
+// persistWrittenState saves the written set and reports any state events.
+// It runs when a path enters or leaves the set and again on every later mark
+// or acknowledgement while a save has failed.
+func (l *manyDBLoad) persistWrittenState() error {
+	l.stateMu.Lock()
+	events, err := l.saveWrittenStateLocked()
+	l.stateMu.Unlock()
+	l.emitStateEvents(events)
+	return err
+}
+
+func (l *manyDBLoad) emitStateEvents(events []manyDBStateEvent) {
+	if l.onStateEvent == nil {
+		return
+	}
+	for _, event := range events {
+		l.onStateEvent(event.eventType, event.message)
+	}
+}
+
+func (l *manyDBLoad) stateIsDirty() bool {
+	return l.stateDirty.Load()
 }
 
 func (l *manyDBLoad) Start(ctx context.Context) error {
@@ -245,14 +441,59 @@ func (l *manyDBLoad) writeWorker(ctx context.Context) {
 			if !l.beginWrite(ctx) {
 				return
 			}
-			if err := writeManyDBRow(ctx, write.dbPath, l.cfg.PayloadSize, write.rowSlot); err != nil {
+			if err := l.performWrite(ctx, write); err != nil {
 				slog.Warn("Many database write failed", "db", write.dbPath, "error", err)
-			} else {
-				l.markChanged(write.dbPath)
 			}
 			l.endWrite()
 		}
 	}
+}
+
+// performWrite records the database as written before the row is committed,
+// so a crash between the commit and the record cannot leave a valid written
+// set that omits the write. A database whose written entry is already on disk
+// (durable) goes straight to the row write while no save has failed;
+// otherwise the write takes stateMu, so a second writer to the same database
+// waits for the save in flight, saves, and only then writes the row. When the
+// save and the removal of the stale file both fail the write is refused, so
+// a broken state disk shows up as write errors rather than lost coverage. A
+// row write that fails leaves the database marked written, and it is verified
+// anyway.
+func (l *manyDBLoad) performWrite(ctx context.Context, write manyDBWrite) error {
+	if !l.markDurableWrite(write.dbPath) {
+		l.stateMu.Lock()
+		var events []manyDBStateEvent
+		var err error
+		if !l.markDurableWrite(write.dbPath) {
+			l.mark(write.dbPath, true)
+			events, err = l.saveWrittenStateLocked()
+		}
+		l.stateMu.Unlock()
+		l.emitStateEvents(events)
+		if err != nil {
+			return fmt.Errorf("written set not durable, write to %s refused: %w", filepath.Base(write.dbPath), err)
+		}
+	}
+	return l.writeRow(ctx, write.dbPath, l.cfg.PayloadSize, write.rowSlot)
+}
+
+// markDurableWrite bumps the generation of a database whose written entry is
+// already saved and reports whether it did; a dirty state or an entry that is
+// not yet durable leaves the write to the saving path.
+func (l *manyDBLoad) markDurableWrite(dbPath string) bool {
+	if l.stateDirty.Load() {
+		return false
+	}
+	l.changedMu.Lock()
+	defer l.changedMu.Unlock()
+	change, ok := l.changed[dbPath]
+	if !ok || !change.written || !change.durable {
+		return false
+	}
+	l.changeGeneration++
+	change.generation = l.changeGeneration
+	l.changed[dbPath] = change
+	return true
 }
 
 func (l *manyDBLoad) beginWrite(ctx context.Context) bool {
@@ -362,15 +603,32 @@ func (l *manyDBLoad) Stop() {
 	SetLoadRunning(false)
 }
 
+// manyDBChange is one database awaiting verification of its current
+// generation. written is set once the workload wrote to it since it was last
+// verified; a seeded entry that was never written is backlog, not a change.
 type manyDBChange struct {
 	path       string
 	generation uint64
 	since      time.Time
+	written    bool
+	durable    bool
 }
 
+// markChanged records a workload write and saves the written set when the
+// database enters it, or when an earlier save failed and must be retried.
 func (l *manyDBLoad) markChanged(dbPath string) {
+	if l.mark(dbPath, true) || l.stateIsDirty() {
+		if err := l.persistWrittenState(); err != nil {
+			slog.Warn("Many database written set not saved", "error", err)
+		}
+	}
+}
+
+// mark bumps the database's generation and flags it written; it reports
+// whether the database entered the written set, which the caller persists.
+func (l *manyDBLoad) mark(dbPath string, written bool) bool {
 	if dbPath == "" {
-		return
+		return false
 	}
 	l.changedMu.Lock()
 	defer l.changedMu.Unlock()
@@ -383,9 +641,18 @@ func (l *manyDBLoad) markChanged(dbPath string) {
 	}
 	l.changeGeneration++
 	change.generation = l.changeGeneration
+	entered := written && !change.written
+	change.written = change.written || written
+	if entered {
+		change.durable = false
+	}
 	l.changed[dbPath] = change
+	return entered
 }
 
+// pendingManyDBChanges lists the pending set with written databases ahead of
+// the seeded backlog, each group in round-robin order from the last attempt,
+// so a truncated batch always covers what the workload touched first.
 func (l *manyDBLoad) pendingManyDBChanges() []manyDBChange {
 	l.changedMu.Lock()
 	defer l.changedMu.Unlock()
@@ -394,6 +661,9 @@ func (l *manyDBLoad) pendingManyDBChanges() []manyDBChange {
 		changes = append(changes, change)
 	}
 	sort.Slice(changes, func(i, j int) bool {
+		if changes[i].written != changes[j].written {
+			return changes[i].written
+		}
 		afterI, afterJ := changes[i].path > l.lastAttempt, changes[j].path > l.lastAttempt
 		if afterI != afterJ {
 			return afterI
@@ -411,23 +681,44 @@ func (l *manyDBLoad) attemptManyDBChange(change manyDBChange) {
 
 func (l *manyDBLoad) acknowledgeManyDBChange(change manyDBChange) {
 	l.changedMu.Lock()
-	defer l.changedMu.Unlock()
-	if current, ok := l.changed[change.path]; ok && current.generation == change.generation {
+	current, ok := l.changed[change.path]
+	verified := ok && current.generation == change.generation
+	if verified {
 		delete(l.changed, change.path)
+	}
+	l.changedMu.Unlock()
+	if (verified && current.written) || l.stateIsDirty() {
+		if err := l.persistWrittenState(); err != nil {
+			slog.Warn("Many database written set not saved", "error", err)
+		}
 	}
 }
 
-func (l *manyDBLoad) manyDBPendingCoverage() (int, float64) {
+// manyDBCoverage is the pending set at one instant: every database awaiting
+// verification, how many of them the workload wrote to, and the age of the
+// oldest. All three are read under one lock so they describe the same set.
+type manyDBCoverage struct {
+	pending   int
+	written   int
+	oldestAge float64
+}
+
+func (l *manyDBLoad) manyDBPendingCoverage() manyDBCoverage {
 	l.changedMu.Lock()
 	defer l.changedMu.Unlock()
 	now := l.now()
 	oldest := now
+	coverage := manyDBCoverage{pending: len(l.changed)}
 	for _, change := range l.changed {
 		if change.since.Before(oldest) {
 			oldest = change.since
 		}
+		if change.written {
+			coverage.written++
+		}
 	}
-	return len(l.changed), max(0, now.Sub(oldest).Seconds())
+	coverage.oldestAge = max(0, now.Sub(oldest).Seconds())
+	return coverage
 }
 
 func selectManyDBVerificationTargets(cfg Config, changed []string) ([]string, int) {
@@ -464,21 +755,24 @@ func selectManyDBVerificationTargets(cfg Config, changed []string) ([]string, in
 	return targets, totalChanged
 }
 
-func (l *manyDBLoad) coverageDescriptors() (*prometheus.Desc, *prometheus.Desc) {
+func (l *manyDBLoad) coverageDescriptors() (*prometheus.Desc, *prometheus.Desc, *prometheus.Desc) {
 	labels := prometheus.Labels{"worker_id": l.cfg.WorkerID, "profile": l.cfg.ProfileName, "source": l.cfg.Source, "region": l.cfg.Region}
 	return prometheus.NewDesc("soak_many_db_pending_count", "Databases awaiting successful verification of their current generation, including untouched databases.", nil, labels),
-		prometheus.NewDesc("soak_many_db_oldest_pending_age_seconds", "Seconds since the oldest outstanding database first required verification; zero when coverage is current.", nil, labels)
+		prometheus.NewDesc("soak_many_db_oldest_pending_age_seconds", "Seconds since the oldest outstanding database first required verification; zero when coverage is current.", nil, labels),
+		prometheus.NewDesc("soak_many_db_written_pending_count", "Databases the workload wrote to that still await successful verification of their current generation.", nil, labels)
 }
 
 func (l *manyDBLoad) Describe(ch chan<- *prometheus.Desc) {
-	count, age := l.coverageDescriptors()
+	count, age, written := l.coverageDescriptors()
 	ch <- count
 	ch <- age
+	ch <- written
 }
 
 func (l *manyDBLoad) Collect(ch chan<- prometheus.Metric) {
-	countDesc, ageDesc := l.coverageDescriptors()
-	count, age := l.manyDBPendingCoverage()
-	ch <- prometheus.MustNewConstMetric(countDesc, prometheus.GaugeValue, float64(count))
-	ch <- prometheus.MustNewConstMetric(ageDesc, prometheus.GaugeValue, age)
+	countDesc, ageDesc, writtenDesc := l.coverageDescriptors()
+	coverage := l.manyDBPendingCoverage()
+	ch <- prometheus.MustNewConstMetric(countDesc, prometheus.GaugeValue, float64(coverage.pending))
+	ch <- prometheus.MustNewConstMetric(ageDesc, prometheus.GaugeValue, coverage.oldestAge)
+	ch <- prometheus.MustNewConstMetric(writtenDesc, prometheus.GaugeValue, float64(coverage.written))
 }

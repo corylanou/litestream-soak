@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -250,6 +251,50 @@ func (r *Runner) resetFailureDebugState() {
 	defer r.failureDebug.mu.Unlock()
 	r.failureDebug.key = ""
 	r.failureDebug.at = time.Time{}
+}
+
+// sendManyDBTruncatedEvent records that a verification batch could not fit
+// every pending database, so the ledger can tell a slow drain from a slow
+// candidate.
+func (r *Runner) sendManyDBTruncatedEvent(changed, targets, limit int) {
+	if r.reporter == nil || !r.reporter.Enabled() {
+		return
+	}
+	reportCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.reporter.SendEvent(reportCtx, reporting.WorkerEventPayload{
+		EventType:      manyDBTruncatedEventType,
+		Message:        manyDBTruncatedMessage(changed, targets, limit),
+		SentAt:         time.Now().UTC(),
+		RuntimePayload: r.currentSnapshot().RuntimePayload,
+	}); err != nil {
+		slog.Warn("Failed to send many database truncation event", "error", err)
+	}
+}
+
+const manyDBTruncatedEventType = "many_db_changed_set_truncated"
+
+// sendManyDBStateEvent reports the written set going dirty or recovering, so
+// a restart that fell back to treating every database as written can be
+// explained from the ledger.
+func (r *Runner) sendManyDBStateEvent(eventType, message string) {
+	if r.reporter == nil || !r.reporter.Enabled() {
+		return
+	}
+	reportCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.reporter.SendEvent(reportCtx, reporting.WorkerEventPayload{
+		EventType:      eventType,
+		Message:        message,
+		SentAt:         time.Now().UTC(),
+		RuntimePayload: r.currentSnapshot().RuntimePayload,
+	}); err != nil {
+		slog.Warn("Failed to send many database written set event", "event", eventType, "error", err)
+	}
+}
+
+func manyDBTruncatedMessage(changed, targets, limit int) string {
+	return fmt.Sprintf("many database changed set truncated: %d pending databases, %d selected this cycle (limit %d)", changed, targets, limit)
 }
 
 func (r *Runner) sendWorkerFailureEvent(err error) {

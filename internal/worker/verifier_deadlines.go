@@ -47,6 +47,18 @@ func verificationCooldown(interval, elapsed time.Duration) time.Duration {
 	return max(interval, 2*elapsed)
 }
 
+// verificationCooldown is the wait before the next cycle. A single-database
+// cycle waits at least twice as long as it ran so the primary is not spent
+// mostly paused; a many-database batch already pauses the load for its whole
+// run and every extra minute of cooldown rotates more databases into the
+// pending set, so it keeps the plain interval.
+func (c Config) verificationCooldown(elapsed time.Duration) time.Duration {
+	if c.ManyDBEnabled() {
+		return c.VerifyInterval
+	}
+	return verificationCooldown(c.VerifyInterval, elapsed)
+}
+
 func (v *Verifier) runValidationPhase(parent context.Context, name string, budget time.Duration, fn func(context.Context) error) error {
 	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
