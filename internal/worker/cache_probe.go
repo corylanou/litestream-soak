@@ -3,8 +3,11 @@ package worker
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"sync"
 	"time"
@@ -84,19 +87,62 @@ type cacheProbeWriter struct {
 	dbPath   string
 	interval time.Duration
 	bump     func(context.Context, string, int) error
+	position func(context.Context) (uint64, error)
 
-	mu     sync.Mutex
-	paused bool
-	stripe int
-	stop   context.CancelFunc
-	done   chan struct{}
+	mu      sync.Mutex
+	paused  bool
+	stripe  int
+	commits []cacheProbeCommit
+	stop    context.CancelFunc
+	done    chan struct{}
 }
+
+// cacheProbeCommit is one committed probe update and the Litestream txid by
+// which it must be in the replica: the position Litestream reported after the
+// commit plus one, since the next sync after a commit carries its frames. A
+// zero txid means the position could not be read.
+type cacheProbeCommit struct {
+	txid uint64
+	at   time.Time
+}
+
+const cacheProbeCommitHistory = 256
 
 func newCacheProbeWriter(dbPath string, interval time.Duration) *cacheProbeWriter {
 	if interval <= 0 {
 		interval = cacheProbeInterval
 	}
-	return &cacheProbeWriter{dbPath: dbPath, interval: interval, bump: bumpCacheProbe}
+	return &cacheProbeWriter{dbPath: dbPath, interval: interval, bump: bumpCacheProbe, position: func(context.Context) (uint64, error) { return 0, errors.New("litestream position unavailable") }}
+}
+
+// litestreamPosition reads the primary's current Litestream txid over IPC.
+func litestreamPosition(cfg Config) func(context.Context) (uint64, error) {
+	client := newIPCClient(cfg.SocketPath, cacheProbeBusyTimeout)
+	return func(ctx context.Context) (uint64, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/txid?path="+cfg.DBPath, nil)
+		if err != nil {
+			return 0, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return 0, fmt.Errorf("read txid: %w", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var result struct {
+			TXID uint64 `json:"txid"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return 0, fmt.Errorf("decode txid: %w", err)
+		}
+		return result.TXID, nil
+	}
+}
+
+// Commits returns the recent probe commits, oldest first.
+func (w *cacheProbeWriter) Commits() []cacheProbeCommit {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]cacheProbeCommit(nil), w.commits...)
 }
 
 func (w *cacheProbeWriter) Start(ctx context.Context) {
@@ -153,7 +199,20 @@ func (w *cacheProbeWriter) writeOnce(ctx context.Context) {
 	}
 	stripe := w.stripe
 	w.stripe++
-	if err := w.bump(ctx, w.dbPath, stripe); err != nil && ctx.Err() == nil {
-		slog.Warn("Cache probe update failed", "error", err)
+	if err := w.bump(ctx, w.dbPath, stripe); err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("Cache probe update failed", "error", err)
+		}
+		return
+	}
+	commit := cacheProbeCommit{at: time.Now().UTC()}
+	if position, err := w.position(ctx); err == nil {
+		commit.txid = position + 1
+	} else if ctx.Err() == nil {
+		slog.Warn("Cache probe commit position unavailable", "error", err)
+	}
+	w.commits = append(w.commits, commit)
+	if len(w.commits) > cacheProbeCommitHistory {
+		w.commits = w.commits[len(w.commits)-cacheProbeCommitHistory:]
 	}
 }

@@ -131,6 +131,7 @@ func newTestVFSReaderCheck(t *testing.T, reader *fakeVFSReader, startErr error) 
 		}
 		return reader, nil
 	}
+	check.probeCommits = func() []cacheProbeCommit { return []cacheProbeCommit{{txid: 9}, {txid: 11}} }
 	t.Cleanup(check.Stop)
 	return check
 }
@@ -152,6 +153,7 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 	tests := []struct {
 		name          string
 		reader        *fakeVFSReader
+		commits       []cacheProbeCommit
 		startErr      error
 		wantStatus    string
 		wantSignature string
@@ -159,23 +161,39 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 		wantDropped   bool
 	}{
 		{
-			name:       "repeats match after new ltx arrived mid-transaction and the reader advances after commit",
+			name:       "repeats match after a probe update landed mid-transaction and the reader advances after commit",
 			reader:     &fakeVFSReader{probes: []string{first, first, first, "2048|0|1|128"}, txids: []uint64{10, 11, 11, 12}, progress: []float64{100}},
 			wantStatus: "passed",
 		},
 		{
-			name:          "ltx that arrives only after the last repeat is no evidence",
+			name:          "a probe update that lands only after the last repeat is no evidence",
 			reader:        &fakeVFSReader{probes: []string{first, first, first, "2048|0|1|128"}, txids: []uint64{10, 10, 11, 12}, progress: []float64{100}},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
-			wantMessage:   "no replica txid past 000000000000000a was observed before the last repeat",
+			wantMessage:   "probe update landing by txid 000000000000000b was not observed before the last repeat",
+		},
+		{
+			name:          "synthetic writes replicating mid-transaction are no evidence without a probe update",
+			reader:        &fakeVFSReader{probes: []string{first, first, first, "2048|0|1|128"}, txids: []uint64{10, 11, 12, 13}, progress: []float64{100}},
+			commits:       []cacheProbeCommit{{txid: 9}, {txid: 13}},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
+			wantMessage:   "probe update landing by txid 000000000000000d was not observed before the last repeat",
 		},
 		{
 			name:          "a replica that never moves during the transaction is no evidence",
 			reader:        &fakeVFSReader{probes: []string{first, first, first, "2048|0|1|128"}, txids: []uint64{10, 10, 10, 12}, progress: []float64{100}},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
-			wantMessage:   "no replica txid past 000000000000000a was observed before the last repeat",
+			wantMessage:   "probe update landing by txid 000000000000000b was not observed before the last repeat",
+		},
+		{
+			name:          "no probe commit past the first read is no evidence even when the reader advances",
+			reader:        &fakeVFSReader{probes: []string{first, first, first, "2048|0|1|128"}, txids: []uint64{10, 11, 12, 13}, progress: []float64{100}},
+			commits:       []cacheProbeCommit{{txid: 9}, {txid: 0}},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureVFSReaderNotCaughtUp,
+			wantMessage:   "no probe update landed past the first read at txid 000000000000000a",
 		},
 		{
 			name:          "a repeat that sees replicated updates is snapshot drift",
@@ -225,6 +243,9 @@ func TestVFSSnapshotCycleJudgesRepeatableReads(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			check := newTestVFSReaderCheck(t, tt.reader, tt.startErr)
+			if tt.commits != nil {
+				check.probeCommits = func() []cacheProbeCommit { return tt.commits }
+			}
 			result := check.snapshotCycle(context.Background())
 			if result.Status != tt.wantStatus || result.Passed != (tt.wantStatus == "passed") || result.CheckType != vfsCheckType || result.RestoreMode != vfsSnapshotRestoreMode {
 				t.Fatalf("result = %+v", result)

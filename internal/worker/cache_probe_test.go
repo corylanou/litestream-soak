@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -121,5 +122,48 @@ func TestCacheProbeWriterPauseWaitsForInFlightWrite(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	if writes.Load() != committed {
 		t.Fatalf("probe writes continued after Pause returned: %d -> %d", committed, writes.Load())
+	}
+}
+
+func TestCacheProbeWriterRecordsCommitLandingTXIDs(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	if err := ensureCacheProbe(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	writer := newCacheProbeWriter(path, time.Hour)
+	positions := []uint64{40, 41}
+	writer.position = func(context.Context) (uint64, error) {
+		if len(positions) == 0 {
+			return 0, errors.New("socket closed")
+		}
+		position := positions[0]
+		positions = positions[1:]
+		return position, nil
+	}
+	for i := 0; i < 3; i++ {
+		writer.writeOnce(ctx)
+	}
+	commits := writer.Commits()
+	if len(commits) != 3 || commits[0].txid != 41 || commits[1].txid != 42 || commits[2].txid != 0 {
+		t.Fatalf("commits = %+v, want landing txids 41, 42 and unknown", commits)
+	}
+	for _, commit := range commits {
+		if commit.at.IsZero() {
+			t.Fatalf("commit without a time: %+v", commit)
+		}
+	}
+	queries, err := primaryReadQueries(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queries[0].primary != "2048|0|1|384" {
+		t.Fatalf("three stripes should have committed: %s", queries[0].primary)
+	}
+	failing := newCacheProbeWriter(path, time.Hour)
+	failing.bump = func(context.Context, string, int) error { return errors.New("database is locked") }
+	failing.writeOnce(ctx)
+	if len(failing.Commits()) != 0 {
+		t.Fatalf("failed update recorded a commit: %+v", failing.Commits())
 	}
 }

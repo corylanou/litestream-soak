@@ -95,6 +95,7 @@ type vfsSnapshotOutcome struct {
 	repeats   []vfsProbe
 	after     vfsProbe
 	committed bool
+	commits   []cacheProbeCommit
 	err       error
 	logTail   string
 }
@@ -110,15 +111,34 @@ func (o vfsSnapshotOutcome) drifted() []int {
 }
 
 func (o vfsSnapshotOutcome) advanced() bool {
-	return o.committed && o.after.sum > o.first.sum && o.advancedInTransaction()
+	return o.committed && o.after.sum > o.first.sum && o.probeLandedInTransaction()
 }
 
-// advancedInTransaction reports whether a repeat other than the last observed
-// the reader's position past the first read, so the repeats after it re-read
-// the table with new LTX files already applied underneath the transaction.
-func (o vfsSnapshotOutcome) advancedInTransaction() bool {
+// probeLandTXID is the earliest txid by which a probe update the first read
+// could not have seen is in the replica: the smallest commit txid above the
+// reader's position at the first read. Zero when no such commit is known.
+func (o vfsSnapshotOutcome) probeLandTXID() uint64 {
+	var land uint64
+	for _, commit := range o.commits {
+		if commit.txid > o.first.txid && (land == 0 || commit.txid < land) {
+			land = commit.txid
+		}
+	}
+	return land
+}
+
+// probeLandedInTransaction reports whether a repeat other than the last saw
+// the reader's position at or past a probe commit the first read could not
+// include, so the repeats after it re-read probe pages the VFS had already
+// replaced underneath the transaction. Advances carried only by the synthetic
+// load do not count.
+func (o vfsSnapshotOutcome) probeLandedInTransaction() bool {
+	land := o.probeLandTXID()
+	if land == 0 {
+		return false
+	}
 	for _, repeat := range o.repeats[:max(len(o.repeats)-1, 0)] {
-		if repeat.txid > o.first.txid {
+		if repeat.txid >= land {
 			return true
 		}
 	}
@@ -126,10 +146,15 @@ func (o vfsSnapshotOutcome) advancedInTransaction() bool {
 }
 
 func (o vfsSnapshotOutcome) noEvidence() string {
-	if !o.advancedInTransaction() {
-		return fmt.Sprintf("no replica txid past %s was observed before the last repeat", formatTXID(o.first.txid))
+	land := o.probeLandTXID()
+	switch {
+	case land == 0:
+		return fmt.Sprintf("no probe update landed past the first read at txid %s", formatTXID(o.first.txid))
+	case !o.probeLandedInTransaction():
+		return fmt.Sprintf("probe update landing by txid %s was not observed before the last repeat", formatTXID(land))
+	default:
+		return fmt.Sprintf("probe after COMMIT %s did not advance past the first read %s", o.after, o.first)
 	}
-	return fmt.Sprintf("probe after COMMIT %s did not advance past the first read %s", o.after, o.first)
 }
 
 func (o vfsSnapshotOutcome) driftError() string {
@@ -150,7 +175,7 @@ func (o vfsSnapshotOutcome) summary() string {
 		parts = append(parts, "last_repeat="+o.repeats[len(o.repeats)-1].String())
 	}
 	if o.committed {
-		parts = append(parts, "after_commit="+o.after.String(), fmt.Sprintf("advanced=%t", o.advanced()))
+		parts = append(parts, "after_commit="+o.after.String(), fmt.Sprintf("probe_commits=%d probe_land_txid=%s advanced=%t", len(o.commits), formatTXID(o.probeLandTXID()), o.advanced()))
 	}
 	if o.err != nil {
 		parts = append(parts, "error="+o.err.Error())
@@ -307,6 +332,7 @@ type vfsReaderCheck struct {
 	cfg              Config
 	start            func(context.Context, string) (vfsReader, error)
 	primaryQueries   func(context.Context) ([]vfsReadQuery, error)
+	probeCommits     func() []cacheProbeCommit
 	clock            func() time.Time
 	repeats          int
 	repeatInterval   time.Duration
@@ -347,6 +373,7 @@ func newVFSReaderCheck(cfg Config) *vfsReaderCheck {
 		return startVFSSession(startCtx, name, spec)
 	}
 	check.primaryQueries = func(ctx context.Context) ([]vfsReadQuery, error) { return primaryReadQueries(ctx, cfg.DBPath) }
+	check.probeCommits = func() []cacheProbeCommit { return nil }
 	return check
 }
 
@@ -458,6 +485,7 @@ func (c *vfsReaderCheck) runSnapshot(ctx context.Context) (outcome vfsSnapshotOu
 	}
 	outcome.committed = true
 	outcome.after, outcome.err = c.probe(ctx, session)
+	outcome.commits = c.probeCommits()
 	return outcome
 }
 
