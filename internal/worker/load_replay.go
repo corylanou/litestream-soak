@@ -23,7 +23,9 @@ type loadReplayManager struct {
 	loadSup      *loadSupervisor
 	replayEngine *replay.Engine
 	manyDBLoad   *manyDBLoad
-	loadLog      *lineBuffer
+
+	manyDBStateEvent func(eventType, message string)
+	loadLog          *lineBuffer
 }
 
 func newLoadReplayManager(cfg *Config) loadReplayManager {
@@ -51,6 +53,7 @@ func (r *Runner) startManyDBLoad(ctx context.Context) error {
 
 func (m *loadReplayManager) startManyDBLoad(ctx context.Context) error {
 	load := newManyDBLoad(m.cfg)
+	load.onStateEvent = m.manyDBStateEvent
 	if err := load.Start(ctx); err != nil {
 		return err
 	}

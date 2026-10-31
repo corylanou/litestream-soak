@@ -274,6 +274,25 @@ func (r *Runner) sendManyDBTruncatedEvent(changed, targets, limit int) {
 
 const manyDBTruncatedEventType = "many_db_changed_set_truncated"
 
+// sendManyDBStateEvent reports the written set going dirty or recovering, so
+// a restart that fell back to treating every database as written can be
+// explained from the ledger.
+func (r *Runner) sendManyDBStateEvent(eventType, message string) {
+	if r.reporter == nil || !r.reporter.Enabled() {
+		return
+	}
+	reportCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.reporter.SendEvent(reportCtx, reporting.WorkerEventPayload{
+		EventType:      eventType,
+		Message:        message,
+		SentAt:         time.Now().UTC(),
+		RuntimePayload: r.currentSnapshot().RuntimePayload,
+	}); err != nil {
+		slog.Warn("Failed to send many database written set event", "event", eventType, "error", err)
+	}
+}
+
 func manyDBTruncatedMessage(changed, targets, limit int) string {
 	return fmt.Sprintf("many database changed set truncated: %d pending databases, %d selected this cycle (limit %d)", changed, targets, limit)
 }

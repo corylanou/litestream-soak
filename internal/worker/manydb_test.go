@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -384,6 +386,139 @@ func TestPopulateManyDBsRecordsEmptyWrittenSetOnAFreshVolume(t *testing.T) {
 	}
 	if written, err = readManyDBWrittenState(&cfg); err != nil || !slices.Equal(written, []string{cfg.ManyDBPaths()[1]}) {
 		t.Fatalf("re-populate on a restart overwrote the written set: %v, %v", written, err)
+	}
+}
+
+func TestManyDBWrittenSetMatchesMemoryAfterConcurrentChanges(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.NumDatabases = 16
+	manyDBWrittenStateDir(t, &cfg)
+	paths := cfg.ManyDBPaths()
+	load := newManyDBLoad(&cfg)
+	var wg sync.WaitGroup
+	for worker := range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				path := paths[(i*7+worker)%len(paths)]
+				load.markChanged(path)
+				if i%3 == 0 {
+					load.changedMu.Lock()
+					change, ok := load.changed[paths[(i+worker)%len(paths)]]
+					load.changedMu.Unlock()
+					if ok {
+						load.acknowledgeManyDBChange(change)
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	var inMemory []string
+	for _, change := range load.pendingManyDBChanges() {
+		if change.written {
+			inMemory = append(inMemory, change.path)
+		}
+	}
+	sort.Strings(inMemory)
+	onDisk, err := readManyDBWrittenState(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(onDisk, inMemory) {
+		t.Fatalf("persisted written set %v differs from memory %v", onDisk, inMemory)
+	}
+	var restored []string
+	for _, change := range newManyDBLoad(&cfg).pendingManyDBChanges() {
+		if change.written {
+			restored = append(restored, change.path)
+		}
+	}
+	sort.Strings(restored)
+	if !slices.Equal(restored, inMemory) {
+		t.Fatalf("restart restored %v, memory had %v", restored, inMemory)
+	}
+}
+
+func TestManyDBWritePersistsIntentBeforeTheRowCommits(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.NumDatabases = 3
+	manyDBWrittenStateDir(t, &cfg)
+	paths := cfg.ManyDBPaths()
+	load := newManyDBLoad(&cfg)
+	var order []string
+	load.writeRow = func(_ context.Context, dbPath string, _ int, _ int64) error {
+		written, err := readManyDBWrittenState(&cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(written, dbPath) {
+			t.Fatalf("row written before the written set recorded %s: file has %v", dbPath, written)
+		}
+		order = append(order, "write "+filepath.Base(dbPath))
+		return nil
+	}
+	load.performWrite(context.Background(), manyDBWrite{dbPath: paths[1], rowSlot: 1})
+	if !slices.Equal(order, []string{"write " + filepath.Base(paths[1])}) {
+		t.Fatalf("order = %v", order)
+	}
+	crashed := newManyDBLoad(&cfg)
+	if coverage := crashed.manyDBPendingCoverage(); coverage.written != 1 || crashed.pendingManyDBChanges()[0].path != paths[1] {
+		t.Fatalf("a crash right after the commit lost the write: %+v %+v", coverage, crashed.pendingManyDBChanges()[0])
+	}
+	load.writeRow = func(context.Context, string, int, int64) error { return errors.New("database is locked") }
+	load.performWrite(context.Background(), manyDBWrite{dbPath: paths[2], rowSlot: 1})
+	if written, err := readManyDBWrittenState(&cfg); err != nil || !slices.Equal(written, []string{paths[1], paths[2]}) {
+		t.Fatalf("a failed write must stay recorded as written: %v, %v", written, err)
+	}
+}
+
+func TestManyDBWrittenSetFailureGoesDirtyAndFallsBackOnRestart(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.NumDatabases = 4
+	manyDBWrittenStateDir(t, &cfg)
+	paths := cfg.ManyDBPaths()
+	load := newManyDBLoad(&cfg)
+	var events []string
+	load.onStateEvent = func(eventType, message string) { events = append(events, eventType+": "+message) }
+	load.markChanged(paths[0])
+	saves := 0
+	load.saveState = func([]string) error { saves++; return errors.New("read-only file system") }
+	load.markChanged(paths[1])
+	load.markChanged(paths[1])
+	load.markChanged(paths[1])
+	if !load.stateIsDirty() || saves != 3 {
+		t.Fatalf("dirty=%v saves=%d, want dirty with a retry on every later mark", load.stateIsDirty(), saves)
+	}
+	if _, err := os.Stat(manyDBWrittenStatePath(&cfg)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale written set left on disk: %v", err)
+	}
+	if len(events) != 1 || !strings.HasPrefix(events[0], manyDBStateDirtyEvent+": ") {
+		t.Fatalf("events = %v, want one dirty event", events)
+	}
+	restarted := newManyDBLoad(&cfg)
+	if coverage := restarted.manyDBPendingCoverage(); coverage.written != 4 {
+		t.Fatalf("restart while dirty = %+v, want every database written", coverage)
+	}
+	load.saveState = func(written []string) error { return writeManyDBWrittenState(cfg, written) }
+	for _, change := range load.pendingManyDBChanges() {
+		if change.path == paths[3] {
+			load.acknowledgeManyDBChange(change)
+		}
+	}
+	if load.stateIsDirty() {
+		t.Fatal("a successful save did not clear the dirty flag")
+	}
+	if written, err := readManyDBWrittenState(&cfg); err != nil || !slices.Equal(written, []string{paths[0], paths[1]}) {
+		t.Fatalf("recovered written set = %v, %v", written, err)
+	}
+	if len(events) != 2 || !strings.HasPrefix(events[1], manyDBStateRecoveredEvent+": ") {
+		t.Fatalf("events = %v, want dirty then recovered", events)
+	}
+	load.markChanged(paths[2])
+	if len(events) != 2 {
+		t.Fatalf("events after recovery = %v, want no repeats", events)
 	}
 }
 
