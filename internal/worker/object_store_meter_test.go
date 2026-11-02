@@ -489,14 +489,20 @@ func TestCountingResponseWriterScansWholeCompletionBody(t *testing.T) {
 		chunks        []string
 		want          bool
 	}{
-		"clean result":                  {chunks: []string{"<CompleteMultipartUploadResult><ETag>e</ETag></CompleteMultipartUploadResult>"}, want: true},
-		"error after 64 KiB whitespace": {chunks: []string{whitespace, "<Error><Code>InternalError</Code></Error>"}},
-		"error split across writes":     {chunks: []string{whitespace + "<Err", "or><Code>SlowDown</Code></Error>"}},
-		"error split byte by byte":      {chunks: []string{"<", "E", "r", "r", "o", "r", ">"}},
-		"error after a full tail":       {chunks: []string{whitespace + "<Erro", "r>"}},
-		"truncated 200":                 {contentLength: "100", chunks: []string{"<CompleteMul"}},
-		"complete with content length":  {contentLength: "9", chunks: []string{"<Result/>"}, want: true},
-		"empty body":                    {chunks: nil, want: true},
+		"clean result":                   {chunks: []string{"<CompleteMultipartUploadResult><ETag>e</ETag></CompleteMultipartUploadResult>"}, want: true},
+		"result after 64 KiB whitespace": {chunks: []string{whitespace, "<CompleteMultipartUploadResult/>"}, want: true},
+		"result split across writes":     {chunks: []string{whitespace + "<CompleteMultipart", "UploadResult><ETag>e</ETag></CompleteMultipartUploadResult>"}, want: true},
+		"result split byte by byte":      {chunks: strings.Split("<CompleteMultipartUploadResult/>", ""), want: true},
+		"result then error":              {chunks: []string{"<CompleteMultipartUploadResult>", "<Error><Code>InternalError</Code></Error>"}},
+		"error after 64 KiB whitespace":  {chunks: []string{whitespace, "<Error><Code>InternalError</Code></Error>"}},
+		"error split across writes":      {chunks: []string{whitespace + "<Err", "or><Code>SlowDown</Code></Error>"}},
+		"error split byte by byte":       {chunks: []string{"<", "E", "r", "r", "o", "r", ">"}},
+		"error after a full tail":        {chunks: []string{whitespace + "<Erro", "r>"}},
+		"truncated 200":                  {contentLength: "100", chunks: []string{"<CompleteMultipartUploadResult>"}},
+		"complete with content length":   {contentLength: "32", chunks: []string{"<CompleteMultipartUploadResult/>"}, want: true},
+		"unrelated element only":         {contentLength: "9", chunks: []string{"<Result/>"}},
+		"whitespace only":                {chunks: []string{whitespace, "\n"}},
+		"empty body":                     {chunks: nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			counted := write(t, tc.contentLength, tc.chunks...)
@@ -539,6 +545,10 @@ func TestS3ObserveProxyIgnoresCompletionErrorsStreamedLate(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("<CompleteMultipartUploadResult>"))
 			panic(http.ErrAbortHandler)
+		case "empty":
+			w.WriteHeader(http.StatusOK)
+		case "whitespace":
+			_, _ = w.Write([]byte(strings.Repeat(" ", 1024)))
 		default:
 			_, _ = w.Write([]byte("<CompleteMultipartUploadResult/>"))
 		}
@@ -571,13 +581,15 @@ func TestS3ObserveProxyIgnoresCompletionErrorsStreamedLate(t *testing.T) {
 	}
 	complete("late")
 	complete("truncated")
+	complete("empty")
+	complete("whitespace")
 	complete("ok")
 
 	counters := proxy.RequestCounters()
 	if want := map[string]uint64{"L9": 1}; !reflect.DeepEqual(counters.LevelPuts, want) {
 		t.Fatalf("level puts = %v, want only the clean completion %v", counters.LevelPuts, want)
 	}
-	if counters.Requests["POST"] != 3 {
+	if counters.Requests["POST"] != 5 {
 		t.Fatalf("requests = %v, want every completion attempt counted as a request", counters.Requests)
 	}
 }

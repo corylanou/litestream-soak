@@ -104,6 +104,7 @@ func TestApplyGateWorkloadObserveProxyKeepsFaultModes(t *testing.T) {
 		return FleetSpec{Workers: []DesiredWorker{
 			{Name: "fault", Workload: workload.Config{S3FaultProxyEnabled: true, S3FaultProxyMode: "source-get-reset", S3FaultProxyFailFirstAttempts: 3}},
 			{Name: "plain", Workload: workload.Config{LoadMode: "synthetic"}},
+			{Name: "already-observing", Workload: workload.Config{S3FaultProxyEnabled: true, S3FaultProxyMode: "observe"}},
 		}}
 	}
 	applied := applyGateWorkload(model.RCGate{ObserveProxy: true}, spec())
@@ -113,9 +114,54 @@ func TestApplyGateWorkloadObserveProxyKeepsFaultModes(t *testing.T) {
 	if plain := applied.Workers[1].Workload; !plain.S3FaultProxyEnabled || plain.S3FaultProxyMode != "observe" || !plain.S3ObserveProxyRequired || plain.MeteringWindow {
 		t.Fatalf("plain worker = %+v, want required observe proxy without metering window", plain)
 	}
+	if observing := applied.Workers[2].Workload; !observing.S3FaultProxyEnabled || observing.S3FaultProxyMode != "observe" || !observing.S3ObserveProxyRequired {
+		t.Fatalf("already-observing worker = %+v, want the proxy made required", observing)
+	}
 	unchanged := applyGateWorkload(model.RCGate{}, spec())
 	if plain := unchanged.Workers[1].Workload; plain.S3FaultProxyEnabled || plain.S3FaultProxyMode != "" || plain.S3ObserveProxyRequired {
 		t.Fatalf("plain worker without opt-in = %+v, want direct replication", plain)
+	}
+	if observing := unchanged.Workers[2].Workload; observing.S3ObserveProxyRequired {
+		t.Fatalf("already-observing worker without opt-in = %+v, want fail-open proxy", observing)
+	}
+}
+
+func TestRegisterRCGateObserveProxyRejectsMeteringWindowSources(t *testing.T) {
+	now := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	request := RCGateRequest{Repository: "benbjohnson/litestream", CandidateSHA: testGateCandidateSHA, BaselineSHA: testGateBaselineSHA, Duration: "24h", ObserveProxy: true}
+	for name, listed := range map[string]string{
+		"candidate listed": "main," + testGateCandidate,
+		"baseline listed":  testGateBaseline,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("SOAK_METERING_WINDOW_SOURCES", listed)
+			db := openTestDB(t)
+			manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+			_, _, err := manager.RegisterRCGate(request, now)
+			if !errors.Is(err, errRCGateInvalid) || !strings.Contains(err.Error(), "metering window source") {
+				t.Fatalf("RegisterRCGate() error = %v, want %v about the metering window", err, errRCGateInvalid)
+			}
+			gates, err := db.ListRCGates()
+			if err != nil || len(gates) != 0 {
+				t.Fatalf("gates after rejected registration = %d, %v", len(gates), err)
+			}
+
+			api := NewAPI(db, nil, nil, nil, manager, nil)
+			mux := http.NewServeMux()
+			api.RegisterRoutes(mux)
+			body, _ := json.Marshal(request)
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/admin/rc-gates", bytes.NewReader(body)))
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("register status = %d body %s, want 400", recorder.Code, recorder.Body.String())
+			}
+
+			plain := request
+			plain.ObserveProxy = false
+			if _, created, err := manager.RegisterRCGate(plain, now); err != nil || !created {
+				t.Fatalf("RegisterRCGate() without observe_proxy = %v, %v, want the metering gate to register", created, err)
+			}
+		})
 	}
 }
 

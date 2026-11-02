@@ -831,6 +831,14 @@ func (m *Manager) RegisterRCGate(request RCGateRequest, now time.Time) (model.RC
 	if gate.Tail {
 		gate.TailExpiresAt = new(now.Add(rcGateTailDuration))
 	}
+	if gate.ObserveProxy {
+		metered := meteringWindowSources()
+		for _, source := range gate.Sources() {
+			if slices.Contains(metered, source) {
+				return model.RCGate{}, false, fmt.Errorf("%w: observe_proxy cannot be combined with metering window source %s, whose verifications would be excluded from the verdict", errRCGateInvalid, source)
+			}
+		}
+	}
 	for _, source := range gate.Sources() {
 		litestreamSHA, _ := gate.LitestreamSHAFor(source)
 		for _, desired := range gateFleetForSource(gate, source, "", litestreamSHA).Workers {
@@ -892,10 +900,14 @@ func applyGateWorkload(gate model.RCGate, spec FleetSpec) FleetSpec {
 		if spec.Workers[i].Workload.UpgradeLane && gate.UpgradeWarmup > 0 {
 			spec.Workers[i].Workload.UpgradeWarmup = gate.UpgradeWarmup.String()
 		}
-		if gate.ObserveProxy && !spec.Workers[i].Workload.S3FaultProxyEnabled {
-			spec.Workers[i].Workload.S3FaultProxyEnabled = true
-			spec.Workers[i].Workload.S3FaultProxyMode = "observe"
-			spec.Workers[i].Workload.S3ObserveProxyRequired = true
+		if gate.ObserveProxy {
+			if !spec.Workers[i].Workload.S3FaultProxyEnabled {
+				spec.Workers[i].Workload.S3FaultProxyEnabled = true
+				spec.Workers[i].Workload.S3FaultProxyMode = "observe"
+			}
+			if spec.Workers[i].Workload.S3FaultProxyMode == "observe" {
+				spec.Workers[i].Workload.S3ObserveProxyRequired = true
+			}
 		}
 		for _, resource := range gate.Resources {
 			if resource.Source == spec.Workers[i].Source && resource.Profile == spec.Workers[i].ProfileName && resource.VolumeGB > 0 {

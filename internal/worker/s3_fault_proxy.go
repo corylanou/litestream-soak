@@ -373,12 +373,16 @@ func (c *countingReadCloser) Close() error {
 	return c.ReadCloser.Close()
 }
 
-var s3ErrorElement = []byte("<Error")
+var (
+	s3ErrorElement            = []byte("<Error")
+	s3CompletionResultElement = []byte("<CompleteMultipartUploadResult")
+)
 
 // countingResponseWriter counts response bytes and, for a multipart
-// completion, scans the whole body for an embedded <Error element with a
-// rolling window that spans writes, forwarding every byte unchanged. S3 may
-// stream whitespace for a long time before the error, so no prefix is enough.
+// completion, scans the whole body for the result element and for an
+// embedded <Error element with a rolling window that spans writes,
+// forwarding every byte unchanged. S3 may stream whitespace for a long time
+// before either, so no prefix is enough and an empty body proves nothing.
 type countingResponseWriter struct {
 	http.ResponseWriter
 	n             atomic.Int64
@@ -386,6 +390,7 @@ type countingResponseWriter struct {
 	contentLength int64
 	scanErrors    bool
 	errorSeen     bool
+	resultSeen    bool
 	tail          []byte
 }
 
@@ -408,7 +413,10 @@ func (c *countingResponseWriter) Write(p []byte) (int, error) {
 		if bytes.Contains(window, s3ErrorElement) {
 			c.errorSeen = true
 		}
-		c.tail = append(c.tail[:0], window[max(0, len(window)-(len(s3ErrorElement)-1)):]...)
+		if !c.resultSeen && bytes.Contains(window, s3CompletionResultElement) {
+			c.resultSeen = true
+		}
+		c.tail = append(c.tail[:0], window[max(0, len(window)-(len(s3CompletionResultElement)-1)):]...)
 	}
 	n, err := c.ResponseWriter.Write(p)
 	c.n.Add(int64(n))
@@ -420,10 +428,11 @@ func (c *countingResponseWriter) status() int {
 }
 
 // completionSucceeded reports whether a multipart completion response was
-// fully forwarded without an embedded error: a short body (fewer bytes than
-// the declared Content-Length) is never counted.
+// fully forwarded and carried the result element without an embedded error.
+// An empty or whitespace-only body and a short body (fewer bytes than the
+// declared Content-Length) are never counted.
 func (c *countingResponseWriter) completionSucceeded() bool {
-	if !c.scanErrors || c.errorSeen || c.statusCode.Load() == 0 {
+	if !c.scanErrors || c.errorSeen || !c.resultSeen || c.statusCode.Load() == 0 {
 		return false
 	}
 	return c.contentLength < 0 || c.n.Load() == c.contentLength
