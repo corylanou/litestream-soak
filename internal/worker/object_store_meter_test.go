@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -10,8 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -312,6 +313,11 @@ func TestLTXLevelOfKeyFollowsS3ReplicaLayout(t *testing.T) {
 		"/bucket/soak/manydb/db-0417/0003/0000000000000a00-0000000000000a7f.ltx":          "L3",
 		"/bucket/soak/scenarios/pinned-reader/0000/0000000000000002-0000000000000002.ltx": "L0",
 		"/bucket/soak/w1/ltx/0/0000000000000001-0000000000000001.ltx":                     "other",
+		"/bucket/soak/w1/0000/0000000000000001-0000000000000001.ltx.tmp":                  "other",
+		"/bucket/soak/w1/0000/00000000000000001-0000000000000001.ltx":                     "other",
+		"/bucket/soak/w1/0000/000000000000000G-0000000000000001.ltx":                      "other",
+		"/bucket/soak/w1/0009/snapshot.ltx":                                               "other",
+		"/bucket/soak/w1/0009/":                                                           "other",
 		"/bucket/soak/w1/000a/0000000000000001-0000000000000001.ltx":                      "other",
 		"/bucket/soak/w1/0010/0000000000000001-0000000000000001.ltx":                      "other",
 		"/bucket/soak/w1/9/0000000000000001-0000000000000001.ltx":                         "other",
@@ -326,10 +332,23 @@ func TestLTXLevelOfKeyFollowsS3ReplicaLayout(t *testing.T) {
 	}
 }
 
-func TestS3ObserveProxyCountsPutsPerLevelOncePerObject(t *testing.T) {
+func TestS3ObserveProxyCountsSuccessfulPutsPerLevelOncePerObject(t *testing.T) {
+	var failNext atomic.Int32
+	const errorCompletion = `<?xml version="1.0" encoding="UTF-8"?><Error><Code>InternalError</Code><Message>We encountered an internal error.</Message></Error>`
 	upstream := newSignedS3Upstream(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
-		w.WriteHeader(http.StatusOK)
+		switch {
+		case failNext.Load() > 0:
+			failNext.Add(-1)
+			w.WriteHeader(http.StatusInternalServerError)
+		case r.URL.Query().Get("uploadId") == "errbody" && r.Method == http.MethodPost:
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(errorCompletion))
+		case r.URL.Query().Get("uploadId") == "snap" && r.Method == http.MethodPost:
+			_, _ = w.Write([]byte(`<CompleteMultipartUploadResult><ETag>"e"</ETag></CompleteMultipartUploadResult>`))
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
 	})
 	proxy := newS3FaultProxy(withTestS3SigningConfig(s3FaultProxyConfig{
 		TargetEndpoint: upstream.URL,
@@ -344,7 +363,7 @@ func TestS3ObserveProxyCountsPutsPerLevelOncePerObject(t *testing.T) {
 	t.Cleanup(func() { _ = proxy.Close(context.Background()) })
 
 	client := testS3HTTPClient(time.Second)
-	do := func(method, path string, body []byte) {
+	do := func(method, path string, body []byte, wantStatus int) {
 		t.Helper()
 		req, err := http.NewRequestWithContext(ctx, method, proxy.Endpoint()+path, bytes.NewReader(body))
 		if err != nil {
@@ -356,62 +375,154 @@ func TestS3ObserveProxyCountsPutsPerLevelOncePerObject(t *testing.T) {
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("%s %s status = %d", method, path, resp.StatusCode)
+		if resp.StatusCode != wantStatus {
+			t.Fatalf("%s %s status = %d, want %d", method, path, resp.StatusCode, wantStatus)
 		}
 	}
 	l0 := "/bucket/soak/w1/0000/0000000000000001-0000000000000001.ltx"
-	l9 := "/bucket/soak/w1/0009/0000000000000001-0000000000000400.ltx"
 	l1 := "/bucket/soak/w1/0001/0000000000000001-0000000000000040.ltx"
-	do(http.MethodPut, l0, bytes.Repeat([]byte("a"), 100))
-	do(http.MethodPost, l9+"?uploads", nil)
-	do(http.MethodPut, l9+"?partNumber=1&uploadId=snap", bytes.Repeat([]byte("p"), 1000))
-	do(http.MethodPut, l9+"?partNumber=2&uploadId=snap", bytes.Repeat([]byte("p"), 500))
-	do(http.MethodPost, l9+"?uploadId=snap", []byte("<CompleteMultipartUpload></CompleteMultipartUpload>"))
-	do(http.MethodPost, l1+"?uploads", nil)
-	do(http.MethodPut, l1+"?partNumber=1&uploadId=abandoned", bytes.Repeat([]byte("p"), 700))
-	do(http.MethodDelete, l1+"?uploadId=abandoned", nil)
-	do(http.MethodPut, "/bucket/soak/w1/.litestream-replica", bytes.Repeat([]byte("m"), 20))
-	do(http.MethodGet, l0, nil)
-	do(http.MethodHead, l9, nil)
-	do(http.MethodPost, "/bucket?delete", []byte("<Delete></Delete>"))
+	l2 := "/bucket/soak/w1/0002/0000000000000001-0000000000000080.ltx"
+	l9 := "/bucket/soak/w1/0009/0000000000000001-0000000000000400.ltx"
+
+	failNext.Store(1)
+	do(http.MethodPut, l0, bytes.Repeat([]byte("a"), 100), http.StatusInternalServerError)
+	do(http.MethodPut, l0, bytes.Repeat([]byte("a"), 100), http.StatusOK)
+
+	do(http.MethodPost, l9+"?uploads", nil, http.StatusOK)
+	do(http.MethodPut, l9+"?partNumber=1&uploadId=snap", bytes.Repeat([]byte("p"), 1000), http.StatusOK)
+	failNext.Store(1)
+	do(http.MethodPut, l9+"?partNumber=2&uploadId=snap", bytes.Repeat([]byte("p"), 500), http.StatusInternalServerError)
+	do(http.MethodPut, l9+"?partNumber=2&uploadId=snap", bytes.Repeat([]byte("p"), 500), http.StatusOK)
+	do(http.MethodPost, l9+"?uploadId=snap", []byte("<CompleteMultipartUpload></CompleteMultipartUpload>"), http.StatusOK)
+
+	do(http.MethodPost, l1+"?uploads", nil, http.StatusOK)
+	do(http.MethodPut, l1+"?partNumber=1&uploadId=abandoned", bytes.Repeat([]byte("p"), 700), http.StatusOK)
+	do(http.MethodDelete, l1+"?uploadId=abandoned", nil, http.StatusOK)
+
+	do(http.MethodPost, l2+"?uploads", nil, http.StatusOK)
+	do(http.MethodPut, l2+"?partNumber=1&uploadId=failed", bytes.Repeat([]byte("p"), 300), http.StatusOK)
+	failNext.Store(1)
+	do(http.MethodPost, l2+"?uploadId=failed", []byte("<CompleteMultipartUpload></CompleteMultipartUpload>"), http.StatusInternalServerError)
+	do(http.MethodPut, l2+"?partNumber=1&uploadId=errbody", bytes.Repeat([]byte("p"), 200), http.StatusOK)
+	do(http.MethodPost, l2+"?uploadId=errbody", []byte("<CompleteMultipartUpload></CompleteMultipartUpload>"), http.StatusOK)
+
+	do(http.MethodPut, "/bucket/soak/w1/.litestream-replica", bytes.Repeat([]byte("m"), 20), http.StatusOK)
+	do(http.MethodGet, l0, nil, http.StatusOK)
+	do(http.MethodHead, l9, nil, http.StatusOK)
+	do(http.MethodPost, "/bucket?delete", []byte("<Delete></Delete>"), http.StatusOK)
 
 	counters := proxy.RequestCounters()
 	if want := map[string]uint64{"L0": 1, "L9": 1, "other": 1}; !reflect.DeepEqual(counters.LevelPuts, want) {
 		t.Fatalf("level puts = %v, want %v", counters.LevelPuts, want)
 	}
-	if want := map[string]uint64{"L0": 100, "L9": 1500, "other": 20}; !reflect.DeepEqual(counters.LevelPutBytes, want) {
+	if want := map[string]uint64{"L0": 100, "L1": 700, "L2": 500, "L9": 1500, "other": 20}; !reflect.DeepEqual(counters.LevelPutBytes, want) {
 		t.Fatalf("level put bytes = %v, want %v", counters.LevelPutBytes, want)
 	}
-	if want := map[string]uint64{"PUT": 5, "POST": 4, "DELETE": 1, "GET": 1, "HEAD": 1}; !reflect.DeepEqual(counters.Requests, want) {
+	if want := map[string]uint64{"PUT": 9, "POST": 7, "DELETE": 1, "GET": 1, "HEAD": 1}; !reflect.DeepEqual(counters.Requests, want) {
 		t.Fatalf("requests = %v, want %v", counters.Requests, want)
-	}
-	if len(proxy.multipartBytes) != 0 {
-		t.Fatalf("multipart uploads still tracked after completion and abort: %v", proxy.multipartBytes)
 	}
 }
 
-func TestS3FaultProxyBoundsTrackedMultipartUploads(t *testing.T) {
-	proxy := newS3FaultProxy(s3FaultProxyConfig{Mode: s3FaultProxyModeObserve})
-	part := func(key, uploadID string, n int64) {
-		proxy.recordUpload(httptest.NewRequest(http.MethodPut, key+"?partNumber=1&uploadId="+uploadID, nil), n)
+func TestRecordUploadIgnoresFailuresAndErrorCompletions(t *testing.T) {
+	key := "/bucket/soak/w1/0003/0000000000000001-0000000000000001.ltx"
+	for name, tc := range map[string]struct {
+		request *http.Request
+		status  int
+		body    string
+		puts    map[string]uint64
+		bytes   map[string]uint64
+	}{
+		"put without status": {request: httptest.NewRequest(http.MethodPut, key, nil), status: 0},
+		"put 500":            {request: httptest.NewRequest(http.MethodPut, key, nil), status: http.StatusInternalServerError},
+		"put 502 from proxy": {request: httptest.NewRequest(http.MethodPut, key, nil), status: http.StatusBadGateway},
+		"put 200":            {request: httptest.NewRequest(http.MethodPut, key, nil), status: http.StatusOK, puts: map[string]uint64{"L3": 1}, bytes: map[string]uint64{"L3": 40}},
+		"part 200":           {request: httptest.NewRequest(http.MethodPut, key+"?partNumber=3&uploadId=u", nil), status: http.StatusOK, bytes: map[string]uint64{"L3": 40}},
+		"part 403":           {request: httptest.NewRequest(http.MethodPut, key+"?partNumber=3&uploadId=u", nil), status: http.StatusForbidden},
+		"completion 200":     {request: httptest.NewRequest(http.MethodPost, key+"?uploadId=u", nil), status: http.StatusOK, body: "<CompleteMultipartUploadResult/>", puts: map[string]uint64{"L3": 1}},
+		"completion error":   {request: httptest.NewRequest(http.MethodPost, key+"?uploadId=u", nil), status: http.StatusOK, body: `<?xml version="1.0"?><Error><Code>SlowDown</Code></Error>`},
+		"completion 500":     {request: httptest.NewRequest(http.MethodPost, key+"?uploadId=u", nil), status: http.StatusInternalServerError},
+		"create upload":      {request: httptest.NewRequest(http.MethodPost, key+"?uploads", nil), status: http.StatusOK},
+		"abort upload":       {request: httptest.NewRequest(http.MethodDelete, key+"?uploadId=u", nil), status: http.StatusNoContent},
+		"batch delete":       {request: httptest.NewRequest(http.MethodPost, "/bucket?delete", nil), status: http.StatusOK},
+		"other key put 200":  {request: httptest.NewRequest(http.MethodPut, "/bucket/soak/w1/0003/notes.txt", nil), status: http.StatusOK, puts: map[string]uint64{"other": 1}, bytes: map[string]uint64{"other": 40}},
+		"other part 200":     {request: httptest.NewRequest(http.MethodPut, "/bucket/soak/evidence/heap.pb.gz?partNumber=1&uploadId=u", nil), status: http.StatusOK, bytes: map[string]uint64{"other": 40}},
+		"zero byte put 200":  {request: httptest.NewRequest(http.MethodPut, key, nil), status: http.StatusOK, puts: map[string]uint64{"L3": 1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			proxy := newS3FaultProxy(s3FaultProxyConfig{Mode: s3FaultProxyModeObserve})
+			sent := int64(40)
+			if name == "zero byte put 200" {
+				sent = 0
+			}
+			proxy.recordUpload(tc.request, sent, tc.status, []byte(tc.body))
+			counters := proxy.RequestCounters()
+			if !reflect.DeepEqual(counters.LevelPuts, tc.puts) || !reflect.DeepEqual(counters.LevelPutBytes, tc.bytes) {
+				t.Fatalf("puts = %v bytes = %v, want %v and %v", counters.LevelPuts, counters.LevelPutBytes, tc.puts, tc.bytes)
+			}
+		})
 	}
-	for i := range maxS3FaultProxyMultipartUploads {
-		part("/bucket/soak/w1/0000/"+strconv.Itoa(i)+".ltx", "u", 1)
+}
+
+func TestFinalHeartbeatCarriesProxyCountersAfterCancel(t *testing.T) {
+	var mu sync.Mutex
+	var heartbeats []reporting.HeartbeatPayload
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload reporting.HeartbeatPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		heartbeats = append(heartbeats, payload)
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(control.Close)
+	upstream := newSignedS3Upstream(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	cfg := DefaultConfig()
+	cfg.ControlBaseURL = control.URL
+	cfg.WorkerID = "w-final"
+	cfg.ReplicaType = "s3"
+	cfg.S3Endpoint = upstream.URL
+	cfg.S3AccessKey = testS3AccessKey
+	cfg.S3SecretKey = testS3SecretKey
+	cfg.S3SessionToken = testS3SessionToken
+	cfg.S3Region = testS3Region
+	cfg.S3FaultProxyEnabled = true
+	cfg.S3FaultProxyMode = s3FaultProxyModeObserve
+	cfg.S3FaultProxyListenAddr = "127.0.0.1:0"
+	runner := NewRunner(cfg)
+	runner.reporter = NewReporter(runner.cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := runner.startS3FaultProxy(ctx); err != nil {
+		t.Fatal(err)
 	}
-	if len(proxy.multipartBytes) != maxS3FaultProxyMultipartUploads {
-		t.Fatalf("tracked uploads = %d, want %d", len(proxy.multipartBytes), maxS3FaultProxyMultipartUploads)
+	t.Cleanup(runner.stopS3FaultProxy)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, runner.s3FaultProxyEndpoint+"/bucket/soak/w1/0000/0000000000000001-0000000000000001.ltx", bytes.NewReader(bytes.Repeat([]byte("a"), 64)))
+	if err != nil {
+		t.Fatal(err)
 	}
-	part("/bucket/soak/w1/0000/0.ltx", "u", 5)
-	if got := proxy.multipartBytes["/bucket/soak/w1/0000/0.ltx\x00u"]; got != 6 || len(proxy.multipartBytes) != maxS3FaultProxyMultipartUploads {
-		t.Fatalf("existing upload bytes = %d tracked = %d, want 6 and %d", got, len(proxy.multipartBytes), maxS3FaultProxyMultipartUploads)
+	resp, err := testS3HTTPClient(time.Second).Do(req)
+	if err != nil {
+		t.Fatal(err)
 	}
-	part("/bucket/soak/w1/0009/new.ltx", "u", 7)
-	if len(proxy.multipartBytes) != 1 || proxy.multipartBytes["/bucket/soak/w1/0009/new.ltx\x00u"] != 7 {
-		t.Fatalf("tracked uploads after overflow = %v", proxy.multipartBytes)
+	_ = resp.Body.Close()
+
+	cancel()
+	runner.sendFinalHeartbeat(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(heartbeats) != 1 {
+		t.Fatalf("heartbeats after cancel = %d, want 1", len(heartbeats))
 	}
-	proxy.recordUpload(httptest.NewRequest(http.MethodPost, "/bucket/soak/w1/0009/new.ltx?uploadId=u", nil), 40)
-	if proxy.levelPuts["L9"] != 1 || proxy.levelPutBytes["L9"] != 7 {
-		t.Fatalf("L9 puts = %d bytes = %d, want 1 and 7", proxy.levelPuts["L9"], proxy.levelPutBytes["L9"])
+	counters := heartbeats[0].ObjectStoreCounters
+	if counters.ReplicaLevelPutTotals["L0"] != 1 || counters.ReplicaLevelPutBytes["L0"] != 64 || counters.ReplicaRequestTotals["PUT"] != 1 {
+		t.Fatalf("final heartbeat counters = %+v", counters)
 	}
 }

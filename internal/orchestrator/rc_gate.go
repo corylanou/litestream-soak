@@ -122,6 +122,11 @@ type RCGateRequest struct {
 	// the gate's sources are distinct from any other gate's for the same
 	// commits; empty keeps the legacy rc-<sha8> names.
 	SourceSuffix string `json:"source_suffix,omitempty"`
+	// ObserveProxy puts every worker the gate creates, on both sides, behind
+	// the S3 observe proxy so the cost meter can report PUTs per LTX level.
+	// Profiles that already inject faults keep their mode, and no
+	// metering-window marker is set, so the gate's verifications still count.
+	ObserveProxy bool `json:"observe_proxy,omitempty"`
 }
 
 type RCGateSideResult struct {
@@ -817,6 +822,7 @@ func (m *Manager) RegisterRCGate(request RCGateRequest, now time.Time) (model.RC
 		UpgradeWarmup:     warmup,
 		Tail:              request.Tail,
 		Profiles:          profiles,
+		ObserveProxy:      request.ObserveProxy,
 		Status:            model.RCGateRunning,
 		StartedAt:         now,
 		ExpiresAt:         now.Add(duration),
@@ -853,12 +859,12 @@ func (m *Manager) RegisterRCGate(request RCGateRequest, now time.Time) (model.RC
 		}
 		if existing != nil && existing.Kind == gate.Kind && existing.LaneVariant == gate.LaneVariant && existing.Repository == gate.Repository && existing.CandidateSHA == gate.CandidateSHA &&
 			existing.BaselineSHA == gate.BaselineSHA && existing.Duration == gate.Duration && existing.UpgradeWarmup == gate.UpgradeWarmup && existing.Tail == gate.Tail &&
-			slices.Equal(existing.Profiles, gate.Profiles) {
+			slices.Equal(existing.Profiles, gate.Profiles) && existing.ObserveProxy == gate.ObserveProxy {
 			return *existing, false, nil
 		}
 		return model.RCGate{}, false, err
 	}
-	_ = m.db.RecordEvent("", "rc_gate_registered", fmt.Sprintf("Registered %s gate %s vs %s for %s", gate.Kind, gate.CandidateSource, gate.BaselineSource, duration), fmt.Sprintf("gate_id=%d tail=%t upgrade_warmup=%s lane_variant=%s profiles=%s", gate.ID, gate.Tail, gate.UpgradeWarmup, gate.LaneVariant, firstNonEmpty(strings.Join(gate.Profiles, ","), "all")))
+	_ = m.db.RecordEvent("", "rc_gate_registered", fmt.Sprintf("Registered %s gate %s vs %s for %s", gate.Kind, gate.CandidateSource, gate.BaselineSource, duration), fmt.Sprintf("gate_id=%d tail=%t upgrade_warmup=%s lane_variant=%s profiles=%s observe_proxy=%t", gate.ID, gate.Tail, gate.UpgradeWarmup, gate.LaneVariant, firstNonEmpty(strings.Join(gate.Profiles, ","), "all"), gate.ObserveProxy))
 	return gate, true, nil
 }
 
@@ -877,13 +883,18 @@ func gateHasProfile(gate model.RCGate, profile string) bool {
 // operator chose at registration, so the attested profile config matches what
 // the worker actually runs.
 // applyGateWorkload pins a gate's workers to what was registered for it: the
-// registered warm-up on the upgrade lane, and the volume size recorded in the
-// gate's resources, so a later change to the fleet defaults (such as a larger
-// gate-stress volume) applies to new gates only and never drifts a running one.
+// registered warm-up on the upgrade lane, the observe proxy when the gate
+// opted in, and the volume size recorded in the gate's resources, so a later
+// change to the fleet defaults (such as a larger gate-stress volume) applies
+// to new gates only and never drifts a running one.
 func applyGateWorkload(gate model.RCGate, spec FleetSpec) FleetSpec {
 	for i := range spec.Workers {
 		if spec.Workers[i].Workload.UpgradeLane && gate.UpgradeWarmup > 0 {
 			spec.Workers[i].Workload.UpgradeWarmup = gate.UpgradeWarmup.String()
+		}
+		if gate.ObserveProxy && !spec.Workers[i].Workload.S3FaultProxyEnabled {
+			spec.Workers[i].Workload.S3FaultProxyEnabled = true
+			spec.Workers[i].Workload.S3FaultProxyMode = "observe"
 		}
 		for _, resource := range gate.Resources {
 			if resource.Source == spec.Workers[i].Source && resource.Profile == spec.Workers[i].ProfileName && resource.VolumeGB > 0 {

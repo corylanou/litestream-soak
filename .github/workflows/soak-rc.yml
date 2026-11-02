@@ -33,6 +33,11 @@ on:
         required: false
         type: string
         default: ""
+      observe_proxy:
+        description: Route every gate worker's replication through the S3 observe proxy so /api/cost-meter reports PUTs per LTX level (verifications still score)
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -55,6 +60,7 @@ jobs:
       tail: ${{ steps.resolve.outputs.tail }}
       profiles: ${{ steps.resolve.outputs.profiles }}
       source_suffix: ${{ steps.resolve.outputs.source_suffix }}
+      observe_proxy: ${{ steps.resolve.outputs.observe_proxy }}
     steps:
       - id: resolve
         shell: bash
@@ -66,6 +72,7 @@ jobs:
           DURATION: ${{ github.event.inputs.duration || '72h' }}
           TAIL: ${{ github.event.inputs.tail || 'false' }}
           PROFILES: ${{ github.event.inputs.profiles || '' }}
+          OBSERVE_PROXY: ${{ github.event.inputs.observe_proxy || 'false' }}
         run: |
           set -euo pipefail
 
@@ -75,6 +82,7 @@ jobs:
           duration="${DURATION}"
           tail="${TAIL}"
           profiles="${PROFILES//[[:space:]]/}"
+          observe_proxy="${OBSERVE_PROXY:-false}"
           upstream_repo="benbjohnson/litestream"
           gate_profile="gate-stress|gate-manydb-500|gate-large-db|gate-remote|gate-vfs"
 
@@ -122,6 +130,10 @@ jobs:
             echo "tail must be true or false" >&2
             exit 1
           fi
+          if [ "${observe_proxy}" != "true" ] && [ "${observe_proxy}" != "false" ]; then
+            echo "observe_proxy must be true or false" >&2
+            exit 1
+          fi
 
           resolve_sha() {
             local repo="$1"
@@ -153,6 +165,7 @@ jobs:
             echo "tail=${tail}"
             echo "profiles=${profiles}"
             echo "source_suffix=${source_suffix}"
+            echo "observe_proxy=${observe_proxy}"
           } >> "${GITHUB_OUTPUT}"
 
           {
@@ -161,6 +174,7 @@ jobs:
             echo "Baseline: ${upstream_repo}@${baseline_ref} -> ${baseline_sha} (source rcbase-${baseline_sha::8}-${source_suffix})"
             echo "Duration: ${duration} (tail: ${tail})"
             echo "Profiles: ${profiles:-default four}"
+            echo "Observe proxy: ${observe_proxy}"
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
   build-worker-images:
@@ -279,6 +293,7 @@ jobs:
           TAIL: ${{ needs.resolve-request.outputs.tail }}
           GATE_PROFILES: ${{ needs.resolve-request.outputs.profiles }}
           GATE_SOURCE_SUFFIX: ${{ needs.resolve-request.outputs.source_suffix }}
+          GATE_OBSERVE_PROXY: ${{ needs.resolve-request.outputs.observe_proxy }}
         run: |
           set -euo pipefail
 

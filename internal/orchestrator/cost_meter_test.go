@@ -204,21 +204,29 @@ func TestCostMeterAPIReportsReplicaLevelPutsPerWorkerAndWindow(t *testing.T) {
 		t.Fatalf("per-source L0 put bytes delta = %v, want 16000", got)
 	}
 
-	fetch := func(since string) map[string]any {
+	type costMeterRawResponse struct {
+		Until     *time.Time       `json:"until"`
+		WindowEnd *time.Time       `json:"window_end"`
+		Sources   []map[string]any `json:"sources"`
+	}
+	fetchRaw := func(query string) costMeterRawResponse {
 		t.Helper()
 		response := httptest.NewRecorder()
-		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/cost-meter?source=meter-level&since="+since, nil))
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/cost-meter?source=meter-level&"+query, nil))
 		if response.Code != http.StatusOK {
-			t.Fatalf("since=%s status = %d: %s", since, response.Code, response.Body.String())
+			t.Fatalf("%s status = %d: %s", query, response.Code, response.Body.String())
 		}
-		var report struct {
-			Sources []map[string]any `json:"sources"`
-		}
+		var report costMeterRawResponse
 		if err := json.Unmarshal(response.Body.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if len(report.Sources) != 1 {
-			t.Fatalf("since=%s sources = %+v", since, report.Sources)
+		return report
+	}
+	fetch := func(since string) map[string]any {
+		t.Helper()
+		report := fetchRaw("since=" + since)
+		if len(report.Sources) != 1 || report.Until != nil || report.WindowEnd != nil {
+			t.Fatalf("since=%s report = %+v", since, report)
 		}
 		return report.Sources[0]
 	}
@@ -275,8 +283,27 @@ func TestCostMeterAPIReportsReplicaLevelPutsPerWorkerAndWindow(t *testing.T) {
 	if got := numbers(window["totals"].(map[string]any)["replica_level_puts"]); !reflect.DeepEqual(got, map[string]float64{"L0": 160, "L9": 3}) {
 		t.Fatalf("6h replica_level_puts = %v", got)
 	}
-	if got := window["workers"].([]any)[0].(map[string]any)["db_size_bytes"].(float64); got != 450000 {
-		t.Fatalf("6h db_size_bytes = %v, want latest 450000", got)
+	if got := window["workers"].([]any)[0].(map[string]any); got["db_size_bytes"].(float64) != 450000 || got["db_size_max_bytes"].(float64) != 450000 {
+		t.Fatalf("6h worker = %v, want latest and max 450000", got)
+	}
+
+	earlyHour := now.Add(-3 * time.Hour).Truncate(time.Hour)
+	oneHour := fetchRaw("since=" + earlyHour.Format(time.RFC3339) + "&until=" + earlyHour.Add(time.Hour).Format(time.RFC3339))
+	if oneHour.Until == nil || oneHour.WindowEnd == nil || !oneHour.WindowEnd.Equal(earlyHour.Add(time.Hour)) || len(oneHour.Sources) != 1 {
+		t.Fatalf("one hour report = %+v", oneHour)
+	}
+	if got := numbers(oneHour.Sources[0]["totals"].(map[string]any)["replica_level_puts"]); !reflect.DeepEqual(got, map[string]float64{"L0": 100, "L9": 2}) {
+		t.Fatalf("one hour replica_level_puts = %v", got)
+	}
+	if got := oneHour.Sources[0]["workers"].([]any)[0].(map[string]any); got["db_size_bytes"].(float64) != 400000 || got["db_size_max_bytes"].(float64) != 400000 {
+		t.Fatalf("one hour worker = %v, want 400000", got)
+	}
+	for _, query := range []string{"since=1h&until=2h", "since=1h&until=1h", "since=1h&until=yesterday"} {
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/cost-meter?"+query, nil))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want 400", query, response.Code)
+		}
 	}
 }
 
@@ -293,7 +320,7 @@ func TestPruneDBOnceBoundsCostMeterEvenWithRetentionDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "").pruneDBOnce(context.Background(), 0)
-	report, err := db.CostMeter("main", now.Add(-2*costMeterRetention))
+	report, err := db.CostMeter("main", now.Add(-2*costMeterRetention), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

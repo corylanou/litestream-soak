@@ -13,12 +13,18 @@ lane_variant="${9:-}"
 profiles="${GATE_PROFILES:-}"
 profiles="${profiles//[[:space:]]/}"
 source_suffix="${GATE_SOURCE_SUFFIX:-}"
+observe_proxy="${GATE_OBSERVE_PROXY:-false}"
 base_url="${CONTROL_BASE_URL:-https://litestream-soak-ctl.fly.dev}"
 
 if [ "$#" -lt 4 ]; then
   echo "usage: $0 <repository> <candidate-ref> <candidate-sha> <baseline-sha> [duration] [tail] [kind] [upgrade-warmup] [lane-variant]" >&2
   echo "  GATE_PROFILES=<comma-separated profiles> runs a subset of the gate fleet (default: all)" >&2
   echo "  GATE_SOURCE_SUFFIX=<1-8 lowercase alphanumerics> names the sources <prefix>-<sha8>-<suffix>" >&2
+  echo "  GATE_OBSERVE_PROXY=true meters every gate worker's replication through the S3 observe proxy" >&2
+  exit 1
+fi
+if [ "${observe_proxy}" != "true" ] && [ "${observe_proxy}" != "false" ]; then
+  echo "GATE_OBSERVE_PROXY must be true or false" >&2
   exit 1
 fi
 if [ -n "${profiles}" ] && [[ ! "${profiles}" =~ ^[a-z0-9-]+(,[a-z0-9-]+)*$ ]]; then
@@ -77,6 +83,7 @@ payload="$(jq -n \
   --arg lane_variant "$lane_variant" \
   --arg profiles "$profiles" \
   --arg source_suffix "$source_suffix" \
+  --argjson observe_proxy "$observe_proxy" \
   '{
     repository: $repository,
     candidate_ref: $candidate_ref,
@@ -89,7 +96,8 @@ payload="$(jq -n \
   + (if $upgrade_warmup == "" then {} else {upgrade_warmup: $upgrade_warmup} end)
   + (if $lane_variant == "" then {} else {lane_variant: $lane_variant} end)
   + (if $profiles == "" then {} else {profiles: ($profiles | split(","))} end)
-  + (if $source_suffix == "" then {} else {source_suffix: $source_suffix} end)')"
+  + (if $source_suffix == "" then {} else {source_suffix: $source_suffix} end)
+  + (if $observe_proxy then {observe_proxy: true} else {} end)')"
 
 curl -sS --fail-with-body --max-time 60 -X POST \
   "${auth_args[@]}" \

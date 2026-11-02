@@ -80,6 +80,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("start s3 fault proxy: %w", err)
 	}
 	defer r.stopS3FaultProxy()
+	defer r.sendFinalHeartbeat(runCtx)
 
 	go func() {
 		defer func() {

@@ -97,7 +97,7 @@ func TestRecordCostMeterSumsDeltasAcrossCounterResets(t *testing.T) {
 		},
 	})
 
-	report, err := db.CostMeter("", base.Add(-time.Hour))
+	report, err := db.CostMeter("", base.Add(-time.Hour), time.Time{})
 	if err != nil {
 		t.Fatalf("CostMeter() error = %v", err)
 	}
@@ -218,15 +218,15 @@ func TestRecordCostMeterTracksReplicaLevelPutsAndLatestDBSize(t *testing.T) {
 	if want := (CostMeterTotals{ReplicaLevelPuts: map[string]uint64{"L0": 4, "other": 2}, ReplicaLevelPutBytes: map[string]uint64{"L0": 400, "other": 60}}); !reflect.DeepEqual(delta, want) {
 		t.Fatalf("second delta = %+v, want %+v", delta, want)
 	}
-	delta = record(base.Add(30*time.Second), reporting.RuntimePayload{ObjectStoreCounters: levels("worker-b", map[string]uint64{"L0": 3}, map[string]uint64{"L0": 300}), DBTotalSizeBytes: 7600})
+	delta = record(base.Add(30*time.Second), reporting.RuntimePayload{ObjectStoreCounters: levels("worker-b", map[string]uint64{"L0": 3}, map[string]uint64{"L0": 300}), DBTotalSizeBytes: 7200})
 	if want := (CostMeterTotals{ReplicaLevelPuts: map[string]uint64{"L0": 3}, ReplicaLevelPutBytes: map[string]uint64{"L0": 300}}); !reflect.DeepEqual(delta, want) {
 		t.Fatalf("restart delta = %+v, want %+v", delta, want)
 	}
-	firstHour, err := db.CostMeter("main", base)
+	firstHour, err := db.CostMeter("main", base, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := firstHour[0].Workers[0]; got.DBSizeBytes != 7600 || got.Totals.ReplicaLevelPuts["L0"] != 17 {
+	if got := firstHour[0].Workers[0]; got.DBSizeBytes != 7200 || got.DBSizeMaxBytes != 7500 || got.Totals.ReplicaLevelPuts["L0"] != 17 {
 		t.Fatalf("first hour worker = %+v", got)
 	}
 	delta = record(base.Add(2*time.Hour), reporting.RuntimePayload{ObjectStoreCounters: reporting.ObjectStoreCounters{ObjectStoreCounterEpoch: "worker-b"}, DBSizeBytes: 8000})
@@ -234,7 +234,7 @@ func TestRecordCostMeterTracksReplicaLevelPutsAndLatestDBSize(t *testing.T) {
 		t.Fatalf("legacy delta = %+v, want zero", delta)
 	}
 
-	report, err := db.CostMeter("main", base.Add(-time.Hour))
+	report, err := db.CostMeter("main", base.Add(-time.Hour), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,16 +248,62 @@ func TestRecordCostMeterTracksReplicaLevelPutsAndLatestDBSize(t *testing.T) {
 	if want := map[string]uint64{"L0": 1700, "L9": 5000, "other": 60}; !reflect.DeepEqual(worker.Totals.ReplicaLevelPutBytes, want) {
 		t.Fatalf("level put bytes = %v, want %v", worker.Totals.ReplicaLevelPutBytes, want)
 	}
-	if worker.DBSizeBytes != 8000 {
-		t.Fatalf("latest db size = %d, want 8000", worker.DBSizeBytes)
+	if worker.DBSizeBytes != 8000 || worker.DBSizeMaxBytes != 8000 {
+		t.Fatalf("latest db size = %d max = %d, want 8000 and 8000", worker.DBSizeBytes, worker.DBSizeMaxBytes)
 	}
 
-	lastHour, err := db.CostMeter("main", base.Add(90*time.Minute))
+	lastHour, err := db.CostMeter("main", base.Add(90*time.Minute), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := lastHour[0].Workers[0]; got.DBSizeBytes != 8000 || got.Totals.ReplicaLevelPuts != nil || got.Totals.ReplicaLevelPutBytes != nil {
 		t.Fatalf("last hour worker = %+v", got)
+	}
+
+	for name, tc := range map[string]struct {
+		since, until  time.Time
+		wantL0        uint64
+		wantSize      int64
+		wantMax       int64
+		wantNoBuckets bool
+	}{
+		"exactly the first hour":               {since: base, until: base.Truncate(time.Hour).Add(time.Hour), wantL0: 17, wantSize: 7200, wantMax: 7500},
+		"until inside an hour keeps that hour": {since: base, until: base.Add(90 * time.Minute), wantL0: 17, wantSize: 7200, wantMax: 7500},
+		"until at the next bucket excludes it": {since: base, until: base.Truncate(time.Hour).Add(2 * time.Hour), wantL0: 17, wantSize: 7200, wantMax: 7500},
+		"last hour only":                       {since: base.Add(2 * time.Hour), until: base.Add(2*time.Hour + time.Minute), wantSize: 8000, wantMax: 8000},
+		"empty window":                         {since: base.Truncate(time.Hour).Add(time.Hour), until: base.Truncate(time.Hour).Add(2 * time.Hour), wantNoBuckets: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			report, err := db.CostMeter("main", tc.since, tc.until)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantNoBuckets {
+				if len(report) != 0 {
+					t.Fatalf("report = %+v, want none", report)
+				}
+				return
+			}
+			got := report[0].Workers[0]
+			if got.Totals.ReplicaLevelPuts["L0"] != tc.wantL0 || got.DBSizeBytes != tc.wantSize || got.DBSizeMaxBytes != tc.wantMax {
+				t.Fatalf("worker = %+v, want L0 %d size %d max %d", got, tc.wantL0, tc.wantSize, tc.wantMax)
+			}
+		})
+	}
+}
+
+func TestCostMeterWindowEnd(t *testing.T) {
+	hour := time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)
+	for name, tc := range map[string]struct{ until, want time.Time }{
+		"zero is unbounded":  {},
+		"on the hour":        {until: hour, want: hour},
+		"inside the hour":    {until: hour.Add(29 * time.Minute), want: hour.Add(time.Hour)},
+		"last second":        {until: hour.Add(59*time.Minute + 59*time.Second), want: hour.Add(time.Hour)},
+		"non-utc normalizes": {until: hour.In(time.FixedZone("plus2", 7200)).Add(time.Second), want: hour.Add(time.Hour)},
+	} {
+		if got := CostMeterWindowEnd(tc.until); !got.Equal(tc.want) {
+			t.Errorf("%s: CostMeterWindowEnd(%v) = %v, want %v", name, tc.until, got, tc.want)
+		}
 	}
 }
 
@@ -277,7 +323,7 @@ func TestCostMeterAggregatesPerSourceAndWindow(t *testing.T) {
 	record("w-main-2", "main", now.Add(2*time.Minute), 20, 200)
 	record("w-pr-1", "pr-1584", now.Add(3*time.Minute), 5, 50)
 
-	report, err := db.CostMeter("", now.Add(-time.Hour))
+	report, err := db.CostMeter("", now.Add(-time.Hour), time.Time{})
 	if err != nil {
 		t.Fatalf("CostMeter() error = %v", err)
 	}
@@ -294,7 +340,7 @@ func TestCostMeterAggregatesPerSourceAndWindow(t *testing.T) {
 		t.Fatalf("main workers = %+v", report[0].Workers)
 	}
 
-	filtered, err := db.CostMeter("pr-1584", old.Add(-time.Hour))
+	filtered, err := db.CostMeter("pr-1584", old.Add(-time.Hour), time.Time{})
 	if err != nil {
 		t.Fatalf("CostMeter(source) error = %v", err)
 	}
@@ -302,7 +348,7 @@ func TestCostMeterAggregatesPerSourceAndWindow(t *testing.T) {
 		t.Fatalf("filtered = %+v", filtered)
 	}
 
-	all, err := db.CostMeter("main", old.Add(-time.Hour))
+	all, err := db.CostMeter("main", old.Add(-time.Hour), time.Time{})
 	if err != nil {
 		t.Fatalf("CostMeter(all) error = %v", err)
 	}
@@ -348,7 +394,7 @@ func TestCostMeterSurvivesReopenAndPrunes(t *testing.T) {
 	if deleted != 1 {
 		t.Fatalf("deleted = %d, want 1", deleted)
 	}
-	report, err := db.CostMeter("main", now.Add(-60*24*time.Hour))
+	report, err := db.CostMeter("main", now.Add(-60*24*time.Hour), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

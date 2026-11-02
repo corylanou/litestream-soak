@@ -47,14 +47,16 @@ type CostMeterTotals struct {
 }
 
 type CostMeterWorker struct {
-	WorkerID    string          `json:"worker_id"`
-	Totals      CostMeterTotals `json:"totals"`
-	DBSizeBytes int64           `json:"db_size_bytes,omitempty"`
+	WorkerID       string          `json:"worker_id"`
+	Totals         CostMeterTotals `json:"totals"`
+	DBSizeBytes    int64           `json:"db_size_bytes,omitempty"`
+	DBSizeMaxBytes int64           `json:"db_size_max_bytes,omitempty"`
 }
 
 type costMeterBucket struct {
 	CostMeterTotals
-	DBSizeBytes int64 `json:"db_size_bytes,omitempty"`
+	DBSizeBytes    int64 `json:"db_size_bytes,omitempty"`
+	DBSizeMaxBytes int64 `json:"db_size_max_bytes,omitempty"`
 }
 
 type CostMeterSource struct {
@@ -255,6 +257,7 @@ func (d *DB) RecordCostMeter(workerID, source string, observedAt time.Time, runt
 		totals.Add(bucketDelta)
 		if dbSize > 0 {
 			totals.DBSizeBytes = dbSize
+			totals.DBSizeMaxBytes = max(totals.DBSizeMaxBytes, dbSize)
 		}
 		if !delta.IsZero() || totals.PeakDiskUsedBytes != before || totals.DBSizeBytes != sizeBefore || totalsJSON == "" {
 			encoded, err := json.Marshal(totals)
@@ -282,9 +285,27 @@ func costMeterDBSize(runtime reporting.RuntimePayload) int64 {
 	return max(runtime.DBTotalSizeBytes, 0)
 }
 
-func (d *DB) CostMeter(source string, since time.Time) ([]CostMeterSource, error) {
+// CostMeterWindowEnd is the exclusive end of the hourly buckets an `until`
+// bound selects: the end of the hour containing until, so a bound inside an
+// hour still returns that hour's bucket. A zero until means no end bound.
+func CostMeterWindowEnd(until time.Time) time.Time {
+	if until.IsZero() {
+		return time.Time{}
+	}
+	until = until.UTC()
+	if end := until.Truncate(time.Hour); end.Equal(until) {
+		return end
+	}
+	return until.Truncate(time.Hour).Add(time.Hour)
+}
+
+func (d *DB) CostMeter(source string, since, until time.Time) ([]CostMeterSource, error) {
 	query := `SELECT worker_id, source, totals_json FROM cost_meter_hourly WHERE bucket_start >= ?`
 	args := []any{since.UTC().Truncate(time.Hour)}
+	if end := CostMeterWindowEnd(until); !end.IsZero() {
+		query += ` AND bucket_start < ?`
+		args = append(args, end)
+	}
 	if source != "" {
 		query += ` AND source = ?`
 		args = append(args, source)
@@ -320,6 +341,7 @@ func (d *DB) CostMeter(source string, since time.Time) ([]CostMeterSource, error
 		if bucket.DBSizeBytes > 0 {
 			totals.DBSizeBytes = bucket.DBSizeBytes
 		}
+		totals.DBSizeMaxBytes = max(totals.DBSizeMaxBytes, bucket.DBSizeMaxBytes, bucket.DBSizeBytes)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -331,7 +353,7 @@ func (d *DB) CostMeter(source string, since time.Time) ([]CostMeterSource, error
 		for workerID, totals := range workers {
 			entry.Totals.Add(totals.CostMeterTotals)
 			entry.WorkerPeakDiskUsedBytesSum += totals.PeakDiskUsedBytes
-			entry.Workers = append(entry.Workers, CostMeterWorker{WorkerID: workerID, Totals: totals.CostMeterTotals, DBSizeBytes: totals.DBSizeBytes})
+			entry.Workers = append(entry.Workers, CostMeterWorker{WorkerID: workerID, Totals: totals.CostMeterTotals, DBSizeBytes: totals.DBSizeBytes, DBSizeMaxBytes: totals.DBSizeMaxBytes})
 		}
 		sort.Slice(entry.Workers, func(i, j int) bool { return entry.Workers[i].WorkerID < entry.Workers[j].WorkerID })
 		report = append(report, entry)

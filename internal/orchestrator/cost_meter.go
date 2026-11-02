@@ -67,7 +67,9 @@ var (
 type CostMeterResponse struct {
 	Source      string                  `json:"source,omitempty"`
 	Since       time.Time               `json:"since"`
+	Until       *time.Time              `json:"until,omitempty"`
 	WindowStart time.Time               `json:"window_start"`
+	WindowEnd   *time.Time              `json:"window_end,omitempty"`
 	Sources     []model.CostMeterSource `json:"sources"`
 }
 
@@ -78,9 +80,14 @@ func (a *API) handleCostMeter(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusBadRequest, nil, err.Error())
 		return
 	}
+	until, err := parseCostMeterUntil(r.URL.Query().Get("until"), since, now)
+	if err != nil {
+		respondError(w, r, http.StatusBadRequest, nil, err.Error())
+		return
+	}
 	source := strings.TrimSpace(r.URL.Query().Get("source"))
 	db := a.db.WithReadContext(r.Context())
-	sources, err := db.CostMeter(source, since)
+	sources, err := db.CostMeter(source, since, until)
 	if err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to load cost meter")
 		return
@@ -91,12 +98,31 @@ func (a *API) handleCostMeter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sources = attachMeteringWindows(sources, windows, since)
-	writeAPIJSON(w, CostMeterResponse{
+	response := CostMeterResponse{
 		Source:      source,
 		Since:       since,
 		WindowStart: since.Truncate(time.Hour),
 		Sources:     sources,
-	})
+	}
+	if !until.IsZero() {
+		response.Until = &until
+		response.WindowEnd = new(model.CostMeterWindowEnd(until))
+	}
+	writeAPIJSON(w, response)
+}
+
+func parseCostMeterUntil(raw string, since, now time.Time) (time.Time, error) {
+	if strings.TrimSpace(raw) == "" {
+		return time.Time{}, nil
+	}
+	until, err := parseCostMeterSince(raw, now)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid until %q: use a duration such as 1h or an RFC3339 timestamp", raw)
+	}
+	if !until.After(since) {
+		return time.Time{}, errors.New("until must be after since")
+	}
+	return until, nil
 }
 
 func attachMeteringWindows(sources []model.CostMeterSource, windows []model.MeteringWindow, since time.Time) []model.CostMeterSource {

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,7 +25,7 @@ import (
 
 const (
 	maxS3FaultProxyAttemptKeys              = 10000
-	maxS3FaultProxyMultipartUploads         = 4096
+	maxS3CompletionBodyBytes                = 64 << 10
 	s3FaultProxyModeUploadPartReset         = "uploadpart-reset"
 	s3FaultProxyModeSourceGETReset          = "source-get-reset"
 	s3FaultProxyModeProvider408Canceled     = "provider-408-requestcanceled"
@@ -78,7 +80,6 @@ type s3FaultProxy struct {
 	bytesReceived          map[string]uint64
 	levelPuts              map[string]uint64
 	levelPutBytes          map[string]uint64
-	multipartBytes         map[string]uint64
 }
 
 type s3ProxyRequestCounters struct {
@@ -185,13 +186,13 @@ func (p *s3FaultProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Mode == s3FaultProxyModeObserve {
 		body := &countingReadCloser{ReadCloser: r.Body}
 		r.Body = body
-		counted := &countingResponseWriter{ResponseWriter: w}
+		counted := &countingResponseWriter{ResponseWriter: w, captureBody: isS3MultipartCompletion(r)}
 		w = counted
 		operation := s3RequestOperation(r)
 		defer func() {
 			sent := body.n.Load()
 			p.recordRequest(operation, sent, counted.n.Load())
-			p.recordUpload(r, sent)
+			p.recordUpload(r, sent, counted.status(), counted.body.Bytes())
 		}()
 	}
 	if p.shouldInjectProviderHTTP408(r) {
@@ -269,51 +270,51 @@ func (p *s3FaultProxy) RequestCounters() s3ProxyRequestCounters {
 	}
 }
 
-func (p *s3FaultProxy) recordUpload(r *http.Request, sent int64) {
-	uploadID := strings.TrimSpace(r.URL.Query().Get("uploadId"))
-	if uploadID == "" && r.Method != http.MethodPut {
+func (p *s3FaultProxy) recordUpload(r *http.Request, sent int64, status int, responseBody []byte) {
+	if status < 200 || status > 299 {
 		return
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	multipartKey := r.URL.Path + "\x00" + uploadID
+	isPart := r.Method == http.MethodPut && r.URL.Query().Get("uploadId") != ""
 	switch {
-	case r.Method == http.MethodPut && uploadID == "":
-		p.addLevelPut(ltxLevelOfKey(r.URL.Path), sent)
-	case r.Method == http.MethodPut:
-		if p.multipartBytes == nil {
-			p.multipartBytes = make(map[string]uint64)
+	case r.Method == http.MethodPut && !isPart:
+		p.addLevelPut(ltxLevelOfKey(r.URL.Path), 1, sent)
+	case isPart:
+		p.addLevelPut(ltxLevelOfKey(r.URL.Path), 0, sent)
+	case isS3MultipartCompletion(r):
+		if bytes.Contains(responseBody, []byte("<Error")) {
+			return
 		}
-		if _, tracked := p.multipartBytes[multipartKey]; !tracked && len(p.multipartBytes) >= maxS3FaultProxyMultipartUploads {
-			p.multipartBytes = make(map[string]uint64)
-		}
-		p.multipartBytes[multipartKey] += uint64(max(sent, 0))
-	case r.Method == http.MethodPost:
-		uploaded := p.multipartBytes[multipartKey]
-		delete(p.multipartBytes, multipartKey)
-		p.addLevelPut(ltxLevelOfKey(r.URL.Path), int64(uploaded))
-	case r.Method == http.MethodDelete:
-		delete(p.multipartBytes, multipartKey)
+		p.addLevelPut(ltxLevelOfKey(r.URL.Path), 1, 0)
 	}
 }
 
-func (p *s3FaultProxy) addLevelPut(level string, bytes int64) {
-	if p.levelPuts == nil {
-		p.levelPuts = make(map[string]uint64)
+func (p *s3FaultProxy) addLevelPut(level string, objects uint64, bodyBytes int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if objects > 0 {
+		if p.levelPuts == nil {
+			p.levelPuts = make(map[string]uint64)
+		}
+		p.levelPuts[level] += objects
 	}
-	p.levelPuts[level]++
-	if bytes <= 0 {
+	if bodyBytes <= 0 {
 		return
 	}
 	if p.levelPutBytes == nil {
 		p.levelPutBytes = make(map[string]uint64)
 	}
-	p.levelPutBytes[level] += uint64(bytes)
+	p.levelPutBytes[level] += uint64(bodyBytes)
 }
+
+func isS3MultipartCompletion(r *http.Request) bool {
+	return r.Method == http.MethodPost && r.URL.Query().Get("uploadId") != ""
+}
+
+var ltxObjectNameRe = regexp.MustCompile(`^[0-9a-f]{16}-[0-9a-f]{16}\.ltx$`)
 
 func ltxLevelOfKey(key string) string {
 	level, ok := replicaLevelOfKey(key)
-	if !ok {
+	if !ok || !ltxObjectNameRe.MatchString(key[strings.LastIndex(key, "/")+1:]) {
 		return "other"
 	}
 	return "L" + level[3:]
@@ -370,13 +371,29 @@ func (c *countingReadCloser) Close() error {
 
 type countingResponseWriter struct {
 	http.ResponseWriter
-	n atomic.Int64
+	n           atomic.Int64
+	statusCode  atomic.Int64
+	captureBody bool
+	body        bytes.Buffer
+}
+
+func (c *countingResponseWriter) WriteHeader(statusCode int) {
+	c.statusCode.CompareAndSwap(0, int64(statusCode))
+	c.ResponseWriter.WriteHeader(statusCode)
 }
 
 func (c *countingResponseWriter) Write(p []byte) (int, error) {
+	c.statusCode.CompareAndSwap(0, http.StatusOK)
+	if c.captureBody && c.body.Len() < maxS3CompletionBodyBytes {
+		c.body.Write(p[:min(len(p), maxS3CompletionBodyBytes-c.body.Len())])
+	}
 	n, err := c.ResponseWriter.Write(p)
 	c.n.Add(int64(n))
 	return n, err
+}
+
+func (c *countingResponseWriter) status() int {
+	return int(c.statusCode.Load())
 }
 
 func (c *countingResponseWriter) Flush() {
