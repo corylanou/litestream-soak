@@ -204,6 +204,9 @@ func (m *Manager) workerEnv(worker model.Worker, workloadCfg workload.Config) ma
 	if workloadCfg.MeteringWindow {
 		env["SOAK_METERING_WINDOW"] = "true"
 	}
+	if workloadCfg.S3ObserveProxyRequired {
+		env["S3_OBSERVE_PROXY_REQUIRED"] = "true"
+	}
 	if workloadCfg.S3FaultProxyListenAddr != "" {
 		env["S3_FAULT_PROXY_LISTEN_ADDR"] = workloadCfg.S3FaultProxyListenAddr
 	}

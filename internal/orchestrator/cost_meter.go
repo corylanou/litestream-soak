@@ -97,7 +97,7 @@ func (a *API) handleCostMeter(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to load metering windows")
 		return
 	}
-	sources = attachMeteringWindows(sources, windows, since)
+	sources = attachMeteringWindows(sources, windows, since, until)
 	response := CostMeterResponse{
 		Source:      source,
 		Since:       since,
@@ -125,9 +125,13 @@ func parseCostMeterUntil(raw string, since, now time.Time) (time.Time, error) {
 	return until, nil
 }
 
-func attachMeteringWindows(sources []model.CostMeterSource, windows []model.MeteringWindow, since time.Time) []model.CostMeterSource {
+func attachMeteringWindows(sources []model.CostMeterSource, windows []model.MeteringWindow, since, until time.Time) []model.CostMeterSource {
+	end := model.CostMeterWindowEnd(until)
 	for _, window := range windows {
 		if window.EndedAt != nil && !window.EndedAt.After(since) {
+			continue
+		}
+		if !end.IsZero() && !window.StartedAt.Before(end) {
 			continue
 		}
 		index := slices.IndexFunc(sources, func(entry model.CostMeterSource) bool { return entry.Source == window.Source })

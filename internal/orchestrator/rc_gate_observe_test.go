@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -56,8 +57,12 @@ func TestRegisterRCGateObserveProxyRoundTrip(t *testing.T) {
 			t.Fatalf("%s fleet = %+v", source, spec.Workers)
 		}
 		for _, worker := range spec.Workers {
-			if !worker.Workload.S3FaultProxyEnabled || worker.Workload.S3FaultProxyMode != "observe" {
-				t.Fatalf("%s proxy = %v/%q, want enabled observe", worker.Name, worker.Workload.S3FaultProxyEnabled, worker.Workload.S3FaultProxyMode)
+			if !worker.Workload.S3FaultProxyEnabled || worker.Workload.S3FaultProxyMode != "observe" || !worker.Workload.S3ObserveProxyRequired {
+				t.Fatalf("%s proxy = %v/%q required=%v, want enabled observe required", worker.Name, worker.Workload.S3FaultProxyEnabled, worker.Workload.S3FaultProxyMode, worker.Workload.S3ObserveProxyRequired)
+			}
+			env := manager.workerEnv(model.Worker{ID: worker.WorkerID}, worker.Workload)
+			if env["S3_OBSERVE_PROXY_REQUIRED"] != "true" || env["S3_FAULT_PROXY_MODE"] != "observe" {
+				t.Fatalf("%s env lacks the required observe proxy: %v", worker.Name, env)
 			}
 			if worker.Workload.MeteringWindow || strings.Contains(worker.Workload.JSON(), `"metering_window"`) {
 				t.Fatalf("%s carries the metering window marker: %s", worker.Name, worker.Workload.JSON())
@@ -87,7 +92,7 @@ func TestRegisterRCGateDefaultsToDirectReplication(t *testing.T) {
 			t.Fatalf("%s fleet is empty", source)
 		}
 		for _, worker := range spec.Workers {
-			if worker.Workload.S3FaultProxyEnabled || worker.Workload.S3FaultProxyMode != "" || worker.Workload.MeteringWindow {
+			if worker.Workload.S3FaultProxyEnabled || worker.Workload.S3FaultProxyMode != "" || worker.Workload.MeteringWindow || worker.Workload.S3ObserveProxyRequired {
 				t.Fatalf("%s proxy = %v/%q metering=%v, want direct replication", worker.Name, worker.Workload.S3FaultProxyEnabled, worker.Workload.S3FaultProxyMode, worker.Workload.MeteringWindow)
 			}
 		}
@@ -102,15 +107,46 @@ func TestApplyGateWorkloadObserveProxyKeepsFaultModes(t *testing.T) {
 		}}
 	}
 	applied := applyGateWorkload(model.RCGate{ObserveProxy: true}, spec())
-	if fault := applied.Workers[0].Workload; !fault.S3FaultProxyEnabled || fault.S3FaultProxyMode != "source-get-reset" || fault.S3FaultProxyFailFirstAttempts != 3 {
+	if fault := applied.Workers[0].Workload; !fault.S3FaultProxyEnabled || fault.S3FaultProxyMode != "source-get-reset" || fault.S3FaultProxyFailFirstAttempts != 3 || fault.S3ObserveProxyRequired {
 		t.Fatalf("fault worker = %+v, want its fault mode kept", fault)
 	}
-	if plain := applied.Workers[1].Workload; !plain.S3FaultProxyEnabled || plain.S3FaultProxyMode != "observe" || plain.MeteringWindow {
-		t.Fatalf("plain worker = %+v, want observe proxy without metering window", plain)
+	if plain := applied.Workers[1].Workload; !plain.S3FaultProxyEnabled || plain.S3FaultProxyMode != "observe" || !plain.S3ObserveProxyRequired || plain.MeteringWindow {
+		t.Fatalf("plain worker = %+v, want required observe proxy without metering window", plain)
 	}
 	unchanged := applyGateWorkload(model.RCGate{}, spec())
-	if plain := unchanged.Workers[1].Workload; plain.S3FaultProxyEnabled || plain.S3FaultProxyMode != "" {
+	if plain := unchanged.Workers[1].Workload; plain.S3FaultProxyEnabled || plain.S3FaultProxyMode != "" || plain.S3ObserveProxyRequired {
 		t.Fatalf("plain worker without opt-in = %+v, want direct replication", plain)
+	}
+}
+
+func TestAttachMeteringWindowsHonorsUntil(t *testing.T) {
+	hour := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+	ended := hour.Add(30 * time.Minute)
+	windows := []model.MeteringWindow{
+		{Source: "before", StartedAt: hour.Add(-3 * time.Hour), EndedAt: new(hour.Add(-2 * time.Hour))},
+		{Source: "overlapping", StartedAt: hour.Add(-time.Hour), EndedAt: &ended},
+		{Source: "inside", StartedAt: hour.Add(20 * time.Minute)},
+		{Source: "after", StartedAt: hour.Add(time.Hour)},
+		{Source: "far", StartedAt: hour.Add(5 * time.Hour)},
+	}
+	names := func(sources []model.CostMeterSource) []string {
+		var out []string
+		for _, source := range sources {
+			out = append(out, source.Source)
+		}
+		return out
+	}
+	unbounded := attachMeteringWindows(nil, windows, hour, time.Time{})
+	if got := names(unbounded); !slices.Equal(got, []string{"after", "far", "inside", "overlapping"}) {
+		t.Fatalf("unbounded = %v", got)
+	}
+	oneHour := attachMeteringWindows(nil, windows, hour, hour.Add(time.Hour))
+	if got := names(oneHour); !slices.Equal(got, []string{"inside", "overlapping"}) {
+		t.Fatalf("[since, until) = %v", got)
+	}
+	insideHour := attachMeteringWindows(nil, windows, hour, hour.Add(10*time.Minute))
+	if got := names(insideHour); !slices.Equal(got, []string{"inside", "overlapping"}) {
+		t.Fatalf("until inside the hour = %v, want the whole hour's windows", got)
 	}
 }
 

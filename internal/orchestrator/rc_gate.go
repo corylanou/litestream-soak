@@ -895,6 +895,7 @@ func applyGateWorkload(gate model.RCGate, spec FleetSpec) FleetSpec {
 		if gate.ObserveProxy && !spec.Workers[i].Workload.S3FaultProxyEnabled {
 			spec.Workers[i].Workload.S3FaultProxyEnabled = true
 			spec.Workers[i].Workload.S3FaultProxyMode = "observe"
+			spec.Workers[i].Workload.S3ObserveProxyRequired = true
 		}
 		for _, resource := range gate.Resources {
 			if resource.Source == spec.Workers[i].Source && resource.Profile == spec.Workers[i].ProfileName && resource.VolumeGB > 0 {
