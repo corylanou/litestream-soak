@@ -8,6 +8,8 @@ type ObjectStoreCounters struct {
 	ReplicaRequestTotals            map[string]uint64 `json:"replica_request_totals,omitempty"`
 	ReplicaRequestBytesSent         map[string]uint64 `json:"replica_request_bytes_sent,omitempty"`
 	ReplicaResponseBytesReceived    map[string]uint64 `json:"replica_response_bytes_received,omitempty"`
+	ReplicaLevelPutTotals           map[string]uint64 `json:"replica_level_put_totals,omitempty"`
+	ReplicaLevelPutBytes            map[string]uint64 `json:"replica_level_put_bytes,omitempty"`
 	RestoreRequestTotals            map[string]uint64 `json:"restore_request_totals,omitempty"`
 	EvidenceObjectUploadsTotal      uint64            `json:"evidence_object_uploads_total,omitempty"`
 	EvidenceUploadPayloadBytesTotal uint64            `json:"evidence_upload_payload_bytes_total,omitempty"`

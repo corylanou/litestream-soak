@@ -23,6 +23,7 @@ import (
 
 const (
 	maxS3FaultProxyAttemptKeys              = 10000
+	maxS3FaultProxyMultipartUploads         = 4096
 	s3FaultProxyModeUploadPartReset         = "uploadpart-reset"
 	s3FaultProxyModeSourceGETReset          = "source-get-reset"
 	s3FaultProxyModeProvider408Canceled     = "provider-408-requestcanceled"
@@ -75,12 +76,17 @@ type s3FaultProxy struct {
 	requests               map[string]uint64
 	bytesSent              map[string]uint64
 	bytesReceived          map[string]uint64
+	levelPuts              map[string]uint64
+	levelPutBytes          map[string]uint64
+	multipartBytes         map[string]uint64
 }
 
 type s3ProxyRequestCounters struct {
 	Requests      map[string]uint64
 	BytesSent     map[string]uint64
 	BytesReceived map[string]uint64
+	LevelPuts     map[string]uint64
+	LevelPutBytes map[string]uint64
 }
 
 func newS3FaultProxy(cfg s3FaultProxyConfig) *s3FaultProxy {
@@ -182,7 +188,11 @@ func (p *s3FaultProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		counted := &countingResponseWriter{ResponseWriter: w}
 		w = counted
 		operation := s3RequestOperation(r)
-		defer func() { p.recordRequest(operation, body.n.Load(), counted.n.Load()) }()
+		defer func() {
+			sent := body.n.Load()
+			p.recordRequest(operation, sent, counted.n.Load())
+			p.recordUpload(r, sent)
+		}()
 	}
 	if p.shouldInjectProviderHTTP408(r) {
 		p.injectProviderHTTP408(w, r)
@@ -254,7 +264,59 @@ func (p *s3FaultProxy) RequestCounters() s3ProxyRequestCounters {
 		Requests:      maps.Clone(p.requests),
 		BytesSent:     maps.Clone(p.bytesSent),
 		BytesReceived: maps.Clone(p.bytesReceived),
+		LevelPuts:     maps.Clone(p.levelPuts),
+		LevelPutBytes: maps.Clone(p.levelPutBytes),
 	}
+}
+
+func (p *s3FaultProxy) recordUpload(r *http.Request, sent int64) {
+	uploadID := strings.TrimSpace(r.URL.Query().Get("uploadId"))
+	if uploadID == "" && r.Method != http.MethodPut {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	multipartKey := r.URL.Path + "\x00" + uploadID
+	switch {
+	case r.Method == http.MethodPut && uploadID == "":
+		p.addLevelPut(ltxLevelOfKey(r.URL.Path), sent)
+	case r.Method == http.MethodPut:
+		if p.multipartBytes == nil {
+			p.multipartBytes = make(map[string]uint64)
+		}
+		if _, tracked := p.multipartBytes[multipartKey]; !tracked && len(p.multipartBytes) >= maxS3FaultProxyMultipartUploads {
+			p.multipartBytes = make(map[string]uint64)
+		}
+		p.multipartBytes[multipartKey] += uint64(max(sent, 0))
+	case r.Method == http.MethodPost:
+		uploaded := p.multipartBytes[multipartKey]
+		delete(p.multipartBytes, multipartKey)
+		p.addLevelPut(ltxLevelOfKey(r.URL.Path), int64(uploaded))
+	case r.Method == http.MethodDelete:
+		delete(p.multipartBytes, multipartKey)
+	}
+}
+
+func (p *s3FaultProxy) addLevelPut(level string, bytes int64) {
+	if p.levelPuts == nil {
+		p.levelPuts = make(map[string]uint64)
+	}
+	p.levelPuts[level]++
+	if bytes <= 0 {
+		return
+	}
+	if p.levelPutBytes == nil {
+		p.levelPutBytes = make(map[string]uint64)
+	}
+	p.levelPutBytes[level] += uint64(bytes)
+}
+
+func ltxLevelOfKey(key string) string {
+	level, ok := replicaLevelOfKey(key)
+	if !ok {
+		return "other"
+	}
+	return "L" + level[3:]
 }
 
 func (p *s3FaultProxy) recordRequest(operation string, sent, received int64) {

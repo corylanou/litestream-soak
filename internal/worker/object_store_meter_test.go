@@ -6,9 +6,11 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -297,5 +299,119 @@ func TestS3ObserveProxyResignsAndMetersRequests(t *testing.T) {
 	}
 	if uploaded.Load() != 1517 {
 		t.Fatalf("upstream received %d bytes", uploaded.Load())
+	}
+}
+
+func TestLTXLevelOfKeyFollowsS3ReplicaLayout(t *testing.T) {
+	for key, want := range map[string]string{
+		"/bucket/soak/w1/0000/0000000000000001-0000000000000001.ltx":                      "L0",
+		"/bucket/soak/w1/0001/0000000000000001-0000000000000040.ltx":                      "L1",
+		"/bucket/soak/w1/0008/0000000000000001-0000000000000fff.ltx":                      "L8",
+		"/bucket/soak/w1/0009/0000000000000001-00000000000003e8.ltx":                      "L9",
+		"soak/w1/0009/0000000000000001-00000000000003e8.ltx":                              "L9",
+		"/bucket/soak/manydb/db-0417/0003/0000000000000a00-0000000000000a7f.ltx":          "L3",
+		"/bucket/soak/scenarios/pinned-reader/0000/0000000000000002-0000000000000002.ltx": "L0",
+		"/bucket/soak/w1/ltx/0/0000000000000001-0000000000000001.ltx":                     "other",
+		"/bucket/soak/w1/000a/0000000000000001-0000000000000001.ltx":                      "other",
+		"/bucket/soak/w1/0010/0000000000000001-0000000000000001.ltx":                      "other",
+		"/bucket/soak/w1/9/0000000000000001-0000000000000001.ltx":                         "other",
+		"/bucket/soak/w1/.litestream-replica":                                             "other",
+		"/bucket/soak/evidence/pprof/heap.pb.gz":                                          "other",
+		"/bucket":                                                                         "other",
+		"":                                                                                "other",
+	} {
+		if got := ltxLevelOfKey(key); got != want {
+			t.Errorf("ltxLevelOfKey(%q) = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestS3ObserveProxyCountsPutsPerLevelOncePerObject(t *testing.T) {
+	upstream := newSignedS3Upstream(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	})
+	proxy := newS3FaultProxy(withTestS3SigningConfig(s3FaultProxyConfig{
+		TargetEndpoint: upstream.URL,
+		ListenAddr:     "127.0.0.1:0",
+		Mode:           s3FaultProxyModeObserve,
+	}))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proxy.Close(context.Background()) })
+
+	client := testS3HTTPClient(time.Second)
+	do := func(method, path string, body []byte) {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, method, proxy.Endpoint()+path, bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s %s status = %d", method, path, resp.StatusCode)
+		}
+	}
+	l0 := "/bucket/soak/w1/0000/0000000000000001-0000000000000001.ltx"
+	l9 := "/bucket/soak/w1/0009/0000000000000001-0000000000000400.ltx"
+	l1 := "/bucket/soak/w1/0001/0000000000000001-0000000000000040.ltx"
+	do(http.MethodPut, l0, bytes.Repeat([]byte("a"), 100))
+	do(http.MethodPost, l9+"?uploads", nil)
+	do(http.MethodPut, l9+"?partNumber=1&uploadId=snap", bytes.Repeat([]byte("p"), 1000))
+	do(http.MethodPut, l9+"?partNumber=2&uploadId=snap", bytes.Repeat([]byte("p"), 500))
+	do(http.MethodPost, l9+"?uploadId=snap", []byte("<CompleteMultipartUpload></CompleteMultipartUpload>"))
+	do(http.MethodPost, l1+"?uploads", nil)
+	do(http.MethodPut, l1+"?partNumber=1&uploadId=abandoned", bytes.Repeat([]byte("p"), 700))
+	do(http.MethodDelete, l1+"?uploadId=abandoned", nil)
+	do(http.MethodPut, "/bucket/soak/w1/.litestream-replica", bytes.Repeat([]byte("m"), 20))
+	do(http.MethodGet, l0, nil)
+	do(http.MethodHead, l9, nil)
+	do(http.MethodPost, "/bucket?delete", []byte("<Delete></Delete>"))
+
+	counters := proxy.RequestCounters()
+	if want := map[string]uint64{"L0": 1, "L9": 1, "other": 1}; !reflect.DeepEqual(counters.LevelPuts, want) {
+		t.Fatalf("level puts = %v, want %v", counters.LevelPuts, want)
+	}
+	if want := map[string]uint64{"L0": 100, "L9": 1500, "other": 20}; !reflect.DeepEqual(counters.LevelPutBytes, want) {
+		t.Fatalf("level put bytes = %v, want %v", counters.LevelPutBytes, want)
+	}
+	if want := map[string]uint64{"PUT": 5, "POST": 4, "DELETE": 1, "GET": 1, "HEAD": 1}; !reflect.DeepEqual(counters.Requests, want) {
+		t.Fatalf("requests = %v, want %v", counters.Requests, want)
+	}
+	if len(proxy.multipartBytes) != 0 {
+		t.Fatalf("multipart uploads still tracked after completion and abort: %v", proxy.multipartBytes)
+	}
+}
+
+func TestS3FaultProxyBoundsTrackedMultipartUploads(t *testing.T) {
+	proxy := newS3FaultProxy(s3FaultProxyConfig{Mode: s3FaultProxyModeObserve})
+	part := func(key, uploadID string, n int64) {
+		proxy.recordUpload(httptest.NewRequest(http.MethodPut, key+"?partNumber=1&uploadId="+uploadID, nil), n)
+	}
+	for i := range maxS3FaultProxyMultipartUploads {
+		part("/bucket/soak/w1/0000/"+strconv.Itoa(i)+".ltx", "u", 1)
+	}
+	if len(proxy.multipartBytes) != maxS3FaultProxyMultipartUploads {
+		t.Fatalf("tracked uploads = %d, want %d", len(proxy.multipartBytes), maxS3FaultProxyMultipartUploads)
+	}
+	part("/bucket/soak/w1/0000/0.ltx", "u", 5)
+	if got := proxy.multipartBytes["/bucket/soak/w1/0000/0.ltx\x00u"]; got != 6 || len(proxy.multipartBytes) != maxS3FaultProxyMultipartUploads {
+		t.Fatalf("existing upload bytes = %d tracked = %d, want 6 and %d", got, len(proxy.multipartBytes), maxS3FaultProxyMultipartUploads)
+	}
+	part("/bucket/soak/w1/0009/new.ltx", "u", 7)
+	if len(proxy.multipartBytes) != 1 || proxy.multipartBytes["/bucket/soak/w1/0009/new.ltx\x00u"] != 7 {
+		t.Fatalf("tracked uploads after overflow = %v", proxy.multipartBytes)
+	}
+	proxy.recordUpload(httptest.NewRequest(http.MethodPost, "/bucket/soak/w1/0009/new.ltx?uploadId=u", nil), 40)
+	if proxy.levelPuts["L9"] != 1 || proxy.levelPutBytes["L9"] != 7 {
+		t.Fatalf("L9 puts = %d bytes = %d, want 1 and 7", proxy.levelPuts["L9"], proxy.levelPutBytes["L9"])
 	}
 }

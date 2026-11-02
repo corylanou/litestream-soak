@@ -33,6 +33,16 @@ var (
 		Help: "Object-store HTTP body bytes measured by the worker observe proxy, by direction, summed per source from counter deltas.",
 	}, []string{"source", "origin", "operation", "direction"})
 
+	controlSourceReplicaLevelPuts = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_control_source_replica_level_put_total",
+		Help: "Replica objects uploaded per LTX level (L0-L9, or other for keys outside a level directory) as seen by the worker observe proxy; a multipart upload counts once on completion, summed per source from counter deltas.",
+	}, []string{"source", "level"})
+
+	controlSourceReplicaLevelPutBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_control_source_replica_level_put_bytes_total",
+		Help: "Body bytes uploaded per LTX level as seen by the worker observe proxy (every multipart part body is counted), summed per source from counter deltas.",
+	}, []string{"source", "level"})
+
 	controlSourceLitestreamObjectOperations = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "soak_control_source_litestream_object_operations_total",
 		Help: "Logical object operations from litestream_replica_operation_total (uploaded and deleted objects, not HTTP requests), summed per source.",
@@ -158,6 +168,12 @@ func observeCostMeterDelta(source string, delta model.CostMeterTotals) {
 	}
 	for operation, bytes := range delta.ReplicaResponseBytesReceived {
 		controlSourceObjectStoreRequestBytes.WithLabelValues(source, "replica", operation, "received").Add(float64(bytes))
+	}
+	for level, count := range delta.ReplicaLevelPuts {
+		controlSourceReplicaLevelPuts.WithLabelValues(source, level).Add(float64(count))
+	}
+	for level, bytes := range delta.ReplicaLevelPutBytes {
+		controlSourceReplicaLevelPutBytes.WithLabelValues(source, level).Add(float64(bytes))
 	}
 	for operation, count := range delta.RestoreRequests {
 		controlSourceObjectStoreRequests.WithLabelValues(source, "restore", operation).Add(float64(count))

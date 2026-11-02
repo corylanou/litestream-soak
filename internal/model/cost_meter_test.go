@@ -195,6 +195,72 @@ func TestRecordCostMeterResetsLitestreamBaselineOnWorkerRestart(t *testing.T) {
 	})
 }
 
+func TestRecordCostMeterTracksReplicaLevelPutsAndLatestDBSize(t *testing.T) {
+	db := seriesTestDB(t)
+	base := time.Date(2026, 10, 22, 10, 5, 0, 0, time.UTC)
+	record := func(at time.Time, runtime reporting.RuntimePayload) CostMeterTotals {
+		t.Helper()
+		delta, err := db.RecordCostMeter("w-levels", "main", at, runtime)
+		if err != nil {
+			t.Fatalf("RecordCostMeter(%s) error = %v", at, err)
+		}
+		return delta
+	}
+	levels := func(epoch string, puts, bytes map[string]uint64) reporting.ObjectStoreCounters {
+		return reporting.ObjectStoreCounters{ObjectStoreCounterEpoch: epoch, ReplicaLevelPutTotals: puts, ReplicaLevelPutBytes: bytes}
+	}
+
+	delta := record(base, reporting.RuntimePayload{ObjectStoreCounters: levels("worker-a", map[string]uint64{"L0": 10, "L9": 1}, map[string]uint64{"L0": 1000, "L9": 5000}), DBSizeBytes: 7000})
+	if want := (CostMeterTotals{ReplicaLevelPuts: map[string]uint64{"L0": 10, "L9": 1}, ReplicaLevelPutBytes: map[string]uint64{"L0": 1000, "L9": 5000}}); !reflect.DeepEqual(delta, want) {
+		t.Fatalf("first delta = %+v, want %+v", delta, want)
+	}
+	delta = record(base.Add(15*time.Second), reporting.RuntimePayload{ObjectStoreCounters: levels("worker-a", map[string]uint64{"L0": 14, "L9": 1, "other": 2}, map[string]uint64{"L0": 1400, "L9": 5000, "other": 60}), DBSizeBytes: 7500})
+	if want := (CostMeterTotals{ReplicaLevelPuts: map[string]uint64{"L0": 4, "other": 2}, ReplicaLevelPutBytes: map[string]uint64{"L0": 400, "other": 60}}); !reflect.DeepEqual(delta, want) {
+		t.Fatalf("second delta = %+v, want %+v", delta, want)
+	}
+	delta = record(base.Add(30*time.Second), reporting.RuntimePayload{ObjectStoreCounters: levels("worker-b", map[string]uint64{"L0": 3}, map[string]uint64{"L0": 300}), DBTotalSizeBytes: 7600})
+	if want := (CostMeterTotals{ReplicaLevelPuts: map[string]uint64{"L0": 3}, ReplicaLevelPutBytes: map[string]uint64{"L0": 300}}); !reflect.DeepEqual(delta, want) {
+		t.Fatalf("restart delta = %+v, want %+v", delta, want)
+	}
+	firstHour, err := db.CostMeter("main", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := firstHour[0].Workers[0]; got.DBSizeBytes != 7600 || got.Totals.ReplicaLevelPuts["L0"] != 17 {
+		t.Fatalf("first hour worker = %+v", got)
+	}
+	delta = record(base.Add(2*time.Hour), reporting.RuntimePayload{ObjectStoreCounters: reporting.ObjectStoreCounters{ObjectStoreCounterEpoch: "worker-b"}, DBSizeBytes: 8000})
+	if !delta.IsZero() {
+		t.Fatalf("legacy delta = %+v, want zero", delta)
+	}
+
+	report, err := db.CostMeter("main", base.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report) != 1 || len(report[0].Workers) != 1 {
+		t.Fatalf("report = %+v", report)
+	}
+	worker := report[0].Workers[0]
+	if want := map[string]uint64{"L0": 17, "L9": 1, "other": 2}; !reflect.DeepEqual(worker.Totals.ReplicaLevelPuts, want) || !reflect.DeepEqual(report[0].Totals.ReplicaLevelPuts, want) {
+		t.Fatalf("level puts = %v source = %v, want %v", worker.Totals.ReplicaLevelPuts, report[0].Totals.ReplicaLevelPuts, want)
+	}
+	if want := map[string]uint64{"L0": 1700, "L9": 5000, "other": 60}; !reflect.DeepEqual(worker.Totals.ReplicaLevelPutBytes, want) {
+		t.Fatalf("level put bytes = %v, want %v", worker.Totals.ReplicaLevelPutBytes, want)
+	}
+	if worker.DBSizeBytes != 8000 {
+		t.Fatalf("latest db size = %d, want 8000", worker.DBSizeBytes)
+	}
+
+	lastHour, err := db.CostMeter("main", base.Add(90*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lastHour[0].Workers[0]; got.DBSizeBytes != 8000 || got.Totals.ReplicaLevelPuts != nil || got.Totals.ReplicaLevelPutBytes != nil {
+		t.Fatalf("last hour worker = %+v", got)
+	}
+}
+
 func TestCostMeterAggregatesPerSourceAndWindow(t *testing.T) {
 	db := seriesTestDB(t)
 	now := time.Now().UTC().Truncate(time.Hour)
