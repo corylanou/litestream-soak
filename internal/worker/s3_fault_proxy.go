@@ -374,15 +374,18 @@ func (c *countingReadCloser) Close() error {
 }
 
 var (
-	s3ErrorElement            = []byte("<Error")
-	s3CompletionResultElement = []byte("<CompleteMultipartUploadResult")
+	s3ErrorElement             = []byte("<Error")
+	s3CompletionResultOpen     = []byte("<CompleteMultipartUploadResult")
+	s3CompletionResultClose    = []byte("</CompleteMultipartUploadResult>")
+	s3CompletionScanWindowSize = len(s3CompletionResultClose) - 1
 )
 
 // countingResponseWriter counts response bytes and, for a multipart
-// completion, scans the whole body for the result element and for an
-// embedded <Error element with a rolling window that spans writes,
-// forwarding every byte unchanged. S3 may stream whitespace for a long time
-// before either, so no prefix is enough and an empty body proves nothing.
+// completion, scans the whole body for the opening and closing result
+// elements and for an embedded <Error element with a rolling window that
+// spans writes, forwarding every byte unchanged. S3 may stream whitespace for
+// a long time before any of them, so no prefix is enough, an empty body
+// proves nothing, and a body that ends after the opening tag is not a result.
 type countingResponseWriter struct {
 	http.ResponseWriter
 	n             atomic.Int64
@@ -390,7 +393,8 @@ type countingResponseWriter struct {
 	contentLength int64
 	scanErrors    bool
 	errorSeen     bool
-	resultSeen    bool
+	resultOpened  bool
+	resultClosed  bool
 	tail          []byte
 }
 
@@ -413,10 +417,18 @@ func (c *countingResponseWriter) Write(p []byte) (int, error) {
 		if bytes.Contains(window, s3ErrorElement) {
 			c.errorSeen = true
 		}
-		if !c.resultSeen && bytes.Contains(window, s3CompletionResultElement) {
-			c.resultSeen = true
+		afterOpen := window
+		if !c.resultOpened {
+			afterOpen = nil
+			if i := bytes.Index(window, s3CompletionResultOpen); i >= 0 {
+				c.resultOpened = true
+				afterOpen = window[i+len(s3CompletionResultOpen):]
+			}
 		}
-		c.tail = append(c.tail[:0], window[max(0, len(window)-(len(s3CompletionResultElement)-1)):]...)
+		if c.resultOpened && !c.resultClosed && bytes.Contains(afterOpen, s3CompletionResultClose) {
+			c.resultClosed = true
+		}
+		c.tail = append(c.tail[:0], window[max(0, len(window)-s3CompletionScanWindowSize):]...)
 	}
 	n, err := c.ResponseWriter.Write(p)
 	c.n.Add(int64(n))
@@ -428,11 +440,12 @@ func (c *countingResponseWriter) status() int {
 }
 
 // completionSucceeded reports whether a multipart completion response was
-// fully forwarded and carried the result element without an embedded error.
-// An empty or whitespace-only body and a short body (fewer bytes than the
-// declared Content-Length) are never counted.
+// fully forwarded and carried a complete result element (opening tag followed
+// by its closing tag) without an embedded error. An empty or whitespace-only
+// body, a body cut off after the opening tag, and a short body (fewer bytes
+// than the declared Content-Length) are never counted.
 func (c *countingResponseWriter) completionSucceeded() bool {
-	if !c.scanErrors || c.errorSeen || !c.resultSeen || c.statusCode.Load() == 0 {
+	if !c.scanErrors || c.errorSeen || !c.resultOpened || !c.resultClosed || c.statusCode.Load() == 0 {
 		return false
 	}
 	return c.contentLength < 0 || c.n.Load() == c.contentLength

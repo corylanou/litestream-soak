@@ -143,6 +143,7 @@ type RuntimePayload struct {
 // Litestream, and waits for the first sync. A worker in a startup phase is not
 // running yet and must not count toward gate readiness.
 const (
+	StartupPhaseProxy      = "proxy"
 	StartupPhasePopulate   = "populate"
 	StartupPhaseLitestream = "litestream"
 )

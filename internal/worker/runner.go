@@ -76,6 +76,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}()
 
+	r.setStartupPhase(reporting.StartupPhaseProxy)
 	if err := r.startS3FaultProxy(runCtx); err != nil {
 		err = fmt.Errorf("start s3 fault proxy: %w", err)
 		r.sendPreStartFailureEvent(err)

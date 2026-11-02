@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -484,25 +485,33 @@ func TestCountingResponseWriterScansWholeCompletionBody(t *testing.T) {
 		return counted
 	}
 	whitespace := strings.Repeat(" ", 64<<10)
+	const fullResult = "<CompleteMultipartUploadResult><Bucket>b</Bucket><Key>k</Key><ETag>e</ETag></CompleteMultipartUploadResult>"
 	for name, tc := range map[string]struct {
 		contentLength string
 		chunks        []string
 		want          bool
 	}{
-		"clean result":                   {chunks: []string{"<CompleteMultipartUploadResult><ETag>e</ETag></CompleteMultipartUploadResult>"}, want: true},
-		"result after 64 KiB whitespace": {chunks: []string{whitespace, "<CompleteMultipartUploadResult/>"}, want: true},
-		"result split across writes":     {chunks: []string{whitespace + "<CompleteMultipart", "UploadResult><ETag>e</ETag></CompleteMultipartUploadResult>"}, want: true},
-		"result split byte by byte":      {chunks: strings.Split("<CompleteMultipartUploadResult/>", ""), want: true},
-		"result then error":              {chunks: []string{"<CompleteMultipartUploadResult>", "<Error><Code>InternalError</Code></Error>"}},
-		"error after 64 KiB whitespace":  {chunks: []string{whitespace, "<Error><Code>InternalError</Code></Error>"}},
-		"error split across writes":      {chunks: []string{whitespace + "<Err", "or><Code>SlowDown</Code></Error>"}},
-		"error split byte by byte":       {chunks: []string{"<", "E", "r", "r", "o", "r", ">"}},
-		"error after a full tail":        {chunks: []string{whitespace + "<Erro", "r>"}},
-		"truncated 200":                  {contentLength: "100", chunks: []string{"<CompleteMultipartUploadResult>"}},
-		"complete with content length":   {contentLength: "32", chunks: []string{"<CompleteMultipartUploadResult/>"}, want: true},
-		"unrelated element only":         {contentLength: "9", chunks: []string{"<Result/>"}},
-		"whitespace only":                {chunks: []string{whitespace, "\n"}},
-		"empty body":                     {chunks: nil},
+		"clean result":                    {chunks: []string{fullResult}, want: true},
+		"result after 64 KiB whitespace":  {chunks: []string{whitespace, fullResult}, want: true},
+		"result split across writes":      {chunks: []string{whitespace + "<CompleteMultipart", "UploadResult><ETag>e</ETag></CompleteMultipartUpl", "oadResult>"}, want: true},
+		"result split byte by byte":       {chunks: strings.Split(fullResult, ""), want: true},
+		"result with xml header and tail": {chunks: []string{`<?xml version="1.0" encoding="UTF-8"?>` + "\n", fullResult, "\n"}, want: true},
+		"opening tag only":                {chunks: []string{"<CompleteMultipartUploadResult>"}},
+		"opening tag only chunked":        {chunks: []string{whitespace, "<CompleteMultipartUploadResult", "><Bucket>b</Bucket>"}},
+		"self-closing opening tag":        {chunks: []string{"<CompleteMultipartUploadResult/>"}},
+		"closing tag only":                {chunks: []string{"</CompleteMultipartUploadResult>"}},
+		"closing tag before opening tag":  {chunks: []string{"</CompleteMultipartUploadResult>", "<CompleteMultipartUploadResult>"}},
+		"result then error":               {chunks: []string{fullResult, "<Error><Code>InternalError</Code></Error>"}},
+		"error inside result":             {chunks: []string{"<CompleteMultipartUploadResult><Error><Code>InternalError</Code></Error></CompleteMultipartUploadResult>"}},
+		"error after 64 KiB whitespace":   {chunks: []string{whitespace, "<Error><Code>InternalError</Code></Error>"}},
+		"error split across writes":       {chunks: []string{whitespace + "<Err", "or><Code>SlowDown</Code></Error>"}},
+		"error split byte by byte":        {chunks: []string{"<", "E", "r", "r", "o", "r", ">"}},
+		"error after a full tail":         {chunks: []string{whitespace + "<Erro", "r>"}},
+		"truncated 200":                   {contentLength: "100", chunks: []string{"<CompleteMultipartUploadResult>"}},
+		"complete with content length":    {contentLength: strconv.Itoa(len(fullResult)), chunks: []string{fullResult}, want: true},
+		"unrelated element only":          {contentLength: "9", chunks: []string{"<Result/>"}},
+		"whitespace only":                 {chunks: []string{whitespace, "\n"}},
+		"empty body":                      {chunks: nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			counted := write(t, tc.contentLength, tc.chunks...)
@@ -549,8 +558,14 @@ func TestS3ObserveProxyIgnoresCompletionErrorsStreamedLate(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		case "whitespace":
 			_, _ = w.Write([]byte(strings.Repeat(" ", 1024)))
+		case "opening-only":
+			_, _ = w.Write([]byte(strings.Repeat(" ", 1024) + "<CompleteMultipartUploadResult"))
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			_, _ = w.Write([]byte("><Bucket>b</Bucket>"))
 		default:
-			_, _ = w.Write([]byte("<CompleteMultipartUploadResult/>"))
+			_, _ = w.Write([]byte("<CompleteMultipartUploadResult><Bucket>b</Bucket><Key>k</Key><ETag>e</ETag></CompleteMultipartUploadResult>"))
 		}
 	})
 	proxy := newS3FaultProxy(withTestS3SigningConfig(s3FaultProxyConfig{
@@ -583,13 +598,14 @@ func TestS3ObserveProxyIgnoresCompletionErrorsStreamedLate(t *testing.T) {
 	complete("truncated")
 	complete("empty")
 	complete("whitespace")
+	complete("opening-only")
 	complete("ok")
 
 	counters := proxy.RequestCounters()
 	if want := map[string]uint64{"L9": 1}; !reflect.DeepEqual(counters.LevelPuts, want) {
 		t.Fatalf("level puts = %v, want only the clean completion %v", counters.LevelPuts, want)
 	}
-	if counters.Requests["POST"] != 5 {
+	if counters.Requests["POST"] != 6 {
 		t.Fatalf("requests = %v, want every completion attempt counted as a request", counters.Requests)
 	}
 }

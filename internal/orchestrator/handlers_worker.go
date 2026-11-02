@@ -24,6 +24,34 @@ func (a *API) upsertReportedWorker(identity reporting.WorkerIdentity, runtime re
 	return a.db.UpsertReportedWorker(identity)
 }
 
+// upsertEventWorker is upsertReportedWorker for events. A worker_failed event
+// from a worker that has not finished starting (a proxy, populate, or
+// Litestream start failure) must never flip it to running, whether or not the
+// payload carries a startup phase, or gate readiness would pair a side whose
+// Litestream never ran.
+func (a *API) upsertEventWorker(payload reporting.WorkerEventPayload) error {
+	if payload.PreStart() || a.workerFailedBeforeStart(payload) {
+		return a.db.UpsertStartingWorker(payload.WorkerIdentity)
+	}
+	return a.db.UpsertReportedWorker(payload.WorkerIdentity)
+}
+
+func (a *API) workerFailedBeforeStart(payload reporting.WorkerEventPayload) bool {
+	if strings.TrimSpace(payload.EventType) != "worker_failed" {
+		return false
+	}
+	worker, err := a.db.GetWorker(payload.WorkerID)
+	if err != nil || worker == nil {
+		return false
+	}
+	switch worker.Status {
+	case model.WorkerPending, model.WorkerBuilding, model.WorkerStarting:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	workerID := r.PathValue("id")
 	var payload reporting.HeartbeatPayload
@@ -350,7 +378,7 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(rawPayload, &replay)
 	if replay.EventID == "" && replay.IncidentID == "" {
-		if err := a.upsertReportedWorker(payload.WorkerIdentity, payload.RuntimePayload); err != nil {
+		if err := a.upsertEventWorker(payload); err != nil {
 			respondError(w, r, http.StatusInternalServerError, err, "failed to record worker")
 			return
 		}
