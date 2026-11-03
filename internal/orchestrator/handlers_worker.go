@@ -24,37 +24,21 @@ func (a *API) upsertReportedWorker(identity reporting.WorkerIdentity, runtime re
 	return a.db.UpsertReportedWorker(identity)
 }
 
-// upsertEventWorker is upsertReportedWorker for events. A worker_failed event
-// from a worker that has not finished starting (a proxy, populate, or
-// Litestream start failure) must never flip it to running, whether or not the
-// payload carries a startup phase, or gate readiness would pair a side whose
-// Litestream never ran. It also leaves the heartbeat timestamp alone, so a
-// worker failing on every restart still goes stale and is degraded and
-// replaced like any other silent worker.
+// upsertEventWorker is upsertReportedWorker for events. A worker_failed event,
+// whatever the worker's stored status and whether or not the payload carries
+// a startup phase, never promotes the status and never refreshes the heartbeat
+// timestamp: a pre-start failure must not pair a gate side whose Litestream
+// never ran, and a worker failing on every restart must still go stale, be
+// degraded, and be replaced like any other silent worker. Only heartbeats and
+// startup reports refresh the clock or recover the status.
 func (a *API) upsertEventWorker(payload reporting.WorkerEventPayload) error {
 	switch {
-	case a.workerFailedBeforeStart(payload):
-		return a.db.UpsertFailedStartingWorker(payload.WorkerIdentity)
+	case strings.TrimSpace(payload.EventType) == "worker_failed":
+		return a.db.UpsertFailedWorker(payload.WorkerIdentity)
 	case payload.PreStart():
 		return a.db.UpsertStartingWorker(payload.WorkerIdentity)
 	default:
 		return a.db.UpsertReportedWorker(payload.WorkerIdentity)
-	}
-}
-
-func (a *API) workerFailedBeforeStart(payload reporting.WorkerEventPayload) bool {
-	if strings.TrimSpace(payload.EventType) != "worker_failed" {
-		return false
-	}
-	worker, err := a.db.GetWorker(payload.WorkerID)
-	if err != nil || worker == nil {
-		return false
-	}
-	switch worker.Status {
-	case model.WorkerPending, model.WorkerBuilding, model.WorkerStarting:
-		return true
-	default:
-		return false
 	}
 }
 
