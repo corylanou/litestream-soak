@@ -398,7 +398,16 @@ type countingResponseWriter struct {
 	tail          []byte
 }
 
+// WriteHeader records the final status only. The reverse proxy forwards
+// interim 1xx responses through this method too, and the S3 SDK sends
+// Expect: 100-continue on every PutObject and UploadPart body of 2 MiB or
+// more, so the upstream's 100 Continue arrives first; latching it would make
+// every large upload look unsuccessful and drop its bytes from the meter.
 func (c *countingResponseWriter) WriteHeader(statusCode int) {
+	if statusCode >= 100 && statusCode < 200 {
+		c.ResponseWriter.WriteHeader(statusCode)
+		return
+	}
 	if c.statusCode.CompareAndSwap(0, int64(statusCode)) {
 		c.contentLength = -1
 		if length, err := strconv.ParseInt(c.Header().Get("Content-Length"), 10, 64); err == nil && length >= 0 {
