@@ -358,10 +358,15 @@ func TestRegisterRCGateRecoversFromSlowControlPlane(t *testing.T) {
 	t.Parallel()
 	script := filepath.Join("..", "..", "scripts", "register-rc-gate.sh")
 	candidate := strings.ToLower(rcCandidateSHA)
-	gate := func(profiles string, observe bool, duration string) string {
-		return fmt.Sprintf(`{"gates":[{"id":21,"kind":"rc","status":"running","candidate_source":"rc-%s-dfdc1c35","baseline_source":"rcbase-%s-dfdc1c35","candidate_sha":"%s","baseline_sha":"%s","duration":"%s","tail":false,"profiles":[%s],"observe_proxy":%t,"resources":[]}]}`,
-			candidate[:8], rcBaselineSHA[:8], candidate, rcBaselineSHA, duration, profiles, observe)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	gateEntry := func(id int, status, startedAt, profiles string, observe bool, duration string) string {
+		return fmt.Sprintf(`{"id":%d,"kind":"rc","status":"%s","started_at":"%s","candidate_source":"rc-%s-dfdc1c35","baseline_source":"rcbase-%s-dfdc1c35","candidate_sha":"%s","baseline_sha":"%s","duration":"%s","tail":false,"profiles":[%s],"observe_proxy":%t,"resources":[]}`,
+			id, status, startedAt, candidate[:8], rcBaselineSHA[:8], candidate, rcBaselineSHA, duration, profiles, observe)
 	}
+	gate := func(profiles string, observe bool, duration string) string {
+		return `{"gates":[` + gateEntry(21, "running", now, profiles, observe, duration) + `]}`
+	}
+	oldClosed := gateEntry(4, "completed", "2026-01-01T00:00:00Z", `"gate-large-db"`, true, "24h0m0s")
 	upgradeGate := func(warmup string) string {
 		return fmt.Sprintf(`{"gates":[{"id":7,"kind":"upgrade","status":"running","candidate_source":"up-%s-dfdc1c35","baseline_source":"upbase-%s-dfdc1c35","candidate_sha":"%s","baseline_sha":"%s","duration":"24h0m0s","upgrade_warmup":"%s","tail":false,"resources":[]}]}`,
 			candidate[:8], rcBaselineSHA[:8], candidate, rcBaselineSHA, warmup)
@@ -380,6 +385,9 @@ func TestRegisterRCGateRecoversFromSlowControlPlane(t *testing.T) {
 		"upgrade-2h":   upgradeGate("2h0m0s"),
 		"upgrade-45m":  upgradeGate("45m0s"),
 		"other-source": strings.ReplaceAll(gate(`"gate-large-db"`, true, "24h0m0s"), "-dfdc1c35", "-other"),
+		"old-closed":   `{"gates":[` + oldClosed + `]}`,
+		"old-and-new":  `{"gates":[` + gateEntry(21, "running", now, `"gate-large-db"`, true, "24h0m0s") + `,` + oldClosed + `]}`,
+		"fresh-closed": `{"gates":[` + gateEntry(22, "aborted", now, `"gate-large-db"`, true, "24h0m0s") + `,` + oldClosed + `]}`,
 	}
 	tests := []struct {
 		name      string
@@ -399,6 +407,9 @@ func TestRegisterRCGateRecoversFromSlowControlPlane(t *testing.T) {
 		{name: "upgrade gate default warm-up matches 2h0m0s", postCodes: "28", ledgers: "upgrade-2h", args: []string{"upgrade"}, profiles: "", wantPosts: 1, wantGets: 1, wantOut: `"id":7`},
 		{name: "upgrade gate warm-up mismatch fails", postCodes: "28", ledgers: "upgrade-45m", args: []string{"upgrade", "30m"}, profiles: "", wantExit: true, wantPosts: 1, wantGets: 1, wantErr: "does not match"},
 		{name: "a completed gate on the sources blocks a second registration", postCodes: "28", ledgers: "completed", wantExit: true, wantPosts: 1, wantGets: 1, wantErr: "rc gate 21 is completed"},
+		{name: "an old closed gate plus a new open match succeeds", postCodes: "28", ledgers: "old-and-new", wantPosts: 1, wantGets: 1, wantOut: `"id":21`},
+		{name: "an old closed gate alone keeps polling then re-posts", postCodes: "28 201", ledgers: "old-closed", wantPosts: 2, wantGets: 1, wantOut: `"candidate_source":"registered-now"`},
+		{name: "a closed gate started during this attempt fails", postCodes: "28", ledgers: "fresh-closed", wantExit: true, wantPosts: 1, wantGets: 1, wantErr: "rc gate 22 is aborted and started during this attempt"},
 		{name: "a gate on other sources does not block the retry", postCodes: "28 201", ledgers: "other-source", wantPosts: 2, wantGets: 1, wantOut: `"candidate_source":"registered-now"`},
 		{name: "zero request timeout falls back to the default", postCodes: "201", env: []string{"GATE_REGISTER_TIMEOUT=0"}, wantPosts: 1, wantGets: 0, wantOut: `"candidate_source":"registered-now"`, wantErr: "using 300"},
 		{name: "duplicate profiles in the request still match the deduplicated gate", postCodes: "28", ledgers: "match", profiles: "gate-large-db,gate-large-db", wantPosts: 1, wantGets: 1, wantOut: `"id":21`},

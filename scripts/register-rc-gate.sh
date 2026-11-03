@@ -155,6 +155,12 @@ fi
 body_file="$(mktemp)"
 trap 'rm -f "${body_file}"' EXIT
 started_at="$(date +%s)"
+# Upgrade gates reuse source names across runs, so a closed gate from an
+# earlier run can sit in the ledger while this run's timed-out POST is still
+# committing. Only a closed gate that started during this attempt (with a
+# minute of clock skew) is this run's; older closed gates are ignored and the
+# control plane's open-gate uniqueness keeps the re-POST safe.
+attempt_cutoff=$((started_at - 60))
 sources="${candidate_source} / ${baseline_source}"
 
 # remaining prints the seconds left in the registration budget and exits the
@@ -169,17 +175,22 @@ remaining() {
 }
 capped() { local left; left="$(remaining)"; if [ "$1" -lt "${left}" ]; then echo "$1"; else echo "${left}"; fi; }
 
-# ledger_gate prints the most recent gate, open or closed, that owns this
-# run's sources (the ledger lists newest first), or nothing when the ledger
-# was read and has none. It fails when the ledger could not be read.
+# ledger_gate prints the most recent gate that owns this run's sources and is
+# either open or closed but started during this attempt (the ledger lists
+# newest first), or nothing when the ledger was read and has no such gate. It
+# fails when the ledger could not be read.
 ledger_gate() {
   local code
   : > "${body_file}"
   code="$(curl -sS --max-time "$(capped "${request_timeout}")" -o "${body_file}" -w '%{http_code}' \
     "${auth_args[@]}" "${base_url}/api/rc-gates" 2>/dev/null)" || return 1
   [ "${code}" = "200" ] || return 1
-  jq -c --arg candidate "${candidate_source}" --arg baseline "${baseline_source}" \
-    '[.gates[]? | select(.candidate_source == $candidate and .baseline_source == $baseline)] | first // empty' \
+  jq -c --arg candidate "${candidate_source}" --arg baseline "${baseline_source}" --argjson cutoff "${attempt_cutoff}" \
+    '[.gates[]?
+      | select(.candidate_source == $candidate and .baseline_source == $baseline)
+      | select((.status == "running" or .status == "tail")
+          or (((.started_at // "") | sub("\\.[0-9]+"; "") | try fromdateiso8601 catch 0) >= $cutoff))]
+      | first // empty' \
     "${body_file}" 2>/dev/null
 }
 
@@ -247,7 +258,7 @@ while :; do
             echo "rc gate ${gate_id} (${gate_status}) already owns ${sources} but does not match this request; not registering another:" >&2
             ;;
           *)
-            echo "rc gate ${gate_id} is ${gate_status} and still owns ${sources}; a new POST would register a second gate on them, refusing:" >&2
+            echo "rc gate ${gate_id} is ${gate_status} and started during this attempt on ${sources}; a new POST would register a second gate on them, refusing:" >&2
             ;;
         esac
         printf '%s\n' "${gate}" >&2
