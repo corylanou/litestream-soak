@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -632,6 +633,233 @@ func TestS3ObserveProxyRequiredFailsClosed(t *testing.T) {
 	parsed, err := WorkloadFromEnvironment(map[string]string{"S3_OBSERVE_PROXY_ENABLED": "true", "S3_OBSERVE_PROXY_REQUIRED": "true"})
 	if err != nil || !parsed.S3ObserveProxyRequired || parsed.S3FaultProxyMode != "observe" {
 		t.Fatalf("WorkloadFromEnvironment() = %+v, %v", parsed, err)
+	}
+}
+
+func TestCountingResponseWriterIgnoresInterimStatuses(t *testing.T) {
+	for name, tc := range map[string]struct {
+		statuses   []int
+		wantStatus int
+	}{
+		"100 then 200":        {statuses: []int{http.StatusContinue, http.StatusOK}, wantStatus: http.StatusOK},
+		"100 then 500":        {statuses: []int{http.StatusContinue, http.StatusInternalServerError}, wantStatus: http.StatusInternalServerError},
+		"103 then 200":        {statuses: []int{http.StatusEarlyHints, http.StatusOK}, wantStatus: http.StatusOK},
+		"200 only":            {statuses: []int{http.StatusOK}, wantStatus: http.StatusOK},
+		"100 only is unknown": {statuses: []int{http.StatusContinue}, wantStatus: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			counted := &countingResponseWriter{ResponseWriter: recorder}
+			for _, status := range tc.statuses {
+				if status >= 200 {
+					counted.Header().Set("Content-Length", "0")
+				}
+				counted.WriteHeader(status)
+			}
+			if counted.status() != tc.wantStatus {
+				t.Fatalf("status() = %d, want %d", counted.status(), tc.wantStatus)
+			}
+			if tc.wantStatus != 0 && counted.contentLength != 0 {
+				t.Fatalf("contentLength = %d, want the final response's 0", counted.contentLength)
+			}
+		})
+	}
+}
+
+const (
+	multipartSnapshotKey = "/bucket/soak/w1/0009/0000000000000001-0000000000000400.ltx"
+	multipartL1Key       = "/bucket/soak/w1/0001/0000000000000001-0000000000000040.ltx"
+	multipartL0Key       = "/bucket/soak/w1/0000/0000000000000401-0000000000000401.ltx"
+)
+
+// newMultipartS3Upstream behaves like S3 for the requests the SDK sends during
+// a snapshot upload: it answers Expect: 100-continue (Go's server does that
+// when the handler reads the body), returns an upload id, an ETag per part,
+// and a complete CompleteMultipartUploadResult.
+func newMultipartS3Upstream(t *testing.T) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var received atomic.Int64
+	upstream := newSignedS3Upstream(t, func(w http.ResponseWriter, r *http.Request) {
+		n, _ := io.Copy(io.Discard, r.Body)
+		received.Add(n)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Query().Has("uploads"):
+			_, _ = w.Write([]byte(`<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key><UploadId>snap</UploadId></InitiateMultipartUploadResult>`))
+		case r.Method == http.MethodPut && r.URL.Query().Get("uploadId") != "":
+			w.Header().Set("ETag", `"part-`+r.URL.Query().Get("partNumber")+`"`)
+			w.WriteHeader(http.StatusOK)
+		case isS3MultipartCompletion(r):
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>` + "\n" + `<CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Location>https://bucket/k</Location><Bucket>bucket</Bucket><Key>k</Key><ETag>"snap-3"</ETag></CompleteMultipartUploadResult>`))
+		default:
+			w.Header().Set("ETag", `"single"`)
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	return upstream, &received
+}
+
+// driveSnapshotUpload replays what the S3 SDK sends for Litestream's uploads
+// through endpoint: a small L0 PutObject, an L1 PutObject above the SDK's
+// 2 MiB Expect: 100-continue threshold, and a multipart L9 snapshot whose
+// parts are streamed bodies with Expect: 100-continue. It returns the body
+// bytes uploaded per level.
+func driveSnapshotUpload(t *testing.T, ctx context.Context, endpoint string) map[string]int64 {
+	t.Helper()
+	client := testS3HTTPClient(10 * time.Second)
+	send := func(method, path string, size int64, expectContinue bool) {
+		t.Helper()
+		var body io.Reader
+		if size > 0 {
+			body = io.NopCloser(io.LimitReader(repeatReader('p'), size))
+		}
+		req, err := http.NewRequestWithContext(ctx, method, endpoint+path, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.ContentLength = size
+		if expectContinue {
+			req.Header.Set("Expect", "100-continue")
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s %s status = %d", method, path, resp.StatusCode)
+		}
+	}
+	parts := []int64{5 << 20, 5 << 20, 3<<20 + 4096}
+	l1 := int64(2<<20 + 512)
+	l0 := int64(14000)
+	send(http.MethodPut, multipartL0Key, l0, false)
+	send(http.MethodPut, multipartL1Key, l1, true)
+	send(http.MethodPost, multipartSnapshotKey+"?uploads", 0, false)
+	var snapshot int64
+	for i, size := range parts {
+		send(http.MethodPut, fmt.Sprintf("%s?partNumber=%d&uploadId=snap", multipartSnapshotKey, i+1), size, true)
+		snapshot += size
+	}
+	completion := []byte(`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"part-1"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>"part-2"</ETag></Part><Part><PartNumber>3</PartNumber><ETag>"part-3"</ETag></Part></CompleteMultipartUpload>`)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+multipartSnapshotKey+"?uploadId=snap", bytes.NewReader(completion))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("completion status = %d", resp.StatusCode)
+	}
+	return map[string]int64{"L0": l0, "L1": l1, "L9": snapshot}
+}
+
+type repeatReader byte
+
+func (r repeatReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = byte(r)
+	}
+	return len(p), nil
+}
+
+func TestS3ObserveProxyMetersExpectContinueUploadsPerLevel(t *testing.T) {
+	upstream, received := newMultipartS3Upstream(t)
+	proxy := newS3FaultProxy(withTestS3SigningConfig(s3FaultProxyConfig{
+		TargetEndpoint: upstream.URL,
+		ListenAddr:     "127.0.0.1:0",
+		Mode:           s3FaultProxyModeObserve,
+	}))
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proxy.Close(context.Background()) })
+
+	uploaded := driveSnapshotUpload(t, ctx, proxy.Endpoint())
+	total := uploaded["L0"] + uploaded["L1"] + uploaded["L9"]
+	if received.Load() < total {
+		t.Fatalf("upstream received %d body bytes, want at least %d", received.Load(), total)
+	}
+
+	counters := proxy.RequestCounters()
+	if want := map[string]uint64{"L0": 1, "L1": 1, "L9": 1}; !reflect.DeepEqual(counters.LevelPuts, want) {
+		t.Fatalf("level puts = %v, want %v", counters.LevelPuts, want)
+	}
+	want := map[string]uint64{}
+	for level, size := range uploaded {
+		want[level] = uint64(size)
+	}
+	if !reflect.DeepEqual(counters.LevelPutBytes, want) {
+		t.Fatalf("level put bytes = %v, want the uploaded bodies %v", counters.LevelPutBytes, want)
+	}
+	if counters.BytesSent["PUT"] != uint64(total) {
+		t.Fatalf("request PUT bytes = %d, want %d, the same bodies the level meter saw", counters.BytesSent["PUT"], total)
+	}
+}
+
+func TestSnapshotUploadBytesReachTheHeartbeatPerLevel(t *testing.T) {
+	var mu sync.Mutex
+	var heartbeats []reporting.HeartbeatPayload
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload reporting.HeartbeatPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		heartbeats = append(heartbeats, payload)
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(control.Close)
+	upstream, _ := newMultipartS3Upstream(t)
+
+	cfg := DefaultConfig()
+	cfg.ControlBaseURL = control.URL
+	cfg.WorkerID = "w-snapshot"
+	cfg.ReplicaType = "s3"
+	cfg.S3Endpoint = upstream.URL
+	cfg.S3AccessKey = testS3AccessKey
+	cfg.S3SecretKey = testS3SecretKey
+	cfg.S3SessionToken = testS3SessionToken
+	cfg.S3Region = testS3Region
+	cfg.S3FaultProxyEnabled = true
+	cfg.S3FaultProxyMode = s3FaultProxyModeObserve
+	cfg.S3FaultProxyListenAddr = "127.0.0.1:0"
+	runner := NewRunner(cfg)
+	runner.reporter = NewReporter(runner.cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := runner.startS3FaultProxy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runner.stopS3FaultProxy)
+
+	uploaded := driveSnapshotUpload(t, ctx, runner.s3FaultProxyEndpoint)
+	runner.sendHeartbeat(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(heartbeats) != 1 {
+		t.Fatalf("heartbeats = %d, want 1", len(heartbeats))
+	}
+	counters := heartbeats[0].ObjectStoreCounters
+	if counters.ReplicaLevelPutTotals["L9"] != 1 || counters.ReplicaLevelPutTotals["L1"] != 1 || counters.ReplicaLevelPutTotals["L0"] != 1 {
+		t.Fatalf("heartbeat level puts = %v, want one object per level", counters.ReplicaLevelPutTotals)
+	}
+	for level, size := range uploaded {
+		if counters.ReplicaLevelPutBytes[level] != uint64(size) {
+			t.Fatalf("heartbeat %s bytes = %d, want %d", level, counters.ReplicaLevelPutBytes[level], size)
+		}
+	}
+	if counters.ReplicaRequestBytesSent["PUT"] != uint64(uploaded["L0"]+uploaded["L1"]+uploaded["L9"]) {
+		t.Fatalf("heartbeat request PUT bytes = %d, want %d", counters.ReplicaRequestBytesSent["PUT"], uploaded["L0"]+uploaded["L1"]+uploaded["L9"])
 	}
 }
 
