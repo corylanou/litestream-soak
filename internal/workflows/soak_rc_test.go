@@ -330,7 +330,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -X) method="$2"; shift ;;
     -o) out="$2"; shift ;;
-    -d|-w|-H|-u|--max-time) shift ;;
+    --max-time) echo "$2" >> "$CURL_STATE/max-time.log"; shift ;;
+    -d|-w|-H|-u) shift ;;
   esac
   shift
 done
@@ -361,28 +362,45 @@ func TestRegisterRCGateRecoversFromSlowControlPlane(t *testing.T) {
 		return fmt.Sprintf(`{"gates":[{"id":21,"kind":"rc","status":"running","candidate_source":"rc-%s-dfdc1c35","baseline_source":"rcbase-%s-dfdc1c35","candidate_sha":"%s","baseline_sha":"%s","duration":"%s","tail":false,"profiles":[%s],"observe_proxy":%t,"resources":[]}]}`,
 			candidate[:8], rcBaselineSHA[:8], candidate, rcBaselineSHA, duration, profiles, observe)
 	}
+	upgradeGate := func(warmup string) string {
+		return fmt.Sprintf(`{"gates":[{"id":7,"kind":"upgrade","status":"running","candidate_source":"up-%s-dfdc1c35","baseline_source":"upbase-%s-dfdc1c35","candidate_sha":"%s","baseline_sha":"%s","duration":"24h0m0s","upgrade_warmup":"%s","tail":false,"resources":[]}]}`,
+			candidate[:8], rcBaselineSHA[:8], candidate, rcBaselineSHA, warmup)
+	}
 	ledgers := map[string]string{
-		"empty":     `{"gates":[]}`,
-		"match":     gate(`"gate-large-db"`, true, "24h0m0s"),
-		"match-1h":  gate(`"gate-large-db"`, true, "1h0m0s"),
-		"match-90m": gate(`"gate-large-db"`, true, "1h30m0s"),
-		"match-two": gate(`"gate-stress","gate-large-db"`, true, "24h0m0s"),
-		"closed":    strings.Replace(gate(`"gate-large-db"`, true, "24h0m0s"), `"status":"running"`, `"status":"aborted"`, 1),
-		"mismatch":  gate(`"gate-stress","gate-large-db"`, true, "24h0m0s"),
-		"unmeter":   gate(`"gate-large-db"`, false, "24h0m0s"),
+		"empty":        `{"gates":[]}`,
+		"match":        gate(`"gate-large-db"`, true, "24h0m0s"),
+		"match-1h":     gate(`"gate-large-db"`, true, "1h0m0s"),
+		"match-90m":    gate(`"gate-large-db"`, true, "1h30m0s"),
+		"match-two":    gate(`"gate-stress","gate-large-db"`, true, "24h0m0s"),
+		"closed":       strings.Replace(gate(`"gate-large-db"`, true, "24h0m0s"), `"status":"running"`, `"status":"aborted"`, 1),
+		"completed":    strings.Replace(gate(`"gate-large-db"`, true, "24h0m0s"), `"status":"running"`, `"status":"completed"`, 1),
+		"mismatch":     gate(`"gate-stress","gate-large-db"`, true, "24h0m0s"),
+		"unmeter":      gate(`"gate-large-db"`, false, "24h0m0s"),
+		"upgrade-30m":  upgradeGate("30m0s"),
+		"upgrade-2h":   upgradeGate("2h0m0s"),
+		"upgrade-45m":  upgradeGate("45m0s"),
+		"other-source": strings.ReplaceAll(gate(`"gate-large-db"`, true, "24h0m0s"), "-dfdc1c35", "-other"),
 	}
 	tests := []struct {
 		name      string
 		postCodes string
 		ledgers   string
 		env       []string
+		args      []string
 		duration  string
 		profiles  string
 		wantExit  bool
 		wantPosts int
 		wantGets  int
 		wantOut   string
+		wantErr   string
 	}{
+		{name: "upgrade gate warm-up matches normalized", postCodes: "28", ledgers: "upgrade-30m", args: []string{"upgrade", "30m"}, profiles: "", wantPosts: 1, wantGets: 1, wantOut: `"id":7`},
+		{name: "upgrade gate default warm-up matches 2h0m0s", postCodes: "28", ledgers: "upgrade-2h", args: []string{"upgrade"}, profiles: "", wantPosts: 1, wantGets: 1, wantOut: `"id":7`},
+		{name: "upgrade gate warm-up mismatch fails", postCodes: "28", ledgers: "upgrade-45m", args: []string{"upgrade", "30m"}, profiles: "", wantExit: true, wantPosts: 1, wantGets: 1, wantErr: "does not match"},
+		{name: "a completed gate on the sources blocks a second registration", postCodes: "28", ledgers: "completed", wantExit: true, wantPosts: 1, wantGets: 1, wantErr: "rc gate 21 is completed"},
+		{name: "a gate on other sources does not block the retry", postCodes: "28 201", ledgers: "other-source", wantPosts: 2, wantGets: 1, wantOut: `"candidate_source":"registered-now"`},
+		{name: "zero request timeout falls back to the default", postCodes: "201", env: []string{"GATE_REGISTER_TIMEOUT=0"}, wantPosts: 1, wantGets: 0, wantOut: `"candidate_source":"registered-now"`, wantErr: "using 300"},
 		{name: "duplicate profiles in the request still match the deduplicated gate", postCodes: "28", ledgers: "match", profiles: "gate-large-db,gate-large-db", wantPosts: 1, wantGets: 1, wantOut: `"id":21`},
 		{name: "profiles match regardless of order", postCodes: "28", ledgers: "match-two", profiles: "gate-large-db,gate-stress", wantPosts: 1, wantGets: 1, wantOut: `"id":21`},
 		{name: "60m matches the ledger's 1h0m0s", postCodes: "28", ledgers: "match-1h", duration: "60m", wantPosts: 1, wantGets: 1, wantOut: `"id":21`},
@@ -392,13 +410,13 @@ func TestRegisterRCGateRecoversFromSlowControlPlane(t *testing.T) {
 		{name: "timeout then the ledger already has the gate", postCodes: "28", ledgers: "match", wantPosts: 1, wantGets: 1, wantOut: `"candidate_source":"rc-` + candidate[:8] + `-dfdc1c35"`},
 		{name: "timeout then empty ledger then the retry registers", postCodes: "28 201", ledgers: "empty", wantPosts: 2, wantGets: 1, wantOut: `"candidate_source":"registered-now"`},
 		{name: "5xx then the gate appears on the second poll", postCodes: "500", ledgers: "empty match", env: []string{"GATE_REGISTER_POLL_ATTEMPTS=2"}, wantPosts: 1, wantGets: 2, wantOut: `"id":21`},
-		{name: "closed gate on the same sources is not this run", postCodes: "28 201", ledgers: "closed", wantPosts: 2, wantGets: 1, wantOut: `"candidate_source":"registered-now"`},
-		{name: "ledger timeout then the retry registers", postCodes: "28 200", ledgers: "timeout", wantPosts: 2, wantGets: 1, wantOut: `"candidate_source":"registered-now"`},
-		{name: "a different gate owns the sources", postCodes: "28", ledgers: "mismatch", wantExit: true, wantPosts: 1, wantGets: 1},
-		{name: "same gate without the observe proxy is a mismatch", postCodes: "28", ledgers: "unmeter", wantExit: true, wantPosts: 1, wantGets: 1},
+		{name: "an aborted gate on the sources blocks a second registration", postCodes: "28", ledgers: "closed", wantExit: true, wantPosts: 1, wantGets: 1, wantErr: "rc gate 21 is aborted"},
+		{name: "unreadable ledger never retries the POST", postCodes: "28", ledgers: "timeout", env: []string{"GATE_REGISTER_POLL_ATTEMPTS=2"}, wantExit: true, wantPosts: 1, wantGets: 2, wantErr: "could not read the rc gate ledger"},
+		{name: "a different gate owns the sources", postCodes: "28", ledgers: "mismatch", wantExit: true, wantPosts: 1, wantGets: 1, wantErr: "rc gate 21 (running) already owns"},
+		{name: "same gate without the observe proxy is a mismatch", postCodes: "28", ledgers: "unmeter", wantExit: true, wantPosts: 1, wantGets: 1, wantErr: "does not match"},
 		{name: "409 is final without polling", postCodes: "409", wantExit: true, wantPosts: 1, wantGets: 0},
 		{name: "400 is final without polling", postCodes: "400", wantExit: true, wantPosts: 1, wantGets: 0},
-		{name: "deadline bounds the retries", postCodes: "28", ledgers: "timeout", env: []string{"GATE_REGISTER_DEADLINE=2", "GATE_REGISTER_POLL_INTERVAL=1"}, wantExit: true, wantPosts: -1, wantGets: -1},
+		{name: "deadline bounds the retries and every request", postCodes: "28", ledgers: "empty", env: []string{"GATE_REGISTER_DEADLINE=2", "GATE_REGISTER_POLL_INTERVAL=1"}, wantExit: true, wantPosts: -1, wantGets: -1, wantErr: "did not complete within 2s"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -412,11 +430,20 @@ func TestRegisterRCGateRecoversFromSlowControlPlane(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			cmd := exec.Command(script, "benbjohnson/litestream", "pull/1514/head", candidate, rcBaselineSHA, firstNonEmpty(tt.duration, "24h"), "false")
+			args := append([]string{"benbjohnson/litestream", "pull/1514/head", candidate, rcBaselineSHA, firstNonEmpty(tt.duration, "24h"), "false"}, tt.args...)
+			profiles := "gate-large-db"
+			if tt.profiles != "" || tt.args != nil {
+				profiles = tt.profiles
+			}
+			observe := "true"
+			if tt.args != nil {
+				observe = "false"
+			}
+			cmd := exec.Command(script, args...)
 			cmd.Env = append(os.Environ(),
 				"PATH="+dir+":"+os.Getenv("PATH"), "SOAK_ADMIN_BEARER_TOKEN=token", "CONTROL_BASE_URL=http://127.0.0.1:1",
 				"CURL_STATE="+dir, "POST_CODES="+tt.postCodes, "GET_LEDGERS="+tt.ledgers,
-				"GATE_PROFILES="+firstNonEmpty(tt.profiles, "gate-large-db"), "GATE_OBSERVE_PROXY=true", "GATE_SOURCE_SUFFIX=dfdc1c35",
+				"GATE_PROFILES="+profiles, "GATE_OBSERVE_PROXY="+observe, "GATE_SOURCE_SUFFIX=dfdc1c35",
 				"GATE_REGISTER_POLL_INTERVAL=0", "GATE_REGISTER_POLL_ATTEMPTS=1", "GATE_REGISTER_DEADLINE=30",
 			)
 			cmd.Env = append(cmd.Env, tt.env...)
@@ -432,6 +459,26 @@ func TestRegisterRCGateRecoversFromSlowControlPlane(t *testing.T) {
 			}
 			if tt.wantOut != "" && !strings.Contains(stdout.String(), tt.wantOut) {
 				t.Fatalf("stdout = %q, want %q\nstderr: %s", stdout.String(), tt.wantOut, stderr.String())
+			}
+			if tt.wantErr != "" && !strings.Contains(stderr.String(), tt.wantErr) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.wantErr)
+			}
+			if raw, err := os.ReadFile(filepath.Join(dir, "max-time.log")); err == nil {
+				deadline := 30
+				for _, setting := range tt.env {
+					if value, ok := strings.CutPrefix(setting, "GATE_REGISTER_DEADLINE="); ok {
+						deadline, _ = strconv.Atoi(value)
+					}
+				}
+				for _, line := range strings.Fields(string(raw)) {
+					maxTime, err := strconv.Atoi(line)
+					if err != nil || maxTime < 1 || maxTime > deadline {
+						t.Fatalf("curl --max-time %q, want between 1 and the remaining budget (%ds)", line, deadline)
+					}
+					if slices.Contains(tt.env, "GATE_REGISTER_TIMEOUT=0") && maxTime != 30 {
+						t.Fatalf("curl --max-time %d with a zero timeout, want the 300s default capped by the 30s budget", maxTime)
+					}
+				}
 			}
 			count := func(method string) int {
 				raw, err := os.ReadFile(filepath.Join(dir, method+".count"))
