@@ -357,27 +357,38 @@ func TestRegisterRCGateRecoversFromSlowControlPlane(t *testing.T) {
 	t.Parallel()
 	script := filepath.Join("..", "..", "scripts", "register-rc-gate.sh")
 	candidate := strings.ToLower(rcCandidateSHA)
-	gate := func(profiles string, observe bool) string {
-		return fmt.Sprintf(`{"gates":[{"id":21,"kind":"rc","status":"running","candidate_source":"rc-%s-dfdc1c35","baseline_source":"rcbase-%s-dfdc1c35","candidate_sha":"%s","baseline_sha":"%s","duration":"24h0m0s","tail":false,"profiles":[%s],"observe_proxy":%t,"resources":[]}]}`,
-			candidate[:8], rcBaselineSHA[:8], candidate, rcBaselineSHA, profiles, observe)
+	gate := func(profiles string, observe bool, duration string) string {
+		return fmt.Sprintf(`{"gates":[{"id":21,"kind":"rc","status":"running","candidate_source":"rc-%s-dfdc1c35","baseline_source":"rcbase-%s-dfdc1c35","candidate_sha":"%s","baseline_sha":"%s","duration":"%s","tail":false,"profiles":[%s],"observe_proxy":%t,"resources":[]}]}`,
+			candidate[:8], rcBaselineSHA[:8], candidate, rcBaselineSHA, duration, profiles, observe)
 	}
 	ledgers := map[string]string{
-		"empty":    `{"gates":[]}`,
-		"match":    gate(`"gate-large-db"`, true),
-		"closed":   strings.Replace(gate(`"gate-large-db"`, true), `"status":"running"`, `"status":"aborted"`, 1),
-		"mismatch": gate(`"gate-stress","gate-large-db"`, true),
-		"unmeter":  gate(`"gate-large-db"`, false),
+		"empty":     `{"gates":[]}`,
+		"match":     gate(`"gate-large-db"`, true, "24h0m0s"),
+		"match-1h":  gate(`"gate-large-db"`, true, "1h0m0s"),
+		"match-90m": gate(`"gate-large-db"`, true, "1h30m0s"),
+		"match-two": gate(`"gate-stress","gate-large-db"`, true, "24h0m0s"),
+		"closed":    strings.Replace(gate(`"gate-large-db"`, true, "24h0m0s"), `"status":"running"`, `"status":"aborted"`, 1),
+		"mismatch":  gate(`"gate-stress","gate-large-db"`, true, "24h0m0s"),
+		"unmeter":   gate(`"gate-large-db"`, false, "24h0m0s"),
 	}
 	tests := []struct {
 		name      string
 		postCodes string
 		ledgers   string
 		env       []string
+		duration  string
+		profiles  string
 		wantExit  bool
 		wantPosts int
 		wantGets  int
 		wantOut   string
 	}{
+		{name: "duplicate profiles in the request still match the deduplicated gate", postCodes: "28", ledgers: "match", profiles: "gate-large-db,gate-large-db", wantPosts: 1, wantGets: 1, wantOut: `"id":21`},
+		{name: "profiles match regardless of order", postCodes: "28", ledgers: "match-two", profiles: "gate-large-db,gate-stress", wantPosts: 1, wantGets: 1, wantOut: `"id":21`},
+		{name: "60m matches the ledger's 1h0m0s", postCodes: "28", ledgers: "match-1h", duration: "60m", wantPosts: 1, wantGets: 1, wantOut: `"id":21`},
+		{name: "90m matches the ledger's 1h30m0s", postCodes: "28", ledgers: "match-90m", duration: "90m", wantPosts: 1, wantGets: 1, wantOut: `"id":21`},
+		{name: "1h30m matches the ledger's 1h30m0s", postCodes: "28", ledgers: "match-90m", duration: "1h30m", wantPosts: 1, wantGets: 1, wantOut: `"id":21`},
+		{name: "2h does not match a 1h gate", postCodes: "28", ledgers: "match-1h", duration: "2h", wantExit: true, wantPosts: 1, wantGets: 1},
 		{name: "timeout then the ledger already has the gate", postCodes: "28", ledgers: "match", wantPosts: 1, wantGets: 1, wantOut: `"candidate_source":"rc-` + candidate[:8] + `-dfdc1c35"`},
 		{name: "timeout then empty ledger then the retry registers", postCodes: "28 201", ledgers: "empty", wantPosts: 2, wantGets: 1, wantOut: `"candidate_source":"registered-now"`},
 		{name: "5xx then the gate appears on the second poll", postCodes: "500", ledgers: "empty match", env: []string{"GATE_REGISTER_POLL_ATTEMPTS=2"}, wantPosts: 1, wantGets: 2, wantOut: `"id":21`},
@@ -401,11 +412,11 @@ func TestRegisterRCGateRecoversFromSlowControlPlane(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			cmd := exec.Command(script, "benbjohnson/litestream", "pull/1514/head", candidate, rcBaselineSHA, "24h", "false")
+			cmd := exec.Command(script, "benbjohnson/litestream", "pull/1514/head", candidate, rcBaselineSHA, firstNonEmpty(tt.duration, "24h"), "false")
 			cmd.Env = append(os.Environ(),
 				"PATH="+dir+":"+os.Getenv("PATH"), "SOAK_ADMIN_BEARER_TOKEN=token", "CONTROL_BASE_URL=http://127.0.0.1:1",
 				"CURL_STATE="+dir, "POST_CODES="+tt.postCodes, "GET_LEDGERS="+tt.ledgers,
-				"GATE_PROFILES=gate-large-db", "GATE_OBSERVE_PROXY=true", "GATE_SOURCE_SUFFIX=dfdc1c35",
+				"GATE_PROFILES="+firstNonEmpty(tt.profiles, "gate-large-db"), "GATE_OBSERVE_PROXY=true", "GATE_SOURCE_SUFFIX=dfdc1c35",
 				"GATE_REGISTER_POLL_INTERVAL=0", "GATE_REGISTER_POLL_ATTEMPTS=1", "GATE_REGISTER_DEADLINE=30",
 			)
 			cmd.Env = append(cmd.Env, tt.env...)

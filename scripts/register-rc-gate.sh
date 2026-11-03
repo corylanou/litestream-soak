@@ -117,12 +117,23 @@ case "${kind}:${lane_variant}" in
 esac
 candidate_source="${candidate_prefix}-${candidate_sha:0:8}${source_suffix:+-${source_suffix}}"
 baseline_source="${baseline_prefix}-${baseline_sha:0:8}${source_suffix:+-${source_suffix}}"
-# The ledger reports Go's Duration.String() form (24h -> 24h0m0s, 30m -> 30m0s).
-case "${duration}" in
-  *h) ledger_duration="${duration}0m0s" ;;
-  *m) ledger_duration="${duration}0s" ;;
-  *) ledger_duration="${duration}" ;;
-esac
+# The ledger reports the registered request in the control plane's canonical
+# form: profiles deduplicated and the duration as Go's Duration.String()
+# (24h -> 24h0m0s, 60m -> 1h0m0s, 90m -> 1h30m0s), so normalize the request
+# the same way before comparing. An input that is not whole h/m/s units is
+# compared verbatim.
+jq_go_duration='def go_duration:
+  . as $raw
+  | [scan("([0-9]+)(h|m|s)")] as $parts
+  | if ($parts | length) == 0 or (($parts | map(.[0] + .[1]) | join("")) != $raw) then $raw
+    else ($parts | map((.[0] | tonumber) * ({"h": 3600, "m": 60, "s": 1}[.[1]])) | add) as $total
+      | (($total / 3600) | floor) as $h
+      | ((($total - $h * 3600) / 60) | floor) as $m
+      | ($total - $h * 3600 - $m * 60) as $s
+      | if $h > 0 then "\($h)h\($m)m\($s)s" elif $m > 0 then "\($m)m\($s)s" else "\($s)s" end
+    end;'
+ledger_duration="$(jq -rn --arg duration "${duration}" "${jq_go_duration} \$duration | go_duration")"
+ledger_profiles="$(jq -cn --arg profiles "${profiles}" '$profiles | split(",") | map(select(. != "")) | unique')"
 
 body_file="$(mktemp)"
 trap 'rm -f "${body_file}"' EXIT
@@ -146,10 +157,10 @@ ledger_gate() {
 # refused by the control plane's idempotent re-registration with 409.
 ledger_gate_matches() {
   jq -e --arg candidate_sha "${candidate_sha}" --arg baseline_sha "${baseline_sha}" --arg duration "${ledger_duration}" \
-    --arg kind "${kind}" --argjson tail "${tail}" --argjson observe_proxy "${observe_proxy}" --arg profiles "${profiles}" \
+    --arg kind "${kind}" --argjson tail "${tail}" --argjson observe_proxy "${observe_proxy}" --argjson profiles "${ledger_profiles}" \
     '.candidate_sha == $candidate_sha and .baseline_sha == $baseline_sha and .duration == $duration and .kind == $kind
       and .tail == $tail and ((.observe_proxy // false) == $observe_proxy)
-      and (((.profiles // []) | sort) == (if $profiles == "" then [] else ($profiles | split(",") | sort) end))' \
+      and (((.profiles // []) | unique) == $profiles)' \
     >/dev/null <<<"$1"
 }
 
