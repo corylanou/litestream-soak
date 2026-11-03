@@ -240,7 +240,7 @@ func (d *DB) UpdateWorkerRuntimeSnapshot(id string, payload reporting.RuntimePay
 // so teardown races leave an observable heartbeat trail without resurrecting
 // the row. Only pending, building, and starting workers are flipped to running.
 func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
-	return d.upsertReportedWorker(identity, WorkerRunning)
+	return d.upsertReportedWorker(identity, WorkerRunning, true)
 }
 
 // UpsertStartingWorker records a report from a worker that is still in a
@@ -248,10 +248,20 @@ func (d *DB) UpsertReportedWorker(identity reporting.WorkerIdentity) error {
 // heartbeat trail is kept, but the worker stays (or returns to) starting
 // instead of running, so readiness is only observed once startup completes.
 func (d *DB) UpsertStartingWorker(identity reporting.WorkerIdentity) error {
-	return d.upsertReportedWorker(identity, WorkerStarting)
+	return d.upsertReportedWorker(identity, WorkerStarting, true)
 }
 
-func (d *DB) upsertReportedWorker(identity reporting.WorkerIdentity, reported WorkerStatus) error {
+// UpsertFailedStartingWorker records a worker_failed report from a worker that
+// never finished starting. The worker stays starting and its heartbeat
+// timestamp is not refreshed (it is only set when it was never set, so the
+// stale clock starts), so a worker that fails on every restart still misses
+// the heartbeat deadline, is marked degraded, and is replaced by the normal
+// recovery path instead of looking alive forever.
+func (d *DB) UpsertFailedStartingWorker(identity reporting.WorkerIdentity) error {
+	return d.upsertReportedWorker(identity, WorkerStarting, false)
+}
+
+func (d *DB) upsertReportedWorker(identity reporting.WorkerIdentity, reported WorkerStatus, refreshHeartbeat bool) error {
 	name := identity.Name
 	if name == "" {
 		name = identity.WorkerID
@@ -260,6 +270,10 @@ func (d *DB) upsertReportedWorker(identity reporting.WorkerIdentity, reported Wo
 	profileConfig := identity.ProfileConfig
 	if strings.TrimSpace(profileConfig) == "" {
 		profileConfig = "{}"
+	}
+	heartbeat := "datetime('now')"
+	if !refreshHeartbeat {
+		heartbeat = "COALESCE(workers.last_heartbeat_at, datetime('now'))"
 	}
 
 	_, err := d.exec(`
@@ -298,7 +312,7 @@ func (d *DB) upsertReportedWorker(identity reporting.WorkerIdentity, reported Wo
 				WHEN excluded.profile_config <> '{}' THEN excluded.profile_config
 				ELSE workers.profile_config
 			END,
-			last_heartbeat_at = datetime('now'),
+			last_heartbeat_at = `+heartbeat+`,
 			updated_at = datetime('now')`,
 		identity.WorkerID,
 		identity.AppName,

@@ -91,17 +91,22 @@ func TestGateReadinessIgnoresPreStartWorkerFailures(t *testing.T) {
 			t.Fatalf("%s %s: %d %s", path, workerID, response.Code, response.Body.String())
 		}
 	}
-	assertUnpaired := func(t *testing.T, stage string, wantStatus model.WorkerStatus) {
+	assertUnpaired := func(t *testing.T, stage string, wantStatus model.WorkerStatus) map[string]time.Time {
 		t.Helper()
 		stored, err := db.GetRCGate(gate.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
+		heartbeats := map[string]time.Time{}
 		for _, source := range stored.Sources() {
 			worker := mustWorker(t, db, workerIDs[source])
 			if worker.Status != wantStatus {
 				t.Fatalf("%s: %s status = %s, want %s", stage, worker.ID, worker.Status, wantStatus)
 			}
+			if worker.LastHeartbeatAt == nil {
+				t.Fatalf("%s: %s has no heartbeat timestamp, so the stale clock never starts", stage, worker.ID)
+			}
+			heartbeats[source] = *worker.LastHeartbeatAt
 			if ready, err := manager.rcGateSideReady(*stored, source); err != nil || ready {
 				t.Fatalf("%s: rcGateSideReady(%s) = %v, %v; want not ready", stage, source, ready, err)
 			}
@@ -112,6 +117,7 @@ func TestGateReadinessIgnoresPreStartWorkerFailures(t *testing.T) {
 		if stored, err = db.GetRCGate(gate.ID); err != nil || stored.PairedReadyAt != nil || stored.CandidateReadyAt != nil || stored.BaselineReadyAt != nil {
 			t.Fatalf("%s: gate paired after a pre-start failure: %+v, %v", stage, stored, err)
 		}
+		return heartbeats
 	}
 
 	failure := "start s3 fault proxy: s3 observe proxy is required by this run and could not start: s3 fault proxy upstream request failed"
@@ -125,8 +131,11 @@ func TestGateReadinessIgnoresPreStartWorkerFailures(t *testing.T) {
 			RuntimePayload: reporting.RuntimePayload{StartupPhase: reporting.StartupPhaseProxy, SnapshotCollectedAt: sentAt},
 		})
 	}
-	assertUnpaired(t, "proxy-phase worker_failed", model.WorkerStarting)
+	firstHeartbeats := assertUnpaired(t, "proxy-phase worker_failed", model.WorkerStarting)
 
+	// last_heartbeat_at has one-second resolution, so a later restart-loop
+	// report must land in a later second to prove it did not refresh it.
+	time.Sleep(1100 * time.Millisecond)
 	for _, source := range gate.Sources() {
 		sentAt := time.Now().UTC()
 		report(t, workerIDs[source], "events", reporting.WorkerEventPayload{
@@ -137,7 +146,20 @@ func TestGateReadinessIgnoresPreStartWorkerFailures(t *testing.T) {
 			RuntimePayload: reporting.RuntimePayload{SnapshotCollectedAt: sentAt},
 		})
 	}
-	assertUnpaired(t, "legacy worker_failed without a startup phase", model.WorkerStarting)
+	repeatedHeartbeats := assertUnpaired(t, "legacy worker_failed without a startup phase", model.WorkerStarting)
+	for source, first := range firstHeartbeats {
+		if !repeatedHeartbeats[source].Equal(first) {
+			t.Fatalf("%s heartbeat advanced from %v to %v on a repeated pre-start failure, so the worker would never go stale", source, first, repeatedHeartbeats[source])
+		}
+	}
+
+	manager.checkStaleWorkers(ctx, time.Millisecond)
+	for _, source := range gate.Sources() {
+		if worker := mustWorker(t, db, workerIDs[source]); worker.Status != model.WorkerDegraded || worker.ErrorMessage != "worker missed heartbeat deadline" {
+			t.Fatalf("%s after the stale check = %s %q, want degraded by the heartbeat deadline", worker.ID, worker.Status, worker.ErrorMessage)
+		}
+	}
+	assertUnpaired(t, "stale restart loop", model.WorkerDegraded)
 
 	for _, source := range gate.Sources() {
 		sentAt := time.Now().UTC()

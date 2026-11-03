@@ -28,12 +28,18 @@ func (a *API) upsertReportedWorker(identity reporting.WorkerIdentity, runtime re
 // from a worker that has not finished starting (a proxy, populate, or
 // Litestream start failure) must never flip it to running, whether or not the
 // payload carries a startup phase, or gate readiness would pair a side whose
-// Litestream never ran.
+// Litestream never ran. It also leaves the heartbeat timestamp alone, so a
+// worker failing on every restart still goes stale and is degraded and
+// replaced like any other silent worker.
 func (a *API) upsertEventWorker(payload reporting.WorkerEventPayload) error {
-	if payload.PreStart() || a.workerFailedBeforeStart(payload) {
+	switch {
+	case a.workerFailedBeforeStart(payload):
+		return a.db.UpsertFailedStartingWorker(payload.WorkerIdentity)
+	case payload.PreStart():
 		return a.db.UpsertStartingWorker(payload.WorkerIdentity)
+	default:
+		return a.db.UpsertReportedWorker(payload.WorkerIdentity)
 	}
-	return a.db.UpsertReportedWorker(payload.WorkerIdentity)
 }
 
 func (a *API) workerFailedBeforeStart(payload reporting.WorkerEventPayload) bool {
