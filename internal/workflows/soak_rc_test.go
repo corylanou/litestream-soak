@@ -1,13 +1,17 @@
 package workflows
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -282,7 +286,7 @@ func TestRegisterRCGatePayloadCarriesProfilesAndSuffix(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			capture := filepath.Join(dir, "payload")
-			mock := "#!/bin/bash\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-d\" ]; then printf '%s' \"$2\" > \"$CURL_CAPTURE\"; fi; shift; done\n"
+			mock := "#!/bin/bash\nout=\"\"\nwhile [ $# -gt 0 ]; do case \"$1\" in -d) printf '%s' \"$2\" > \"$CURL_CAPTURE\"; shift;; -o) out=\"$2\"; shift;; esac; shift; done\n[ -n \"$out\" ] && printf '{\"id\":1}' > \"$out\"\nprintf 201\n"
 			if err := os.WriteFile(filepath.Join(dir, "curl"), []byte(mock), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -311,6 +315,130 @@ func TestRegisterRCGatePayloadCarriesProfilesAndSuffix(t *testing.T) {
 				if !strings.Contains(payload, required) {
 					t.Fatalf("payload %s is missing %s", payload, required)
 				}
+			}
+		})
+	}
+}
+
+// registerGateMockCurl stands in for curl. POST_CODES lists the HTTP code each
+// successive POST returns (28 means curl timed out, the last entry repeats);
+// GET_LEDGERS lists the ledger file each successive GET serves (timeout means
+// curl timed out). Every call is counted per method under CURL_STATE.
+const registerGateMockCurl = `#!/bin/bash
+method=GET; out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift ;;
+    -o) out="$2"; shift ;;
+    -d|-w|-H|-u|--max-time) shift ;;
+  esac
+  shift
+done
+count_file="$CURL_STATE/$method.count"
+n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$count_file"
+pick() { local i="$1"; shift; local last=""; for v in "$@"; do last="$v"; if [ "$i" -eq 1 ]; then echo "$v"; return; fi; i=$((i-1)); done; echo "$last"; }
+if [ "$method" = "POST" ]; then
+  # shellcheck disable=SC2086
+  code="$(pick "$n" $POST_CODES)"
+  [ "$code" = "28" ] && exit 28
+  case "$code" in 2*) printf '{"id":9,"candidate_source":"registered-now"}' > "$out" ;; *) printf 'control plane said %s' "$code" > "$out" ;; esac
+  printf '%s' "$code"
+  exit 0
+fi
+# shellcheck disable=SC2086
+ledger="$(pick "$n" $GET_LEDGERS)"
+[ "$ledger" = "timeout" ] && exit 28
+cp "$CURL_STATE/ledger-$ledger.json" "$out"
+printf 200
+`
+
+func TestRegisterRCGateRecoversFromSlowControlPlane(t *testing.T) {
+	t.Parallel()
+	script := filepath.Join("..", "..", "scripts", "register-rc-gate.sh")
+	candidate := strings.ToLower(rcCandidateSHA)
+	gate := func(profiles string, observe bool) string {
+		return fmt.Sprintf(`{"gates":[{"id":21,"kind":"rc","status":"running","candidate_source":"rc-%s-dfdc1c35","baseline_source":"rcbase-%s-dfdc1c35","candidate_sha":"%s","baseline_sha":"%s","duration":"24h0m0s","tail":false,"profiles":[%s],"observe_proxy":%t,"resources":[]}]}`,
+			candidate[:8], rcBaselineSHA[:8], candidate, rcBaselineSHA, profiles, observe)
+	}
+	ledgers := map[string]string{
+		"empty":    `{"gates":[]}`,
+		"match":    gate(`"gate-large-db"`, true),
+		"closed":   strings.Replace(gate(`"gate-large-db"`, true), `"status":"running"`, `"status":"aborted"`, 1),
+		"mismatch": gate(`"gate-stress","gate-large-db"`, true),
+		"unmeter":  gate(`"gate-large-db"`, false),
+	}
+	tests := []struct {
+		name      string
+		postCodes string
+		ledgers   string
+		env       []string
+		wantExit  bool
+		wantPosts int
+		wantGets  int
+		wantOut   string
+	}{
+		{name: "timeout then the ledger already has the gate", postCodes: "28", ledgers: "match", wantPosts: 1, wantGets: 1, wantOut: `"candidate_source":"rc-` + candidate[:8] + `-dfdc1c35"`},
+		{name: "timeout then empty ledger then the retry registers", postCodes: "28 201", ledgers: "empty", wantPosts: 2, wantGets: 1, wantOut: `"candidate_source":"registered-now"`},
+		{name: "5xx then the gate appears on the second poll", postCodes: "500", ledgers: "empty match", env: []string{"GATE_REGISTER_POLL_ATTEMPTS=2"}, wantPosts: 1, wantGets: 2, wantOut: `"id":21`},
+		{name: "closed gate on the same sources is not this run", postCodes: "28 201", ledgers: "closed", wantPosts: 2, wantGets: 1, wantOut: `"candidate_source":"registered-now"`},
+		{name: "ledger timeout then the retry registers", postCodes: "28 200", ledgers: "timeout", wantPosts: 2, wantGets: 1, wantOut: `"candidate_source":"registered-now"`},
+		{name: "a different gate owns the sources", postCodes: "28", ledgers: "mismatch", wantExit: true, wantPosts: 1, wantGets: 1},
+		{name: "same gate without the observe proxy is a mismatch", postCodes: "28", ledgers: "unmeter", wantExit: true, wantPosts: 1, wantGets: 1},
+		{name: "409 is final without polling", postCodes: "409", wantExit: true, wantPosts: 1, wantGets: 0},
+		{name: "400 is final without polling", postCodes: "400", wantExit: true, wantPosts: 1, wantGets: 0},
+		{name: "deadline bounds the retries", postCodes: "28", ledgers: "timeout", env: []string{"GATE_REGISTER_DEADLINE=2", "GATE_REGISTER_POLL_INTERVAL=1"}, wantExit: true, wantPosts: -1, wantGets: -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "curl"), []byte(registerGateMockCurl), 0700); err != nil {
+				t.Fatal(err)
+			}
+			for name, body := range ledgers {
+				if err := os.WriteFile(filepath.Join(dir, "ledger-"+name+".json"), []byte(body), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command(script, "benbjohnson/litestream", "pull/1514/head", candidate, rcBaselineSHA, "24h", "false")
+			cmd.Env = append(os.Environ(),
+				"PATH="+dir+":"+os.Getenv("PATH"), "SOAK_ADMIN_BEARER_TOKEN=token", "CONTROL_BASE_URL=http://127.0.0.1:1",
+				"CURL_STATE="+dir, "POST_CODES="+tt.postCodes, "GET_LEDGERS="+tt.ledgers,
+				"GATE_PROFILES=gate-large-db", "GATE_OBSERVE_PROXY=true", "GATE_SOURCE_SUFFIX=dfdc1c35",
+				"GATE_REGISTER_POLL_INTERVAL=0", "GATE_REGISTER_POLL_ATTEMPTS=1", "GATE_REGISTER_DEADLINE=30",
+			)
+			cmd.Env = append(cmd.Env, tt.env...)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			started := time.Now()
+			err := cmd.Run()
+			if elapsed := time.Since(started); elapsed > 10*time.Second {
+				t.Fatalf("register-rc-gate.sh ran for %s, want the deadline to bound it", elapsed)
+			}
+			if (err != nil) != tt.wantExit {
+				t.Fatalf("register-rc-gate.sh error = %v, want failure %v\nstdout: %s\nstderr: %s", err, tt.wantExit, stdout.String(), stderr.String())
+			}
+			if tt.wantOut != "" && !strings.Contains(stdout.String(), tt.wantOut) {
+				t.Fatalf("stdout = %q, want %q\nstderr: %s", stdout.String(), tt.wantOut, stderr.String())
+			}
+			count := func(method string) int {
+				raw, err := os.ReadFile(filepath.Join(dir, method+".count"))
+				if err != nil {
+					return 0
+				}
+				n, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+				return n
+			}
+			posts, gets := count("POST"), count("GET")
+			if tt.wantPosts < 0 {
+				if posts < 1 || posts > 3 || gets < 1 || gets > 3 {
+					t.Fatalf("curl calls = %d POST %d GET, want a bounded handful of retries\nstderr: %s", posts, gets, stderr.String())
+				}
+				return
+			}
+			if posts != tt.wantPosts || gets != tt.wantGets {
+				t.Fatalf("curl calls = %d POST %d GET, want %d POST %d GET\nstderr: %s", posts, gets, tt.wantPosts, tt.wantGets, stderr.String())
 			}
 		})
 	}
