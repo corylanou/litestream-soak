@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -12,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,6 +44,7 @@ var (
 	errS3FaultProxyPayloadHashRequired        = errors.New("s3 fault proxy x-amz-content-sha256 header is required")
 	errS3FaultProxySigningFailed              = errors.New("s3 fault proxy request signing failed")
 	errS3FaultProxyUpstreamRequestFailed      = errors.New("s3 fault proxy upstream request failed")
+	errS3ObserveProxyRequired                 = errors.New("s3 observe proxy is required by this run and could not start")
 )
 
 type s3FaultProxyConfig struct {
@@ -75,12 +79,16 @@ type s3FaultProxy struct {
 	requests               map[string]uint64
 	bytesSent              map[string]uint64
 	bytesReceived          map[string]uint64
+	levelPuts              map[string]uint64
+	levelPutBytes          map[string]uint64
 }
 
 type s3ProxyRequestCounters struct {
 	Requests      map[string]uint64
 	BytesSent     map[string]uint64
 	BytesReceived map[string]uint64
+	LevelPuts     map[string]uint64
+	LevelPutBytes map[string]uint64
 }
 
 func newS3FaultProxy(cfg s3FaultProxyConfig) *s3FaultProxy {
@@ -179,10 +187,20 @@ func (p *s3FaultProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Mode == s3FaultProxyModeObserve {
 		body := &countingReadCloser{ReadCloser: r.Body}
 		r.Body = body
-		counted := &countingResponseWriter{ResponseWriter: w}
+		counted := &countingResponseWriter{ResponseWriter: w, scanErrors: isS3MultipartCompletion(r)}
 		w = counted
 		operation := s3RequestOperation(r)
-		defer func() { p.recordRequest(operation, body.n.Load(), counted.n.Load()) }()
+		defer func() {
+			aborted := recover()
+			sent := body.n.Load()
+			p.recordRequest(operation, sent, counted.n.Load())
+			if aborted == nil {
+				p.recordUpload(r, sent, counted.status(), counted.completionSucceeded())
+			}
+			if aborted != nil {
+				panic(aborted)
+			}
+		}()
 	}
 	if p.shouldInjectProviderHTTP408(r) {
 		p.injectProviderHTTP408(w, r)
@@ -254,7 +272,56 @@ func (p *s3FaultProxy) RequestCounters() s3ProxyRequestCounters {
 		Requests:      maps.Clone(p.requests),
 		BytesSent:     maps.Clone(p.bytesSent),
 		BytesReceived: maps.Clone(p.bytesReceived),
+		LevelPuts:     maps.Clone(p.levelPuts),
+		LevelPutBytes: maps.Clone(p.levelPutBytes),
 	}
+}
+
+func (p *s3FaultProxy) recordUpload(r *http.Request, sent int64, status int, completionSucceeded bool) {
+	if status < 200 || status > 299 {
+		return
+	}
+	isPart := r.Method == http.MethodPut && r.URL.Query().Get("uploadId") != ""
+	switch {
+	case r.Method == http.MethodPut && !isPart:
+		p.addLevelPut(ltxLevelOfKey(r.URL.Path), 1, sent)
+	case isPart:
+		p.addLevelPut(ltxLevelOfKey(r.URL.Path), 0, sent)
+	case isS3MultipartCompletion(r) && completionSucceeded:
+		p.addLevelPut(ltxLevelOfKey(r.URL.Path), 1, 0)
+	}
+}
+
+func (p *s3FaultProxy) addLevelPut(level string, objects uint64, bodyBytes int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if objects > 0 {
+		if p.levelPuts == nil {
+			p.levelPuts = make(map[string]uint64)
+		}
+		p.levelPuts[level] += objects
+	}
+	if bodyBytes <= 0 {
+		return
+	}
+	if p.levelPutBytes == nil {
+		p.levelPutBytes = make(map[string]uint64)
+	}
+	p.levelPutBytes[level] += uint64(bodyBytes)
+}
+
+func isS3MultipartCompletion(r *http.Request) bool {
+	return r.Method == http.MethodPost && r.URL.Query().Get("uploadId") != ""
+}
+
+var ltxObjectNameRe = regexp.MustCompile(`^[0-9a-f]{16}-[0-9a-f]{16}\.ltx$`)
+
+func ltxLevelOfKey(key string) string {
+	level, ok := replicaLevelOfKey(key)
+	if !ok || !ltxObjectNameRe.MatchString(key[strings.LastIndex(key, "/")+1:]) {
+		return "other"
+	}
+	return "L" + level[3:]
 }
 
 func (p *s3FaultProxy) recordRequest(operation string, sent, received int64) {
@@ -306,15 +373,82 @@ func (c *countingReadCloser) Close() error {
 	return c.ReadCloser.Close()
 }
 
+var (
+	s3ErrorElement             = []byte("<Error")
+	s3CompletionResultOpen     = []byte("<CompleteMultipartUploadResult")
+	s3CompletionResultClose    = []byte("</CompleteMultipartUploadResult>")
+	s3CompletionScanWindowSize = len(s3CompletionResultClose) - 1
+)
+
+// countingResponseWriter counts response bytes and, for a multipart
+// completion, scans the whole body for the opening and closing result
+// elements and for an embedded <Error element with a rolling window that
+// spans writes, forwarding every byte unchanged. S3 may stream whitespace for
+// a long time before any of them, so no prefix is enough, an empty body
+// proves nothing, and a body that ends after the opening tag is not a result.
 type countingResponseWriter struct {
 	http.ResponseWriter
-	n atomic.Int64
+	n             atomic.Int64
+	statusCode    atomic.Int64
+	contentLength int64
+	scanErrors    bool
+	errorSeen     bool
+	resultOpened  bool
+	resultClosed  bool
+	tail          []byte
+}
+
+func (c *countingResponseWriter) WriteHeader(statusCode int) {
+	if c.statusCode.CompareAndSwap(0, int64(statusCode)) {
+		c.contentLength = -1
+		if length, err := strconv.ParseInt(c.Header().Get("Content-Length"), 10, 64); err == nil && length >= 0 {
+			c.contentLength = length
+		}
+	}
+	c.ResponseWriter.WriteHeader(statusCode)
 }
 
 func (c *countingResponseWriter) Write(p []byte) (int, error) {
+	if c.statusCode.Load() == 0 {
+		c.WriteHeader(http.StatusOK)
+	}
+	if c.scanErrors && !c.errorSeen {
+		window := append(c.tail, p...)
+		if bytes.Contains(window, s3ErrorElement) {
+			c.errorSeen = true
+		}
+		afterOpen := window
+		if !c.resultOpened {
+			afterOpen = nil
+			if i := bytes.Index(window, s3CompletionResultOpen); i >= 0 {
+				c.resultOpened = true
+				afterOpen = window[i+len(s3CompletionResultOpen):]
+			}
+		}
+		if c.resultOpened && !c.resultClosed && bytes.Contains(afterOpen, s3CompletionResultClose) {
+			c.resultClosed = true
+		}
+		c.tail = append(c.tail[:0], window[max(0, len(window)-s3CompletionScanWindowSize):]...)
+	}
 	n, err := c.ResponseWriter.Write(p)
 	c.n.Add(int64(n))
 	return n, err
+}
+
+func (c *countingResponseWriter) status() int {
+	return int(c.statusCode.Load())
+}
+
+// completionSucceeded reports whether a multipart completion response was
+// fully forwarded and carried a complete result element (opening tag followed
+// by its closing tag) without an embedded error. An empty or whitespace-only
+// body, a body cut off after the opening tag, and a short body (fewer bytes
+// than the declared Content-Length) are never counted.
+func (c *countingResponseWriter) completionSucceeded() bool {
+	if !c.scanErrors || c.errorSeen || !c.resultOpened || !c.resultClosed || c.statusCode.Load() == 0 {
+		return false
+	}
+	return c.contentLength < 0 || c.n.Load() == c.contentLength
 }
 
 func (c *countingResponseWriter) Flush() {
@@ -754,6 +888,9 @@ func (r *Runner) startS3FaultProxy(ctx context.Context) error {
 	})
 	if err := proxy.Start(ctx); err != nil {
 		if proxy.cfg.Mode == s3FaultProxyModeObserve && ctx.Err() == nil {
+			if r.cfg.S3ObserveProxyRequired {
+				return fmt.Errorf("%w: %w", errS3ObserveProxyRequired, safeS3FaultProxyError(err))
+			}
 			slog.Warn("S3 observe proxy unavailable; replicating directly", "error", safeS3FaultProxyError(err))
 			return nil
 		}

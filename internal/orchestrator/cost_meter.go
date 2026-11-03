@@ -33,6 +33,16 @@ var (
 		Help: "Object-store HTTP body bytes measured by the worker observe proxy, by direction, summed per source from counter deltas.",
 	}, []string{"source", "origin", "operation", "direction"})
 
+	controlSourceReplicaLevelPuts = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_control_source_replica_level_put_total",
+		Help: "Replica objects uploaded per LTX level (L0-L9, or other for keys outside a level directory) as seen by the worker observe proxy; a multipart upload counts once on completion, summed per source from counter deltas.",
+	}, []string{"source", "level"})
+
+	controlSourceReplicaLevelPutBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "soak_control_source_replica_level_put_bytes_total",
+		Help: "Body bytes uploaded per LTX level as seen by the worker observe proxy (every multipart part body is counted), summed per source from counter deltas.",
+	}, []string{"source", "level"})
+
 	controlSourceLitestreamObjectOperations = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "soak_control_source_litestream_object_operations_total",
 		Help: "Logical object operations from litestream_replica_operation_total (uploaded and deleted objects, not HTTP requests), summed per source.",
@@ -57,7 +67,9 @@ var (
 type CostMeterResponse struct {
 	Source      string                  `json:"source,omitempty"`
 	Since       time.Time               `json:"since"`
+	Until       *time.Time              `json:"until,omitempty"`
 	WindowStart time.Time               `json:"window_start"`
+	WindowEnd   *time.Time              `json:"window_end,omitempty"`
 	Sources     []model.CostMeterSource `json:"sources"`
 }
 
@@ -68,9 +80,14 @@ func (a *API) handleCostMeter(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusBadRequest, nil, err.Error())
 		return
 	}
+	until, err := parseCostMeterUntil(r.URL.Query().Get("until"), since, now)
+	if err != nil {
+		respondError(w, r, http.StatusBadRequest, nil, err.Error())
+		return
+	}
 	source := strings.TrimSpace(r.URL.Query().Get("source"))
 	db := a.db.WithReadContext(r.Context())
-	sources, err := db.CostMeter(source, since)
+	sources, err := db.CostMeter(source, since, until)
 	if err != nil {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to load cost meter")
 		return
@@ -80,18 +97,41 @@ func (a *API) handleCostMeter(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusInternalServerError, err, "failed to load metering windows")
 		return
 	}
-	sources = attachMeteringWindows(sources, windows, since)
-	writeAPIJSON(w, CostMeterResponse{
+	sources = attachMeteringWindows(sources, windows, since, until)
+	response := CostMeterResponse{
 		Source:      source,
 		Since:       since,
 		WindowStart: since.Truncate(time.Hour),
 		Sources:     sources,
-	})
+	}
+	if !until.IsZero() {
+		response.Until = &until
+		response.WindowEnd = new(model.CostMeterWindowEnd(until))
+	}
+	writeAPIJSON(w, response)
 }
 
-func attachMeteringWindows(sources []model.CostMeterSource, windows []model.MeteringWindow, since time.Time) []model.CostMeterSource {
+func parseCostMeterUntil(raw string, since, now time.Time) (time.Time, error) {
+	if strings.TrimSpace(raw) == "" {
+		return time.Time{}, nil
+	}
+	until, err := parseCostMeterSince(raw, now)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid until %q: use a duration such as 1h or an RFC3339 timestamp", raw)
+	}
+	if !until.After(since) {
+		return time.Time{}, errors.New("until must be after since")
+	}
+	return until, nil
+}
+
+func attachMeteringWindows(sources []model.CostMeterSource, windows []model.MeteringWindow, since, until time.Time) []model.CostMeterSource {
+	end := model.CostMeterWindowEnd(until)
 	for _, window := range windows {
 		if window.EndedAt != nil && !window.EndedAt.After(since) {
+			continue
+		}
+		if !end.IsZero() && !window.StartedAt.Before(end) {
 			continue
 		}
 		index := slices.IndexFunc(sources, func(entry model.CostMeterSource) bool { return entry.Source == window.Source })
@@ -158,6 +198,12 @@ func observeCostMeterDelta(source string, delta model.CostMeterTotals) {
 	}
 	for operation, bytes := range delta.ReplicaResponseBytesReceived {
 		controlSourceObjectStoreRequestBytes.WithLabelValues(source, "replica", operation, "received").Add(float64(bytes))
+	}
+	for level, count := range delta.ReplicaLevelPuts {
+		controlSourceReplicaLevelPuts.WithLabelValues(source, level).Add(float64(count))
+	}
+	for level, bytes := range delta.ReplicaLevelPutBytes {
+		controlSourceReplicaLevelPutBytes.WithLabelValues(source, level).Add(float64(bytes))
 	}
 	for operation, count := range delta.RestoreRequests {
 		controlSourceObjectStoreRequests.WithLabelValues(source, "restore", operation).Add(float64(count))

@@ -95,6 +95,7 @@ func TestSoakRCResolvesRefsToPinnedFullSHAs(t *testing.T) {
 		"large-db only":       {"PROFILES": "gate-large-db", "DURATION": "24h"},
 		"two profiles spaced": {"PROFILES": " gate-stress, gate-remote ", "TAIL": "true"},
 		"vfs only":            {"PROFILES": "gate-vfs", "DURATION": "2h"},
+		"metered large-db":    {"PROFILES": "gate-large-db", "DURATION": "24h", "OBSERVE_PROXY": "true"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -119,6 +120,9 @@ func TestSoakRCResolvesRefsToPinnedFullSHAs(t *testing.T) {
 			}
 			if want := strings.ReplaceAll(env["PROFILES"], " ", ""); outputs["profiles"] != want {
 				t.Fatalf("profiles = %q, want %q", outputs["profiles"], want)
+			}
+			if want := firstNonEmpty(env["OBSERVE_PROXY"], "false"); outputs["observe_proxy"] != want {
+				t.Fatalf("observe_proxy = %q, want %q", outputs["observe_proxy"], want)
 			}
 		})
 	}
@@ -173,6 +177,7 @@ func TestSoakRCRejectsUnpinnableRequests(t *testing.T) {
 		"unknown profile":          {"PROFILES": "gate-large-db,gate-huge"},
 		"profile injection":        {"PROFILES": "gate-large-db;echo"},
 		"tail without gate-stress": {"PROFILES": "gate-large-db", "TAIL": "true"},
+		"invalid observe_proxy":    {"OBSERVE_PROXY": "yes"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -204,6 +209,9 @@ func TestSoakRCPinsBuildsAndNotifiesResolvedSHAs(t *testing.T) {
 		"./scripts/register-rc-gate.sh",
 		"GATE_PROFILES: ${{ needs.resolve-request.outputs.profiles }}",
 		"GATE_SOURCE_SUFFIX: ${{ needs.resolve-request.outputs.source_suffix }}",
+		"GATE_OBSERVE_PROXY: ${{ needs.resolve-request.outputs.observe_proxy }}",
+		"      observe_proxy:\n        description:",
+		"OBSERVE_PROXY: ${{ github.event.inputs.observe_proxy || 'false' }}",
 		`"${CANDIDATE_IMAGE_REF}" \` + "\n" + `            "${CANDIDATE_SHA}"`,
 		`"${BASELINE_IMAGE_REF}" \` + "\n" + `            "${BASELINE_SHA}"`,
 	} {
@@ -235,6 +243,8 @@ func TestRegisterRCGateRequiresPinnedSHAs(t *testing.T) {
 		"bad profiles":    {args: valid, env: []string{"GATE_PROFILES=gate-large-db;echo"}},
 		"bad suffix":      {args: valid, env: []string{"GATE_SOURCE_SUFFIX=Run_1"}},
 		"long suffix":     {args: valid, env: []string{"GATE_SOURCE_SUFFIX=123456789"}},
+		"bad observe":     {args: valid, env: []string{"GATE_OBSERVE_PROXY=maybe"}},
+		"observe inject":  {args: valid, env: []string{"GATE_OBSERVE_PROXY=true,\"x\":1"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -261,8 +271,10 @@ func TestRegisterRCGatePayloadCarriesProfilesAndSuffix(t *testing.T) {
 		want []string
 		omit []string
 	}{
-		{name: "defaults omit both", omit: []string{`"profiles"`, `"source_suffix"`}},
-		{name: "large-db rerun", env: []string{"GATE_PROFILES=gate-large-db", "GATE_SOURCE_SUFFIX=dfdc1c35"}, want: []string{`"profiles":["gate-large-db"]`, `"source_suffix":"dfdc1c35"`}},
+		{name: "defaults omit both", omit: []string{`"profiles"`, `"source_suffix"`, `"observe_proxy"`}},
+		{name: "large-db rerun", env: []string{"GATE_PROFILES=gate-large-db", "GATE_SOURCE_SUFFIX=dfdc1c35"}, want: []string{`"profiles":["gate-large-db"]`, `"source_suffix":"dfdc1c35"`}, omit: []string{`"observe_proxy"`}},
+		{name: "metered large-db gate", env: []string{"GATE_PROFILES=gate-large-db", "GATE_OBSERVE_PROXY=true"}, want: []string{`"profiles":["gate-large-db"]`, `"observe_proxy":true`}},
+		{name: "observe proxy false is omitted", env: []string{"GATE_OBSERVE_PROXY=false"}, omit: []string{`"observe_proxy"`}},
 		{name: "two profiles", env: []string{"GATE_PROFILES=gate-stress, gate-remote"}, want: []string{`"profiles":["gate-stress","gate-remote"]`}, omit: []string{`"source_suffix"`}},
 	}
 	for _, tt := range tests {

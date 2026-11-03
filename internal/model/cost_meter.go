@@ -38,6 +38,8 @@ type CostMeterTotals struct {
 	ReplicaRequests              map[string]uint64 `json:"replica_requests,omitempty"`
 	ReplicaRequestBytesSent      map[string]uint64 `json:"replica_request_bytes_sent,omitempty"`
 	ReplicaResponseBytesReceived map[string]uint64 `json:"replica_response_bytes_received,omitempty"`
+	ReplicaLevelPuts             map[string]uint64 `json:"replica_level_puts,omitempty"`
+	ReplicaLevelPutBytes         map[string]uint64 `json:"replica_level_put_bytes,omitempty"`
 	RestoreRequests              map[string]uint64 `json:"restore_requests,omitempty"`
 	EvidenceObjectUploads        uint64            `json:"evidence_object_uploads"`
 	EvidenceUploadPayloadBytes   uint64            `json:"evidence_upload_payload_bytes"`
@@ -45,8 +47,16 @@ type CostMeterTotals struct {
 }
 
 type CostMeterWorker struct {
-	WorkerID string          `json:"worker_id"`
-	Totals   CostMeterTotals `json:"totals"`
+	WorkerID       string          `json:"worker_id"`
+	Totals         CostMeterTotals `json:"totals"`
+	DBSizeBytes    int64           `json:"db_size_bytes,omitempty"`
+	DBSizeMaxBytes int64           `json:"db_size_max_bytes,omitempty"`
+}
+
+type costMeterBucket struct {
+	CostMeterTotals
+	DBSizeBytes    int64 `json:"db_size_bytes,omitempty"`
+	DBSizeMaxBytes int64 `json:"db_size_max_bytes,omitempty"`
 }
 
 type CostMeterSource struct {
@@ -60,6 +70,7 @@ type CostMeterSource struct {
 func (t CostMeterTotals) IsZero() bool {
 	return len(t.LitestreamObjectOperations) == 0 && len(t.LitestreamObjectBytes) == 0 &&
 		len(t.ReplicaRequests) == 0 && len(t.ReplicaRequestBytesSent) == 0 && len(t.ReplicaResponseBytesReceived) == 0 &&
+		len(t.ReplicaLevelPuts) == 0 && len(t.ReplicaLevelPutBytes) == 0 &&
 		len(t.RestoreRequests) == 0 && t.EvidenceObjectUploads == 0 && t.EvidenceUploadPayloadBytes == 0 && t.PeakDiskUsedBytes == 0
 }
 
@@ -69,6 +80,8 @@ func (t *CostMeterTotals) Add(other CostMeterTotals) {
 	t.ReplicaRequests = addCounterMap(t.ReplicaRequests, other.ReplicaRequests)
 	t.ReplicaRequestBytesSent = addCounterMap(t.ReplicaRequestBytesSent, other.ReplicaRequestBytesSent)
 	t.ReplicaResponseBytesReceived = addCounterMap(t.ReplicaResponseBytesReceived, other.ReplicaResponseBytesReceived)
+	t.ReplicaLevelPuts = addCounterMap(t.ReplicaLevelPuts, other.ReplicaLevelPuts)
+	t.ReplicaLevelPutBytes = addCounterMap(t.ReplicaLevelPutBytes, other.ReplicaLevelPutBytes)
 	t.RestoreRequests = addCounterMap(t.RestoreRequests, other.RestoreRequests)
 	t.EvidenceObjectUploads += other.EvidenceObjectUploads
 	t.EvidenceUploadPayloadBytes += other.EvidenceUploadPayloadBytes
@@ -176,6 +189,8 @@ func costMeterDelta(previous *reporting.ObjectStoreCounters, current reporting.O
 	delta.ReplicaRequests, next.ReplicaRequestTotals = advanceCounterMap(previous.ReplicaRequestTotals, current.ReplicaRequestTotals, workerLifetime)
 	delta.ReplicaRequestBytesSent, next.ReplicaRequestBytesSent = advanceCounterMap(previous.ReplicaRequestBytesSent, current.ReplicaRequestBytesSent, workerLifetime)
 	delta.ReplicaResponseBytesReceived, next.ReplicaResponseBytesReceived = advanceCounterMap(previous.ReplicaResponseBytesReceived, current.ReplicaResponseBytesReceived, workerLifetime)
+	delta.ReplicaLevelPuts, next.ReplicaLevelPutTotals = advanceCounterMap(previous.ReplicaLevelPutTotals, current.ReplicaLevelPutTotals, workerLifetime)
+	delta.ReplicaLevelPutBytes, next.ReplicaLevelPutBytes = advanceCounterMap(previous.ReplicaLevelPutBytes, current.ReplicaLevelPutBytes, workerLifetime)
 	delta.RestoreRequests, next.RestoreRequestTotals = advanceCounterMap(previous.RestoreRequestTotals, current.RestoreRequestTotals, workerLifetime)
 	delta.EvidenceObjectUploads, next.EvidenceObjectUploadsTotal = advanceCounter(previous.EvidenceObjectUploadsTotal, current.EvidenceObjectUploadsTotal, workerLifetime)
 	delta.EvidenceUploadPayloadBytes, next.EvidenceUploadPayloadBytesTotal = advanceCounter(previous.EvidenceUploadPayloadBytesTotal, current.EvidenceUploadPayloadBytesTotal, workerLifetime)
@@ -222,9 +237,10 @@ func (d *DB) RecordCostMeter(workerID, source string, observedAt time.Time, runt
 
 	bucketDelta := delta
 	bucketDelta.PeakDiskUsedBytes = runtime.DataDiskUsedBytes
-	if !bucketDelta.IsZero() {
+	dbSize := costMeterDBSize(runtime)
+	if !bucketDelta.IsZero() || dbSize > 0 {
 		bucket := observedAt.Truncate(time.Hour)
-		var totals CostMeterTotals
+		var totals costMeterBucket
 		var totalsJSON string
 		err := tx.QueryRow(`SELECT totals_json FROM cost_meter_hourly WHERE worker_id = ? AND bucket_start = ?`, workerID, bucket).Scan(&totalsJSON)
 		switch {
@@ -237,8 +253,13 @@ func (d *DB) RecordCostMeter(workerID, source string, observedAt time.Time, runt
 			}
 		}
 		before := totals.PeakDiskUsedBytes
+		sizeBefore := totals.DBSizeBytes
 		totals.Add(bucketDelta)
-		if !delta.IsZero() || totals.PeakDiskUsedBytes != before || totalsJSON == "" {
+		if dbSize > 0 {
+			totals.DBSizeBytes = dbSize
+			totals.DBSizeMaxBytes = max(totals.DBSizeMaxBytes, dbSize)
+		}
+		if !delta.IsZero() || totals.PeakDiskUsedBytes != before || totals.DBSizeBytes != sizeBefore || totalsJSON == "" {
 			encoded, err := json.Marshal(totals)
 			if err != nil {
 				return CostMeterTotals{}, err
@@ -257,40 +278,70 @@ func (d *DB) RecordCostMeter(workerID, source string, observedAt time.Time, runt
 	return delta, nil
 }
 
-func (d *DB) CostMeter(source string, since time.Time) ([]CostMeterSource, error) {
+func costMeterDBSize(runtime reporting.RuntimePayload) int64 {
+	if runtime.DBSizeBytes > 0 {
+		return runtime.DBSizeBytes
+	}
+	return max(runtime.DBTotalSizeBytes, 0)
+}
+
+// CostMeterWindowEnd is the exclusive end of the hourly buckets an `until`
+// bound selects: the end of the hour containing until, so a bound inside an
+// hour still returns that hour's bucket. A zero until means no end bound.
+func CostMeterWindowEnd(until time.Time) time.Time {
+	if until.IsZero() {
+		return time.Time{}
+	}
+	until = until.UTC()
+	if end := until.Truncate(time.Hour); end.Equal(until) {
+		return end
+	}
+	return until.Truncate(time.Hour).Add(time.Hour)
+}
+
+func (d *DB) CostMeter(source string, since, until time.Time) ([]CostMeterSource, error) {
 	query := `SELECT worker_id, source, totals_json FROM cost_meter_hourly WHERE bucket_start >= ?`
 	args := []any{since.UTC().Truncate(time.Hour)}
+	if end := CostMeterWindowEnd(until); !end.IsZero() {
+		query += ` AND bucket_start < ?`
+		args = append(args, end)
+	}
 	if source != "" {
 		query += ` AND source = ?`
 		args = append(args, source)
 	}
+	query += ` ORDER BY bucket_start`
 	rows, err := d.query(query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	bySource := make(map[string]map[string]*CostMeterTotals)
+	bySource := make(map[string]map[string]*costMeterBucket)
 	for rows.Next() {
 		var workerID, workerSource, totalsJSON string
 		if err := rows.Scan(&workerID, &workerSource, &totalsJSON); err != nil {
 			return nil, err
 		}
-		var bucket CostMeterTotals
+		var bucket costMeterBucket
 		if err := json.Unmarshal([]byte(totalsJSON), &bucket); err != nil {
 			return nil, fmt.Errorf("decode cost meter bucket: %w", err)
 		}
 		workers := bySource[workerSource]
 		if workers == nil {
-			workers = make(map[string]*CostMeterTotals)
+			workers = make(map[string]*costMeterBucket)
 			bySource[workerSource] = workers
 		}
 		totals := workers[workerID]
 		if totals == nil {
-			totals = &CostMeterTotals{}
+			totals = &costMeterBucket{}
 			workers[workerID] = totals
 		}
-		totals.Add(bucket)
+		totals.Add(bucket.CostMeterTotals)
+		if bucket.DBSizeBytes > 0 {
+			totals.DBSizeBytes = bucket.DBSizeBytes
+		}
+		totals.DBSizeMaxBytes = max(totals.DBSizeMaxBytes, bucket.DBSizeMaxBytes, bucket.DBSizeBytes)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -300,9 +351,9 @@ func (d *DB) CostMeter(source string, since time.Time) ([]CostMeterSource, error
 	for sourceName, workers := range bySource {
 		entry := CostMeterSource{Source: sourceName, Workers: make([]CostMeterWorker, 0, len(workers))}
 		for workerID, totals := range workers {
-			entry.Totals.Add(*totals)
+			entry.Totals.Add(totals.CostMeterTotals)
 			entry.WorkerPeakDiskUsedBytesSum += totals.PeakDiskUsedBytes
-			entry.Workers = append(entry.Workers, CostMeterWorker{WorkerID: workerID, Totals: *totals})
+			entry.Workers = append(entry.Workers, CostMeterWorker{WorkerID: workerID, Totals: totals.CostMeterTotals, DBSizeBytes: totals.DBSizeBytes, DBSizeMaxBytes: totals.DBSizeMaxBytes})
 		}
 		sort.Slice(entry.Workers, func(i, j int) bool { return entry.Workers[i].WorkerID < entry.Workers[j].WorkerID })
 		report = append(report, entry)

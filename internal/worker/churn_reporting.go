@@ -38,6 +38,8 @@ func (r *Runner) currentSnapshot() runtimeSnapshot {
 		counters.ReplicaRequestTotals = requests.Requests
 		counters.ReplicaRequestBytesSent = requests.BytesSent
 		counters.ReplicaResponseBytesReceived = requests.BytesReceived
+		counters.ReplicaLevelPutTotals = requests.LevelPuts
+		counters.ReplicaLevelPutBytes = requests.LevelPutBytes
 	}
 	snapshot.ObjectStoreCounters = counters
 	if r.cfg.churnEnabled() {

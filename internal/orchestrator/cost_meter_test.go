@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -160,6 +161,152 @@ func TestCostMeterHeartbeatsAggregateAndServeAPI(t *testing.T) {
 	}
 }
 
+func TestCostMeterAPIReportsReplicaLevelPutsPerWorkerAndWindow(t *testing.T) {
+	db := openTestDB(t)
+	for _, worker := range []model.Worker{
+		{ID: "w-level-1", Name: "w-level-1", Status: model.WorkerRunning, Source: "meter-level", GitSHA: "sha-meter", ProfileName: "gate-large-db", ProfileConfig: "{}"},
+		{ID: "w-level-legacy", Name: "w-level-legacy", Status: model.WorkerRunning, Source: "meter-level", GitSHA: "sha-meter", ProfileName: "gate-large-db", ProfileConfig: "{}"},
+	} {
+		if err := db.CreateWorker(&worker); err != nil {
+			t.Fatal(err)
+		}
+	}
+	api := NewAPI(db, nil, nil, nil, nil, nil)
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	l9Series := controlSourceReplicaLevelPuts.WithLabelValues("meter-level", "L9")
+	l9Before := testutil.ToFloat64(l9Series)
+	l0BytesSeries := controlSourceReplicaLevelPutBytes.WithLabelValues("meter-level", "L0")
+	l0BytesBefore := testutil.ToFloat64(l0BytesSeries)
+	now := time.Now().UTC()
+	levelHeartbeat := func(sentAt time.Time, puts, bytes map[string]uint64, dbSize int64) reporting.HeartbeatPayload {
+		payload := costMeterHeartbeat("w-level-1", "meter-level", sentAt, reporting.ObjectStoreCounters{
+			ObjectStoreCounterEpoch: "epoch-level",
+			ReplicaRequestTotals:    map[string]uint64{"PUT": puts["L0"] + puts["L9"]},
+			ReplicaLevelPutTotals:   puts,
+			ReplicaLevelPutBytes:    bytes,
+		}, 5000)
+		payload.DBSizeBytes = dbSize
+		return payload
+	}
+	postCostMeterHeartbeat(t, mux, levelHeartbeat(now.Add(-3*time.Hour), map[string]uint64{"L0": 100, "L9": 2}, map[string]uint64{"L0": 10000, "L9": 900000}, 400000))
+	postCostMeterHeartbeat(t, mux, levelHeartbeat(now.Add(-time.Minute), map[string]uint64{"L0": 160, "L9": 3}, map[string]uint64{"L0": 16000, "L9": 1350000}, 450000))
+	postCostMeterHeartbeat(t, mux, costMeterHeartbeat("w-level-legacy", "meter-level", now.Add(-time.Minute), reporting.ObjectStoreCounters{
+		ObjectStoreCounterEpoch: "epoch-legacy",
+		ReplicaRequestTotals:    map[string]uint64{"PUT": 5},
+	}, 1000))
+
+	if got := testutil.ToFloat64(l9Series) - l9Before; got != 3 {
+		t.Fatalf("per-source L9 put delta = %v, want 3", got)
+	}
+	if got := testutil.ToFloat64(l0BytesSeries) - l0BytesBefore; got != 16000 {
+		t.Fatalf("per-source L0 put bytes delta = %v, want 16000", got)
+	}
+
+	type costMeterRawResponse struct {
+		Until     *time.Time       `json:"until"`
+		WindowEnd *time.Time       `json:"window_end"`
+		Sources   []map[string]any `json:"sources"`
+	}
+	fetchRaw := func(query string) costMeterRawResponse {
+		t.Helper()
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/cost-meter?source=meter-level&"+query, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status = %d: %s", query, response.Code, response.Body.String())
+		}
+		var report costMeterRawResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		return report
+	}
+	fetch := func(since string) map[string]any {
+		t.Helper()
+		report := fetchRaw("since=" + since)
+		if len(report.Sources) != 1 || report.Until != nil || report.WindowEnd != nil {
+			t.Fatalf("since=%s report = %+v", since, report)
+		}
+		return report.Sources[0]
+	}
+	numbers := func(value any) map[string]float64 {
+		t.Helper()
+		raw, ok := value.(map[string]any)
+		if !ok {
+			t.Fatalf("value %v is not an object", value)
+		}
+		out := make(map[string]float64, len(raw))
+		for key, entry := range raw {
+			out[key] = entry.(float64)
+		}
+		return out
+	}
+
+	lastHour := fetch("1h")
+	totals := lastHour["totals"].(map[string]any)
+	if got := numbers(totals["replica_level_puts"]); !reflect.DeepEqual(got, map[string]float64{"L0": 60, "L9": 1}) {
+		t.Fatalf("source replica_level_puts = %v", got)
+	}
+	if got := numbers(totals["replica_level_put_bytes"]); !reflect.DeepEqual(got, map[string]float64{"L0": 6000, "L9": 450000}) {
+		t.Fatalf("source replica_level_put_bytes = %v", got)
+	}
+	if _, present := totals["db_size_bytes"]; present {
+		t.Fatalf("source totals carry db_size_bytes: %v", totals)
+	}
+	workers := lastHour["workers"].([]any)
+	if len(workers) != 2 {
+		t.Fatalf("workers = %v", workers)
+	}
+	first := workers[0].(map[string]any)
+	if first["worker_id"] != "w-level-1" || first["db_size_bytes"].(float64) != 450000 {
+		t.Fatalf("level worker = %v", first)
+	}
+	if got := numbers(first["totals"].(map[string]any)["replica_level_puts"]); !reflect.DeepEqual(got, map[string]float64{"L0": 60, "L9": 1}) {
+		t.Fatalf("level worker replica_level_puts = %v", got)
+	}
+	legacy := workers[1].(map[string]any)
+	legacyTotals := legacy["totals"].(map[string]any)
+	if _, present := legacy["db_size_bytes"]; present {
+		t.Fatalf("legacy worker carries db_size_bytes: %v", legacy)
+	}
+	for _, key := range []string{"replica_level_puts", "replica_level_put_bytes"} {
+		if _, present := legacyTotals[key]; present {
+			t.Fatalf("legacy worker carries %s: %v", key, legacyTotals)
+		}
+	}
+	if got := numbers(legacyTotals["replica_requests"]); got["PUT"] != 5 {
+		t.Fatalf("legacy replica_requests = %v", got)
+	}
+
+	window := fetch("6h")
+	if got := numbers(window["totals"].(map[string]any)["replica_level_puts"]); !reflect.DeepEqual(got, map[string]float64{"L0": 160, "L9": 3}) {
+		t.Fatalf("6h replica_level_puts = %v", got)
+	}
+	if got := window["workers"].([]any)[0].(map[string]any); got["db_size_bytes"].(float64) != 450000 || got["db_size_max_bytes"].(float64) != 450000 {
+		t.Fatalf("6h worker = %v, want latest and max 450000", got)
+	}
+
+	earlyHour := now.Add(-3 * time.Hour).Truncate(time.Hour)
+	oneHour := fetchRaw("since=" + earlyHour.Format(time.RFC3339) + "&until=" + earlyHour.Add(time.Hour).Format(time.RFC3339))
+	if oneHour.Until == nil || oneHour.WindowEnd == nil || !oneHour.WindowEnd.Equal(earlyHour.Add(time.Hour)) || len(oneHour.Sources) != 1 {
+		t.Fatalf("one hour report = %+v", oneHour)
+	}
+	if got := numbers(oneHour.Sources[0]["totals"].(map[string]any)["replica_level_puts"]); !reflect.DeepEqual(got, map[string]float64{"L0": 100, "L9": 2}) {
+		t.Fatalf("one hour replica_level_puts = %v", got)
+	}
+	if got := oneHour.Sources[0]["workers"].([]any)[0].(map[string]any); got["db_size_bytes"].(float64) != 400000 || got["db_size_max_bytes"].(float64) != 400000 {
+		t.Fatalf("one hour worker = %v, want 400000", got)
+	}
+	for _, query := range []string{"since=1h&until=2h", "since=1h&until=1h", "since=1h&until=yesterday"} {
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/cost-meter?"+query, nil))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want 400", query, response.Code)
+		}
+	}
+}
+
 func TestPruneDBOnceBoundsCostMeterEvenWithRetentionDisabled(t *testing.T) {
 	db := openTestDB(t)
 	now := time.Now().UTC()
@@ -173,7 +320,7 @@ func TestPruneDBOnceBoundsCostMeterEvenWithRetentionDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "").pruneDBOnce(context.Background(), 0)
-	report, err := db.CostMeter("main", now.Add(-2*costMeterRetention))
+	report, err := db.CostMeter("main", now.Add(-2*costMeterRetention), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

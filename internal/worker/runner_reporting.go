@@ -101,6 +101,25 @@ func (r *Runner) sendHeartbeat(ctx context.Context) {
 	}
 }
 
+// sendFinalHeartbeat runs after Litestream has stopped and before the observe
+// proxy closes, so the object-store counters accumulated since the last
+// periodic heartbeat reach the control plane even when the run is cancelled.
+func (r *Runner) sendFinalHeartbeat(ctx context.Context) {
+	if r.reporter == nil || !r.reporter.Enabled() {
+		return
+	}
+
+	snapshot := r.currentSnapshot()
+	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := r.reporter.SendHeartbeat(reportCtx, reporting.HeartbeatPayload{
+		SentAt:         time.Now().UTC(),
+		RuntimePayload: snapshot.RuntimePayload,
+	}); err != nil {
+		slog.Warn("Failed to send final heartbeat", "error", err)
+	}
+}
+
 func (r *Runner) sendVerificationStarted(ctx context.Context, result VerificationResult) {
 	if r.reporter == nil || !r.reporter.Enabled() {
 		return

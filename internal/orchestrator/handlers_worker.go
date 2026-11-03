@@ -24,6 +24,24 @@ func (a *API) upsertReportedWorker(identity reporting.WorkerIdentity, runtime re
 	return a.db.UpsertReportedWorker(identity)
 }
 
+// upsertEventWorker is upsertReportedWorker for events. A worker_failed event,
+// whatever the worker's stored status and whether or not the payload carries
+// a startup phase, never promotes the status and never refreshes the heartbeat
+// timestamp: a pre-start failure must not pair a gate side whose Litestream
+// never ran, and a worker failing on every restart must still go stale, be
+// degraded, and be replaced like any other silent worker. Only heartbeats and
+// startup reports refresh the clock or recover the status.
+func (a *API) upsertEventWorker(payload reporting.WorkerEventPayload) error {
+	switch {
+	case strings.TrimSpace(payload.EventType) == "worker_failed":
+		return a.db.UpsertFailedWorker(payload.WorkerIdentity)
+	case payload.PreStart():
+		return a.db.UpsertStartingWorker(payload.WorkerIdentity)
+	default:
+		return a.db.UpsertReportedWorker(payload.WorkerIdentity)
+	}
+}
+
 func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	workerID := r.PathValue("id")
 	var payload reporting.HeartbeatPayload
@@ -350,7 +368,7 @@ func (a *API) handleWorkerEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(rawPayload, &replay)
 	if replay.EventID == "" && replay.IncidentID == "" {
-		if err := a.upsertReportedWorker(payload.WorkerIdentity, payload.RuntimePayload); err != nil {
+		if err := a.upsertEventWorker(payload); err != nil {
 			respondError(w, r, http.StatusInternalServerError, err, "failed to record worker")
 			return
 		}

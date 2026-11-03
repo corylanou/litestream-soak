@@ -118,6 +118,7 @@ type Config struct {
 	S3FaultProxyMode                          string
 	S3FaultProxyTargetEndpoint                string
 	MeteringWindow                            bool
+	S3ObserveProxyRequired                    bool
 	S3FaultProxyListenAddr                    string
 	S3FaultProxyMinContentLength              int64
 	S3FaultProxyResetAfterBytes               int64
@@ -790,6 +791,9 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 	if parseBoolEnv(getenv("SOAK_METERING_WINDOW")) {
 		c.MeteringWindow = true
 	}
+	if parseBoolEnv(getenv("S3_OBSERVE_PROXY_REQUIRED")) {
+		c.S3ObserveProxyRequired = true
+	}
 	if v := strings.TrimSpace(getenv("S3_FAULT_PROXY_TARGET_ENDPOINT")); v != "" {
 		c.S3FaultProxyTargetEndpoint = v
 	}
@@ -1374,6 +1378,7 @@ func (c Config) WorkloadConfig() workload.Config {
 		cfg.VerifyChangedLimit = c.manyDBVerifyChangedLimit()
 	}
 	cfg.MeteringWindow = c.MeteringWindow
+	cfg.S3ObserveProxyRequired = c.S3ObserveProxyRequired
 	if c.S3FaultProxyEnabled {
 		cfg.S3FaultProxyEnabled = true
 		cfg.S3FaultProxyMode = c.S3FaultProxyMode
