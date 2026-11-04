@@ -266,6 +266,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			})
 		}
 		walReset.validate = walResetValidator(r.cfg, r.objectStore, pausers)
+		walReset.pauseLoad = walResetLoadPauser(r.cfg, pausers)
 		walReset.uploaded = r.walResetUploadedCounter
 		walReset.acquireGate = r.checkGate.acquire
 		walReset.downtime = r.plannedLitestreamDowntime.Store

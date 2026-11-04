@@ -251,19 +251,25 @@ type fakeWAL struct {
 	// frameSalts can answer like the file would.
 	hiddenGrowthGeneration uint32
 	hiddenGrowth           int64
-	history                []fakeGeneration
-	savedFrames            int64
-	savedSalts             [2]uint32
-	scanErr                error
-	overrun                bool
-	shrink                 bool
-	saved                  litestreamSavedPosition
-	savedFound             bool
-	savedStale             bool
-	readErr                error
-	downReadErr            error
-	downBurstErr           error
-	holdErr                error
+	// growsWhilePaused is a writer the pause does not cover: the file holds
+	// that many more final-generation frames than the last sample saw.
+	growsWhilePaused int64
+	paused           bool
+	pauses, resumes  int
+	pauseErr         error
+	history          []fakeGeneration
+	savedFrames      int64
+	savedSalts       [2]uint32
+	scanErr          error
+	overrun          bool
+	shrink           bool
+	saved            litestreamSavedPosition
+	savedFound       bool
+	savedStale       bool
+	readErr          error
+	downReadErr      error
+	downBurstErr     error
+	holdErr          error
 
 	live              int
 	stopPending       bool
@@ -332,11 +338,14 @@ func (w *fakeWAL) frameSalts(from, to, frameSize int64, allowed [][2]uint32) (wa
 	if w.scanErr != nil {
 		return scan, w.scanErr
 	}
+	if !w.paused {
+		return scan, errors.New("fake: wal scanned while the writers were not paused")
+	}
 	for offset := from; offset+frameSize <= to; offset += frameSize {
 		frame := (offset - walHeaderSize) / frameSize
 		var owner [2]uint32
 		switch {
-		case frame < w.frames:
+		case frame < w.frames+w.growsWhilePaused:
 			owner = [2]uint32{w.header.salt1, w.header.salt2}
 		default:
 			found := false
@@ -369,6 +378,23 @@ func (w *fakeWAL) frameSalts(from, to, frameSize int64, allowed [][2]uint32) (wa
 	}
 	scan.checked = true
 	return scan, nil
+}
+
+// pauseLoad stops the background writers until the resume.
+func (w *fakeWAL) pauseLoad(context.Context) (func(), error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.pauseErr != nil {
+		return nil, w.pauseErr
+	}
+	w.paused = true
+	w.pauses++
+	return func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.paused = false
+		w.resumes++
+	}, nil
 }
 
 func (w *fakeWAL) restartGeneration(rows int) {
@@ -531,6 +557,7 @@ func newTestWALResetCheck(script *walResetScript) *walResetCheck {
 	check.holdReader = script.wal.holdReader
 	check.restartWrite = script.wal.restartWrite
 	check.frameSalts = script.wal.frameSalts
+	check.pauseLoad = script.wal.pauseLoad
 	check.stop = func(ctx context.Context) (string, error) {
 		if script.stopErr != nil {
 			return "", script.stopErr
@@ -686,6 +713,31 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			wantSignature: reporting.SignatureWALResetShapeNotReached,
 			wantMessage:   fmt.Sprintf("carry other salts (first at %d: 1002/", walHeaderSize+(walResetGenerationBaseRows+5*walResetGenerationStepRows+1)*fakeFrameSize),
 			wantSummary:   []string{"shape_evidence=contradicted", "wal_resets=5"},
+			wantStarts:    1,
+		},
+		{
+			name: "a final generation still growing under a writer the pause does not cover contradicts the shape",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.growsWhilePaused = 3
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetShapeNotReached,
+			wantMessage:   fmt.Sprintf("carry other salts (first at %d: 1005/", walHeaderSize+(walResetGenerationBaseRows+5*walResetGenerationStepRows+1)*fakeFrameSize),
+			wantSummary:   []string{"shape_evidence=contradicted"},
+			wantStarts:    1,
+		},
+		{
+			name: "writers that cannot be paused before the restart make the cycle inconclusive",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.pauseErr = errors.New("quiesce wait timed out")
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetUnavailable,
+			wantMessage:   "pause load before the restart: quiesce wait timed out",
 			wantStarts:    1,
 		},
 		{
@@ -1183,6 +1235,9 @@ func TestWALResetCycleStopsLitestreamOnlyAfterTheBurstIsDeepEnough(t *testing.T)
 	if observation.checkpoints != observation.resets || wal.checkpoints != 5 {
 		t.Fatalf("checkpoints %d (fake ran %d) resets %d, want the reset count and one checkpoint per reset", observation.checkpoints, wal.checkpoints, observation.resets)
 	}
+	if wal.pauses != 1 || wal.resumes != 1 || wal.paused || !observation.tail.checked || observation.tail.foreignFrames != 0 || observation.tail.to != observation.savedPosition {
+		t.Fatalf("pauses %d resumes %d paused %v tail %+v, want one pause around a clean scan up to the saved position", wal.pauses, wal.resumes, wal.paused, observation.tail)
+	}
 	ends := []int64{}
 	for k := uint32(1); k <= check.targetResets; k++ {
 		ends = append(ends, int64(check.generationRows(k)+1)*fakeFrameSize)
@@ -1212,7 +1267,7 @@ func TestScanWALFrameSaltsFindsAGenerationLitestreamDoesNotKnow(t *testing.T) {
 		}
 		return path
 	}
-	allowed := [][2]uint32{{1000, 77}, {1002, 77 + 2*7919}}
+	allowed := [][2]uint32{{1000, 77}}
 	from, to := int64(walHeaderSize+8*fakeFrameSize), int64(walHeaderSize+30*fakeFrameSize)
 
 	scan, err := scanWALFrameSalts(build(12), from, to, fakeFrameSize, allowed)
@@ -1222,6 +1277,11 @@ func TestScanWALFrameSaltsFindsAGenerationLitestreamDoesNotKnow(t *testing.T) {
 	scan, err = scanWALFrameSalts(build(6), from, to, fakeFrameSize, allowed)
 	if err != nil || !scan.checked || scan.frames != 22 || scan.foreignFrames != 0 {
 		t.Fatalf("shorter earlier generation: scan=%+v err=%v", scan, err)
+	}
+	sampled := int64(walHeaderSize + 5*fakeFrameSize)
+	scan, err = scanWALFrameSalts(build(6), sampled, to, fakeFrameSize, allowed)
+	if err != nil || !scan.checked || scan.frames != 25 || scan.foreignFrames != 3 || scan.foreignOffset != sampled || scan.foreignSalt1 != 1002 {
+		t.Fatalf("final generation longer than its sample: scan=%+v err=%v", scan, err)
 	}
 	if _, err := scanWALFrameSalts(build(6), from, to+fakeFrameSize, fakeFrameSize, allowed); err == nil {
 		t.Fatal("a range past the end of the file passed as clean")

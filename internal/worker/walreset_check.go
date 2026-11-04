@@ -319,6 +319,10 @@ type walResetCheck struct {
 	holdReader   func(ctx context.Context) (func() error, error)
 	restartWrite func(ctx context.Context) (int, error)
 	frameSalts   func(from, to, frameSize int64, allowed [][2]uint32) (walResetSaltScan, error)
+	// pauseLoad stops the workload's writers and returns the resume, so the
+	// WAL layout holds still from the final sample through Litestream's
+	// startup verification.
+	pauseLoad func(ctx context.Context) (func(), error)
 	// stop sends SIGTERM and waits for the exit, returning how the process
 	// ended; start makes sure exactly one Litestream is running and ready,
 	// whether none, a stopping one, or a started but not yet ready one exists.
@@ -371,6 +375,7 @@ func newWALResetCheck(cfg Config) *walResetCheck {
 		uploaded:        func() (uint64, bool) { return 0, false },
 		acquireGate:     func(context.Context) (func(), error) { return func() {}, nil },
 		downtime:        func(bool) {},
+		pauseLoad:       func(context.Context) (func(), error) { return func() {}, nil },
 	}
 	check.burst = func(ctx context.Context, rows int) (int, error) { return writeWALResetBurst(ctx, cfg.DBPath, rows) }
 	check.holdReader = func(ctx context.Context) (func() error, error) { return holdWALResetReader(ctx, cfg.DBPath) }
@@ -578,6 +583,19 @@ func (c *walResetCheck) run(ctx context.Context) (observation walResetObservatio
 		}
 	}
 	observation.downDuration = c.clock().Sub(downStarted)
+
+	// The writers are paused from here until Litestream has read its
+	// position and caught up, so the layout the final sample and the file
+	// scan measure is the layout Litestream's startup verification sees.
+	resumeLoad, pauseErr := c.pauseLoad(ctx)
+	if pauseErr != nil {
+		return observation, validation, fmt.Errorf("%w: pause load before the restart: %v", errWALResetUnavailable, pauseErr)
+	}
+	resumeLoad = releaseOnceFunc(resumeLoad)
+	defer resumeLoad()
+	if wal, walErr := c.generation(); walErr == nil && wal.header.valid {
+		observation.recordGeneration(wal, &lastSalt2)
+	}
 	observation.resets = walResetCount(observation.savedHeader, observation.finalWAL.header)
 	observation.checkpoints = observation.resets
 	observation.tail = c.scanTail(observation)
@@ -619,6 +637,7 @@ func (c *walResetCheck) run(ctx context.Context) (observation walResetObservatio
 		}
 	}
 	observation.catchUpDuration = c.clock().Sub(catchUpStarted)
+	resumeLoad()
 
 	// (5) Restore the latest replicated position, pinned and unpinned, and
 	// compare both with the primary at that txid. The snapshot level is
@@ -657,15 +676,18 @@ func (o *walResetObservation) recordGeneration(wal walGeneration, lastSalt2 *uin
 
 // scanTail reads the WAL file's frame salts from the final generation's end
 // up to Litestream's saved position, the frames Litestream's startup scan
-// walks before it meets its own saved salts. The saved generation's salts
-// and the final generation's (background writes may have extended it since
-// it was sampled) are the only ones that may appear there; any other salt is
-// a generation Litestream does not know, which makes it snapshot.
+// walks before it meets its own saved salts, the frame ending at the saved
+// position included. Every one of them must carry the saved generation's
+// salts: any other salt is a generation Litestream does not know, which
+// makes it snapshot, and the final generation's own salts there mean it
+// grew past the sample, so the sampled end is not the end the shape rests
+// on. The writers are paused while this runs, so the file does not move
+// between the sample, the scan and Litestream's restart.
 func (c *walResetCheck) scanTail(o walResetObservation) walResetSaltScan {
 	if o.savedPosition <= walHeaderSize || !o.finalWAL.header.valid || o.finalWAL.frameSize <= 0 {
 		return walResetSaltScan{}
 	}
-	allowed := [][2]uint32{{o.savedHeader.salt1, o.savedHeader.salt2}, {o.finalWAL.header.salt1, o.finalWAL.header.salt2}}
+	allowed := [][2]uint32{{o.savedHeader.salt1, o.savedHeader.salt2}}
 	scan, err := c.frameSalts(o.finalWAL.writtenEnd(), o.savedPosition, o.finalWAL.frameSize, allowed)
 	if err != nil {
 		scan.err = err.Error()
@@ -718,6 +740,23 @@ func releaseOnce(release func() error) func() error {
 	return func() error {
 		once.Do(func() { err = release() })
 		return err
+	}
+}
+
+func releaseOnceFunc(release func()) func() {
+	var once sync.Once
+	return func() { once.Do(release) }
+}
+
+// walResetLoadPauser pauses the workload's writers through the verifier's
+// pausers and returns the resume.
+func walResetLoadPauser(cfg Config, pausers []loadPauser) func(context.Context) (func(), error) {
+	return func(ctx context.Context) (func(), error) {
+		verifier := NewVerifier(cfg, pausers...)
+		if err := verifier.pauseLoad(ctx); err != nil {
+			return nil, err
+		}
+		return verifier.resumeLoad, nil
 	}
 }
 
