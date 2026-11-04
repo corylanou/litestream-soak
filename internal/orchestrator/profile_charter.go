@@ -106,7 +106,7 @@ var profileCharters = map[string]ProfileCharter{
 		WhyItMatters:  "Guards the litestream#1339 fix and the SnapshotReader lock-release contract: long-lived readers are common in reporting workloads and must not degrade replication or stall writers.",
 	},
 	"gate-stress": {
-		Synopsis:      "RC gate stress lane: sustained overload with truncate-page-n: 0 from 8 writers at 600 writes/s of 2KB rows on a 2 CPU / 2 GB machine with a 10 GB volume.",
+		Synopsis:      "RC gate stress lane: alternating 6-hour phases of overload-truncate0 (8 writers at 600 writes/s of 2KB rows with truncate-page-n: 0) and pinned-reader (4 writers at 200 writes/s with a 4-minute pinned read transaction) on a 2 CPU / 2 GB machine with a 20 GB volume; each scenario's load table is trimmed to 100,000 rows at every verification.",
 		Stresses:      "WAL growth bounding and backlog drain under overload, run identically against the release candidate and its baseline.",
 		GuardsAgainst: "Release candidates that regress WAL bounding or backlog drain relative to the baseline commit.",
 		WhyItMatters:  "Gives each release candidate a paired overload signal against a pinned baseline instead of an open-ended full-fleet clone.",

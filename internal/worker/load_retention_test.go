@@ -144,6 +144,24 @@ func TestLoadRetentionProfiles(t *testing.T) {
 	}
 }
 
+func TestLoadRetentionBoundsGateStressScenarioPhases(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ProfileName = "gate-stress"
+	cfg.StressScenarios = []string{StressScenarioOverloadTruncate0, StressScenarioPinnedReader}
+	for _, scenario := range cfg.StressScenarios {
+		phase, err := cfg.ForStressScenario(scenario)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !phase.boundedLoadProfile() {
+			t.Fatalf("gate-stress %s phase grows its database without bound", scenario)
+		}
+	}
+	if cfg.boundedLoadProfile() {
+		t.Fatal("the scheduling profile itself runs no load and is not bounded")
+	}
+}
+
 func TestLoadRetentionFollowsCheckpointThaw(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ProfileName = "high-volume"
