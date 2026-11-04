@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestProfileSnapshotRetainsUploadFailureAfterRecovery(t *testing.T) {
@@ -108,5 +110,88 @@ func TestNeutralProfileStatusRingPreservesCompleteObservation(t *testing.T) {
 	snapshot := r.profilingSnapshot()
 	if !snapshot.ProfileHistoryComplete || snapshot.ProfileCapability != "observed" || len(snapshot.ProfileIncidents) != 0 {
 		t.Fatalf("neutral ring invalidated coverage: %+v", snapshot)
+	}
+}
+
+func TestProfileIncidentFloodNeverStopsRun(t *testing.T) {
+	cfg := Config{DataDir: t.TempDir(), PprofCaptureEnabled: true, WorkerID: "worker", RunID: "run", MachineID: "machine"}
+	r := NewRunner(cfg)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	r.observeProfiling(cancel)
+	const flood = 3000
+	for i := 0; i < flood; i++ {
+		r.profiles.publishProfileStatus("periodic", "capture-failed")
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		t.Fatalf("profiling incidents stopped the run: %v", cause)
+	}
+	snapshot := r.profilingSnapshot()
+	if !snapshot.ProfileHistoryComplete || snapshot.ProfileEvidenceDropped != 0 {
+		t.Fatalf("coalesced incidents marked the history incomplete: %+v", snapshot)
+	}
+	if len(snapshot.ProfileIncidents) != profileIncidentsRetained+1 {
+		t.Fatalf("retained %d incidents, want %d plus one summary", len(snapshot.ProfileIncidents), profileIncidentsRetained)
+	}
+	if got := snapshot.ProfileIncidentsCoalesced["profile_capture_error"]; got != flood-profileIncidentsRetained {
+		t.Fatalf("coalesced %d, want %d", got, flood-profileIncidentsRetained)
+	}
+	var summary string
+	for _, incident := range snapshot.ProfileIncidents {
+		if incident.ID == profileIncidentSummaryID(snapshot.ProfileEpoch, "profile_capture_error") {
+			summary = incident.Message
+		}
+	}
+	if !strings.Contains(summary, fmt.Sprintf("%d profile_capture_error incidents coalesced since", flood-profileIncidentsRetained)) || !strings.Contains(summary, "periodic: capture-failed") {
+		t.Fatalf("summary incident missing or wrong: %q", summary)
+	}
+	entries, err := os.ReadDir(filepath.Join(cfg.DataDir, "churn-outbox"))
+	if err != nil || len(entries) != profileIncidentsRetained+1 {
+		t.Fatalf("durable events=%d err=%v, want %d retained plus one summary", len(entries), err, profileIncidentsRetained+1)
+	}
+}
+
+func TestProfileIncidentSummaryIsPersistedAgainAfterTheInterval(t *testing.T) {
+	cfg := Config{DataDir: t.TempDir(), PprofCaptureEnabled: true, WorkerID: "worker", RunID: "run", MachineID: "machine"}
+	r := NewRunner(cfg)
+	r.profileEvidence.summaryInterval = time.Nanosecond
+	_, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	r.observeProfiling(cancel)
+	for i := 0; i < profileIncidentsRetained+3; i++ {
+		r.profiles.publishProfileStatus("periodic", "capture-failed")
+		time.Sleep(time.Microsecond)
+	}
+	entries, err := os.ReadDir(filepath.Join(cfg.DataDir, "churn-outbox"))
+	if err != nil || len(entries) != profileIncidentsRetained+3 {
+		t.Fatalf("durable events=%d err=%v, want one summary per coalesced incident once the interval has passed", len(entries), err)
+	}
+	if got := r.profilingSnapshot().ProfileIncidentsCoalesced["profile_capture_error"]; got != 3 {
+		t.Fatalf("coalesced %d, want 3", got)
+	}
+}
+
+func TestProfileIncidentsSurviveAFullOutboxWithoutStoppingTheRun(t *testing.T) {
+	cfg := Config{DataDir: t.TempDir(), PprofCaptureEnabled: true, WorkerID: "worker", RunID: "run", MachineID: "machine"}
+	r := NewRunner(cfg)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	r.observeProfiling(cancel)
+	dir := filepath.Join(cfg.DataDir, "churn-outbox")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < evidenceOutboxMaxEvents; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%04d.json", i)), []byte("{}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.profiles.publishProfileStatus("periodic", "capture-failed")
+	if cause := context.Cause(ctx); cause != nil {
+		t.Fatalf("a full outbox stopped the run: %v", cause)
+	}
+	snapshot := r.profilingSnapshot()
+	if snapshot.ProfileEvidenceDropped != 1 || len(snapshot.ProfileIncidents) != 1 || !snapshot.ProfileHistoryComplete {
+		t.Fatalf("dropped=%d incidents=%d complete=%v, want the incident kept in the snapshot and one drop counted", snapshot.ProfileEvidenceDropped, len(snapshot.ProfileIncidents), snapshot.ProfileHistoryComplete)
 	}
 }

@@ -93,6 +93,8 @@ func (r *Runner) recordChurnAttempt(_ context.Context, op string, n int64, d tim
 const evidenceOutboxMaxEvents = 1024
 const evidenceOutboxMaxBytes = 16 << 20
 
+var errEvidenceOutboxFull = errors.New("run evidence unavailable: outbox capacity exceeded")
+
 func (r *Runner) persistRunEvidence(event reporting.WorkerEventPayload) error {
 	r.churnEvidence.persistMu.Lock()
 	defer r.churnEvidence.persistMu.Unlock()
@@ -119,7 +121,7 @@ func (r *Runner) persistRunEvidence(event reporting.WorkerEventPayload) error {
 		used += info.Size()
 	}
 	if len(entries) >= evidenceOutboxMaxEvents || used+int64(len(body)) > evidenceOutboxMaxBytes {
-		return fmt.Errorf("run evidence unavailable: outbox capacity exceeded (%d events, %d bytes)", len(entries), used)
+		return fmt.Errorf("%w (%d events, %d bytes)", errEvidenceOutboxFull, len(entries), used)
 	}
 	file, err := os.OpenFile(path+".tmp", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {

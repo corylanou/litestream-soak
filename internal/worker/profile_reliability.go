@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,12 +15,45 @@ import (
 	"github.com/google/uuid"
 )
 
+// Profiling incidents are observations about the profiler, not about the
+// workload, so they never stop the run. The first profileIncidentsRetained
+// distinct incidents are kept in the snapshot and persisted one event each;
+// after that each kind is coalesced into one summary incident carrying the
+// count, the first and last time, and the latest message, persisted at most
+// once per profileIncidentSummaryInterval. An outbox that has no room left
+// drops the durable copy and counts the drop; the snapshot still carries the
+// incident. Any other persistence failure still stops the run.
+const (
+	profileIncidentsRetained       = 256
+	profileIncidentSummaryInterval = 15 * time.Minute
+)
+
+type profileIncidentSummary struct {
+	count         uint64
+	first, last   time.Time
+	latest        string
+	run           reporting.WorkerIdentity
+	persisted     uint64
+	lastPersisted time.Time
+}
+
 type profileEvidenceState struct {
 	mu                         sync.Mutex
 	epoch                      string
 	active, complete, observed bool
 	seen                       map[string]bool
 	incidents                  map[string]reporting.ProfileIncident
+	coalesced                  map[string]*profileIncidentSummary
+	dropped                    uint64
+	summaryInterval            time.Duration
+}
+
+func profileIncidentSummaryID(epoch, kind string) string {
+	return "profile:" + epoch + ":summary:" + kind
+}
+
+func (s *profileIncidentSummary) incident(id, kind string) reporting.ProfileIncident {
+	return reporting.ProfileIncident{ID: id, Kind: kind, Message: fmt.Sprintf("%d %s incidents coalesced since %s, latest at %s: %s", s.count, kind, s.first.UTC().Format(time.RFC3339), s.last.UTC().Format(time.RFC3339), s.latest), At: s.last, Run: s.run}
 }
 
 func (r *Runner) observeProfiling(cancelRun context.CancelCauseFunc) {
@@ -30,27 +64,61 @@ func (r *Runner) observeProfiling(cancelRun context.CancelCauseFunc) {
 	state.complete = os.IsNotExist(err) || (err == nil && len(entries) == 0)
 	state.seen = make(map[string]bool)
 	state.incidents = make(map[string]reporting.ProfileIncident)
-	emit := func(id, kind, message string, at time.Time, identity reporting.WorkerIdentity) {
-		state.mu.Lock()
-		defer state.mu.Unlock()
-		if state.seen[id] {
-			return
-		}
-		incident := reporting.ProfileIncident{ID: id, Kind: kind, Message: redactLogIncident(message), At: at, Run: identity}
-		if len(state.incidents) >= evidenceOutboxMaxEvents {
-			state.complete = false
-			cancelRun(fmt.Errorf("profiling evidence snapshot capacity exhausted"))
-		} else {
-			state.incidents[id] = incident
-		}
-		event := reporting.WorkerEventPayload{WorkerIdentity: identity, EventType: kind, Message: redactLogIncident(message), SentAt: at, WorkloadEvent: reporting.WorkloadEvent{WorkloadEventID: id}}
-		if err := r.persistRunEvidence(event); err != nil {
+	state.coalesced = make(map[string]*profileIncidentSummary)
+	if state.summaryInterval == 0 {
+		state.summaryInterval = profileIncidentSummaryInterval
+	}
+	persist := func(id, kind, message string, at time.Time, identity reporting.WorkerIdentity) bool {
+		event := reporting.WorkerEventPayload{WorkerIdentity: identity, EventType: kind, Message: message, SentAt: at, WorkloadEvent: reporting.WorkloadEvent{WorkloadEventID: id}}
+		err := r.persistRunEvidence(event)
+		switch {
+		case err == nil:
+			r.requestEvidenceFlush()
+			return true
+		case errors.Is(err, errEvidenceOutboxFull):
+			state.dropped++
+			return false
+		default:
 			state.complete = false
 			cancelRun(fmt.Errorf("persist profiling evidence: %w", err))
+			return false
+		}
+	}
+	emit := func(id, kind, message string, at time.Time, identity reporting.WorkerIdentity, dedupe bool) {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		if dedupe && state.seen[id] {
 			return
 		}
-		state.seen[id] = true
-		r.requestEvidenceFlush()
+		message = redactLogIncident(message)
+		if len(state.incidents)-len(state.coalesced) < profileIncidentsRetained {
+			state.incidents[id] = reporting.ProfileIncident{ID: id, Kind: kind, Message: message, At: at, Run: identity}
+			if dedupe {
+				state.seen[id] = true
+			}
+			persist(id, kind, message, at, identity)
+			return
+		}
+		if dedupe {
+			state.seen[id] = true
+		}
+		summary := state.coalesced[kind]
+		if summary == nil {
+			summary = &profileIncidentSummary{first: at, run: identity}
+			state.coalesced[kind] = summary
+		}
+		summary.count++
+		summary.last = at
+		summary.latest = message
+		summaryID := profileIncidentSummaryID(state.epoch, kind)
+		incident := summary.incident(summaryID, kind)
+		state.incidents[summaryID] = incident
+		if summary.persisted == 0 || at.Sub(summary.lastPersisted) >= state.summaryInterval {
+			if persist(fmt.Sprintf("%s:%d", summaryID, summary.persisted+1), kind, incident.Message, at, identity) {
+				summary.persisted++
+				summary.lastPersisted = at
+			}
+		}
 	}
 	r.profiles.onRecord = func(record *profileRecord) {
 		state.mu.Lock()
@@ -65,7 +133,7 @@ func (r *Runner) observeProfiling(cancelRun context.CancelCauseFunc) {
 		identity.WorkerID = record.WorkerID
 		identity.DeploymentID = record.DeploymentID
 		for _, incident := range evidence.Incidents() {
-			emit(incident.ID, incident.Kind, incident.Message, incident.At, identity)
+			emit(incident.ID, incident.Kind, incident.Message, incident.At, identity, true)
 		}
 	}
 	r.profiles.onStatus = func(phase, reason string) {
@@ -76,7 +144,7 @@ func (r *Runner) observeProfiling(cancelRun context.CancelCauseFunc) {
 		if strings.Contains(reason, "failed") {
 			kind = "profile_capture_error"
 		}
-		emit("profile:"+state.epoch+":"+uuid.NewString(), kind, phase+": "+reason, time.Now().UTC(), r.identity)
+		emit("profile:"+state.epoch+":"+uuid.NewString(), kind, phase+": "+reason, time.Now().UTC(), r.identity, false)
 	}
 }
 
@@ -88,6 +156,13 @@ func (r *Runner) profilingSnapshot() reporting.ProfilingEvidence {
 	for _, incident := range state.incidents {
 		result.ProfileIncidents = append(result.ProfileIncidents, incident)
 	}
+	for kind, summary := range state.coalesced {
+		if result.ProfileIncidentsCoalesced == nil {
+			result.ProfileIncidentsCoalesced = make(map[string]uint64)
+		}
+		result.ProfileIncidentsCoalesced[kind] = summary.count
+	}
+	result.ProfileEvidenceDropped = state.dropped
 	if state.active {
 		result.ProfileCapability = "pending"
 		if state.observed {
