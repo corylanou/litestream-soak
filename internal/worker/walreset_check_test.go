@@ -227,22 +227,33 @@ func TestL9IdentitiesSeeReplacedSnapshots(t *testing.T) {
 // header. The process model tracks live processes so a recovery that starts
 // a second one is visible.
 type fakeWAL struct {
-	mu           sync.Mutex
-	header       walHeader
-	frames       int64
-	slots        int64
-	down         bool
-	resetEvery   int64
-	maxResets    uint32
-	resets       uint32
-	overrun      bool
-	shrink       bool
-	saved        litestreamSavedPosition
-	savedFound   bool
-	savedStale   bool
-	readErr      error
-	downReadErr  error
-	downBurstErr error
+	mu     sync.Mutex
+	header walHeader
+	frames int64
+	slots  int64
+	down   bool
+	// backfilled is set by a PASSIVE checkpoint and lets the next write
+	// restart the WAL, unless a reader is held, as SQLite does. maxResets
+	// caps the restarts; checkpointBusy makes that many checkpoints fail to
+	// backfill; fatGeneration gives that post-stop generation extra frames.
+	backfilled     bool
+	readerHeld     bool
+	readerReleases int
+	readerHolds    int
+	checkpointBusy int
+	checkpoints    int
+	maxResets      uint32
+	resets         uint32
+	fatGeneration  uint32
+	overrun        bool
+	shrink         bool
+	saved          litestreamSavedPosition
+	savedFound     bool
+	savedStale     bool
+	readErr        error
+	downReadErr    error
+	downBurstErr   error
+	holdErr        error
 
 	live              int
 	stopPending       bool
@@ -255,7 +266,61 @@ type fakeWAL struct {
 const fakeFrameSize = testWALPageSize + walFrameHeaderSize
 
 func newFakeWAL() *fakeWAL {
-	return &fakeWAL{header: walHeader{valid: true, pageSize: testWALPageSize, checkpointSeq: 40, salt1: 1000, salt2: 77}, resetEvery: 1000, maxResets: 1 << 30, savedFound: true, live: 1}
+	return &fakeWAL{header: walHeader{valid: true, pageSize: testWALPageSize, checkpointSeq: 40, salt1: 1000, salt2: 77}, maxResets: 1 << 30, savedFound: true, live: 1}
+}
+
+// holdReader is the read transaction held across the SIGTERM; while it is
+// held no write restarts the WAL.
+func (w *fakeWAL) holdReader(context.Context) (func() error, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.holdErr != nil {
+		return nil, w.holdErr
+	}
+	if w.down {
+		return nil, errors.New("reader held after litestream exited")
+	}
+	w.readerHeld = true
+	w.readerHolds++
+	return func() error {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.readerHeld = false
+		w.readerReleases++
+		return nil
+	}, nil
+}
+
+// checkpoint is PRAGMA wal_checkpoint(PASSIVE): it backfills the WAL unless
+// a scripted reader keeps it from completing.
+func (w *fakeWAL) checkpoint(context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.checkpoints++
+	if w.checkpointBusy > 0 {
+		w.checkpointBusy--
+		return nil
+	}
+	w.backfilled = true
+	return nil
+}
+
+func (w *fakeWAL) restartGeneration(rows int) {
+	w.resets++
+	w.header.checkpointSeq++
+	w.header.salt1++
+	w.header.salt2 += 7919
+	w.frames = int64(rows)
+	if w.overrun {
+		w.frames = w.saved.walOffsetEnd/fakeFrameSize + 1
+	}
+	if w.fatGeneration == w.resets {
+		w.frames += 1500
+	}
+	w.slots = max(w.slots, w.frames)
+	if w.shrink {
+		w.slots = w.frames
+	}
 }
 
 func (w *fakeWAL) generation() (walGeneration, error) {
@@ -280,45 +345,45 @@ func (w *fakeWAL) burst(_ context.Context, rows int) (int, error) {
 	if w.down && w.downBurstErr != nil {
 		return 0, w.downBurstErr
 	}
+	if w.backfilled && !w.readerHeld && w.resets < w.maxResets {
+		w.backfilled = false
+		w.restartGeneration(rows)
+		return rows, nil
+	}
+	w.backfilled = false
 	w.frames += int64(rows)
 	w.slots = max(w.slots, w.frames)
-	if w.down && w.frames >= w.resetEvery && w.resets < w.maxResets {
-		w.resets++
-		w.header.checkpointSeq++
-		w.header.salt1++
-		w.header.salt2 += 7919
-		w.frames = int64(rows)
-		if w.overrun {
-			w.frames = w.saved.walOffsetEnd/fakeFrameSize + 1
-			w.slots = max(w.slots, w.frames)
-		}
-		if w.shrink {
-			w.slots = w.frames
-		}
-	}
 	return rows, nil
 }
 
-// stop is the SIGTERM: the process exits and the WAL is down. With
-// stopPending the signal is delivered but the exit comes late, so the call
-// times out while the process is still alive.
+// stop is the SIGTERM: Litestream's shutdown checkpoint appends its sequence
+// frame, which the held reader keeps from restarting the WAL, and the saved
+// position is the end of that frame. With shutdownReset the reader did not
+// block the restart (its snapshot was already backfilled), so the WAL starts
+// over and the saved position is the sequence frame at the start of the
+// file, as the smoke run showed. With stopPending the signal is delivered
+// but the exit comes late, so the call times out while the process is still
+// alive. The process exits and the WAL is down.
 func (w *fakeWAL) stop(context.Context) (string, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.stops++
+	if !w.readerHeld {
+		return "", errors.New("fake: stop without the read transaction held")
+	}
 	w.down = true
+	if w.shutdownReset {
+		w.restartGeneration(0)
+		w.resets--
+	}
+	w.frames++
+	w.slots = max(w.slots, w.frames)
 	w.saved = litestreamSavedPosition{walOffsetEnd: walHeaderSize + w.frames*fakeFrameSize, salt1: w.header.salt1, salt2: w.header.salt2, found: true, file: "0000000000000001-0000000000000400.ltx"}
 	if w.savedStale {
 		w.saved.salt1--
 	}
 	if w.stopPending {
 		return "", errors.New("litestream did not exit after terminated: context deadline exceeded")
-	}
-	if w.shutdownReset {
-		w.header.checkpointSeq++
-		w.header.salt1++
-		w.header.salt2 += 7919
-		w.frames = 8
 	}
 	w.live--
 	return "exit:0", nil
@@ -376,6 +441,7 @@ func newTestWALResetCheck(script *walResetScript) *walResetCheck {
 	check := newWALResetCheck(Config{DBPath: "/data/test.db"})
 	check.pause = time.Hour
 	check.burstBytes = walHeaderSize + 3*1000*fakeFrameSize
+	check.readerHoldBytes = check.burstBytes / 2
 	check.burstBudget = 5 * time.Second
 	check.downBudget = 2 * time.Second
 	check.headerPoll = 0
@@ -387,6 +453,8 @@ func newTestWALResetCheck(script *walResetScript) *walResetCheck {
 	check.generation = script.wal.generation
 	check.savedPosition = script.wal.savedPosition
 	check.burst = script.wal.burst
+	check.holdReader = script.wal.holdReader
+	check.checkpoint = script.wal.checkpoint
 	check.stop = func(ctx context.Context) (string, error) {
 		if script.stopErr != nil {
 			return "", script.stopErr
@@ -464,19 +532,32 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 				return &walResetScript{wal: newFakeWAL(), uploaded: []uint64{1000, 5000, 9000}}
 			},
 			wantStatus:  "passed",
-			wantSummary: []string{"wal_resets=5", "checkpoints=5", "generations_seen=6", "shape_evidence=confirmed", "saved_position_ltx=0000000000000001-0000000000000400.ltx", "litestream_exit=exit:0", "l9_before=1 l9_after=1 l9_changed=false", "uploaded_bytes=8000", "pinned_restore=passed latest_restore=passed restored_txid=00000000000001f4", "catchup_txid=00000000000001f4"},
+			wantSummary: []string{"wal_resets=5", "checkpoints=5", "generations_seen=6", "shape_evidence=confirmed", "saved_position_ltx=0000000000000001-0000000000000400.ltx", fmt.Sprintf("reader_held_at=%d", walHeaderSize+1536*fakeFrameSize), "litestream_exit=exit:0", "l9_before=1 l9_after=1 l9_changed=false", "uploaded_bytes=8000", "pinned_restore=passed latest_restore=passed restored_txid=00000000000001f4", "catchup_txid=00000000000001f4"},
 			wantStarts:  1,
 		},
 		{
-			name: "no readable ltx position leaves the shape unverified but the cycle still counts",
+			name: "a checkpoint another reader kept from completing is retried until the wal restarts",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.checkpointBusy = 3
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:  "passed",
+			wantSummary: []string{"wal_resets=5", "shape_evidence=confirmed"},
+			wantStarts:  1,
+		},
+		{
+			name: "no readable ltx position leaves the shape unverified, which is inconclusive",
 			script: func() *walResetScript {
 				wal := newFakeWAL()
 				wal.savedFound = false
 				return &walResetScript{wal: wal}
 			},
-			wantStatus:  "passed",
-			wantSummary: []string{"shape_evidence=unverified", "saved_position=0 saved_position_ltx=none"},
-			wantStarts:  1,
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetShapeNotReached,
+			wantMessage:   "shape unverified: litestream's saved position was not readable",
+			wantSummary:   []string{"shape_evidence=unverified", "saved_position=0 saved_position_ltx=none"},
+			wantStarts:    1,
 		},
 		{
 			name: "an ltx file from another generation is not used as the saved position",
@@ -485,20 +566,37 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 				wal.savedStale = true
 				return &walResetScript{wal: wal}
 			},
-			wantStatus:  "passed",
-			wantSummary: []string{"shape_evidence=unverified", "saved_position=0"},
-			wantStarts:  1,
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetShapeNotReached,
+			wantMessage:   "shape unverified",
+			wantSummary:   []string{"shape_evidence=unverified", "saved_position=0"},
+			wantStarts:    1,
 		},
 		{
-			name: "a generation that reaches the saved position contradicts the shape but the cycle still counts",
+			name: "a generation that reaches the saved position contradicts the shape and is inconclusive",
 			script: func() *walResetScript {
 				wal := newFakeWAL()
 				wal.overrun = true
 				return &walResetScript{wal: wal}
 			},
-			wantStatus:  "passed",
-			wantSummary: []string{"shape_evidence=contradicted", "at_or_past_litestream's_saved_position"},
-			wantStarts:  1,
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetShapeNotReached,
+			wantMessage:   "shape contradicted: a post-stop wal generation wrote up to",
+			wantSummary:   []string{"shape_evidence=contradicted", "at_or_past_litestream's_saved_position"},
+			wantStarts:    1,
+		},
+		{
+			name: "an earlier post-stop generation longer than the final one contradicts the shape",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.fatGeneration = 2
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetShapeNotReached,
+			wantMessage:   "past the final generation's",
+			wantSummary:   []string{"shape_evidence=contradicted", "wal_resets=5"},
+			wantStarts:    1,
 		},
 		{
 			name: "a wal that shrinks below the saved position contradicts the shape",
@@ -507,9 +605,23 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 				wal.shrink = true
 				return &walResetScript{wal: wal}
 			},
-			wantStatus:  "passed",
-			wantSummary: []string{"shape_evidence=contradicted", "the_wal_shrank"},
-			wantStarts:  1,
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetShapeNotReached,
+			wantMessage:   "the wal shrank",
+			wantSummary:   []string{"shape_evidence=contradicted", "the_wal_shrank"},
+			wantStarts:    1,
+		},
+		{
+			name: "a read transaction that cannot be opened before the stop is inconclusive without a stop",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.holdErr = errors.New("database is locked")
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetUnavailable,
+			wantMessage:   "hold read transaction: database is locked",
+			wantStarts:    0,
 		},
 		{
 			name: "fewer than three resets while litestream is down is not the reported shape",
@@ -636,7 +748,7 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureWALResetUnavailable,
-			wantMessage:   "burst write while litestream was down: database is locked",
+			wantMessage:   "while litestream was down: database is locked",
 			wantStarts:    1,
 		},
 		{
@@ -807,15 +919,17 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			wantStarts:    1,
 		},
 		{
-			name: "litestream's own shutdown reset is not counted and the baseline is the header after exit",
+			name: "a shutdown reset the reader did not block moves the saved position to the start of the wal, which contradicts the shape",
 			script: func() *walResetScript {
 				wal := newFakeWAL()
 				wal.shutdownReset = true
 				return &walResetScript{wal: wal}
 			},
-			wantStatus:  "passed",
-			wantSummary: []string{"wal_resets=5", "salt1_before=1001 salt1_after=1006", "salt1_at_signal=1000"},
-			wantStarts:  1,
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetShapeNotReached,
+			wantMessage:   fmt.Sprintf("at or past litestream's saved position %d", walHeaderSize+fakeFrameSize),
+			wantSummary:   []string{"wal_resets=5", "shape_evidence=contradicted", fmt.Sprintf("saved_position=%d", walHeaderSize+fakeFrameSize), "salt1_before=1001 salt1_after=1006", "salt1_at_signal=1000"},
+			wantStarts:    1,
 		},
 		{
 			name: "an unreadable wal header after exit is inconclusive and restarts litestream",
@@ -959,6 +1073,28 @@ func TestWALResetCycleStopsLitestreamOnlyAfterTheBurstIsDeepEnough(t *testing.T)
 	}
 	if wal.stops != 1 || wal.starts != 1 || wal.live != 1 {
 		t.Fatalf("stops %d starts %d live %d, want one each", wal.stops, wal.starts, wal.live)
+	}
+	if wal.readerHolds != 1 || wal.readerReleases != 1 || wal.readerHeld || observation.readerHeldAt < check.readerHoldBytes || observation.readerHeldAt >= check.burstBytes {
+		t.Fatalf("reader holds %d releases %d held %v at %d, want one hold between %d and %d released before the down window", wal.readerHolds, wal.readerReleases, wal.readerHeld, observation.readerHeldAt, check.readerHoldBytes, check.burstBytes)
+	}
+	if observation.checkpoints != observation.resets || wal.checkpoints != 5 {
+		t.Fatalf("checkpoints %d (fake ran %d) resets %d, want the reset count and one checkpoint per reset", observation.checkpoints, wal.checkpoints, observation.resets)
+	}
+	ends := []int64{}
+	for k := uint32(1); k <= check.targetResets; k++ {
+		ends = append(ends, int64(check.generationRows(k)+1)*fakeFrameSize)
+	}
+	if observation.finalWAL.writtenEnd() != walHeaderSize+ends[len(ends)-1] || observation.maxEarlierGenerationWritten != walHeaderSize+ends[len(ends)-2] || observation.maxEarlierGenerationWritten >= observation.finalWAL.writtenEnd() {
+		t.Fatalf("final generation written end %d, earlier max %d, want %d and %d", observation.finalWAL.writtenEnd(), observation.maxEarlierGenerationWritten, walHeaderSize+ends[len(ends)-1], walHeaderSize+ends[len(ends)-2])
+	}
+}
+
+func TestWALResetCheckpointsUnderflowIsNotReported(t *testing.T) {
+	observation := walResetObservation{savedHeader: walHeader{valid: true, checkpointSeq: 50, salt1: 10}, resets: 5, checkpoints: 5}
+	observation.finalWAL = walGeneration{header: walHeader{valid: true, checkpointSeq: 4, salt1: 15}}
+	summary := observation.summary()
+	if !strings.Contains(summary, "checkpoints=5") || !strings.Contains(summary, "ckpt_seq_before=50 ckpt_seq_after=4") {
+		t.Fatalf("summary = %s", summary)
 	}
 }
 
