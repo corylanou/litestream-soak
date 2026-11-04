@@ -75,12 +75,21 @@ type walGeneration struct {
 	frameSize       int64
 	frameSlots      int64
 	committedFrames int64
+	// writtenFrames counts every frame of the current generation, committed
+	// or not; an uncommitted frame still overwrites the slot it lands on.
+	writtenFrames int64
 }
 
 // generationEnd is the byte offset just past the current generation's last
 // committed frame.
 func (g walGeneration) generationEnd() int64 {
 	return walHeaderSize + g.committedFrames*g.frameSize
+}
+
+// writtenEnd is the byte offset just past the current generation's last
+// written frame.
+func (g walGeneration) writtenEnd() int64 {
+	return walHeaderSize + g.writtenFrames*g.frameSize
 }
 
 func readWALGeneration(path string) (walGeneration, error) {
@@ -132,6 +141,7 @@ func walkWALGeneration(r io.ReaderAt, fileBytes int64) (walGeneration, error) {
 		if s0 != binary.BigEndian.Uint32(frame[16:20]) || s1 != binary.BigEndian.Uint32(frame[20:24]) {
 			break
 		}
+		generation.writtenFrames = i + 1
 		if binary.BigEndian.Uint32(frame[4:8]) != 0 {
 			generation.committedFrames = i + 1
 		}

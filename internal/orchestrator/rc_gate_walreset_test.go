@@ -37,7 +37,7 @@ func TestGateWALResetProfileIsOptIn(t *testing.T) {
 			t.Fatalf("%s fleet = %+v", source, spec.Workers)
 		}
 		cfg := normalizeWorkloadConfig(spec.Workers[0].Workload)
-		if !cfg.WALResetCheck || cfg.VFSReaderCheck || !cfg.LTXCoverageCheck || cfg.SnapshotInterval != "48h" || cfg.CPUs != 2 || cfg.MemoryMB != 2048 || spec.Workers[0].VolumeSizeGB != 10 {
+		if !cfg.WALResetCheck || cfg.VFSReaderCheck || !cfg.LTXCoverageCheck || cfg.SnapshotInterval != "8760h" || cfg.CPUs != 2 || cfg.MemoryMB != 2048 || spec.Workers[0].VolumeSizeGB != 10 {
 			t.Fatalf("%s gate-walreset config = %+v", source, cfg)
 		}
 		env := (&Manager{}).workerEnv(model.Worker{ID: spec.Workers[0].WorkerID, Name: spec.Workers[0].Name, Source: source}, cfg)

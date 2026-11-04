@@ -255,13 +255,15 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	if r.walResetCheckEnabled() {
 		walReset := newWALResetCheck(r.cfg)
-		walReset.stop = func(ctx context.Context) error { return r.stopLitestreamForCheck(ctx, syscall.SIGTERM) }
+		walReset.stop = func(ctx context.Context) (string, error) { return r.stopLitestreamForCheck(ctx, syscall.SIGTERM) }
 		walReset.start = func(ctx context.Context) error {
-			if err := r.startLitestream(litestreamCtx); err != nil {
-				return err
-			}
-			r.monitorLitestream(runCtx, cancelRun)
-			return r.waitForFirstSync(ctx)
+			return r.ensureLitestreamForCheck(ctx, func() error {
+				if err := r.startLitestream(litestreamCtx); err != nil {
+					return err
+				}
+				r.monitorLitestream(runCtx, cancelRun)
+				return nil
+			})
 		}
 		walReset.validate = walResetValidator(r.cfg, r.objectStore, pausers)
 		walReset.uploaded = r.walResetUploadedCounter

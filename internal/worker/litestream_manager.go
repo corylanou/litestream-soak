@@ -455,6 +455,28 @@ func (m *litestreamManager) currentProcess() *litestreamProcess {
 	return m.litestreamProc
 }
 
+// litestreamRunning reports whether the current Litestream process has not
+// exited yet.
+func (m *litestreamManager) litestreamRunning() bool {
+	proc := m.currentProcess()
+	if proc == nil {
+		return false
+	}
+	select {
+	case <-proc.done:
+		return false
+	default:
+		return true
+	}
+}
+
+// litestreamExitExpected reports whether the current process was asked to
+// stop by the harness.
+func (m *litestreamManager) litestreamExitExpected() bool {
+	proc := m.currentProcess()
+	return proc != nil && proc.exitExpected()
+}
+
 func (m *litestreamManager) litestreamEnv() []string {
 	return m.cfg.s3CommandEnv(m.s3FaultProxyEndpoint)
 }

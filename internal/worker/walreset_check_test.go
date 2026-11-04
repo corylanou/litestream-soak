@@ -93,7 +93,7 @@ func (b *walBuilder) reset() {
 	b.writeHeader()
 }
 
-func TestWalkWALGenerationCountsOnlyTheCurrentGenerationsCommittedFrames(t *testing.T) {
+func TestWalkWALGenerationCountsOnlyTheCurrentGenerationsFrames(t *testing.T) {
 	for _, bigEndian := range []bool{false, true} {
 		wal := newWALBuilder(bigEndian, 1000, 77)
 		for page := uint32(1); page <= 2000; page++ {
@@ -103,7 +103,7 @@ func TestWalkWALGenerationCountsOnlyTheCurrentGenerationsCommittedFrames(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !before.header.valid || before.committedFrames != 2000 || before.frameSlots != 2000 || before.frameSize != testWALPageSize+walFrameHeaderSize {
+		if !before.header.valid || before.committedFrames != 2000 || before.writtenFrames != 2000 || before.frameSlots != 2000 || before.frameSize != testWALPageSize+walFrameHeaderSize {
 			t.Fatalf("big-endian %v before reset = %+v", bigEndian, before)
 		}
 
@@ -116,11 +116,11 @@ func TestWalkWALGenerationCountsOnlyTheCurrentGenerationsCommittedFrames(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
-		if after.committedFrames != 300 || after.frameSlots != 2000 || after.fileBytes != int64(len(wal.buf)) || after.header.salt1 != 1001 {
-			t.Fatalf("big-endian %v after reset = %+v, want 300 committed frames in a 2000-slot file", bigEndian, after)
+		if after.committedFrames != 300 || after.writtenFrames != 301 || after.frameSlots != 2000 || after.fileBytes != int64(len(wal.buf)) || after.header.salt1 != 1001 {
+			t.Fatalf("big-endian %v after reset = %+v, want 300 committed and 301 written frames in a 2000-slot file", bigEndian, after)
 		}
-		if walResetCount(before.header, after.header) != 1 || after.generationEnd() != walHeaderSize+300*after.frameSize {
-			t.Fatalf("reset count %d generation end %d", walResetCount(before.header, after.header), after.generationEnd())
+		if walResetCount(before.header, after.header) != 1 || after.generationEnd() != walHeaderSize+300*after.frameSize || after.writtenEnd() != walHeaderSize+301*after.frameSize {
+			t.Fatalf("reset count %d generation end %d written end %d", walResetCount(before.header, after.header), after.generationEnd(), after.writtenEnd())
 		}
 
 		wal.appendFrame(302, true, true)
@@ -129,7 +129,7 @@ func TestWalkWALGenerationCountsOnlyTheCurrentGenerationsCommittedFrames(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
-		if corrupt.committedFrames != 300 {
+		if corrupt.committedFrames != 300 || corrupt.writtenFrames != 301 {
 			t.Fatalf("frames after a bad checksum counted: %+v", corrupt)
 		}
 	}
@@ -183,35 +183,73 @@ func TestWALResetUploadedBytes(t *testing.T) {
 	}
 }
 
-// fakeWAL stands in for the primary's WAL: bursts add one committed frame per
-// row to the current generation, and while Litestream is down every
-// autocheckpoint worth of frames restarts the generation at frame 0 with new
-// salts while the physical file keeps its size, as SQLite does without a
-// journal_size_limit. Litestream's saved position is the generation end at
-// the stop, exposed as its newest L0 LTX header.
+func TestCheckWALResetLatestTXIDRequiresTheBoundary(t *testing.T) {
+	if err := checkWALResetLatestTXID(500, 500); err != nil {
+		t.Fatalf("exact boundary rejected: %v", err)
+	}
+	if err := checkWALResetLatestTXID(499, 500); err == nil || !strings.Contains(err.Error(), "landed on txid 00000000000001f3, boundary 00000000000001f4") || errors.Is(err, errWALResetMissingPlan) {
+		t.Fatalf("behind the boundary = %v, want a restore failure", err)
+	}
+	if err := checkWALResetLatestTXID(501, 500); err == nil || errors.Is(err, errWALResetMissingPlan) {
+		t.Fatalf("ahead of the boundary = %v, want a restore failure", err)
+	}
+	if err := checkWALResetLatestTXID(0, 500); !errors.Is(err, errWALResetMissingPlan) {
+		t.Fatalf("missing plan = %v, want %v", err, errWALResetMissingPlan)
+	}
+}
+
+func TestL9IdentitiesSeeReplacedSnapshots(t *testing.T) {
+	before := l9Identities([]restorePlanCandidate{{level: 9, minTXID: 1, maxTXID: 0x400, createdAt: "2026-11-03T09:00:00Z"}, {level: 0, minTXID: 0x401, maxTXID: 0x401}})
+	same := l9Identities([]restorePlanCandidate{{level: 9, minTXID: 1, maxTXID: 0x400, createdAt: "2026-11-03T09:00:00Z"}, {level: 1, minTXID: 1, maxTXID: 0x420}})
+	replaced := l9Identities([]restorePlanCandidate{{level: 9, minTXID: 1, maxTXID: 0x7ff, createdAt: "2026-11-03T09:40:00Z"}})
+	added := l9Identities([]restorePlanCandidate{{level: 9, minTXID: 1, maxTXID: 0x400, createdAt: "2026-11-03T09:00:00Z"}, {level: 9, minTXID: 1, maxTXID: 0x7ff, createdAt: "2026-11-03T09:40:00Z"}})
+	if !before.known || before.count() != 1 || before.changed(same) {
+		t.Fatalf("identical listings differ: %+v vs %+v", before, same)
+	}
+	if !before.changed(replaced) || !before.changed(added) || replaced.count() != 1 || added.count() != 2 {
+		t.Fatalf("replaced %+v or added %+v snapshot not seen against %+v", replaced, added, before)
+	}
+	if none := l9Identities(nil); !none.known || none.count() != 0 || none.changed(l9Identities([]restorePlanCandidate{})) {
+		t.Fatalf("empty listing = %+v", none)
+	}
+}
+
+// fakeWAL stands in for the primary's WAL and the Litestream process. Bursts
+// add one committed frame per row to the current generation, and while
+// Litestream is down every autocheckpoint worth of frames restarts the
+// generation at frame 0 with new salts while the physical file keeps its
+// size, as SQLite does without a journal_size_limit. Litestream's saved
+// position is the generation end at the stop, exposed as its newest L0 LTX
+// header. The process model tracks live processes so a recovery that starts
+// a second one is visible.
 type fakeWAL struct {
-	mu            sync.Mutex
-	header        walHeader
-	frames        int64
-	slots         int64
-	down          bool
-	resetEvery    int64
-	maxResets     uint32
-	resets        uint32
-	overrun       bool
-	shrink        bool
-	saved         litestreamSavedPosition
-	savedFound    bool
-	readErr       error
-	downReadErr   error
-	downBurstErr  error
+	mu           sync.Mutex
+	header       walHeader
+	frames       int64
+	slots        int64
+	down         bool
+	resetEvery   int64
+	maxResets    uint32
+	resets       uint32
+	overrun      bool
+	shrink       bool
+	saved        litestreamSavedPosition
+	savedFound   bool
+	savedStale   bool
+	readErr      error
+	downReadErr  error
+	downBurstErr error
+
+	live          int
+	stopPending   bool
+	startFailOnce bool
 	stops, starts int
 }
 
 const fakeFrameSize = testWALPageSize + walFrameHeaderSize
 
 func newFakeWAL() *fakeWAL {
-	return &fakeWAL{header: walHeader{valid: true, pageSize: testWALPageSize, checkpointSeq: 40, salt1: 1000, salt2: 77}, resetEvery: 1000, maxResets: 1 << 30, savedFound: true}
+	return &fakeWAL{header: walHeader{valid: true, pageSize: testWALPageSize, checkpointSeq: 40, salt1: 1000, salt2: 77}, resetEvery: 1000, maxResets: 1 << 30, savedFound: true, live: 1}
 }
 
 func (w *fakeWAL) generation() (walGeneration, error) {
@@ -223,7 +261,7 @@ func (w *fakeWAL) generation() (walGeneration, error) {
 	if w.down && w.downReadErr != nil {
 		return walGeneration{}, w.downReadErr
 	}
-	return walGeneration{header: w.header, fileBytes: walHeaderSize + w.slots*fakeFrameSize, frameSize: fakeFrameSize, frameSlots: w.slots, committedFrames: w.frames}, nil
+	return walGeneration{header: w.header, fileBytes: walHeaderSize + w.slots*fakeFrameSize, frameSize: fakeFrameSize, frameSlots: w.slots, committedFrames: w.frames, writtenFrames: w.frames}, nil
 }
 
 func (w *fakeWAL) burst(_ context.Context, rows int) (int, error) {
@@ -251,19 +289,43 @@ func (w *fakeWAL) burst(_ context.Context, rows int) (int, error) {
 	return rows, nil
 }
 
-func (w *fakeWAL) stop(context.Context) error {
+// stop is the SIGTERM: the process exits and the WAL is down. With
+// stopPending the signal is delivered but the exit comes late, so the call
+// times out while the process is still alive.
+func (w *fakeWAL) stop(context.Context) (string, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.stops++
 	w.down = true
 	w.saved = litestreamSavedPosition{walOffsetEnd: walHeaderSize + w.frames*fakeFrameSize, salt1: w.header.salt1, salt2: w.header.salt2, found: true, file: "0000000000000001-0000000000000400.ltx"}
-	return nil
+	if w.savedStale {
+		w.saved.salt1--
+	}
+	if w.stopPending {
+		return "", errors.New("litestream did not exit after terminated: context deadline exceeded")
+	}
+	w.live--
+	return "exit:0", nil
 }
 
+// start is the manager's ensure step: a stopping process is replaced, a live
+// one is kept, and a fresh one is started only when none is alive. With
+// startFailOnce the first start brings a process up that never becomes ready.
 func (w *fakeWAL) start(context.Context) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.starts++
+	if w.stopPending {
+		w.live--
+		w.stopPending = false
+	}
+	if w.live == 0 {
+		w.live++
+		w.starts++
+		if w.startFailOnce {
+			w.startFailOnce = false
+			return errors.New("timed out waiting for first sync")
+		}
+	}
 	w.down = false
 	return nil
 }
@@ -288,11 +350,14 @@ type walResetScript struct {
 	uploaded []uint64
 	gateErr  error
 	downtime []bool
-	interval time.Duration
+}
+
+func l9Of(objects ...string) walResetL9 {
+	return walResetL9{objects: objects, known: true}
 }
 
 func newTestWALResetCheck(script *walResetScript) *walResetCheck {
-	check := newWALResetCheck(Config{DBPath: "/data/test.db", SnapshotInterval: script.interval})
+	check := newWALResetCheck(Config{DBPath: "/data/test.db"})
 	check.pause = time.Hour
 	check.burstBytes = walHeaderSize + 3*1000*fakeFrameSize
 	check.burstBudget = 5 * time.Second
@@ -306,9 +371,9 @@ func newTestWALResetCheck(script *walResetScript) *walResetCheck {
 	check.generation = script.wal.generation
 	check.savedPosition = script.wal.savedPosition
 	check.burst = script.wal.burst
-	check.stop = func(ctx context.Context) error {
+	check.stop = func(ctx context.Context) (string, error) {
 		if script.stopErr != nil {
-			return script.stopErr
+			return "", script.stopErr
 		}
 		return script.wal.stop(ctx)
 	}
@@ -336,6 +401,9 @@ func newTestWALResetCheck(script *walResetScript) *walResetCheck {
 		}
 		return validation, walResetValidationError(script.phase, script.validErr)
 	}
+	if script.l9 == nil {
+		script.l9 = []walResetL9{l9Of("0000000000000001-0000000000000400@2026-11-03T09:00:00Z"), l9Of("0000000000000001-0000000000000400@2026-11-03T09:00:00Z")}
+	}
 	l9Calls, uploadCalls := 0, 0
 	check.l9 = func() walResetL9 {
 		if l9Calls >= len(script.l9) {
@@ -362,8 +430,6 @@ func newTestWALResetCheck(script *walResetScript) *walResetCheck {
 }
 
 func TestWALResetCycleStateMachine(t *testing.T) {
-	recent := time.Now().Add(-2 * time.Hour)
-	old := time.Now().Add(-49 * time.Hour)
 	tests := []struct {
 		name          string
 		script        func() *walResetScript
@@ -375,43 +441,56 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 		wantStarts    int
 	}{
 		{
-			name: "five resets below litestream's saved position then intact pinned and latest restores pass",
+			name: "five resets below litestream's saved position then intact pinned and latest restores pass with the shape confirmed",
 			script: func() *walResetScript {
-				return &walResetScript{wal: newFakeWAL(), interval: 48 * time.Hour, l9: []walResetL9{{count: 1, newestAt: recent, known: true}, {count: 1, newestAt: recent, known: true}}, uploaded: []uint64{1000, 5000, 9000}}
+				return &walResetScript{wal: newFakeWAL(), uploaded: []uint64{1000, 5000, 9000}}
 			},
 			wantStatus:  "passed",
-			wantSummary: []string{"wal_resets=5", "checkpoints=5", "generations_seen=6", "saved_position_source=ltx:", "l9_before=1 l9_after=1 l9_new=none", "uploaded_bytes=8000", "pinned_restore=passed latest_restore=passed restored_txid=00000000000001f4", "catchup_txid=00000000000001f4"},
+			wantSummary: []string{"wal_resets=5", "checkpoints=5", "generations_seen=6", "shape_evidence=confirmed", "saved_position_ltx=0000000000000001-0000000000000400.ltx", "litestream_exit=exit:0", "l9_before=1 l9_after=1 l9_changed=false", "uploaded_bytes=8000", "pinned_restore=passed latest_restore=passed restored_txid=00000000000001f4", "catchup_txid=00000000000001f4"},
 			wantStarts:  1,
 		},
 		{
-			name: "a reset-triggered snapshot is recorded and the cycle still counts",
-			script: func() *walResetScript {
-				return &walResetScript{wal: newFakeWAL(), interval: 48 * time.Hour, l9: []walResetL9{{count: 1, newestAt: recent, known: true}, {count: 2, newestAt: time.Now(), known: true}}}
-			},
-			wantStatus:  "passed",
-			wantSummary: []string{"l9_before=1 l9_after=2 l9_new=reset"},
-			wantStarts:  1,
-		},
-		{
-			name: "a scheduled snapshot during the cycle is interference",
-			script: func() *walResetScript {
-				return &walResetScript{wal: newFakeWAL(), interval: 48 * time.Hour, l9: []walResetL9{{count: 1, newestAt: old, known: true}, {count: 2, newestAt: time.Now(), known: true}}}
-			},
-			wantStatus:    "aborted",
-			wantSignature: reporting.SignatureWALResetSnapshotInterference,
-			wantMessage:   "a new L9 appeared during the cycle (1 -> 2)",
-			wantSummary:   []string{"l9_new=scheduled"},
-			wantStarts:    1,
-		},
-		{
-			name: "litestream's position falls back to the wal end at exit when no ltx matches",
+			name: "no readable ltx position leaves the shape unverified but the cycle still counts",
 			script: func() *walResetScript {
 				wal := newFakeWAL()
 				wal.savedFound = false
 				return &walResetScript{wal: wal}
 			},
 			wantStatus:  "passed",
-			wantSummary: []string{"saved_position_source=wal_end_at_exit"},
+			wantSummary: []string{"shape_evidence=unverified", "saved_position=0 saved_position_ltx=none"},
+			wantStarts:  1,
+		},
+		{
+			name: "an ltx file from another generation is not used as the saved position",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.savedStale = true
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:  "passed",
+			wantSummary: []string{"shape_evidence=unverified", "saved_position=0"},
+			wantStarts:  1,
+		},
+		{
+			name: "a generation that reaches the saved position contradicts the shape but the cycle still counts",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.overrun = true
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:  "passed",
+			wantSummary: []string{"shape_evidence=contradicted", "at_or_past_litestream's_saved_position"},
+			wantStarts:  1,
+		},
+		{
+			name: "a wal that shrinks below the saved position contradicts the shape",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.shrink = true
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:  "passed",
+			wantSummary: []string{"shape_evidence=contradicted", "the_wal_shrank"},
 			wantStarts:  1,
 		},
 		{
@@ -428,31 +507,54 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			wantStarts:    1,
 		},
 		{
-			name: "a generation that reaches the saved position rewrites the stale frame",
+			name: "a new L9 inside the cycle is snapshot interference even when the restores pass",
 			script: func() *walResetScript {
-				wal := newFakeWAL()
-				wal.overrun = true
-				return &walResetScript{wal: wal}
+				return &walResetScript{wal: newFakeWAL(), l9: []walResetL9{l9Of("0000000000000001-0000000000000400@2026-11-03T09:00:00Z"), l9Of("0000000000000001-0000000000000400@2026-11-03T09:00:00Z", "0000000000000001-00000000000007ff@2026-11-03T09:40:00Z")}}
 			},
 			wantStatus:    "aborted",
-			wantSignature: reporting.SignatureWALResetShapeNotReached,
-			wantMessage:   "so the frame there was rewritten",
+			wantSignature: reporting.SignatureWALResetSnapshotInterference,
+			wantMessage:   "L9 objects changed during the cycle (1 -> 2",
+			wantSummary:   []string{"l9_before=1 l9_after=2 l9_changed=true"},
 			wantStarts:    1,
 		},
 		{
-			name: "a wal that shrinks below the saved position has lost the stale frame",
+			name: "a replaced L9 with the same count is snapshot interference",
 			script: func() *walResetScript {
-				wal := newFakeWAL()
-				wal.shrink = true
-				return &walResetScript{wal: wal}
+				return &walResetScript{wal: newFakeWAL(), l9: []walResetL9{l9Of("0000000000000001-0000000000000400@2026-11-03T09:00:00Z"), l9Of("0000000000000001-00000000000007ff@2026-11-03T09:40:00Z")}}
 			},
 			wantStatus:    "aborted",
-			wantSignature: reporting.SignatureWALResetShapeNotReached,
-			wantMessage:   "so the stale frame is gone",
+			wantSignature: reporting.SignatureWALResetSnapshotInterference,
+			wantMessage:   "L9 objects changed during the cycle (1 -> 1",
 			wantStarts:    1,
 		},
 		{
-			name: "a stop that does not exit is a litestream restart failure",
+			name: "snapshot interference outranks a corrupt restore",
+			script: func() *walResetScript {
+				return &walResetScript{wal: newFakeWAL(), phase: "integrity_check", validErr: errors.New("restored integrity: Page 50485: never used"), l9: []walResetL9{l9Of("a@1"), l9Of("b@2")}}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetSnapshotInterference,
+			wantStarts:    1,
+		},
+		{
+			name:          "an unreadable L9 listing before the stop is snapshot interference",
+			script:        func() *walResetScript { return &walResetScript{wal: newFakeWAL(), l9: []walResetL9{{}, l9Of("a@1")}} },
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetSnapshotInterference,
+			wantMessage:   "could not be listed before the stop",
+			wantStarts:    1,
+		},
+		{
+			name:          "an unreadable L9 listing after the restores is snapshot interference",
+			script:        func() *walResetScript { return &walResetScript{wal: newFakeWAL(), l9: []walResetL9{l9Of("a@1"), {}}} },
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetSnapshotInterference,
+			wantMessage:   "could not be listed after the restores",
+			wantSummary:   []string{"l9_before=1 l9_after=unknown"},
+			wantStarts:    1,
+		},
+		{
+			name: "a stop that does not exit is a litestream restart failure and recovery restarts once",
 			script: func() *walResetScript {
 				return &walResetScript{wal: newFakeWAL(), stopErr: errors.New("litestream did not exit after terminated")}
 			},
@@ -460,6 +562,18 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			wantSignature: reporting.SignatureWALResetLitestreamRestartFailed,
 			wantMessage:   "stop: litestream did not exit",
 			wantStarts:    0,
+		},
+		{
+			name: "a stop that completes late is replaced by exactly one running litestream",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.stopPending = true
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetLitestreamRestartFailed,
+			wantMessage:   "stop: litestream did not exit after terminated",
+			wantStarts:    1,
 		},
 		{
 			name: "a start that fails is a litestream restart failure",
@@ -470,6 +584,18 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			wantSignature: reporting.SignatureWALResetLitestreamRestartFailed,
 			wantMessage:   "start: timed out waiting for first sync",
 			wantStarts:    0,
+		},
+		{
+			name: "a start whose socket wait times out is recovered without a second process",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.startFailOnce = true
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetLitestreamRestartFailed,
+			wantMessage:   "start: timed out waiting for first sync",
+			wantStarts:    1,
 		},
 		{
 			name: "a wal read error after the stop still restarts litestream",
@@ -546,13 +672,33 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			wantStarts:    1,
 		},
 		{
-			name: "a latest restore that differs logically is a logical mismatch",
+			name: "a latest restore behind the synced boundary is a restore failure",
 			script: func() *walResetScript {
-				return &walResetScript{wal: newFakeWAL(), phase: "latest_compare", validErr: errors.New("table wal_reset_burst: 80 rows restored, 201 in source")}
+				return &walResetScript{wal: newFakeWAL(), phase: "latest_boundary", validErr: checkWALResetLatestTXID(499, 500)}
 			},
 			wantStatus:    "failed",
-			wantSignature: reporting.SignatureWALResetLogicalMismatch,
-			wantMessage:   "wal reset logical mismatch (latest): table wal_reset_burst",
+			wantSignature: reporting.SignatureWALResetRestoreFailed,
+			wantMessage:   "wal reset restore failed (latest): latest restore landed on txid 00000000000001f3, boundary 00000000000001f4",
+			wantStarts:    1,
+		},
+		{
+			name: "a latest restore ahead of the synced boundary is a restore failure",
+			script: func() *walResetScript {
+				return &walResetScript{wal: newFakeWAL(), phase: "latest_boundary", validErr: checkWALResetLatestTXID(501, 500)}
+			},
+			wantStatus:    "failed",
+			wantSignature: reporting.SignatureWALResetRestoreFailed,
+			wantMessage:   "wal reset restore failed (latest): latest restore landed on txid 00000000000001f5, boundary 00000000000001f4",
+			wantStarts:    1,
+		},
+		{
+			name: "a latest restore without a plan txid is inconclusive",
+			script: func() *walResetScript {
+				return &walResetScript{wal: newFakeWAL(), phase: "latest_boundary", validErr: checkWALResetLatestTXID(0, 500)}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetUnavailable,
+			wantMessage:   "latest_boundary: latest restore reported no plan txid",
 			wantStarts:    1,
 		},
 		{
@@ -573,16 +719,6 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureWALResetUnavailable,
 			wantMessage:   "compare ran out of time, no corruption evidence",
-			wantStarts:    1,
-		},
-		{
-			name: "a latest restore whose target is not the boundary is inconclusive",
-			script: func() *walResetScript {
-				return &walResetScript{wal: newFakeWAL(), phase: "latest_boundary", validErr: errors.New("latest restore behind boundary: restored 00000000000001f3 boundary 00000000000001f4")}
-			},
-			wantStatus:    "aborted",
-			wantSignature: reporting.SignatureWALResetUnavailable,
-			wantMessage:   "latest_boundary: latest restore behind boundary",
 			wantStarts:    1,
 		},
 		{
@@ -656,8 +792,8 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			if script.wal.starts != tt.wantStarts {
 				t.Fatalf("litestream starts = %d, want %d", script.wal.starts, tt.wantStarts)
 			}
-			if script.wal.stops > 0 && script.wal.starts == 0 && tt.wantStarts > 0 {
-				t.Fatal("litestream left stopped")
+			if script.wal.live != 1 && (script.stopErr == nil && script.startErr == nil) {
+				t.Fatalf("live litestream processes = %d, want exactly one", script.wal.live)
 			}
 		})
 	}
@@ -674,8 +810,8 @@ func TestWALResetCycleStopsLitestreamOnlyAfterTheBurstIsDeepEnough(t *testing.T)
 	if observation.savedAtSignal < check.burstBytes || observation.savedPosition < observation.savedAtSignal || observation.savedPosition > observation.savedAtExit {
 		t.Fatalf("saved position %d not bracketed by signal %d and exit %d, burst floor %d", observation.savedPosition, observation.savedAtSignal, observation.savedAtExit, check.burstBytes)
 	}
-	if observation.maxGenerationEnd >= observation.savedPosition || observation.finalWAL.fileBytes < observation.savedPosition {
-		t.Fatalf("generation end %d against saved position %d in a %d-byte file", observation.maxGenerationEnd, observation.savedPosition, observation.finalWAL.fileBytes)
+	if shape, _ := observation.shapeEvidence(); shape != walResetShapeConfirmed || observation.maxGenerationWritten >= observation.savedPosition || observation.finalWAL.fileBytes < observation.savedPosition {
+		t.Fatalf("shape %s: written end %d against saved position %d in a %d-byte file", shape, observation.maxGenerationWritten, observation.savedPosition, observation.finalWAL.fileBytes)
 	}
 	if observation.resets != 5 || observation.savedHeader.salt1 != 1000 || observation.finalWAL.header.salt1 != 1005 || observation.savedPositionSalt1 != 1000 {
 		t.Fatalf("resets = %d salt1 %d -> %d (saved from %d), want 5 from 1000 to 1005", observation.resets, observation.savedHeader.salt1, observation.finalWAL.header.salt1, observation.savedPositionSalt1)
@@ -683,8 +819,8 @@ func TestWALResetCycleStopsLitestreamOnlyAfterTheBurstIsDeepEnough(t *testing.T)
 	if !strings.Contains(observation.summary(), "salt1_before=1000 salt1_after=1005 ckpt_seq_before=40 ckpt_seq_after=45") {
 		t.Fatalf("summary = %s", observation.summary())
 	}
-	if wal.stops != 1 || wal.starts != 1 {
-		t.Fatalf("stops %d starts %d, want one each", wal.stops, wal.starts)
+	if wal.stops != 1 || wal.starts != 1 || wal.live != 1 {
+		t.Fatalf("stops %d starts %d live %d, want one each", wal.stops, wal.starts, wal.live)
 	}
 }
 
@@ -744,7 +880,13 @@ func TestMonitorProcessIgnoresAnExpectedExitEvenAfterARestart(t *testing.T) {
 	first := &litestreamProcess{done: make(chan struct{})}
 	manager.litestreamProc = first
 	manager.monitorProcess(ctx, cancel, first)
+	if !manager.litestreamRunning() || manager.litestreamExitExpected() {
+		t.Fatalf("running=%v expected=%v before the stop", manager.litestreamRunning(), manager.litestreamExitExpected())
+	}
 	first.markExpectedExit()
+	if !manager.litestreamRunning() || !manager.litestreamExitExpected() {
+		t.Fatalf("running=%v expected=%v after the stop was requested", manager.litestreamRunning(), manager.litestreamExitExpected())
+	}
 
 	second := &litestreamProcess{done: make(chan struct{})}
 	manager.litestreamProc = second
@@ -756,11 +898,14 @@ func TestMonitorProcessIgnoresAnExpectedExitEvenAfterARestart(t *testing.T) {
 		t.Fatalf("expected exit of the stopped process cancelled the run: %v", context.Cause(ctx))
 	case <-time.After(50 * time.Millisecond):
 	}
-	if manager.litestreamExitError() != nil {
-		t.Fatalf("exit error of the new process = %v, want none", manager.litestreamExitError())
+	if manager.litestreamExitError() != nil || !manager.litestreamRunning() || manager.litestreamExitExpected() {
+		t.Fatalf("new process: err=%v running=%v expected=%v", manager.litestreamExitError(), manager.litestreamRunning(), manager.litestreamExitExpected())
 	}
 
 	second.finish(errors.New("exit status 2"), nil)
+	if manager.litestreamRunning() {
+		t.Fatal("exited process still reported running")
+	}
 	select {
 	case <-ctx.Done():
 		if cause := context.Cause(ctx); cause == nil || !strings.Contains(cause.Error(), "exit status 2") {
@@ -768,5 +913,18 @@ func TestMonitorProcessIgnoresAnExpectedExitEvenAfterARestart(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("unexpected exit of the running process did not cancel the run")
+	}
+}
+
+func TestDescribeProcessExit(t *testing.T) {
+	code := 0
+	if got := describeProcessExit(&reporting.ProcessExitSnapshot{ExitCode: &code}); got != "exit:0" {
+		t.Fatalf("clean exit = %q", got)
+	}
+	if got := describeProcessExit(&reporting.ProcessExitSnapshot{Signal: "terminated", Error: "signal: terminated"}); got != "signal:terminated" {
+		t.Fatalf("signalled exit = %q", got)
+	}
+	if got := describeProcessExit(nil); got != "unknown" {
+		t.Fatalf("missing snapshot = %q", got)
 	}
 }

@@ -770,7 +770,7 @@ func rcGateWorkers() []DesiredWorker {
 				InitialSize:              "20MB",
 				VerifyInterval:           "30m",
 				VerifyType:               "integrity",
-				SnapshotInterval:         "48h",
+				SnapshotInterval:         "8760h",
 				SyncInterval:             "1s",
 				L1CompactionInterval:     "30s",
 				L2CompactionInterval:     "5m",
