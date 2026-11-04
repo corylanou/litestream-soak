@@ -27,8 +27,13 @@ func (s loadRetentionStats) outputTail() string {
 	return fmt.Sprintf("retries=%d rows_trimmed=%d completed=%t", s.Retries, s.RowsTrimmed, s.Completed)
 }
 
+// boundedLoadProfile reports whether the load table is trimmed to
+// heavyLoadMaxRows at every verification. A stress scenario phase is judged
+// by its scenario, not by the profile that schedules it, so the gate-stress
+// phases are bounded exactly like the standalone pinned-reader and
+// overload-truncate0 profiles.
 func (c Config) boundedLoadProfile() bool {
-	switch c.ProfileName {
+	switch firstNonEmpty(c.stressScenario, c.ProfileName) {
 	case "high-volume", "high-vol-ams", "burst-volume", "gharchive-replay", "gharchive-mixed", "pinned-reader", "overload-truncate0":
 		return !c.ManyDBEnabled() && !c.churnEnabled()
 	default:
