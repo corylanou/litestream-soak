@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -908,6 +909,67 @@ func TestDeploymentReadyPersistsBeforeAcceptanceWhileSourceLocked(t *testing.T) 
 	after, err := buildDeploymentRollout(db, *oldDeployment)
 	if err != nil || after.Status != "superseded" {
 		t.Fatalf("old rollout = %s, %v; want superseded", after.Status, err)
+	}
+}
+
+func TestDeploymentReadyReturnsRetryableWhileTheWriterIsHeld(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := model.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	unlock, err := manager.lockSource(context.Background(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiCtx, cancelAPI := context.WithCancel(context.Background())
+	api := NewAPIWithContext(apiCtx, db, nil, nil, nil, manager, NewDeployer(manager, db, "litestream-soak", false))
+	defer func() { cancelAPI(); unlock(); waitForAPIRollouts(t, api) }()
+
+	holder, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(1000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Close() }()
+	ctx := context.Background()
+	holding, err := holder.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holding.Close() }()
+	if _, err := holding.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+
+	deploymentReadyRecordTimeout = 500 * time.Millisecond
+	defer func() { deploymentReadyRecordTimeout = 60 * time.Second }()
+	started := time.Now()
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?source=main&sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil)
+	response := httptest.NewRecorder()
+	api.handleDeploymentReady(response, request)
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "15" {
+		t.Fatalf("status = %d retry-after %q: %s; want 503 with Retry-After while the writer is held", response.Code, response.Header().Get("Retry-After"), response.Body.String())
+	}
+	if elapsed := time.Since(started); elapsed > 40*time.Second {
+		t.Fatalf("handler held the request for %s with the writer busy", elapsed)
+	}
+	if latest, err := db.GetLatestReadyDeployment("main"); err != nil || latest != nil {
+		t.Fatalf("deployment recorded while the writer was held: %+v, %v", latest, err)
+	}
+
+	if _, err := holding.ExecContext(ctx, "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	api.handleDeploymentReady(response, httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?source=main&sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("retry status = %d: %s; want 202 once the writer is free", response.Code, response.Body.String())
+	}
+	latest, err := db.GetLatestReadyDeployment("main")
+	if err != nil || latest == nil || latest.GitSHA != "2222222" {
+		t.Fatalf("retried deployment not recorded: %+v, %v", latest, err)
 	}
 }
 

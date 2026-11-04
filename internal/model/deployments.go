@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -98,7 +99,14 @@ func (d *DB) UpdateDeployment(id int64, status, imageRef, errMsg string) error {
 }
 
 func (d *DB) UpsertReadyDeployment(dep *Deployment) error {
-	tx, err := d.writer.Begin()
+	return d.UpsertReadyDeploymentContext(context.Background(), dep)
+}
+
+// UpsertReadyDeploymentContext records a ready deployment, waiting for the
+// writer connection and the database write lock only as long as ctx allows,
+// so a caller with a deadline is not held behind a long maintenance pass.
+func (d *DB) UpsertReadyDeploymentContext(ctx context.Context, dep *Deployment) error {
+	tx, err := d.writer.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}

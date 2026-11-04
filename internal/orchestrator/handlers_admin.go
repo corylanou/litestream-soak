@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,20 @@ type deploymentReadyRequest struct {
 	Repository    string `json:"repository"`
 	ImageRef      string `json:"image_ref"`
 	Trigger       string `json:"trigger"`
+}
+
+// deploymentReadyRecordTimeout bounds how long the ready notification waits
+// for the control database's single writer, well inside the platform proxy's
+// 120-second limit, so a notification that lands behind a maintenance pass
+// gets a 503 with Retry-After instead of a proxy 502 after the deployment was
+// recorded anyway. Recording is an upsert, so the retry is safe.
+var deploymentReadyRecordTimeout = 60 * time.Second
+
+const deploymentReadyRetryAfter = 15 * time.Second
+
+func controlDatabaseBusy(err error) bool {
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "database is locked") || strings.Contains(text, "sqlite_busy")
 }
 
 func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
@@ -86,11 +101,18 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 		trigger = "deploy_ready"
 	}
 
-	target, err := a.deployer.recordDeploymentReady(r.Context(), source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger, request.Repository, request.WorkloadSHA)
+	recordCtx, cancelRecord := context.WithTimeout(r.Context(), deploymentReadyRecordTimeout)
+	defer cancelRecord()
+	target, err := a.deployer.recordDeploymentReady(recordCtx, source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger, request.Repository, request.WorkloadSHA)
 	if err != nil {
 		status := http.StatusInternalServerError
-		if errors.Is(err, errRCGateNotRegistered) || errors.Is(err, errRCGatePinned) || errors.Is(err, errRCGateClosed) {
+		switch {
+		case errors.Is(err, errRCGateNotRegistered), errors.Is(err, errRCGatePinned), errors.Is(err, errRCGateClosed):
 			status = http.StatusConflict
+		case r.Context().Err() == nil && (errors.Is(err, context.DeadlineExceeded) || controlDatabaseBusy(err)):
+			w.Header().Set("Retry-After", strconv.Itoa(int(deploymentReadyRetryAfter/time.Second)))
+			respondError(w, r, http.StatusServiceUnavailable, err, "control database busy, retry the ready notification")
+			return
 		}
 		respondError(w, r, status, err, "record ready deployment")
 		return

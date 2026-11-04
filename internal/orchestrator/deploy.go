@@ -161,12 +161,12 @@ func (d *Deployer) recordDeploymentReady(ctx context.Context, source, sha, lites
 		target.ImageRef = pinnedImage
 	}
 
-	if err := d.db.UpsertReadyDeployment(&target); err != nil {
+	if err := d.db.UpsertReadyDeploymentContext(ctx, &target); err != nil {
 		return model.Deployment{}, fmt.Errorf("record ready deployment: %w", err)
 	}
 
 	message := fmt.Sprintf("Image ready for soak %s / litestream %s via %s", trimSHA(sha), shortVersionValue(litestreamSHA), trigger)
-	if err := d.db.RecordEvent("", "deploy_ready_received", message, imageRef); err != nil {
+	if err := d.db.RecordEventContext(ctx, "", "deploy_ready_received", message, imageRef); err != nil {
 		return model.Deployment{}, fmt.Errorf("record deploy event: %w", err)
 	}
 

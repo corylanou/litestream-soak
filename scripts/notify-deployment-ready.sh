@@ -70,8 +70,42 @@ payload="$(jq -n \
     workload_sha: $workload_sha
   }')"
 
-curl -sS --fail-with-body --max-time 180 -X POST \
-  "${auth_args[@]}" \
-  -H "Content-Type: application/json" \
-  "${base_url}/api/admin/deployments/ready" \
-  -d "$payload"
+# The control plane records the deployment and rolls the fleet in the
+# background, and recording is an upsert, so posting again is safe. A post
+# can still die at the platform proxy's 120-second limit or get a 503 while
+# the control database is busy, so after any failed post the script checks
+# whether the deployment was recorded anyway and otherwise posts again until
+# the deadline.
+total_timeout="${NOTIFY_DEPLOYMENT_READY_TIMEOUT:-900}"
+poll_interval="${NOTIFY_DEPLOYMENT_READY_POLL_INTERVAL:-15}"
+deadline=$(( $(date +%s) + total_timeout ))
+
+recorded() {
+  curl -sS --max-time 30 "${auth_args[@]}" \
+    "${base_url}/api/deployments/latest?source=${source_name}" 2>/dev/null \
+    | jq -e --arg sha "$sha" --arg litestream_sha "$litestream_sha" --arg image_ref "$image_ref" \
+      '.deployment.git_sha == $sha and .deployment.litestream_sha == $litestream_sha and .deployment.image_ref == $image_ref' >/dev/null 2>&1
+}
+
+attempt=0
+while :; do
+  attempt=$((attempt + 1))
+  if curl -sS --fail-with-body --max-time 100 -X POST \
+    "${auth_args[@]}" \
+    -H "Content-Type: application/json" \
+    "${base_url}/api/admin/deployments/ready" \
+    -d "$payload"; then
+    exit 0
+  fi
+  echo >&2
+  echo "notify attempt ${attempt} did not get an acceptance; checking whether the deployment was recorded" >&2
+  if recorded; then
+    echo "deployment ${sha} / litestream ${litestream_sha} is recorded for ${source_name}" >&2
+    exit 0
+  fi
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "deployment ${sha} was not recorded within ${total_timeout}s" >&2
+    exit 1
+  fi
+  sleep "$poll_interval"
+done

@@ -82,7 +82,13 @@ in ctl logs. The hourly retention pass deletes evidence from archived
 deployments only after two newer deployments for that source exist and the
 entire runtime window is older than the retention window. It preserves the
 current deployment and the previous deployment used by the latest comparison,
-including main soak history needed by scorecards and lifecycle checks.
+including main soak history needed by scorecards and lifecycle checks. It
+decides which deployments are eligible once, on the `deployments` table, and
+then deletes per deployment in 16-row batches through the evidence window
+indexes, so heartbeat and report writes interleave between batches; the first
+pass after a control plane start waits ten minutes, so a deploy's
+`notify-worker-fleet` never queues behind it. `Database maintenance pass
+finished` logs each pass's duration.
 
 Compaction frees SQLite pages for reuse, but an existing database created with
 `auto_vacuum=NONE` does not return those pages to the volume. After compaction
@@ -614,8 +620,15 @@ The trusted deploy path for `main` is now:
 1. GitHub Actions builds the worker image with `flyctl deploy --build-only --push`.
 2. GitHub Actions deploys the control plane when control-plane code changed.
 3. GitHub Actions calls `POST /api/admin/deployments/ready`.
-4. The control plane records the ready deployment, performs the rolling update,
-   and resumes dormant workers into `probing`.
+4. The control plane records the ready deployment and answers 202, then
+   performs the rolling update in the background and resumes dormant workers
+   into `probing`. The record waits at most 60 seconds for the control
+   database's writer and answers 503 with `Retry-After` when it is busy; the
+   record is an upsert, so `scripts/notify-deployment-ready.sh` posts with a
+   100-second limit, checks `GET /api/deployments/latest?source=<source>` for
+   the exact sha, litestream sha and image after any failed post, and posts
+   again every 15 seconds (`NOTIFY_DEPLOYMENT_READY_POLL_INTERVAL`) for up to
+   15 minutes (`NOTIFY_DEPLOYMENT_READY_TIMEOUT`).
 
 This matters because the worker fleet is a set of custom Fly Machines with
 per-worker env and volume bindings. A plain `fly deploy` on the app is not the

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -11,12 +12,18 @@ import (
 )
 
 func (d *DB) RecordEvent(workerID, eventType, message, details string) error {
+	return d.RecordEventContext(context.Background(), workerID, eventType, message, details)
+}
+
+// RecordEventContext records an event, waiting for the writer only as long
+// as ctx allows.
+func (d *DB) RecordEventContext(ctx context.Context, workerID, eventType, message, details string) error {
 	defer d.blobs.hold()()
 	details, err := d.compactProfileSnapshot(details)
 	if err != nil {
 		return err
 	}
-	_, err = d.exec(`
+	_, err = d.writer.ExecContext(ctx, `
 		INSERT INTO events (worker_id, event_type, message, details)
 		VALUES (?, ?, ?, ?)`,
 		workerID, eventType, message, details,

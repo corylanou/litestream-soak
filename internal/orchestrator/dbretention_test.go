@@ -34,6 +34,7 @@ func TestRetentionDisabledStillCompactsRuntimeEvidence(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	mgr := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	dbRetentionStartupDelay = 0
 	go func() {
 		mgr.RunDBRetentionLoop(ctx, 0)
 		close(done)
@@ -152,5 +153,38 @@ func TestPruneDBOnceDropsOnlyOldHistory(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Message != "new event" {
 		t.Fatalf("events after prune = %+v, want only the new event", events)
+	}
+}
+
+func TestDBRetentionLoopWaitsBeforeTheFirstPass(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := model.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	connection, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = connection.Close() }()
+	identity := reporting.WorkerIdentity{Source: "main", DeploymentID: 1, WorkerID: "worker", RunID: "run"}
+	identityJSON, _ := json.Marshal(identity)
+	body, _ := json.Marshal(reporting.RuntimePayload{ProfilingEvidence: reporting.ProfilingEvidence{ProfileCapability: "observed", ProfileIncidents: []reporting.ProfileIncident{{ID: "incident", Run: identity, Kind: "profile_capture_error"}}}})
+	if _, err := connection.Exec(`INSERT INTO evidence_runtime(source,deployment_id,identity_json,runtime_json,attributed,received_at,kind) VALUES (?,?,?,?,?,?,?)`, "main", 1, string(identityJSON), string(body), true, time.Now().UTC(), "heartbeat"); err != nil {
+		t.Fatal(err)
+	}
+	dbRetentionStartupDelay = time.Hour
+	defer func() { dbRetentionStartupDelay = 0 }()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	mgr := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	mgr.RunDBRetentionLoop(ctx, 30)
+	var stored string
+	if err := connection.QueryRow(`SELECT runtime_json FROM evidence_runtime LIMIT 1`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) < len(body) {
+		t.Fatal("the maintenance pass ran before the startup delay elapsed")
 	}
 }
