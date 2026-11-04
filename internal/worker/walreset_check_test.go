@@ -260,19 +260,23 @@ type fakeWAL struct {
 	frozenInTx       int
 	holdsWriteLock   bool
 	drains           int
-	history          []fakeGeneration
-	savedFrames      int64
-	savedSalts       [2]uint32
-	scanErr          error
-	overrun          bool
-	shrink           bool
-	saved            litestreamSavedPosition
-	savedFound       bool
-	savedStale       bool
-	readErr          error
-	downReadErr      error
-	downBurstErr     error
-	holdErr          error
+	// pausedReadErr and pausedHeaderInvalid break the sample taken after
+	// the drain, while the writers are paused.
+	pausedReadErr       error
+	pausedHeaderInvalid bool
+	history             []fakeGeneration
+	savedFrames         int64
+	savedSalts          [2]uint32
+	scanErr             error
+	overrun             bool
+	shrink              bool
+	saved               litestreamSavedPosition
+	savedFound          bool
+	savedStale          bool
+	readErr             error
+	downReadErr         error
+	downBurstErr        error
+	holdErr             error
 
 	live              int
 	stopPending       bool
@@ -457,8 +461,14 @@ func (w *fakeWAL) generation() (walGeneration, error) {
 	if w.down && w.downReadErr != nil {
 		return walGeneration{}, w.downReadErr
 	}
+	if w.paused && w.pausedReadErr != nil {
+		return walGeneration{}, w.pausedReadErr
+	}
 	header := w.header
 	if w.down && w.exitHeaderInvalid {
+		header = walHeader{}
+	}
+	if w.paused && w.pausedHeaderInvalid {
 		header = walHeader{}
 	}
 	return walGeneration{header: header, fileBytes: walHeaderSize + w.slots*fakeFrameSize, frameSize: fakeFrameSize, frameSlots: w.slots, committedFrames: w.frames, writtenFrames: w.frames}, nil
@@ -777,6 +787,30 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureWALResetUnavailable,
 			wantMessage:   fmt.Sprintf("drain writers before the restart after %d pauses: source boundary unavailable", walResetDrainAttempts),
+			wantStarts:    1,
+		},
+		{
+			name: "a wal that cannot be read after the drain is inconclusive instead of scanned from the earlier sample",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.pausedReadErr = errors.New("open test.db-wal: input/output error")
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetShapeNotReached,
+			wantMessage:   "read wal after the drain: open test.db-wal: input/output error",
+			wantStarts:    1,
+		},
+		{
+			name: "an unreadable wal header after the drain is inconclusive",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.pausedHeaderInvalid = true
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetShapeNotReached,
+			wantMessage:   "wal header unreadable after the drain",
 			wantStarts:    1,
 		},
 		{

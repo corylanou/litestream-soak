@@ -608,9 +608,17 @@ func (c *walResetCheck) run(ctx context.Context) (observation walResetObservatio
 		return observation, validation, fmt.Errorf("%w: %v", errWALResetUnavailable, pauseErr)
 	}
 	defer resumeLoad()
-	if wal, walErr := c.generation(); walErr == nil && wal.header.valid {
-		observation.recordGeneration(wal, &lastSalt2)
+	// The sample after the drain is the one the scan and the shape rest on;
+	// without it the earlier sample could be stale (a reset in between
+	// shortens the generation) and confirm the shape falsely.
+	drainedWAL, drainedErr := c.generation()
+	if drainedErr != nil {
+		return observation, validation, fmt.Errorf("%w: read wal after the drain: %v", errWALResetShapeNotReached, drainedErr)
 	}
+	if !drainedWAL.header.valid {
+		return observation, validation, fmt.Errorf("%w: wal header unreadable after the drain (wal %d bytes)", errWALResetShapeNotReached, drainedWAL.fileBytes)
+	}
+	observation.recordGeneration(drainedWAL, &lastSalt2)
 	observation.resets = walResetCount(observation.savedHeader, observation.finalWAL.header)
 	observation.checkpoints = observation.resets
 	observation.tail = c.scanTail(observation)
