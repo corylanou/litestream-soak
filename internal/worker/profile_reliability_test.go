@@ -212,7 +212,9 @@ func readOutboxEvent(t *testing.T, cfg Config, id string) string {
 func TestProfileIncidentWindowIsClosedWithItsFinalCountAtShutdown(t *testing.T) {
 	cfg := Config{DataDir: t.TempDir(), PprofCaptureEnabled: true, WorkerID: "worker", RunID: "run", MachineID: "machine"}
 	r := NewRunner(cfg)
-	r.finalizeProfileSummaries()
+	if err := r.finalizeProfileSummaries(); err != nil {
+		t.Fatal(err)
+	}
 	_, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 	r.observeProfiling(cancel)
@@ -226,7 +228,9 @@ func TestProfileIncidentWindowIsClosedWithItsFinalCountAtShutdown(t *testing.T) 
 		t.Fatal("the window was not persisted when it opened")
 	}
 
-	r.finalizeProfileSummaries()
+	if err := r.finalizeProfileSummaries(); err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(readOutboxEvent(t, cfg, closedID), "40 profile_capture_error incidents coalesced") {
 		t.Fatal("the window was not closed with its final count")
 	}
@@ -240,7 +244,9 @@ func TestProfileIncidentWindowIsClosedWithItsFinalCountAtShutdown(t *testing.T) 
 	if len(ids) != 1 || !ids[closedID] {
 		t.Fatalf("snapshot summaries after shutdown = %v, want only the closed window", ids)
 	}
-	r.finalizeProfileSummaries()
+	if err := r.finalizeProfileSummaries(); err != nil {
+		t.Fatal(err)
+	}
 	entries, err := os.ReadDir(filepath.Join(cfg.DataDir, "churn-outbox"))
 	if err != nil || len(entries) != profileIncidentsRetained+2 {
 		t.Fatalf("durable events=%d err=%v, want one opening and one closing, with a second finalize a no-op", len(entries), err)
@@ -249,6 +255,37 @@ func TestProfileIncidentWindowIsClosedWithItsFinalCountAtShutdown(t *testing.T) 
 	r.profiles.publishProfileStatus("periodic", "capture-failed")
 	if !strings.Contains(readOutboxEvent(t, cfg, profileIncidentSummaryID(epoch, "profile_capture_error", r.identity, 2, false)), "41 profile_capture_error incidents coalesced") {
 		t.Fatal("an incident after the close did not open a second window")
+	}
+}
+
+func TestProfileSummaryFinalizeReportsAFailedClosingWrite(t *testing.T) {
+	cfg := Config{DataDir: t.TempDir(), PprofCaptureEnabled: true, WorkerID: "worker", RunID: "run", MachineID: "machine"}
+	r := NewRunner(cfg)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	r.observeProfiling(cancel)
+	for i := 0; i < profileIncidentsRetained+5; i++ {
+		r.profiles.publishProfileStatus("periodic", "capture-failed")
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		t.Fatalf("run cancelled before the closing write: %v", cause)
+	}
+	outbox := filepath.Join(cfg.DataDir, "churn-outbox")
+	if err := os.RemoveAll(outbox); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outbox, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := r.finalizeProfileSummaries()
+	if err == nil || !strings.Contains(err.Error(), "persist profiling evidence") {
+		t.Fatalf("finalize error = %v, want the failed closing write reported", err)
+	}
+	if r.profilingSnapshot().ProfileHistoryComplete {
+		t.Fatal("a lost closing write left the history marked complete")
+	}
+	if err := r.finalizeProfileSummaries(); err != nil {
+		t.Fatalf("second finalize = %v, want nothing left to close", err)
 	}
 }
 

@@ -64,7 +64,7 @@ type profileEvidenceState struct {
 	coalesced                  map[string]*profileIncidentSummary
 	dropped                    uint64
 	summaryInterval            time.Duration
-	persist                    func(id, kind, message string, at time.Time, identity reporting.WorkerIdentity) bool
+	persist                    func(id, kind, message string, at time.Time, identity reporting.WorkerIdentity) error
 }
 
 func profileIncidentSummaryKey(kind string, run reporting.WorkerIdentity) string {
@@ -86,9 +86,9 @@ func (s *profileIncidentSummary) incident(id string) reporting.ProfileIncident {
 // closeSummary publishes the open window's final state under its closed id
 // and leaves that incident in the snapshot until the next window opens. Each
 // summary holds exactly one incident in the snapshot at any time.
-func (s *profileEvidenceState) closeSummary(summary *profileIncidentSummary) {
+func (s *profileEvidenceState) closeSummary(summary *profileIncidentSummary) error {
 	if !summary.open {
-		return
+		return nil
 	}
 	closedID := profileIncidentSummaryID(s.epoch, summary.kind, summary.run, summary.windows, true)
 	incident := summary.incident(closedID)
@@ -96,21 +96,26 @@ func (s *profileEvidenceState) closeSummary(summary *profileIncidentSummary) {
 	s.incidents[closedID] = incident
 	summary.incidentID = closedID
 	summary.open = false
-	s.persist(closedID, summary.kind, incident.Message, incident.At, summary.run)
+	return s.persist(closedID, summary.kind, incident.Message, incident.At, summary.run)
 }
 
 // finalizeProfileSummaries closes every open summary window so the final
-// counts reach the outbox before the run's last evidence flush.
-func (r *Runner) finalizeProfileSummaries() {
+// counts reach the outbox before the run's last evidence flush. It runs at
+// shutdown, when the run's context is already cancelled and its result
+// chosen, so a closing write that fails is returned for the caller to join
+// into the run's error instead of being lost.
+func (r *Runner) finalizeProfileSummaries() error {
 	state := &r.profileEvidence
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.persist == nil {
-		return
+		return nil
 	}
+	var err error
 	for _, summary := range state.coalesced {
-		state.closeSummary(summary)
+		err = errors.Join(err, state.closeSummary(summary))
 	}
+	return err
 }
 
 func (s *profileEvidenceState) markSeen(id string) {
@@ -137,20 +142,21 @@ func (r *Runner) observeProfiling(cancelRun context.CancelCauseFunc) {
 	if state.summaryInterval == 0 {
 		state.summaryInterval = profileIncidentSummaryInterval
 	}
-	persist := func(id, kind, message string, at time.Time, identity reporting.WorkerIdentity) bool {
+	persist := func(id, kind, message string, at time.Time, identity reporting.WorkerIdentity) error {
 		event := reporting.WorkerEventPayload{WorkerIdentity: identity, EventType: kind, Message: message, SentAt: at, WorkloadEvent: reporting.WorkloadEvent{WorkloadEventID: id}}
 		err := r.persistRunEvidence(event)
 		switch {
 		case err == nil:
 			r.requestEvidenceFlush()
-			return true
+			return nil
 		case errors.Is(err, errEvidenceOutboxFull):
 			state.dropped++
-			return false
+			return nil
 		default:
 			state.complete = false
-			cancelRun(fmt.Errorf("persist profiling evidence: %w", err))
-			return false
+			err = fmt.Errorf("persist profiling evidence: %w", err)
+			cancelRun(err)
+			return err
 		}
 	}
 	state.persist = persist
@@ -166,7 +172,7 @@ func (r *Runner) observeProfiling(cancelRun context.CancelCauseFunc) {
 		}
 		if len(state.incidents)-len(state.coalesced) < profileIncidentsRetained {
 			state.incidents[id] = reporting.ProfileIncident{ID: id, Kind: kind, Message: message, At: at, Run: identity}
-			persist(id, kind, message, at, identity)
+			_ = persist(id, kind, message, at, identity)
 			return
 		}
 		key := profileIncidentSummaryKey(kind, identity)
@@ -176,7 +182,7 @@ func (r *Runner) observeProfiling(cancelRun context.CancelCauseFunc) {
 			state.coalesced[key] = summary
 		}
 		if summary.open && at.Sub(summary.lastPersisted) >= state.summaryInterval {
-			state.closeSummary(summary)
+			_ = state.closeSummary(summary)
 		}
 		summary.count++
 		summary.last = at
@@ -187,7 +193,7 @@ func (r *Runner) observeProfiling(cancelRun context.CancelCauseFunc) {
 			summary.open = true
 			summary.incidentID = profileIncidentSummaryID(state.epoch, kind, identity, summary.windows, false)
 			summary.lastPersisted = at
-			persist(summary.incidentID, kind, summary.incident(summary.incidentID).Message, at, identity)
+			_ = persist(summary.incidentID, kind, summary.incident(summary.incidentID).Message, at, identity)
 		}
 		state.incidents[summary.incidentID] = summary.incident(summary.incidentID)
 	}
