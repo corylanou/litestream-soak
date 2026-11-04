@@ -78,6 +78,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	stopEvidenceUploader := r.startEvidenceUploader(runCtx)
 	defer func() {
 		stopEvidenceUploader()
+		r.finalizeProfileSummaries()
 		if err := r.flushRunEvidence(context.WithoutCancel(runCtx)); err != nil {
 			slog.Warn("Final evidence delivery pending", "error", err)
 		}

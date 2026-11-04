@@ -35,6 +35,13 @@ const (
 	profileIncidentsSeenMax        = 4096
 )
 
+// profileIncidentSummary coalesces one kind of incident from one run
+// identity. A window opens with the first coalesced incident and is
+// persisted then with its own id; while it is open the snapshot carries it
+// live. When the interval has passed, or at shutdown, the window closes: its
+// final count, time and message are persisted once more under the window's
+// closed id, so a consumer that records an id once still gets the final
+// state of every window.
 type profileIncidentSummary struct {
 	kind          string
 	run           reporting.WorkerIdentity
@@ -42,7 +49,8 @@ type profileIncidentSummary struct {
 	first, last   time.Time
 	latest        string
 	windows       uint64
-	windowID      string
+	open          bool
+	incidentID    string
 	lastPersisted time.Time
 }
 
@@ -56,18 +64,53 @@ type profileEvidenceState struct {
 	coalesced                  map[string]*profileIncidentSummary
 	dropped                    uint64
 	summaryInterval            time.Duration
+	persist                    func(id, kind, message string, at time.Time, identity reporting.WorkerIdentity) bool
 }
 
 func profileIncidentSummaryKey(kind string, run reporting.WorkerIdentity) string {
 	return strings.Join([]string{kind, run.RunID, run.WorkerID, run.MachineID, fmt.Sprint(run.DeploymentID)}, "|")
 }
 
-func profileIncidentSummaryID(epoch, kind string, run reporting.WorkerIdentity, window uint64) string {
-	return fmt.Sprintf("profile:%s:summary:%s:%s:%v:%d", epoch, kind, run.RunID, run.DeploymentID, window)
+func profileIncidentSummaryID(epoch, kind string, run reporting.WorkerIdentity, window uint64, closed bool) string {
+	id := fmt.Sprintf("profile:%s:summary:%s:%s:%s:%s:%v:%d", epoch, kind, run.RunID, run.WorkerID, run.MachineID, run.DeploymentID, window)
+	if closed {
+		id += ":closed"
+	}
+	return id
 }
 
 func (s *profileIncidentSummary) incident(id string) reporting.ProfileIncident {
 	return reporting.ProfileIncident{ID: id, Kind: s.kind, Message: fmt.Sprintf("%d %s incidents coalesced since %s, latest at %s: %s", s.count, s.kind, s.first.UTC().Format(time.RFC3339), s.last.UTC().Format(time.RFC3339), s.latest), At: s.last, Run: s.run}
+}
+
+// closeSummary publishes the open window's final state under its closed id
+// and leaves that incident in the snapshot until the next window opens. Each
+// summary holds exactly one incident in the snapshot at any time.
+func (s *profileEvidenceState) closeSummary(summary *profileIncidentSummary) {
+	if !summary.open {
+		return
+	}
+	closedID := profileIncidentSummaryID(s.epoch, summary.kind, summary.run, summary.windows, true)
+	incident := summary.incident(closedID)
+	delete(s.incidents, summary.incidentID)
+	s.incidents[closedID] = incident
+	summary.incidentID = closedID
+	summary.open = false
+	s.persist(closedID, summary.kind, incident.Message, incident.At, summary.run)
+}
+
+// finalizeProfileSummaries closes every open summary window so the final
+// counts reach the outbox before the run's last evidence flush.
+func (r *Runner) finalizeProfileSummaries() {
+	state := &r.profileEvidence
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.persist == nil {
+		return
+	}
+	for _, summary := range state.coalesced {
+		state.closeSummary(summary)
+	}
 }
 
 func (s *profileEvidenceState) markSeen(id string) {
@@ -110,6 +153,7 @@ func (r *Runner) observeProfiling(cancelRun context.CancelCauseFunc) {
 			return false
 		}
 	}
+	state.persist = persist
 	emit := func(id, kind, message string, at time.Time, identity reporting.WorkerIdentity, dedupe bool) {
 		state.mu.Lock()
 		defer state.mu.Unlock()
@@ -131,17 +175,21 @@ func (r *Runner) observeProfiling(cancelRun context.CancelCauseFunc) {
 			summary = &profileIncidentSummary{kind: kind, run: identity, first: at}
 			state.coalesced[key] = summary
 		}
+		if summary.open && at.Sub(summary.lastPersisted) >= state.summaryInterval {
+			state.closeSummary(summary)
+		}
 		summary.count++
 		summary.last = at
 		summary.latest = message
-		if summary.windows == 0 || at.Sub(summary.lastPersisted) >= state.summaryInterval {
-			delete(state.incidents, summary.windowID)
+		if !summary.open {
+			delete(state.incidents, summary.incidentID)
 			summary.windows++
-			summary.windowID = profileIncidentSummaryID(state.epoch, kind, identity, summary.windows)
+			summary.open = true
+			summary.incidentID = profileIncidentSummaryID(state.epoch, kind, identity, summary.windows, false)
 			summary.lastPersisted = at
-			persist(summary.windowID, kind, summary.incident(summary.windowID).Message, at, identity)
+			persist(summary.incidentID, kind, summary.incident(summary.incidentID).Message, at, identity)
 		}
-		state.incidents[summary.windowID] = summary.incident(summary.windowID)
+		state.incidents[summary.incidentID] = summary.incident(summary.incidentID)
 	}
 	r.profiles.onRecord = func(record *profileRecord) {
 		state.mu.Lock()

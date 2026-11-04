@@ -139,7 +139,7 @@ func TestProfileIncidentFloodNeverStopsRun(t *testing.T) {
 	}
 	var summary string
 	for _, incident := range snapshot.ProfileIncidents {
-		if incident.ID == profileIncidentSummaryID(snapshot.ProfileEpoch, "profile_capture_error", r.identity, 1) {
+		if incident.ID == profileIncidentSummaryID(snapshot.ProfileEpoch, "profile_capture_error", r.identity, 1, false) {
 			summary = incident.Message
 		}
 	}
@@ -164,15 +164,15 @@ func TestProfileIncidentSummaryIsPersistedAgainAfterTheInterval(t *testing.T) {
 		time.Sleep(time.Microsecond)
 	}
 	entries, err := os.ReadDir(filepath.Join(cfg.DataDir, "churn-outbox"))
-	if err != nil || len(entries) != profileIncidentsRetained+3 {
-		t.Fatalf("durable events=%d err=%v, want one summary per coalesced incident once the interval has passed", len(entries), err)
+	if err != nil || len(entries) != profileIncidentsRetained+5 {
+		t.Fatalf("durable events=%d err=%v, want three window openings and two closings once the interval has passed", len(entries), err)
 	}
 	snapshot := r.profilingSnapshot()
 	if got := snapshot.ProfileIncidentsCoalesced["profile_capture_error"]; got != 3 {
 		t.Fatalf("coalesced %d, want 3", got)
 	}
 	if len(snapshot.ProfileIncidents) != profileIncidentsRetained+1 {
-		t.Fatalf("snapshot holds %d incidents, want the retained set plus only the latest window", len(snapshot.ProfileIncidents))
+		t.Fatalf("snapshot holds %d incidents, want the retained set plus only the open window", len(snapshot.ProfileIncidents))
 	}
 	windows := map[string]string{}
 	for _, incident := range snapshot.ProfileIncidents {
@@ -180,16 +180,106 @@ func TestProfileIncidentSummaryIsPersistedAgainAfterTheInterval(t *testing.T) {
 			windows[incident.ID] = incident.Message
 		}
 	}
-	latest := profileIncidentSummaryID(snapshot.ProfileEpoch, "profile_capture_error", r.identity, 3)
+	latest := profileIncidentSummaryID(snapshot.ProfileEpoch, "profile_capture_error", r.identity, 3, false)
 	if len(windows) != 1 || !strings.HasPrefix(windows[latest], "3 profile_capture_error incidents coalesced") {
-		t.Fatalf("latest window missing: %v", windows)
+		t.Fatalf("open window missing: %v", windows)
 	}
 	for window := uint64(1); window <= 3; window++ {
-		id := profileIncidentSummaryID(snapshot.ProfileEpoch, "profile_capture_error", r.identity, window)
-		name := fmt.Sprintf("%x.json", sha256.Sum256([]byte(cfg.WorkerID+"\x00"+cfg.RunID+"\x00"+id)))
-		body, err := os.ReadFile(filepath.Join(cfg.DataDir, "churn-outbox", name))
-		if err != nil || !strings.Contains(string(body), fmt.Sprintf("%d profile_capture_error incidents coalesced", window)) {
-			t.Fatalf("window %d not persisted with its own id and count: %v %s", window, err, body)
+		body := readOutboxEvent(t, cfg, profileIncidentSummaryID(snapshot.ProfileEpoch, "profile_capture_error", r.identity, window, false))
+		if !strings.Contains(body, fmt.Sprintf("%d profile_capture_error incidents coalesced", window)) {
+			t.Fatalf("window %d not persisted with its own id and count: %s", window, body)
+		}
+		if window == 3 {
+			continue
+		}
+		closed := readOutboxEvent(t, cfg, profileIncidentSummaryID(snapshot.ProfileEpoch, "profile_capture_error", r.identity, window, true))
+		if !strings.Contains(closed, fmt.Sprintf("%d profile_capture_error incidents coalesced", window)) {
+			t.Fatalf("window %d not closed with its final count: %s", window, closed)
+		}
+	}
+}
+
+func readOutboxEvent(t *testing.T, cfg Config, id string) string {
+	t.Helper()
+	name := fmt.Sprintf("%x.json", sha256.Sum256([]byte(cfg.WorkerID+"\x00"+cfg.RunID+"\x00"+id)))
+	body, err := os.ReadFile(filepath.Join(cfg.DataDir, "churn-outbox", name))
+	if err != nil {
+		t.Fatalf("outbox event %s: %v", id, err)
+	}
+	return string(body)
+}
+
+func TestProfileIncidentWindowIsClosedWithItsFinalCountAtShutdown(t *testing.T) {
+	cfg := Config{DataDir: t.TempDir(), PprofCaptureEnabled: true, WorkerID: "worker", RunID: "run", MachineID: "machine"}
+	r := NewRunner(cfg)
+	r.finalizeProfileSummaries()
+	_, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	r.observeProfiling(cancel)
+	for i := 0; i < profileIncidentsRetained+40; i++ {
+		r.profiles.publishProfileStatus("periodic", "capture-failed")
+	}
+	epoch := r.profilingSnapshot().ProfileEpoch
+	openID := profileIncidentSummaryID(epoch, "profile_capture_error", r.identity, 1, false)
+	closedID := profileIncidentSummaryID(epoch, "profile_capture_error", r.identity, 1, true)
+	if !strings.Contains(readOutboxEvent(t, cfg, openID), "1 profile_capture_error incidents coalesced") {
+		t.Fatal("the window was not persisted when it opened")
+	}
+
+	r.finalizeProfileSummaries()
+	if !strings.Contains(readOutboxEvent(t, cfg, closedID), "40 profile_capture_error incidents coalesced") {
+		t.Fatal("the window was not closed with its final count")
+	}
+	snapshot := r.profilingSnapshot()
+	ids := map[string]bool{}
+	for _, incident := range snapshot.ProfileIncidents {
+		if strings.Contains(incident.ID, ":summary:") {
+			ids[incident.ID] = true
+		}
+	}
+	if len(ids) != 1 || !ids[closedID] {
+		t.Fatalf("snapshot summaries after shutdown = %v, want only the closed window", ids)
+	}
+	r.finalizeProfileSummaries()
+	entries, err := os.ReadDir(filepath.Join(cfg.DataDir, "churn-outbox"))
+	if err != nil || len(entries) != profileIncidentsRetained+2 {
+		t.Fatalf("durable events=%d err=%v, want one opening and one closing, with a second finalize a no-op", len(entries), err)
+	}
+
+	r.profiles.publishProfileStatus("periodic", "capture-failed")
+	if !strings.Contains(readOutboxEvent(t, cfg, profileIncidentSummaryID(epoch, "profile_capture_error", r.identity, 2, false)), "41 profile_capture_error incidents coalesced") {
+		t.Fatal("an incident after the close did not open a second window")
+	}
+}
+
+func TestProfileIncidentSummaryIDsCarryWorkerAndMachine(t *testing.T) {
+	cfg := Config{DataDir: t.TempDir(), PprofCaptureEnabled: true, WorkerID: "worker", RunID: "run", MachineID: "machine"}
+	r := NewRunner(cfg)
+	_, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	r.observeProfiling(cancel)
+	for i := 0; i < profileIncidentsRetained; i++ {
+		r.profiles.publishProfileStatus("periodic", "capture-failed")
+	}
+	for _, machine := range []string{"machine-a", "machine-b"} {
+		record := r.profiles.newRecord("hourly", "heap", machine+".pprof")
+		record.RunID, record.MachineID, record.WorkerID = "run", machine, "worker"
+		record.Error = "incomplete capture"
+		r.profiles.onRecord(record)
+	}
+	snapshot := r.profilingSnapshot()
+	ids := map[string]string{}
+	for _, incident := range snapshot.ProfileIncidents {
+		if strings.Contains(incident.ID, ":summary:") {
+			ids[incident.ID] = incident.Run.MachineID
+		}
+	}
+	if len(ids) != 2 {
+		t.Fatalf("summaries = %v, want one per machine with its own id", ids)
+	}
+	for id, machine := range ids {
+		if !strings.Contains(id, ":run:worker:"+machine+":") {
+			t.Fatalf("summary id %s does not carry worker and machine %s", id, machine)
 		}
 	}
 }
