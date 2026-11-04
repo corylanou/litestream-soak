@@ -1161,8 +1161,11 @@ func TestSupersededRolloutClearsOnlyItsOwnRowWhenWorkloadSHAsDiffer(t *testing.T
 	if err != nil || len(remaining) != 1 || remaining[0].ID != newer.ID {
 		t.Fatalf("pending rollouts = %+v, %v; want only the newer deployment", remaining, err)
 	}
-	if err := deployer.clearRolloutPending(model.Deployment{Source: "main", GitSHA: sha, LitestreamSHA: litestreamSHA}); err == nil {
-		t.Fatal("clearing without a row id succeeded; it must never fall back to a lookup by version")
+	if err := deployer.clearRolloutPending(model.Deployment{Source: "main", GitSHA: sha, LitestreamSHA: litestreamSHA}); err != nil {
+		t.Fatalf("clearing without a recorded row = %v, want a no-op", err)
+	}
+	if pending, err := db.RolloutPending(newer.ID); err != nil || !pending {
+		t.Fatalf("newer row rollout_pending after a clear without a row id = %v, %v; want untouched, never resolved by a lookup", pending, err)
 	}
 }
 

@@ -226,10 +226,12 @@ func (d *Deployer) rolloutDeploymentReady(ctx context.Context, target model.Depl
 // source and both code SHAs but differ in workload SHA are separate rows, and
 // a record of another image (or the same one again) over an existing row
 // bumps its generation, so an older rollout of that row never clears the
-// newer record's flag.
+// newer record's flag. A target that carries no recorded row and generation
+// (a rollout driven from a stored deployment rather than from a record) has
+// no pending flag of its own to clear and is never resolved by a lookup.
 func (d *Deployer) clearRolloutPending(target model.Deployment) error {
 	if target.ID == 0 || target.RolloutGeneration == 0 {
-		return fmt.Errorf("clear rollout pending: deployment %s %s/%s has no recorded row and generation", target.Source, trimSHA(target.GitSHA), shortVersionValue(target.LitestreamSHA))
+		return nil
 	}
 	if err := d.db.ClearRolloutPending(target.ID, target.RolloutGeneration); err != nil {
 		return fmt.Errorf("clear rollout pending: %w", err)
