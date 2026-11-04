@@ -939,9 +939,11 @@ func checkWALResetLatestTXID(restored, boundary uint64) error {
 // only when it is one: harness-side problems, a verifier deadline, a
 // cancellation, exhausted restore capacity, a locked restored comparison, or
 // a restore log without a plan txid are inconclusive, and a failed restore is
-// evidence only when the restore classifier blames the data or the plan. It
-// returns the classifier's signature for a failed restore.
+// evidence only when the restore classifier names an unambiguous data defect
+// and the verifier did not already mark the restore inconclusive. It returns
+// the classifier's signature for a failed restore.
 func walResetValidationError(phase string, err error) (string, error) {
+	var evidence *restoreEvidenceInconclusiveError
 	var capacity *restoreCapacityInconclusiveError
 	var locked *restoredComparisonLockedError
 	var deadline *verifierDeadlineError
@@ -953,8 +955,8 @@ func walResetValidationError(phase string, err error) (string, error) {
 	case strings.TrimPrefix(phase, "latest_") == "source_snapshot", strings.TrimPrefix(phase, "latest_") == "restore_preflight":
 		return "", fmt.Errorf("%w: %s: %v", errWALResetUnavailable, phase, err)
 	case strings.TrimPrefix(phase, "latest_") == "restore":
-		signature, evidence := walResetRestoreSignature(err)
-		if !evidence {
+		signature, defect := walResetRestoreSignature(err)
+		if !defect || errors.As(err, &evidence) {
 			return signature, fmt.Errorf("%w: %s: %s: %v", errWALResetUnavailable, phase, signature, err)
 		}
 		return signature, fmt.Errorf("%s: %w", signature, err)
@@ -964,24 +966,38 @@ func walResetValidationError(phase string, err error) (string, error) {
 }
 
 // walResetRestoreSignature runs a failed restore through the verifier's
-// restore classifier and reports whether the failure is evidence against the
-// replicated data. Only a defect in the data or the plan is: a decode or
-// checksum error, an LTX file or page the plan needs but cannot read, a plan
-// that cannot be built, a corrupt index, or a target the replica was synced
-// to and should hold. Any object store error (auth, transport, DNS, a
-// cancelled or timed-out request), a plan recomputation that gave up, and a
-// failure the classifier cannot name are environmental.
+// restore classifier and reports whether the failure is an unambiguous defect
+// in the replicated data: a decode, page header, checksum or unexpected EOF
+// error, an LTX file the plan needs but cannot find, or a corrupt index. A
+// lost restore target is not, because a pinned target can vanish to
+// compaction or retention between the boundary capture and the restore. A
+// plan failure is not either unless the message carries one of those data
+// markers, because a DNS or connection error without object store markers
+// can hide behind the plan prefix. Any object store error and a failure the
+// classifier cannot name are environmental.
 func walResetRestoreSignature(err error) (string, bool) {
 	classification := reporting.ClassifyVerificationFailure("restore", err.Error())
 	if classification.ObjectStore != nil {
 		return classification.Signature, false
 	}
 	switch classification.Signature {
-	case "restore_decode_error", "restore_missing_ltx", "restore_plan_failed", "sqlite_index_mismatch", reporting.SignatureRestoreTargetUnavailable:
+	case "restore_decode_error", "restore_missing_ltx", "sqlite_index_mismatch":
 		return classification.Signature, true
+	case "restore_plan_failed":
+		return classification.Signature, walResetDataDefectMarker(err.Error())
 	default:
 		return classification.Signature, false
 	}
+}
+
+func walResetDataDefectMarker(message string) bool {
+	text := strings.ToLower(message)
+	for _, marker := range []string{"decode", "read page header", "checksum mismatch", "unexpected eof", "missing ltx", "open ltx file: file does not exist", "wrong # of entries in index"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runner) walResetCheckEnabled() bool {

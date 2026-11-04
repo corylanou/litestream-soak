@@ -243,7 +243,7 @@ func TestWALResetFailuresAreTheirOwnSubsystem(t *testing.T) {
 		signature string
 	}{
 		{"wal reset restore failed: restore_decode_error: restore failed: validation failed (exit 1): apply ltx file: decode ltx header: unexpected EOF", reporting.SignatureWALResetRestoreFailed},
-		{"wal reset restore failed: restore_target_unavailable: restore failed: validation failed (exit 1): no matching backup files available", reporting.SignatureWALResetRestoreFailed},
+		{"wal reset restore failed: restore_missing_ltx: restore failed: validation failed (exit 1): calc restore plan: open ltx file: file does not exist", reporting.SignatureWALResetRestoreFailed},
 		{"wal reset integrity failed: restored integrity: Page 50485: never used", reporting.SignatureWALResetIntegrityFailed},
 		{"wal reset logical mismatch: table wal_reset_burst: 80 rows restored, 201 in source", reporting.SignatureWALResetLogicalMismatch},
 	} {

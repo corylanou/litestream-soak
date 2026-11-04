@@ -669,14 +669,35 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			wantStarts:    1,
 		},
 		{
-			name: "a synced boundary the replica cannot serve is a restore failure",
+			name: "a pinned target lost between the boundary capture and the restore is inconclusive",
 			script: func() *walResetScript {
 				return &walResetScript{wal: newFakeWAL(), phase: "restore", validErr: &restoreEvidenceInconclusiveError{err: errors.New("restore failed: validation failed (exit 1): restore target txid 00000000000001f4 is no longer available: no matching backup files available")}}
 			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetUnavailable,
+			wantMessage:   "wal reset check unavailable: restore: restore_target_unavailable: restore failed: validation failed (exit 1): restore target txid 00000000000001f4 is no longer available",
+			wantSummary:   []string{"restore_signature=restore_target_unavailable"},
+			wantStarts:    1,
+		},
+		{
+			name: "a plan failure hiding a connection error is inconclusive",
+			script: func() *walResetScript {
+				return &walResetScript{wal: newFakeWAL(), phase: "restore", validErr: errors.New("restore failed: validation failed (exit 1): calc restore plan: dial tcp 10.0.0.5:9000: connect: connection refused")}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetUnavailable,
+			wantMessage:   "wal reset check unavailable: restore: restore_plan_failed: restore failed: validation failed (exit 1): calc restore plan: dial tcp 10.0.0.5:9000: connect: connection refused",
+			wantSummary:   []string{"restore_signature=restore_plan_failed"},
+			wantStarts:    1,
+		},
+		{
+			name: "a plan failure carrying a missing ltx file is a restore failure",
+			script: func() *walResetScript {
+				return &walResetScript{wal: newFakeWAL(), phase: "restore", validErr: errors.New("restore failed: validation failed (exit 1): calc restore plan: open ltx file: file does not exist")}
+			},
 			wantStatus:    "failed",
 			wantSignature: reporting.SignatureWALResetRestoreFailed,
-			wantMessage:   "wal reset restore failed: restore_target_unavailable: restore failed: validation failed (exit 1): restore target txid 00000000000001f4 is no longer available: no matching backup files available",
-			wantSummary:   []string{"restore_signature=restore_target_unavailable"},
+			wantMessage:   "wal reset restore failed: restore_missing_ltx: restore failed: validation failed (exit 1): calc restore plan: open ltx file: file does not exist",
 			wantStarts:    1,
 		},
 		{
