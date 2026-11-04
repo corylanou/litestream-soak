@@ -153,7 +153,7 @@ func (d *Deployer) recordDeploymentReady(ctx context.Context, source, sha, lites
 		return model.Deployment{}, err
 	}
 	if isGateSource(source) {
-		pinnedImage, err := d.manager.pinRCGateDeployment(source, sha, litestreamSHA, imageRef, time.Now().UTC())
+		pinnedImage, err := d.manager.pinRCGateDeployment(ctx, source, sha, litestreamSHA, imageRef, time.Now().UTC())
 		if err != nil {
 			return model.Deployment{}, err
 		}
@@ -191,7 +191,7 @@ func (d *Deployer) rolloutDeploymentReady(ctx context.Context, target model.Depl
 	}
 	if !current {
 		slog.Info("Deployment ready superseded, skipping rollout", "source", source, "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "latest_sha", latest.GitSHA, "latest_litestream_sha", latest.LitestreamSHA, "latest_image", latest.ImageRef, "trigger", trigger)
-		return imageRef, nil
+		return imageRef, d.clearRolloutPending(target)
 	}
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("start deployment rollout: %w", err)
@@ -209,10 +209,53 @@ func (d *Deployer) rolloutDeploymentReady(ctx context.Context, target model.Depl
 	}
 	if !current {
 		slog.Info("Deployment ready superseded, skipping dormant resume", "source", source, "sha", sha, "litestream_sha", litestreamSHA, "image", imageRef, "latest_sha", latest.GitSHA, "latest_litestream_sha", latest.LitestreamSHA, "latest_image", latest.ImageRef, "trigger", trigger)
-		return imageRef, rolloutErr
+		return imageRef, errors.Join(rolloutErr, d.clearRolloutPending(target))
 	}
 	rolloutErr = errors.Join(rolloutErr, d.manager.resumeDeploymentDormantWorkers(ctx, target, trigger, false))
+	if rolloutErr == nil {
+		rolloutErr = d.clearRolloutPending(target)
+	}
 	return imageRef, rolloutErr
+}
+
+// clearRolloutPending marks the recorded deployment's rollout as handled.
+// The flag is set when the deployment is recorded and stays set while the
+// rollout has not completed, so a control plane that restarts in between
+// resumes it from the row instead of from memory.
+func (d *Deployer) clearRolloutPending(target model.Deployment) error {
+	id := target.ID
+	if id == 0 {
+		stored, err := d.db.GetDeploymentByVersion(target.Source, target.GitSHA, target.LitestreamSHA)
+		if err != nil || stored == nil {
+			return err
+		}
+		id = stored.ID
+	}
+	if err := d.db.ClearRolloutPending(id); err != nil {
+		return fmt.Errorf("clear rollout pending: %w", err)
+	}
+	return nil
+}
+
+// ResumePendingRollouts rolls out every ready deployment whose rollout was
+// recorded but never completed, because the control plane stopped between
+// the record and the rollout. A deployment that is no longer its source's
+// latest ready one is only marked handled.
+func (d *Deployer) ResumePendingRollouts(ctx context.Context) {
+	pending, err := d.db.ListRolloutPendingDeployments()
+	if err != nil {
+		slog.Error("Failed to list pending deployment rollouts", "error", err)
+		return
+	}
+	for _, deployment := range pending {
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Info("Resuming deployment rollout recorded before the restart", "source", deployment.Source, "sha", deployment.GitSHA, "litestream_sha", deployment.LitestreamSHA, "image", deployment.ImageRef)
+		if _, err := d.rolloutDeploymentReady(ctx, deployment, "resume_pending"); err != nil {
+			slog.Error("Resumed deployment rollout failed", "source", deployment.Source, "sha", deployment.GitSHA, "error", err)
+		}
+	}
 }
 
 func validateDeploymentRepository(source, repository string) error {

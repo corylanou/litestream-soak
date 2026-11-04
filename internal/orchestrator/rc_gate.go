@@ -1042,8 +1042,8 @@ func (m *Manager) rcGateFleetForSource(source, gitSHA, litestreamSHA string, now
 	return spec, nil
 }
 
-func (m *Manager) pinRCGateDeployment(source, gitSHA, litestreamSHA, imageRef string, now time.Time) (string, error) {
-	gate, err := m.db.ActiveRCGateForSource(source)
+func (m *Manager) pinRCGateDeployment(ctx context.Context, source, gitSHA, litestreamSHA, imageRef string, now time.Time) (string, error) {
+	gate, err := m.db.ActiveRCGateForSourceContext(ctx, source)
 	if err != nil {
 		return "", fmt.Errorf("load rc gate for %s: %w", source, err)
 	}
@@ -1057,7 +1057,7 @@ func (m *Manager) pinRCGateDeployment(source, gitSHA, litestreamSHA, imageRef st
 	if currentImage, _ := gate.PinnedBuildFor(source); currentImage == "" && (gate.Status != model.RCGateRunning || !now.Before(gate.ProvisionDeadline)) {
 		return "", fmt.Errorf("%w: %s missed its launch window", errRCGateClosed, source)
 	}
-	pinnedImage, pinnedGit, err := m.db.PinRCGateBuild(gate.ID, source, imageRef, gitSHA)
+	pinnedImage, pinnedGit, err := m.db.PinRCGateBuildContext(ctx, gate.ID, source, imageRef, gitSHA)
 	if err != nil {
 		return "", fmt.Errorf("pin rc gate build: %w", err)
 	}

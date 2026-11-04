@@ -41,11 +41,24 @@ func (d *DB) archivedEvidenceDeployments(ctx context.Context, cutoff time.Time) 
 	return refs, rows.Err()
 }
 
+// archivedEvidenceDeploymentStillEligible is re-evaluated inside every batch
+// statement, so a deployment that stops being eligible while the prune runs
+// (a heartbeat arrives, or it becomes one of the two newest) keeps the rest
+// of its evidence from that batch on.
+const archivedEvidenceDeploymentStillEligible = `EXISTS (SELECT 1 FROM deployments d WHERE d.id=? AND ` + archivedEvidenceDeployment + `)`
+
+// pruneBatchHook runs before every batch; tests use it to change the world
+// between batches.
+var pruneBatchHook func()
+
 // PruneArchivedEvidenceBefore deletes the evidence of eligible deployments
 // older than the cutoff in small batches. Every batch is one short statement
 // or transaction driven by the evidence window indexes (source, deployment,
 // time), so heartbeat and report writes interleave between batches instead
-// of waiting behind a scan of the whole evidence journal.
+// of waiting behind a scan of the whole evidence journal, and every batch
+// re-checks the deployment's eligibility. Rows journaled without a source
+// but with a valid deployment id (legacy evidence) belong to the deployment
+// as well and are pruned with it.
 func (d *DB) PruneArchivedEvidenceBefore(ctx context.Context, cutoff time.Time) (map[string]int64, error) {
 	counts := map[string]int64{"runtime": 0, "verifications": 0, "events": 0}
 	deployments, err := d.archivedEvidenceDeployments(ctx, cutoff)
@@ -58,17 +71,20 @@ func (d *DB) PruneArchivedEvidenceBefore(ctx context.Context, cutoff time.Time) 
 			query string
 		}{
 			{"verifications", `DELETE FROM evidence_verifications WHERE id IN (
-				SELECT id FROM evidence_verifications WHERE evidence_source=? AND ` + verificationDeployment + `=?
-				AND julianday(COALESCE(completed_at,started_at))<julianday(?) LIMIT ?)`},
+				SELECT id FROM evidence_verifications WHERE evidence_source IN (?, '') AND ` + verificationDeployment + `=?
+				AND julianday(COALESCE(completed_at,started_at))<julianday(?) AND ` + archivedEvidenceDeploymentStillEligible + ` LIMIT ?)`},
 			{"events", `DELETE FROM evidence_events WHERE journal_id IN (
-				SELECT journal_id FROM evidence_events WHERE evidence_source=? AND ` + eventDeployment + `=?
-				AND julianday(created_at)<julianday(?) LIMIT ?)`},
+				SELECT journal_id FROM evidence_events WHERE evidence_source IN (?, '') AND ` + eventDeployment + `=?
+				AND julianday(created_at)<julianday(?) AND ` + archivedEvidenceDeploymentStillEligible + ` LIMIT ?)`},
 		} {
 			for {
 				if err := ctx.Err(); err != nil {
 					return counts, err
 				}
-				result, err := d.writer.ExecContext(ctx, spec.query, deployment.source, deployment.id, cutoff, evidencePruneBatchSize)
+				if pruneBatchHook != nil {
+					pruneBatchHook()
+				}
+				result, err := d.writer.ExecContext(ctx, spec.query, deployment.source, deployment.id, cutoff, deployment.id, cutoff, evidencePruneBatchSize)
 				if err != nil {
 					return counts, fmt.Errorf("prune evidence %s: %w", spec.name, err)
 				}
@@ -94,11 +110,14 @@ func (d *DB) pruneArchivedRuntimeEvidence(ctx context.Context, deployment archiv
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if pruneBatchHook != nil {
+			pruneBatchHook()
+		}
 		tx, err := d.writer.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT id,runtime_json FROM evidence_runtime WHERE source=? AND deployment_id=? AND julianday(received_at)<julianday(?) ORDER BY id LIMIT ?`, deployment.source, deployment.id, cutoff, evidencePruneBatchSize)
+		rows, err := tx.QueryContext(ctx, `SELECT id,runtime_json FROM evidence_runtime WHERE source IN (?, '') AND deployment_id=? AND julianday(received_at)<julianday(?) AND `+archivedEvidenceDeploymentStillEligible+` ORDER BY id LIMIT ?`, deployment.source, deployment.id, cutoff, deployment.id, cutoff, evidencePruneBatchSize)
 		if err != nil {
 			_ = tx.Rollback()
 			return err

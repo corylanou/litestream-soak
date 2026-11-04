@@ -1014,6 +1014,118 @@ func TestDeploymentReadyReturnsRetryableWhileTheWriterIsHeld(t *testing.T) {
 	}
 }
 
+func TestDeploymentReadyTaskGivesUpAtTheRecordDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := model.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	api := NewAPI(db, nil, nil, nil, manager, NewDeployer(manager, db, "litestream-soak", false))
+	defer waitForAPIRollouts(t, api)
+
+	holder, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(1000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Close() }()
+	ctx := context.Background()
+	holding, err := holder.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holding.Close() }()
+	if _, err := holding.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	deploymentReadyRecordTimeout = 100 * time.Millisecond
+	deploymentReadyRecordRetryDelay = 20 * time.Millisecond
+	deploymentReadyRecordDeadline = 400 * time.Millisecond
+	defer func() {
+		deploymentReadyRecordTimeout = 60 * time.Second
+		deploymentReadyRecordRetryDelay = 2 * time.Second
+		deploymentReadyRecordDeadline = 10 * time.Minute
+	}()
+
+	response := httptest.NewRecorder()
+	api.handleDeploymentReady(response, httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?source=main&sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d: %s; want 503 while the writer is held", response.Code, response.Body.String())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		api.rolloutMu.Lock()
+		inFlight := len(api.readyTasks)
+		api.rolloutMu.Unlock()
+		if inFlight == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the record task did not give up at its deadline while the writer stayed held")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if latest, err := db.GetLatestReadyDeployment("main"); err != nil || latest != nil {
+		t.Fatalf("deployment recorded although the task gave up: %+v, %v", latest, err)
+	}
+	if _, err := holding.ExecContext(ctx, "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResumePendingRolloutsRollsADeploymentRecordedBeforeARestart(t *testing.T) {
+	db := openTestDB(t)
+	source := "pr-1228"
+	oldSHA := "0123456789abcdef0123456789abcdef01234567"
+	oldLitestreamSHA := "1111111111111111111111111111111111111111"
+	sha := "2222222222222222222222222222222222222222"
+	litestreamSHA := "3333333333333333333333333333333333333333"
+	imageRef := "registry.fly.io/litestream-soak:sha-222222222222-pr-1228"
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-1228-sentinel-single",
+		AppName:       "litestream-soak",
+		Name:          "worker-pr-1228-sentinel-single",
+		Status:        model.WorkerRunning,
+		Source:        source,
+		GitSHA:        oldSHA,
+		LitestreamSHA: oldLitestreamSHA,
+		PRNumber:      1228,
+		ProfileName:   "sentinel-single",
+		ProfileConfig: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}.JSON(),
+		FlyMachineID:  "old-machine-low",
+		FlyVolumeID:   "old-volume-low",
+	})
+	fly := newDeployTestFlyServer(t, db, source, sha, litestreamSHA, imageRef)
+	deployer := NewDeployer(NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", ""), db, "litestream-soak", false)
+
+	target, err := deployer.recordDeploymentReady(context.Background(), source, sha, litestreamSHA, imageRef, "github_actions_pr_soak", "benbjohnson/litestream", "")
+	if err != nil {
+		t.Fatalf("recordDeploymentReady() error = %v", err)
+	}
+	recorded := mustDeploymentByVersion(t, db, source, sha, litestreamSHA)
+	if pending, err := db.RolloutPending(recorded.ID); err != nil || !pending {
+		t.Fatalf("rollout_pending after the record = %v, %v; want set", pending, err)
+	}
+	if worker := mustWorker(t, db, "worker-pr-1228-sentinel-single"); worker.GitSHA != oldSHA {
+		t.Fatalf("worker rolled before the resume: %s", worker.GitSHA)
+	}
+
+	deployer.ResumePendingRollouts(context.Background())
+	if worker := mustWorker(t, db, "worker-pr-1228-sentinel-single"); worker.GitSHA != sha || worker.LitestreamSHA != litestreamSHA {
+		t.Fatalf("worker after the resumed rollout = %s / %s, want %s / %s", worker.GitSHA, worker.LitestreamSHA, sha, litestreamSHA)
+	}
+	if pending, err := db.RolloutPending(recorded.ID); err != nil || pending {
+		t.Fatalf("rollout_pending after the resumed rollout = %v, %v; want cleared", pending, err)
+	}
+	if target.GitSHA != sha {
+		t.Fatalf("recorded target = %+v", target)
+	}
+	if remaining, err := db.ListRolloutPendingDeployments(); err != nil || len(remaining) != 0 {
+		t.Fatalf("pending rollouts after the resume = %+v, %v", remaining, err)
+	}
+}
+
 func TestDeploymentReadyRejectsPersistenceFailure(t *testing.T) {
 	db := openTestDB(t)
 	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")

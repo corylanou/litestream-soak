@@ -47,6 +47,28 @@ func (c *profileBlobCache) hold() func() {
 	return c.sweep.RUnlock
 }
 
+// holdContext takes the sweep read lock unless ctx ends first. A sweep holds
+// the lock exclusively while it deletes a batch, so a caller with a deadline
+// must not wait on it without bound; a lock acquired after the caller gave
+// up is released at once.
+func (c *profileBlobCache) holdContext(ctx context.Context) (func(), error) {
+	acquired := make(chan struct{})
+	go func() {
+		c.sweep.RLock()
+		close(acquired)
+	}()
+	select {
+	case <-acquired:
+		return c.sweep.RUnlock, nil
+	case <-ctx.Done():
+		go func() {
+			<-acquired
+			c.sweep.RUnlock()
+		}()
+		return nil, ctx.Err()
+	}
+}
+
 func (c *profileBlobCache) pin(id int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

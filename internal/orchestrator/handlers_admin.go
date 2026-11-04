@@ -40,10 +40,12 @@ const deploymentReadyRetryAfter = 15 * time.Second
 
 // The task retries a record that the database refused as busy (a deferred
 // transaction cannot wait for the write lock, so a maintenance checkpoint
-// answers SQLITE_BUSY at once) until it lands or the retry budget runs out.
-var deploymentReadyRecordRetryDelay = 2 * time.Second
-
-const deploymentReadyRecordAttempts = 300
+// answers SQLITE_BUSY at once) until it lands or deploymentReadyRecordDeadline
+// has elapsed; every wait on the record path honors that deadline.
+var (
+	deploymentReadyRecordRetryDelay = 2 * time.Second
+	deploymentReadyRecordDeadline   = 10 * time.Minute
+)
 
 func controlDatabaseBusy(err error) bool {
 	text := strings.ToLower(err.Error())
@@ -75,15 +77,17 @@ func (a *API) deploymentReadyTask(key string, record func(context.Context) (mode
 			delete(a.readyTasks, key)
 			a.rolloutMu.Unlock()
 		}()
-		target, err := record(ctx)
-		for attempt := 1; err != nil && controlDatabaseBusy(err) && ctx.Err() == nil && attempt < deploymentReadyRecordAttempts; attempt++ {
+		recordCtx, cancelRecord := context.WithTimeout(ctx, deploymentReadyRecordDeadline)
+		target, err := record(recordCtx)
+		for attempt := 1; err != nil && controlDatabaseBusy(err) && recordCtx.Err() == nil; attempt++ {
 			slog.Warn("Deployment ready record waiting for the control database", "attempt", attempt, "error", err)
 			select {
-			case <-ctx.Done():
+			case <-recordCtx.Done():
 			case <-time.After(deploymentReadyRecordRetryDelay):
 			}
-			target, err = record(ctx)
+			target, err = record(recordCtx)
 		}
+		cancelRecord()
 		task.err = err
 		close(task.recorded)
 		if err != nil {

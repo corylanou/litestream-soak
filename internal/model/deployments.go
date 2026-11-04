@@ -140,18 +140,18 @@ func (d *DB) UpsertReadyDeploymentContext(ctx context.Context, dep *Deployment) 
 	).Scan(&existingID)
 	switch {
 	case err == nil:
-		_, err = tx.Exec(`
+		_, err = tx.ExecContext(ctx, `
 			UPDATE deployments
-			SET status = 'ready', image_ref = ?, repository = ?, error_message = '', completed_at = datetime('now')
+			SET status = 'ready', image_ref = ?, repository = ?, error_message = '', completed_at = datetime('now'), rollout_pending = 1
 			WHERE id = ?`,
 			dep.ImageRef,
 			repository,
 			existingID,
 		)
 	case errors.Is(err, sql.ErrNoRows):
-		_, err = tx.Exec(`
-			INSERT INTO deployments (git_sha, litestream_sha, workload_sha, image_ref, source, repository, pr_number, status, started_at, completed_at, error_message)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', datetime('now'), datetime('now'), '')`,
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO deployments (git_sha, litestream_sha, workload_sha, image_ref, source, repository, pr_number, status, started_at, completed_at, error_message, rollout_pending)
+			VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', datetime('now'), datetime('now'), '', 1)`,
 			dep.GitSHA, dep.LitestreamSHA, dep.WorkloadSHA, dep.ImageRef, dep.Source, repository, dep.PRNumber,
 		)
 	default:
@@ -161,6 +161,39 @@ func (d *DB) UpsertReadyDeploymentContext(ctx context.Context, dep *Deployment) 
 		return err
 	}
 	return tx.Commit()
+}
+
+// ListRolloutPendingDeployments returns the ready deployments that were
+// recorded but whose rollout has not completed, so a control plane that
+// restarted in between can resume them.
+func (d *DB) ListRolloutPendingDeployments() ([]Deployment, error) {
+	rows, err := d.query("SELECT " + deploymentColumns + " FROM deployments WHERE status = 'ready' AND rollout_pending = 1 ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var deployments []Deployment
+	for rows.Next() {
+		var dep Deployment
+		if err := scanDeployment(rows, &dep); err != nil {
+			return nil, err
+		}
+		deployments = append(deployments, dep)
+	}
+	return deployments, rows.Err()
+}
+
+// ClearRolloutPending marks a deployment's rollout as handled: completed,
+// or superseded by a newer ready deployment of its source.
+func (d *DB) ClearRolloutPending(id int) error {
+	_, err := d.exec(`UPDATE deployments SET rollout_pending = 0 WHERE id = ?`, id)
+	return err
+}
+
+func (d *DB) RolloutPending(id int) (bool, error) {
+	var pending bool
+	err := d.queryRow(`SELECT rollout_pending FROM deployments WHERE id = ?`, id).Scan(&pending)
+	return pending, err
 }
 
 func (d *DB) GetDeploymentSourceRepository(source string) (string, error) {

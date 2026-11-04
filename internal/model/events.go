@@ -15,11 +15,15 @@ func (d *DB) RecordEvent(workerID, eventType, message, details string) error {
 	return d.RecordEventContext(context.Background(), workerID, eventType, message, details)
 }
 
-// RecordEventContext records an event, waiting for the writer only as long
-// as ctx allows.
+// RecordEventContext records an event, waiting for the blob sweep lock and
+// the writer only as long as ctx allows.
 func (d *DB) RecordEventContext(ctx context.Context, workerID, eventType, message, details string) error {
-	defer d.blobs.hold()()
-	details, err := d.compactProfileSnapshot(details)
+	release, err := d.blobs.holdContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	details, err = d.compactProfileSnapshot(details)
 	if err != nil {
 		return err
 	}
