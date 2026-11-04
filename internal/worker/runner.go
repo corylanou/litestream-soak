@@ -64,7 +64,7 @@ func NewRunner(cfg Config) *Runner {
 	return runner
 }
 
-func (r *Runner) Run(ctx context.Context) error {
+func (r *Runner) Run(ctx context.Context) (runErr error) {
 	runCtx, cancelRun := context.WithCancelCause(ctx)
 	defer cancelRun(nil)
 
@@ -78,6 +78,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	stopEvidenceUploader := r.startEvidenceUploader(runCtx)
 	defer func() {
 		stopEvidenceUploader()
+		if err := r.finalizeProfileSummaries(); err != nil {
+			slog.Error("Final profiling evidence not persisted", "error", err)
+			runErr = errors.Join(runErr, fmt.Errorf("finalize profiling evidence: %w", err))
+		}
 		if err := r.flushRunEvidence(context.WithoutCancel(runCtx)); err != nil {
 			slog.Warn("Final evidence delivery pending", "error", err)
 		}

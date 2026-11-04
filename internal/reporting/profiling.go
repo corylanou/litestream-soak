@@ -13,6 +13,12 @@ type ProfilingEvidence struct {
 	ProfileReadError       string                  `json:"profile_read_error,omitempty"`
 	ProfileStatusCounts    map[string]uint64       `json:"profile_status_counts,omitempty"`
 	ProfileRecords         []ProfileRecordEvidence `json:"profile_records,omitempty"`
+	// ProfileIncidentsCoalesced counts, per kind, the incidents folded into
+	// that kind's summary incident once the retained set was full, and
+	// ProfileEvidenceDropped counts incident events the durable outbox had no
+	// room for; both stay in the snapshot, so neither is a gap in history.
+	ProfileIncidentsCoalesced map[string]uint64 `json:"profile_incidents_coalesced,omitempty"`
+	ProfileEvidenceDropped    uint64            `json:"profile_evidence_dropped,omitempty"`
 }
 
 type ProfileUploadFailureEvidence struct {
