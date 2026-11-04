@@ -37,6 +37,7 @@ type litestreamManager struct {
 // state of the one started after it.
 type litestreamProcess struct {
 	done chan struct{}
+	cmd  *exec.Cmd
 
 	mu   sync.Mutex
 	err  error
@@ -435,7 +436,7 @@ func (m *litestreamManager) startLitestream(ctx context.Context) error {
 		return err
 	}
 
-	proc := &litestreamProcess{done: make(chan struct{})}
+	proc := &litestreamProcess{done: make(chan struct{}), cmd: m.litestreamCmd}
 	m.litestreamMu.Lock()
 	m.litestreamProc = proc
 	m.litestreamMu.Unlock()
@@ -493,27 +494,66 @@ func setCommandEnv(env []string, key, value string) []string {
 }
 
 func (m *litestreamManager) stopLitestream() {
-	m.stopLitestreamWithSignal(os.Interrupt)
+	if err := m.stopLitestreamWithSignal(os.Interrupt); err != nil && !errors.Is(err, errLitestreamNotRunning) {
+		slog.Warn("Litestream stop did not complete as signalled", "error", err)
+	}
 }
 
-// stopLitestreamWithSignal stops Litestream with sig and waits for it to
-// exit. The exit is expected, so the monitor started for this process does
-// not cancel the run.
-func (m *litestreamManager) stopLitestreamWithSignal(sig os.Signal) {
-	if m.litestreamCmd == nil || m.litestreamCmd.Process == nil {
-		return
+var (
+	errLitestreamNotRunning        = errors.New("litestream is not running")
+	errLitestreamExitedBeforeStop  = errors.New("litestream exited before the stop signal was delivered")
+	errLitestreamExitNotAttributed = errors.New("litestream exit is not attributable to the stop signal")
+)
+
+// stopLitestreamWithSignal stops the current Litestream process with sig and
+// waits for it to exit. The process and its bookkeeping are captured once, so
+// a stop that runs late can never signal a replacement started in between.
+func (m *litestreamManager) stopLitestreamWithSignal(sig os.Signal) error {
+	return stopLitestreamProcess(m.currentProcess(), sig)
+}
+
+// stopLitestreamProcess signals exactly proc and waits for its exit. The exit
+// is expected, so the monitor for proc does not cancel the run. It fails when
+// the process had already exited, when the signal could not be delivered, or
+// when the exit came from a different signal, so a caller that needs the stop
+// to be its own doing can tell.
+func stopLitestreamProcess(proc *litestreamProcess, sig os.Signal) error {
+	if proc == nil || proc.cmd == nil || proc.cmd.Process == nil {
+		return errLitestreamNotRunning
 	}
-	slog.Info("Stopping Litestream", "signal", sig)
-	proc := m.currentProcess()
-	if proc != nil {
-		proc.markExpectedExit()
+	select {
+	case <-proc.done:
+		return fmt.Errorf("%w: %s", errLitestreamExitedBeforeStop, describeProcessExit(proc.exitSnapshot()))
+	default:
 	}
-	if err := m.litestreamCmd.Process.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		slog.Warn("Failed to signal Litestream", "signal", sig, "error", err)
+	slog.Info("Stopping Litestream", "signal", sig, "pid", proc.cmd.Process.Pid)
+	proc.markExpectedExit()
+	if err := proc.cmd.Process.Signal(sig); err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
+			<-proc.done
+			return fmt.Errorf("%w: %s", errLitestreamExitedBeforeStop, describeProcessExit(proc.exitSnapshot()))
+		}
+		return fmt.Errorf("signal litestream with %v: %w", sig, err)
 	}
-	if proc != nil {
-		<-proc.done
+	<-proc.done
+	if exit := proc.exitSnapshot(); exit != nil && exit.Signal != "" && !signalMatches(exit.Signal, sig) {
+		return fmt.Errorf("%w: exited on %s after %v was sent", errLitestreamExitNotAttributed, exit.Signal, sig)
 	}
+	return nil
+}
+
+func signalMatches(reported string, sig os.Signal) bool {
+	return strings.EqualFold(strings.TrimSpace(reported), sig.String())
+}
+
+func (p *litestreamProcess) exitSnapshot() *reporting.ProcessExitSnapshot {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.exit == nil {
+		return nil
+	}
+	exit := *p.exit
+	return &exit
 }
 
 func (m *litestreamManager) monitorLitestream(ctx context.Context, cancel context.CancelCauseFunc) {
@@ -598,13 +638,7 @@ func (m *litestreamManager) litestreamExitSnapshot() *reporting.ProcessExitSnaps
 	if proc == nil {
 		return nil
 	}
-	proc.mu.Lock()
-	defer proc.mu.Unlock()
-	if proc.exit == nil {
-		return nil
-	}
-	exit := *proc.exit
-	return &exit
+	return proc.exitSnapshot()
 }
 
 func processExitSnapshot(process string, exitedAt time.Time, err error) *reporting.ProcessExitSnapshot {

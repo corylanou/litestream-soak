@@ -6,8 +6,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -187,11 +189,11 @@ func TestCheckWALResetLatestTXIDRequiresTheBoundary(t *testing.T) {
 	if err := checkWALResetLatestTXID(500, 500); err != nil {
 		t.Fatalf("exact boundary rejected: %v", err)
 	}
-	if err := checkWALResetLatestTXID(499, 500); err == nil || !strings.Contains(err.Error(), "landed on txid 00000000000001f3, boundary 00000000000001f4") || errors.Is(err, errWALResetMissingPlan) {
+	if err := checkWALResetLatestTXID(499, 500); err == nil || !strings.Contains(err.Error(), "landed on txid 00000000000001f3, behind boundary 00000000000001f4") || errors.Is(err, errWALResetMissingPlan) || errors.Is(err, errWALResetLatestAdvanced) {
 		t.Fatalf("behind the boundary = %v, want a restore failure", err)
 	}
-	if err := checkWALResetLatestTXID(501, 500); err == nil || errors.Is(err, errWALResetMissingPlan) {
-		t.Fatalf("ahead of the boundary = %v, want a restore failure", err)
+	if err := checkWALResetLatestTXID(501, 500); !errors.Is(err, errWALResetLatestAdvanced) {
+		t.Fatalf("ahead of the boundary = %v, want %v", err, errWALResetLatestAdvanced)
 	}
 	if err := checkWALResetLatestTXID(0, 500); !errors.Is(err, errWALResetMissingPlan) {
 		t.Fatalf("missing plan = %v, want %v", err, errWALResetMissingPlan)
@@ -240,10 +242,12 @@ type fakeWAL struct {
 	downReadErr  error
 	downBurstErr error
 
-	live          int
-	stopPending   bool
-	startFailOnce bool
-	stops, starts int
+	live              int
+	stopPending       bool
+	startFailOnce     bool
+	shutdownReset     bool
+	exitHeaderInvalid bool
+	stops, starts     int
 }
 
 const fakeFrameSize = testWALPageSize + walFrameHeaderSize
@@ -261,7 +265,11 @@ func (w *fakeWAL) generation() (walGeneration, error) {
 	if w.down && w.downReadErr != nil {
 		return walGeneration{}, w.downReadErr
 	}
-	return walGeneration{header: w.header, fileBytes: walHeaderSize + w.slots*fakeFrameSize, frameSize: fakeFrameSize, frameSlots: w.slots, committedFrames: w.frames, writtenFrames: w.frames}, nil
+	header := w.header
+	if w.down && w.exitHeaderInvalid {
+		header = walHeader{}
+	}
+	return walGeneration{header: header, fileBytes: walHeaderSize + w.slots*fakeFrameSize, frameSize: fakeFrameSize, frameSlots: w.slots, committedFrames: w.frames, writtenFrames: w.frames}, nil
 }
 
 func (w *fakeWAL) burst(_ context.Context, rows int) (int, error) {
@@ -303,6 +311,12 @@ func (w *fakeWAL) stop(context.Context) (string, error) {
 	}
 	if w.stopPending {
 		return "", errors.New("litestream did not exit after terminated: context deadline exceeded")
+	}
+	if w.shutdownReset {
+		w.header.checkpointSeq++
+		w.header.salt1++
+		w.header.salt2 += 7919
+		w.frames = 8
 	}
 	w.live--
 	return "exit:0", nil
@@ -678,17 +692,40 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			},
 			wantStatus:    "failed",
 			wantSignature: reporting.SignatureWALResetRestoreFailed,
-			wantMessage:   "wal reset restore failed (latest): latest restore landed on txid 00000000000001f3, boundary 00000000000001f4",
+			wantMessage:   "wal reset restore failed (latest): latest restore landed on txid 00000000000001f3, behind boundary 00000000000001f4",
 			wantStarts:    1,
 		},
 		{
-			name: "a latest restore ahead of the synced boundary is a restore failure",
+			name: "a latest restore ahead of the synced boundary is inconclusive",
 			script: func() *walResetScript {
 				return &walResetScript{wal: newFakeWAL(), phase: "latest_boundary", validErr: checkWALResetLatestTXID(501, 500)}
 			},
-			wantStatus:    "failed",
-			wantSignature: reporting.SignatureWALResetRestoreFailed,
-			wantMessage:   "wal reset restore failed (latest): latest restore landed on txid 00000000000001f5, boundary 00000000000001f4",
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetUnavailable,
+			wantMessage:   "latest_boundary: latest advanced past the synced boundary: latest restore landed on txid 00000000000001f5, boundary 00000000000001f4",
+			wantStarts:    1,
+		},
+		{
+			name: "litestream's own shutdown reset is not counted and the baseline is the header after exit",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.shutdownReset = true
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:  "passed",
+			wantSummary: []string{"wal_resets=5", "salt1_before=1001 salt1_after=1006", "salt1_at_signal=1000"},
+			wantStarts:  1,
+		},
+		{
+			name: "an unreadable wal header after exit is inconclusive and restarts litestream",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.exitHeaderInvalid = true
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetUnavailable,
+			wantMessage:   "wal header unreadable after litestream exited",
 			wantStarts:    1,
 		},
 		{
@@ -913,6 +950,77 @@ func TestMonitorProcessIgnoresAnExpectedExitEvenAfterARestart(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("unexpected exit of the running process did not cancel the run")
+	}
+}
+
+func startSleepProcess(t *testing.T) *litestreamProcess {
+	t.Helper()
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("sleep unavailable: %v", err)
+	}
+	proc := &litestreamProcess{done: make(chan struct{}), cmd: cmd}
+	go func() {
+		err := cmd.Wait()
+		proc.finish(err, processExitSnapshot("litestream", time.Now().UTC(), err))
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-proc.done
+	})
+	return proc
+}
+
+func processAlive(cmd *exec.Cmd) bool {
+	return cmd.Process.Signal(syscall.Signal(0)) == nil
+}
+
+func TestStopLitestreamProcessSignalsOnlyTheCapturedProcess(t *testing.T) {
+	manager := newLitestreamManager(&Config{})
+	first := startSleepProcess(t)
+	manager.litestreamCmd, manager.litestreamProc = first.cmd, first
+
+	captured := manager.currentProcess()
+	second := startSleepProcess(t)
+	manager.litestreamCmd, manager.litestreamProc = second.cmd, second
+
+	if err := stopLitestreamProcess(captured, syscall.SIGTERM); err != nil {
+		t.Fatalf("delayed stop of the captured process = %v", err)
+	}
+	if exit := captured.exitSnapshot(); exit == nil || exit.Signal != syscall.SIGTERM.String() {
+		t.Fatalf("captured process exit = %+v, want terminated", exit)
+	}
+	if !processAlive(second.cmd) || !manager.litestreamRunning() || manager.litestreamExitExpected() {
+		t.Fatalf("replacement touched by the delayed stop: alive=%v running=%v expected=%v", processAlive(second.cmd), manager.litestreamRunning(), manager.litestreamExitExpected())
+	}
+
+	if err := stopLitestreamProcess(captured, syscall.SIGTERM); !errors.Is(err, errLitestreamExitedBeforeStop) {
+		t.Fatalf("stop of an exited process = %v, want %v", err, errLitestreamExitedBeforeStop)
+	}
+	if err := stopLitestreamProcess(nil, syscall.SIGTERM); !errors.Is(err, errLitestreamNotRunning) {
+		t.Fatalf("stop without a process = %v, want %v", err, errLitestreamNotRunning)
+	}
+
+	if err := manager.stopLitestreamWithSignal(syscall.SIGKILL); err != nil {
+		t.Fatalf("kill of the replacement = %v", err)
+	}
+	if processAlive(second.cmd) || manager.litestreamRunning() {
+		t.Fatal("replacement still alive after the kill")
+	}
+}
+
+func TestStopLitestreamProcessRejectsAnExitFromAnotherSignal(t *testing.T) {
+	proc := startSleepProcess(t)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_ = proc.cmd.Process.Kill()
+	}()
+	err := stopLitestreamProcess(proc, syscall.SIGSTOP)
+	if !errors.Is(err, errLitestreamExitNotAttributed) || !strings.Contains(err.Error(), "exited on killed after") {
+		t.Fatalf("stop racing a kill = %v, want %v", err, errLitestreamExitNotAttributed)
+	}
+	if !signalMatches("terminated", syscall.SIGTERM) || signalMatches("killed", syscall.SIGTERM) {
+		t.Fatal("signalMatches does not compare signal names")
 	}
 }
 

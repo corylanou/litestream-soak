@@ -73,6 +73,7 @@ var (
 	errWALResetSnapshotInterference = errors.New("wal reset snapshot interference")
 	errWALResetGateBusy             = errors.New("verification held the check gate")
 	errWALResetMissingPlan          = errors.New("latest restore reported no plan txid")
+	errWALResetLatestAdvanced       = errors.New("latest advanced past the synced boundary")
 )
 
 // walResetCount is the number of WAL resets between two valid headers,
@@ -111,7 +112,11 @@ func (l walResetL9) changed(other walResetL9) bool {
 
 // walResetObservation is what one cycle measured on the WAL and the replica.
 type walResetObservation struct {
-	savedHeader walHeader
+	// signalHeader is the WAL header read just before SIGTERM; savedHeader is
+	// the valid header read after Litestream exited and is the baseline the
+	// reset count is taken from.
+	signalHeader walHeader
+	savedHeader  walHeader
 	// savedPosition is Litestream's recorded resume position, read from the
 	// header of its newest local L0 LTX file (WALOffset+WALSize) when that
 	// file belongs to the generation that was current at the stop. Zero when
@@ -183,6 +188,9 @@ func (o walResetObservation) summary() string {
 	}
 	if o.savedHeader.valid {
 		parts = append(parts, fmt.Sprintf("salt1_before=%d salt1_after=%d ckpt_seq_before=%d ckpt_seq_after=%d", o.savedHeader.salt1, o.finalWAL.header.salt1, o.savedHeader.checkpointSeq, o.finalWAL.header.checkpointSeq))
+	}
+	if o.signalHeader.valid {
+		parts = append(parts, fmt.Sprintf("salt1_at_signal=%d", o.signalHeader.salt1))
 	}
 	switch {
 	case o.l9Before.known && o.l9After.known:
@@ -421,7 +429,7 @@ func (c *walResetCheck) run(ctx context.Context) (observation walResetObservatio
 	if walErr != nil {
 		return observation, validation, fmt.Errorf("%w: read wal: %v", errWALResetUnavailable, walErr)
 	}
-	observation.savedHeader = signalWAL.header
+	observation.signalHeader = signalWAL.header
 	observation.savedAtSignal = signalWAL.generationEnd()
 	stopCtx, cancelStop := context.WithTimeout(ctx, c.stopBudget)
 	observation.litestreamExit, err = c.stop(stopCtx)
@@ -430,10 +438,17 @@ func (c *walResetCheck) run(ctx context.Context) (observation walResetObservatio
 		return observation, validation, fmt.Errorf("%w: stop: %v", errWALResetLitestreamRestart, err)
 	}
 	downStarted := c.clock()
+	// The reset baseline is the header after the exit: Litestream's own
+	// shutdown checkpoint may restart the WAL once more on its way out, and
+	// only resets after it has gone are the application's.
 	exitWAL, walErr := c.generation()
 	if walErr != nil {
 		return observation, validation, fmt.Errorf("%w: read wal after stop: %v", errWALResetUnavailable, walErr)
 	}
+	if !exitWAL.header.valid {
+		return observation, validation, fmt.Errorf("%w: wal header unreadable after litestream exited (wal %d bytes)", errWALResetUnavailable, exitWAL.fileBytes)
+	}
+	observation.savedHeader = exitWAL.header
 	observation.savedAtExit = exitWAL.generationEnd()
 	c.recordSavedPosition(exitWAL, &observation)
 
@@ -893,15 +908,20 @@ func walResetLatestRestore(ctx context.Context, verifier *Verifier, cfg Config, 
 }
 
 // checkWALResetLatestTXID requires the unpinned restore to have landed exactly
-// on the synced boundary: behind it the replica lost committed data, ahead of
-// it the pause did not hold; a restore log without a plan txid is the only
-// outcome that proves nothing.
+// on the synced boundary. Behind it the replica lost committed data, which is
+// the failure the check exists for. Ahead of it proves nothing: Litestream's
+// own checkpoint (its _litestream_seq write) can add an LTX file while the
+// load is paused, so the latest point is simply newer than the boundary the
+// comparison was taken at. A restore log without a plan txid proves nothing
+// either.
 func checkWALResetLatestTXID(restored, boundary uint64) error {
 	switch {
 	case restored == 0:
 		return errWALResetMissingPlan
-	case restored != boundary:
-		return fmt.Errorf("latest restore landed on txid %s, boundary %s", formatTXID(restored), formatTXID(boundary))
+	case restored < boundary:
+		return fmt.Errorf("latest restore landed on txid %s, behind boundary %s", formatTXID(restored), formatTXID(boundary))
+	case restored > boundary:
+		return fmt.Errorf("%w: latest restore landed on txid %s, boundary %s", errWALResetLatestAdvanced, formatTXID(restored), formatTXID(boundary))
 	default:
 		return nil
 	}
@@ -917,7 +937,7 @@ func walResetValidationError(phase string, err error) error {
 	var locked *restoredComparisonLockedError
 	var deadline *verifierDeadlineError
 	switch {
-	case errors.As(err, &evidence), errors.As(err, &capacity), errors.As(err, &locked), errors.Is(err, errWALResetMissingPlan):
+	case errors.As(err, &evidence), errors.As(err, &capacity), errors.As(err, &locked), errors.Is(err, errWALResetMissingPlan), errors.Is(err, errWALResetLatestAdvanced):
 		return fmt.Errorf("%w: %s: %v", errWALResetUnavailable, phase, err)
 	case errors.As(err, &deadline), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return fmt.Errorf("%w: %s ran out of time, no corruption evidence: %v", errWALResetUnavailable, phase, err)
@@ -932,21 +952,33 @@ func (r *Runner) walResetCheckEnabled() bool {
 	return r.cfg.WALResetCheck && !r.cfg.ManyDBEnabled()
 }
 
-// stopLitestreamForCheck stops Litestream with sig and waits for the exit,
-// bounded by ctx so a process that ignores the signal fails the cycle
-// instead of hanging it. It returns how the process ended.
+// stopLitestreamForCheck stops the current Litestream process with sig and
+// waits for the exit, bounded by ctx so a process that ignores the signal
+// fails the cycle instead of hanging it. The process is captured before the
+// wait, so a stop that completes late never touches a replacement. It
+// returns how the process ended; a signal that could not be delivered, a
+// process that had already exited, or an exit from another signal is an
+// error, because the cycle then cannot claim the stop as its own.
 func (r *Runner) stopLitestreamForCheck(ctx context.Context, sig os.Signal) (string, error) {
-	done := make(chan struct{})
-	go func() {
-		r.stopLitestreamWithSignal(sig)
-		close(done)
-	}()
+	proc := r.currentProcess()
+	done := make(chan error, 1)
+	go func() { done <- stopLitestreamProcess(proc, sig) }()
 	select {
-	case <-done:
-		return describeProcessExit(r.litestreamExitSnapshot()), nil
+	case err := <-done:
+		if err != nil {
+			return describeProcessExit(proc.exitSnapshotOrNil()), err
+		}
+		return describeProcessExit(proc.exitSnapshot()), nil
 	case <-ctx.Done():
 		return "", fmt.Errorf("litestream did not exit after %v: %w", sig, ctx.Err())
 	}
+}
+
+func (p *litestreamProcess) exitSnapshotOrNil() *reporting.ProcessExitSnapshot {
+	if p == nil {
+		return nil
+	}
+	return p.exitSnapshot()
 }
 
 func describeProcessExit(exit *reporting.ProcessExitSnapshot) string {
@@ -975,7 +1007,11 @@ func (r *Runner) ensureLitestreamForCheck(ctx context.Context, start func() erro
 			}
 			slog.Warn("Litestream started by the wal reset check never became ready; replacing it")
 		}
-		r.stopLitestreamWithSignal(syscall.SIGKILL)
+		// Waiting on the captured process also lets any outstanding stop that
+		// is still waiting on it finish before the replacement starts.
+		if err := r.stopLitestreamWithSignal(syscall.SIGKILL); err != nil && !errors.Is(err, errLitestreamExitedBeforeStop) && !errors.Is(err, errLitestreamNotRunning) {
+			return fmt.Errorf("replace litestream: %w", err)
+		}
 	}
 	if err := start(); err != nil {
 		return err

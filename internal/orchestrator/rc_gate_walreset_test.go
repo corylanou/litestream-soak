@@ -126,13 +126,18 @@ func TestRCGateScoresWALResetChecks(t *testing.T) {
 		wantGate     string
 	}{
 		{
-			name:         "both sides restore intact after the resets",
+			name:         "both sides restore intact is no reproduction, not a pass",
 			checks:       []gateWALResetCheck{{testGateCandidate, "passed", ""}, {testGateBaseline, "passed", ""}},
-			wantScenario: rcGateVerdictPass, wantRestore: rcGateVerdictPass, wantGate: rcGateVerdictPass,
+			wantScenario: rcGateVerdictNoReproduction, wantRestore: rcGateVerdictPass, wantGate: rcGateVerdictIncomplete,
 		},
 		{
 			name:         "the candidate fixes a corrupt latest restore the baseline still has",
 			checks:       []gateWALResetCheck{{testGateCandidate, "passed", ""}, {testGateBaseline, "failed", "integrity_check"}, {testGateBaseline, "passed", ""}},
+			wantScenario: rcGateVerdictPass, wantRestore: rcGateVerdictPass, wantGate: rcGateVerdictPass,
+		},
+		{
+			name:         "a baseline that lost rows is a reproduction too",
+			checks:       []gateWALResetCheck{{testGateCandidate, "passed", ""}, {testGateBaseline, "failed", "compare"}},
 			wantScenario: rcGateVerdictPass, wantRestore: rcGateVerdictPass, wantGate: rcGateVerdictPass,
 		},
 		{
@@ -195,6 +200,18 @@ func TestRCGateScoresWALResetChecks(t *testing.T) {
 			}
 			if len(reset.Modes) != 1 || reset.Modes[0].Mode != gateModeWALReset || reset.Modes[0].Verdict != tt.wantScenario {
 				t.Fatalf("wal reset modes = %+v, want one %s mode with verdict %s", reset.Modes, gateModeWALReset, tt.wantScenario)
+			}
+			wantReproduced := 0
+			for _, check := range tt.checks {
+				if check.source == testGateBaseline && check.status == "failed" {
+					wantReproduced++
+				}
+			}
+			if reset.Baseline.Reproduced != wantReproduced || reset.Modes[0].Baseline.Reproduced != wantReproduced {
+				t.Fatalf("baseline reproduced = %d (mode %d), want %d", reset.Baseline.Reproduced, reset.Modes[0].Baseline.Reproduced, wantReproduced)
+			}
+			if tt.wantScenario == rcGateVerdictPass && reset.Baseline.Reproduced == 0 {
+				t.Fatal("wal reset scenario passed without a baseline reproduction")
 			}
 			if reset.Candidate.RotationEnabled || reset.Baseline.RotationEnabled {
 				t.Fatalf("wal reset mode counted as restore rotation: %+v", reset)
