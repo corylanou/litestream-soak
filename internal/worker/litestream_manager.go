@@ -45,6 +45,16 @@ type litestreamProcess struct {
 	// expectedExit marks a stop the harness asked for, so the monitor does
 	// not treat the exit as a failure.
 	expectedExit bool
+	// stop is the request currently responsible for the exit. A later
+	// request supersedes it, and a superseded request never sends its signal.
+	stop *litestreamStop
+}
+
+// litestreamStop is one stop request for one process. The process is marked
+// as stopping the moment the request is made; the signal goes out later and
+// only while the request still owns the stop.
+type litestreamStop struct {
+	sig os.Signal
 }
 
 func (p *litestreamProcess) markExpectedExit() {
@@ -503,6 +513,7 @@ var (
 	errLitestreamNotRunning        = errors.New("litestream is not running")
 	errLitestreamExitedBeforeStop  = errors.New("litestream exited before the stop signal was delivered")
 	errLitestreamExitNotAttributed = errors.New("litestream exit is not attributable to the stop signal")
+	errLitestreamStopSuperseded    = errors.New("litestream stop was superseded by a later stop")
 )
 
 // stopLitestreamWithSignal stops the current Litestream process with sig and
@@ -518,28 +529,66 @@ func (m *litestreamManager) stopLitestreamWithSignal(sig os.Signal) error {
 // when the exit came from a different signal, so a caller that needs the stop
 // to be its own doing can tell.
 func stopLitestreamProcess(proc *litestreamProcess, sig os.Signal) error {
-	if proc == nil || proc.cmd == nil || proc.cmd.Process == nil {
-		return errLitestreamNotRunning
+	stop, err := proc.beginStop(sig)
+	if err != nil {
+		return err
+	}
+	return proc.finishStop(stop)
+}
+
+// beginStop marks p as stopping on behalf of sig before any signal is sent,
+// so a recovery that runs between the request and the signal already sees a
+// stopping process. A later beginStop takes the stop over: the earlier
+// request's signal is then never sent.
+func (p *litestreamProcess) beginStop(sig os.Signal) (*litestreamStop, error) {
+	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+		return nil, errLitestreamNotRunning
 	}
 	select {
-	case <-proc.done:
-		return fmt.Errorf("%w: %s", errLitestreamExitedBeforeStop, describeProcessExit(proc.exitSnapshot()))
+	case <-p.done:
+		return nil, fmt.Errorf("%w: %s", errLitestreamExitedBeforeStop, describeProcessExit(p.exitSnapshot()))
 	default:
 	}
-	slog.Info("Stopping Litestream", "signal", sig, "pid", proc.cmd.Process.Pid)
-	proc.markExpectedExit()
-	if err := proc.cmd.Process.Signal(sig); err != nil {
+	slog.Info("Stopping Litestream", "signal", sig, "pid", p.cmd.Process.Pid)
+	stop := &litestreamStop{sig: sig}
+	p.mu.Lock()
+	p.expectedExit = true
+	p.stop = stop
+	p.mu.Unlock()
+	return stop, nil
+}
+
+// finishStop sends the request's signal and waits for the exit. It fails when
+// the process exited first, when the signal could not be delivered, when a
+// later request superseded this one, or when the exit came from a different
+// signal.
+func (p *litestreamProcess) finishStop(stop *litestreamStop) error {
+	if err := p.signal(stop); err != nil {
 		if errors.Is(err, os.ErrProcessDone) {
-			<-proc.done
-			return fmt.Errorf("%w: %s", errLitestreamExitedBeforeStop, describeProcessExit(proc.exitSnapshot()))
+			<-p.done
+			return fmt.Errorf("%w: %s", errLitestreamExitedBeforeStop, describeProcessExit(p.exitSnapshot()))
 		}
-		return fmt.Errorf("signal litestream with %v: %w", sig, err)
+		if errors.Is(err, errLitestreamStopSuperseded) {
+			return err
+		}
+		return fmt.Errorf("signal litestream with %v: %w", stop.sig, err)
 	}
-	<-proc.done
-	if exit := proc.exitSnapshot(); exit != nil && exit.Signal != "" && !signalMatches(exit.Signal, sig) {
-		return fmt.Errorf("%w: exited on %s after %v was sent", errLitestreamExitNotAttributed, exit.Signal, sig)
+	<-p.done
+	if exit := p.exitSnapshot(); exit != nil && exit.Signal != "" && !signalMatches(exit.Signal, stop.sig) {
+		return fmt.Errorf("%w: exited on %s after %v was sent", errLitestreamExitNotAttributed, exit.Signal, stop.sig)
 	}
 	return nil
+}
+
+// signal delivers the request's signal under the process lock, so a request
+// superseded before it sends never sends.
+func (p *litestreamProcess) signal(stop *litestreamStop) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stop != stop {
+		return errLitestreamStopSuperseded
+	}
+	return p.cmd.Process.Signal(stop.sig)
 }
 
 func signalMatches(reported string, sig os.Signal) bool {

@@ -186,7 +186,7 @@ func InferFailureStage(checkType, errorMessage string) string {
 		return "integrity_check"
 	case strings.Contains(text, "validation failed"):
 		return "validation"
-	case strings.Contains(text, "decode") || strings.Contains(text, "unexpected eof"):
+	case strings.Contains(text, "decode") || strings.Contains(text, "unexpected eof") || strings.Contains(text, "checksum mismatch"):
 		return "restore"
 	case strings.TrimSpace(checkType) != "":
 		return strings.TrimSpace(checkType)
@@ -308,7 +308,7 @@ func inferFailureSignature(stage, text, original string) string {
 		return "sqlite_index_mismatch"
 	case strings.Contains(text, "open ltx file: file does not exist") || strings.Contains(text, "no such key") || strings.Contains(text, "missing ltx"):
 		return signatureStagePrefix(stage) + "_missing_ltx"
-	case strings.Contains(text, "read page header") || strings.Contains(text, "decode") || strings.Contains(text, "unexpected eof"):
+	case strings.Contains(text, "read page header") || strings.Contains(text, "decode") || strings.Contains(text, "unexpected eof") || strings.Contains(text, "checksum mismatch"):
 		return signatureStagePrefix(stage) + "_decode_error"
 	case strings.Contains(text, "restore plan") || strings.Contains(text, "calc restore"):
 		return signatureStagePrefix(stage) + "_plan_failed"

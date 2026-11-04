@@ -6,7 +6,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -413,7 +415,9 @@ func newTestWALResetCheck(script *walResetScript) *walResetCheck {
 		if strings.HasPrefix(script.phase, "latest_") {
 			validation.pinnedPassed = true
 		}
-		return validation, walResetValidationError(script.phase, script.validErr)
+		signature, err := walResetValidationError(script.phase, script.validErr)
+		validation.restoreSignature = signature
+		return validation, err
 	}
 	if script.l9 == nil {
 		script.l9 = []walResetL9{l9Of("0000000000000001-0000000000000400@2026-11-03T09:00:00Z"), l9Of("0000000000000001-0000000000000400@2026-11-03T09:00:00Z")}
@@ -644,14 +648,90 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			wantStarts:    1,
 		},
 		{
-			name: "a failed pinned restore is a restore failure",
+			name: "a pinned restore that cannot decode the replica is a restore failure",
 			script: func() *walResetScript {
-				return &walResetScript{wal: newFakeWAL(), phase: "restore", validErr: errors.New("restore failed: validation failed (exit 1): page 50485: never used")}
+				return &walResetScript{wal: newFakeWAL(), phase: "restore", validErr: errors.New("restore failed: validation failed (exit 1): apply ltx file 0000000000000001-0000000000000400.ltx: decode ltx header: unexpected EOF")}
 			},
 			wantStatus:    "failed",
 			wantSignature: reporting.SignatureWALResetRestoreFailed,
-			wantMessage:   "wal reset restore failed: restore failed: validation failed (exit 1): page 50485: never used",
-			wantSummary:   []string{"pinned_restore=failed latest_restore=failed"},
+			wantMessage:   "wal reset restore failed: restore_decode_error: restore failed: validation failed (exit 1): apply ltx file 0000000000000001-0000000000000400.ltx: decode ltx header: unexpected EOF",
+			wantSummary:   []string{"pinned_restore=failed latest_restore=failed", "restore_signature=restore_decode_error"},
+			wantStarts:    1,
+		},
+		{
+			name: "a checksum mismatch in the replica is a restore failure",
+			script: func() *walResetScript {
+				return &walResetScript{wal: newFakeWAL(), phase: "restore", validErr: errors.New("restore failed: validation failed (exit 1): apply ltx file: ltx: checksum mismatch")}
+			},
+			wantStatus:    "failed",
+			wantSignature: reporting.SignatureWALResetRestoreFailed,
+			wantMessage:   "wal reset restore failed: restore_decode_error: restore failed: validation failed (exit 1): apply ltx file: ltx: checksum mismatch",
+			wantStarts:    1,
+		},
+		{
+			name: "a synced boundary the replica cannot serve is a restore failure",
+			script: func() *walResetScript {
+				return &walResetScript{wal: newFakeWAL(), phase: "restore", validErr: &restoreEvidenceInconclusiveError{err: errors.New("restore failed: validation failed (exit 1): restore target txid 00000000000001f4 is no longer available: no matching backup files available")}}
+			},
+			wantStatus:    "failed",
+			wantSignature: reporting.SignatureWALResetRestoreFailed,
+			wantMessage:   "wal reset restore failed: restore_target_unavailable: restore failed: validation failed (exit 1): restore target txid 00000000000001f4 is no longer available: no matching backup files available",
+			wantSummary:   []string{"restore_signature=restore_target_unavailable"},
+			wantStarts:    1,
+		},
+		{
+			name: "an object store 403 during the restore is inconclusive, not a reproduction",
+			script: func() *walResetScript {
+				return &walResetScript{wal: newFakeWAL(), phase: "restore", validErr: errors.New("restore failed: validation failed (exit 1): operation error S3: GetObject, https response error StatusCode: 403, RequestID: 7F3A9C, HostID: abc=, api error AccessDenied: Access Denied")}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetUnavailable,
+			wantMessage:   "wal reset check unavailable: restore: restore_s3_access_denied: restore failed: validation failed (exit 1): operation error S3: GetObject",
+			wantSummary:   []string{"pinned_restore=failed latest_restore=failed", "restore_signature=restore_s3_access_denied"},
+			wantStarts:    1,
+		},
+		{
+			name: "an object store 500 during the restore is inconclusive",
+			script: func() *walResetScript {
+				return &walResetScript{wal: newFakeWAL(), phase: "restore", validErr: errors.New("restore failed: validation failed (exit 1): operation error S3: GetObject, https response error StatusCode: 500, RequestID: 7F3A9C, HostID: abc=, api error InternalError: We encountered an internal error. Please try again.")}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetUnavailable,
+			wantMessage:   "wal reset check unavailable: restore: restore_s3_get_failed: restore failed",
+			wantSummary:   []string{"restore_signature=restore_s3_get_failed"},
+			wantStarts:    1,
+		},
+		{
+			name: "a dns failure during the restore is inconclusive",
+			script: func() *walResetScript {
+				return &walResetScript{wal: newFakeWAL(), phase: "restore", validErr: errors.New(`restore failed: validation failed (exit 1): operation error S3: ListObjectsV2, exceeded maximum number of attempts, 3, https response error StatusCode: 0, RequestID: , HostID: , request send failed, Get "https://soak.s3.us-east-1.amazonaws.com/?list-type=2": dial tcp: lookup soak.s3.us-east-1.amazonaws.com: no such host`)}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetUnavailable,
+			wantMessage:   "wal reset check unavailable: restore: restore_s3_list_failed: restore failed",
+			wantSummary:   []string{"restore_signature=restore_s3_list_failed"},
+			wantStarts:    1,
+		},
+		{
+			name: "a cancelled object store request during the latest restore is inconclusive",
+			script: func() *walResetScript {
+				return &walResetScript{wal: newFakeWAL(), phase: "latest_restore", validErr: &restoreEvidenceInconclusiveError{err: errors.New("restore failed: validation failed (exit 1): operation error S3: GetObject, https response error StatusCode: 408, RequestID: 7F3A9C, HostID: abc=, api error RequestCanceled: request canceled")}}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetUnavailable,
+			wantMessage:   "wal reset check unavailable: latest_restore: restore_s3_get_request_canceled: restore failed",
+			wantSummary:   []string{"pinned_restore=passed latest_restore=failed", "restore_signature=restore_s3_get_request_canceled"},
+			wantStarts:    1,
+		},
+		{
+			name: "a restore failure the classifier cannot name is inconclusive and keeps its signature",
+			script: func() *walResetScript {
+				return &walResetScript{wal: newFakeWAL(), phase: "restore", validErr: errors.New("restore failed: validation failed (exit 1): page 50485: never used")}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetUnavailable,
+			wantMessage:   "wal reset check unavailable: restore: validation_failed: restore failed: validation failed (exit 1): page 50485: never used",
+			wantSummary:   []string{"restore_signature=validation_failed"},
 			wantStarts:    1,
 		},
 		{
@@ -1021,6 +1101,88 @@ func TestStopLitestreamProcessRejectsAnExitFromAnotherSignal(t *testing.T) {
 	}
 	if !signalMatches("terminated", syscall.SIGTERM) || signalMatches("killed", syscall.SIGTERM) {
 		t.Fatal("signalMatches does not compare signal names")
+	}
+}
+
+func TestBeginStopMarksTheProcessBeforeAnySignalAndALaterStopSupersedesIt(t *testing.T) {
+	manager := newLitestreamManager(&Config{})
+	proc := startSleepProcess(t)
+	manager.litestreamCmd, manager.litestreamProc = proc.cmd, proc
+
+	term, err := proc.beginStop(syscall.SIGTERM)
+	if err != nil {
+		t.Fatalf("beginStop = %v", err)
+	}
+	if !manager.litestreamRunning() || !manager.litestreamExitExpected() || !processAlive(proc.cmd) {
+		t.Fatalf("after the request: running=%v expected=%v alive=%v, want a live process already marked as stopping", manager.litestreamRunning(), manager.litestreamExitExpected(), processAlive(proc.cmd))
+	}
+
+	kill, err := proc.beginStop(syscall.SIGKILL)
+	if err != nil {
+		t.Fatalf("superseding beginStop = %v", err)
+	}
+	if err := proc.finishStop(term); !errors.Is(err, errLitestreamStopSuperseded) {
+		t.Fatalf("superseded stop = %v, want %v", err, errLitestreamStopSuperseded)
+	}
+	if !processAlive(proc.cmd) {
+		t.Fatal("superseded stop signalled the process")
+	}
+	if err := proc.finishStop(kill); err != nil {
+		t.Fatalf("superseding stop = %v", err)
+	}
+	if exit := proc.exitSnapshot(); exit == nil || exit.Signal != syscall.SIGKILL.String() {
+		t.Fatalf("exit = %+v, want killed", exit)
+	}
+	if err := proc.finishStop(term); !errors.Is(err, errLitestreamStopSuperseded) {
+		t.Fatalf("superseded stop after the exit = %v, want %v", err, errLitestreamStopSuperseded)
+	}
+}
+
+func TestStopLitestreamForCheckTimeoutLeavesAStoppingProcessForRecoveryToReplace(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "litestream.sock")
+	if err := os.WriteFile(socket, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{cfg: Config{SocketPath: socket}}
+	r.litestreamManager = newLitestreamManager(&r.cfg)
+	first := startSleepProcess(t)
+	r.litestreamCmd, r.litestreamProc = first.cmd, first
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	exit, err := r.stopLitestreamForCheck(expired, syscall.SIGSTOP)
+	if err == nil || !errors.Is(err, context.Canceled) || exit != "" {
+		t.Fatalf("stop with an expired deadline = %q, %v", exit, err)
+	}
+	if !r.litestreamRunning() || !r.litestreamExitExpected() {
+		t.Fatalf("running=%v expected=%v, want the captured process marked as stopping before the deadline", r.litestreamRunning(), r.litestreamExitExpected())
+	}
+
+	var second *litestreamProcess
+	starts := 0
+	ctx, cancelWait := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelWait()
+	if err := r.ensureLitestreamForCheck(ctx, func() error {
+		starts++
+		second = startSleepProcess(t)
+		r.litestreamCmd, r.litestreamProc = second.cmd, second
+		return nil
+	}); err != nil {
+		t.Fatalf("ensure after a timed-out stop = %v", err)
+	}
+	if starts != 1 || second == nil || !processAlive(second.cmd) || !r.litestreamRunning() || r.litestreamExitExpected() {
+		t.Fatalf("starts=%d running=%v expected=%v, want exactly one fresh process", starts, r.litestreamRunning(), r.litestreamExitExpected())
+	}
+	select {
+	case <-first.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovery did not replace the stopping process")
+	}
+	if exit := first.exitSnapshot(); exit == nil || exit.Signal != syscall.SIGKILL.String() {
+		t.Fatalf("captured process exit = %+v, want killed by the recovery", exit)
+	}
+	if !processAlive(second.cmd) {
+		t.Fatal("the pending stop reached the replacement")
 	}
 }
 

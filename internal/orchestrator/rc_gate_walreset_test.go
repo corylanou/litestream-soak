@@ -109,7 +109,10 @@ func recordGateWALResetCheck(t *testing.T, db *model.DB, check gateWALResetCheck
 	case check.status == "failed" && check.phase == "compare":
 		verification.ErrorMessage = "wal reset logical mismatch: table wal_reset_burst: 80 rows restored, 201 in source"
 	case check.status == "failed":
-		verification.ErrorMessage = "wal reset restore failed: restore failed: validation failed (exit 1): page 50485: never used"
+		verification.ErrorMessage = "wal reset restore failed: restore_decode_error: restore failed: validation failed (exit 1): apply ltx file: decode ltx header: unexpected EOF"
+	case check.status == "aborted" && check.phase == "restore":
+		verification.ErrorMessage = "wal reset check skipped: wal reset check unavailable: restore: restore_s3_access_denied: restore failed: validation failed (exit 1): operation error S3: GetObject, https response error StatusCode: 403, RequestID: 7F3A9C, HostID: abc=, api error AccessDenied: Access Denied"
+		verification.FailureClassification = &reporting.FailureClassification{Stage: "wal_reset", Signature: reporting.SignatureWALResetUnavailable, RestoreMode: gateModeWALReset}
 	case check.status == "aborted":
 		verification.ErrorMessage = "wal reset check skipped: wal reset shape not reached: 2 wal resets while litestream was down, need at least 3"
 		verification.FailureClassification = &reporting.FailureClassification{Stage: "wal_reset", Signature: reporting.SignatureWALResetShapeNotReached, RestoreMode: gateModeWALReset}
@@ -134,6 +137,11 @@ func TestRCGateScoresWALResetChecks(t *testing.T) {
 			name:         "the candidate fixes a corrupt latest restore the baseline still has",
 			checks:       []gateWALResetCheck{{testGateCandidate, "passed", ""}, {testGateBaseline, "failed", "integrity_check"}, {testGateBaseline, "passed", ""}},
 			wantScenario: rcGateVerdictPass, wantRestore: rcGateVerdictPass, wantGate: rcGateVerdictPass,
+		},
+		{
+			name:         "a baseline restore blocked by the object store is not a reproduction",
+			checks:       []gateWALResetCheck{{testGateCandidate, "passed", ""}, {testGateBaseline, "aborted", "restore"}, {testGateBaseline, "passed", ""}},
+			wantScenario: rcGateVerdictNoReproduction, wantRestore: rcGateVerdictPass, wantGate: rcGateVerdictIncomplete,
 		},
 		{
 			name:         "a baseline that lost rows is a reproduction too",
@@ -234,7 +242,8 @@ func TestWALResetFailuresAreTheirOwnSubsystem(t *testing.T) {
 		message   string
 		signature string
 	}{
-		{"wal reset restore failed: restore failed: validation failed (exit 1): page 50485: never used", reporting.SignatureWALResetRestoreFailed},
+		{"wal reset restore failed: restore_decode_error: restore failed: validation failed (exit 1): apply ltx file: decode ltx header: unexpected EOF", reporting.SignatureWALResetRestoreFailed},
+		{"wal reset restore failed: restore_target_unavailable: restore failed: validation failed (exit 1): no matching backup files available", reporting.SignatureWALResetRestoreFailed},
 		{"wal reset integrity failed: restored integrity: Page 50485: never used", reporting.SignatureWALResetIntegrityFailed},
 		{"wal reset logical mismatch: table wal_reset_burst: 80 rows restored, 201 in source", reporting.SignatureWALResetLogicalMismatch},
 	} {
@@ -257,5 +266,9 @@ func TestWALResetFailuresAreTheirOwnSubsystem(t *testing.T) {
 	plain := reporting.ClassifyVerificationFailure("integrity", "restore failed: validation failed (exit 1): page 50485: never used")
 	if plain.Signature == reporting.SignatureWALResetRestoreFailed || plain.Stage != "restore" {
 		t.Fatalf("ordinary restore failure classified as a wal reset failure: %+v", plain)
+	}
+	skipped := model.Verification{CheckType: gateCheckWALReset, Status: "aborted", ErrorMessage: "wal reset check skipped: wal reset check unavailable: restore: restore_s3_access_denied: restore failed: validation failed (exit 1): operation error S3: GetObject, https response error StatusCode: 403, RequestID: 7F3A9C, HostID: abc=, api error AccessDenied: Access Denied"}
+	if walResetReproduction(skipped) {
+		t.Fatal("an object store failure during the restore counted as a reproduction")
 	}
 }

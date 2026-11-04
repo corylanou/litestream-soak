@@ -230,14 +230,16 @@ func (o walResetObservation) snapshotInterference() error {
 
 // walResetValidation is the outcome of the restore step: the pinned restore
 // at the boundary txid and the unpinned latest restore, which validation
-// phase failed, and the steps both produced.
+// phase failed, the restore classifier's signature for a failed restore, and
+// the steps both produced.
 type walResetValidation struct {
-	phase        string
-	boundary     uint64
-	pinnedPassed bool
-	latestPassed bool
-	latestTXID   uint64
-	steps        []reporting.VerificationStep
+	phase            string
+	boundary         uint64
+	pinnedPassed     bool
+	latestPassed     bool
+	latestTXID       uint64
+	restoreSignature string
+	steps            []reporting.VerificationStep
 }
 
 func (v walResetValidation) summary() string {
@@ -247,7 +249,11 @@ func (v walResetValidation) summary() string {
 		}
 		return "failed"
 	}
-	return fmt.Sprintf("pinned_restore=%s latest_restore=%s restored_txid=%s latest_txid=%s", status(v.pinnedPassed), status(v.latestPassed), formatTXID(v.boundary), formatTXID(v.latestTXID))
+	summary := fmt.Sprintf("pinned_restore=%s latest_restore=%s restored_txid=%s latest_txid=%s", status(v.pinnedPassed), status(v.latestPassed), formatTXID(v.boundary), formatTXID(v.latestTXID))
+	if v.restoreSignature != "" {
+		summary += " restore_signature=" + v.restoreSignature
+	}
+	return summary
 }
 
 // walResetCheck runs the cycle on a schedule. Every external interaction is a
@@ -813,7 +819,8 @@ func walResetValidator(cfg Config, objectStore *objectStoreMeter, pausers []load
 			validation.phase = verifier.validationSteps[len(verifier.validationSteps)-1].Name
 		}
 		if err != nil {
-			return validation, walResetValidationError(validation.phase, err)
+			validation.restoreSignature, err = walResetValidationError(validation.phase, err)
+			return validation, err
 		}
 		validation.pinnedPassed = true
 		if verifier.boundary == nil {
@@ -826,7 +833,8 @@ func walResetValidator(cfg Config, objectStore *objectStoreMeter, pausers []load
 			if len(latestSteps) > 0 {
 				validation.phase = "latest_" + latestSteps[len(latestSteps)-1].Name
 			}
-			return validation, walResetValidationError(validation.phase, latestErr)
+			validation.restoreSignature, latestErr = walResetValidationError(validation.phase, latestErr)
+			return validation, latestErr
 		}
 		validation.latestPassed = true
 		return validation, nil
@@ -929,22 +937,50 @@ func checkWALResetLatestTXID(restored, boundary uint64) error {
 
 // walResetValidationError keeps a validation failure as corruption evidence
 // only when it is one: harness-side problems, a verifier deadline, a
-// cancellation, a lost restore target, exhausted restore capacity, a locked
-// restored comparison, or a restore log without a plan txid are inconclusive.
-func walResetValidationError(phase string, err error) error {
-	var evidence *restoreEvidenceInconclusiveError
+// cancellation, exhausted restore capacity, a locked restored comparison, or
+// a restore log without a plan txid are inconclusive, and a failed restore is
+// evidence only when the restore classifier blames the data or the plan. It
+// returns the classifier's signature for a failed restore.
+func walResetValidationError(phase string, err error) (string, error) {
 	var capacity *restoreCapacityInconclusiveError
 	var locked *restoredComparisonLockedError
 	var deadline *verifierDeadlineError
 	switch {
-	case errors.As(err, &evidence), errors.As(err, &capacity), errors.As(err, &locked), errors.Is(err, errWALResetMissingPlan), errors.Is(err, errWALResetLatestAdvanced):
-		return fmt.Errorf("%w: %s: %v", errWALResetUnavailable, phase, err)
 	case errors.As(err, &deadline), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
-		return fmt.Errorf("%w: %s ran out of time, no corruption evidence: %v", errWALResetUnavailable, phase, err)
+		return "", fmt.Errorf("%w: %s ran out of time, no corruption evidence: %v", errWALResetUnavailable, phase, err)
+	case errors.As(err, &capacity), errors.As(err, &locked), errors.Is(err, errWALResetMissingPlan), errors.Is(err, errWALResetLatestAdvanced):
+		return "", fmt.Errorf("%w: %s: %v", errWALResetUnavailable, phase, err)
 	case strings.TrimPrefix(phase, "latest_") == "source_snapshot", strings.TrimPrefix(phase, "latest_") == "restore_preflight":
-		return fmt.Errorf("%w: %s: %v", errWALResetUnavailable, phase, err)
+		return "", fmt.Errorf("%w: %s: %v", errWALResetUnavailable, phase, err)
+	case strings.TrimPrefix(phase, "latest_") == "restore":
+		signature, evidence := walResetRestoreSignature(err)
+		if !evidence {
+			return signature, fmt.Errorf("%w: %s: %s: %v", errWALResetUnavailable, phase, signature, err)
+		}
+		return signature, fmt.Errorf("%s: %w", signature, err)
 	default:
-		return err
+		return "", err
+	}
+}
+
+// walResetRestoreSignature runs a failed restore through the verifier's
+// restore classifier and reports whether the failure is evidence against the
+// replicated data. Only a defect in the data or the plan is: a decode or
+// checksum error, an LTX file or page the plan needs but cannot read, a plan
+// that cannot be built, a corrupt index, or a target the replica was synced
+// to and should hold. Any object store error (auth, transport, DNS, a
+// cancelled or timed-out request), a plan recomputation that gave up, and a
+// failure the classifier cannot name are environmental.
+func walResetRestoreSignature(err error) (string, bool) {
+	classification := reporting.ClassifyVerificationFailure("restore", err.Error())
+	if classification.ObjectStore != nil {
+		return classification.Signature, false
+	}
+	switch classification.Signature {
+	case "restore_decode_error", "restore_missing_ltx", "restore_plan_failed", "sqlite_index_mismatch", reporting.SignatureRestoreTargetUnavailable:
+		return classification.Signature, true
+	default:
+		return classification.Signature, false
 	}
 }
 
@@ -954,15 +990,22 @@ func (r *Runner) walResetCheckEnabled() bool {
 
 // stopLitestreamForCheck stops the current Litestream process with sig and
 // waits for the exit, bounded by ctx so a process that ignores the signal
-// fails the cycle instead of hanging it. The process is captured before the
-// wait, so a stop that completes late never touches a replacement. It
-// returns how the process ended; a signal that could not be delivered, a
-// process that had already exited, or an exit from another signal is an
-// error, because the cycle then cannot claim the stop as its own.
+// fails the cycle instead of hanging it. The process is captured and marked
+// as stopping synchronously, before the signal goes out and before ctx can
+// expire, so the recovery that follows a timeout always sees a stopping
+// process and replaces it; its kill supersedes this stop, and a signal still
+// pending then is never sent. It returns how the process ended; a signal that
+// could not be delivered, a process that had already exited, or an exit from
+// another signal is an error, because the cycle then cannot claim the stop as
+// its own.
 func (r *Runner) stopLitestreamForCheck(ctx context.Context, sig os.Signal) (string, error) {
 	proc := r.currentProcess()
+	stop, err := proc.beginStop(sig)
+	if err != nil {
+		return describeProcessExit(proc.exitSnapshotOrNil()), err
+	}
 	done := make(chan error, 1)
-	go func() { done <- stopLitestreamProcess(proc, sig) }()
+	go func() { done <- proc.finishStop(stop) }()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -1007,9 +1050,11 @@ func (r *Runner) ensureLitestreamForCheck(ctx context.Context, start func() erro
 			}
 			slog.Warn("Litestream started by the wal reset check never became ready; replacing it")
 		}
-		// Waiting on the captured process also lets any outstanding stop that
-		// is still waiting on it finish before the replacement starts.
-		if err := r.stopLitestreamWithSignal(syscall.SIGKILL); err != nil && !errors.Is(err, errLitestreamExitedBeforeStop) && !errors.Is(err, errLitestreamNotRunning) {
+		// The kill supersedes a stop whose signal is still pending, and waits
+		// for the captured process, so no earlier stop can touch the
+		// replacement. A process that exited first, or on the earlier stop's
+		// signal in the same instant, is gone either way and gets replaced.
+		if err := r.stopLitestreamWithSignal(syscall.SIGKILL); err != nil && !errors.Is(err, errLitestreamExitedBeforeStop) && !errors.Is(err, errLitestreamNotRunning) && !errors.Is(err, errLitestreamExitNotAttributed) {
 			return fmt.Errorf("replace litestream: %w", err)
 		}
 	}
