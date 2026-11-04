@@ -187,6 +187,12 @@ type Config struct {
 	VFSReaderCheck   bool
 	VFSExtensionPath string
 
+	// WAL reset: every cycle bursts writes under Litestream, stops it with
+	// SIGTERM, keeps writing until the application's autocheckpoints have
+	// restarted the WAL several times, restarts Litestream, and restores the
+	// latest position (benbjohnson/litestream#1540).
+	WALResetCheck bool
+
 	// Replay
 	LoadMode       string  // "synthetic", "replay", "both"
 	ReplayDataset  string  // "taxi", "gharchive", "orders"
@@ -998,6 +1004,9 @@ func configFromLookup(getenv func(string) string) (Config, error) {
 	if parseBoolEnv(getenv("VFS_READER_CHECK")) {
 		c.VFSReaderCheck = true
 	}
+	if parseBoolEnv(getenv("WAL_RESET_CHECK")) {
+		c.WALResetCheck = true
+	}
 	if v := strings.TrimSpace(getenv("LITESTREAM_VFS_EXTENSION")); v != "" {
 		c.VFSExtensionPath = v
 	}
@@ -1369,6 +1378,7 @@ func (c Config) WorkloadConfig() workload.Config {
 	cfg.CompactionProgressCheck = c.CompactionProgressCheck
 	cfg.LTXCoverageCheck = c.LTXCoverageCheck
 	cfg.VFSReaderCheck = c.VFSReaderCheck
+	cfg.WALResetCheck = c.WALResetCheck
 	cfg.CompactionL0ObjectBound = c.CompactionL0ObjectBound
 	cfg.CompactionL1ObjectBound = c.CompactionL1ObjectBound
 	if c.ManyDBEnabled() {

@@ -25,7 +25,7 @@ type litestreamMetricsObservation struct {
 }
 
 func (r *Runner) observeLitestreamMetricsCondition(runtime reporting.RuntimePayload) litestreamMetricsObservation {
-	if !runtime.LitestreamSnapshotHealthy {
+	if !runtime.LitestreamSnapshotHealthy || r.plannedLitestreamDowntime.Load() {
 		return litestreamMetricsObservation{}
 	}
 

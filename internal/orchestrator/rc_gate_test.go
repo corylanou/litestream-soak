@@ -89,6 +89,7 @@ func TestGateFleetPinsPopulateIndexRatio(t *testing.T) {
 		gateLargeDBProfile:   1,
 		gateRemoteProfile:    0,
 		gateVFSProfile:       0,
+		gateWALResetProfile:  0,
 	}
 	for _, source := range []string{testGateCandidate, testGateBaseline} {
 		for _, worker := range GateFleetForSource(source, testGateSoakSHA, testGateCandidateSHA).Workers {
@@ -124,6 +125,7 @@ func TestGateFleetSpecHasSizedWorkersPerSource(t *testing.T) {
 		gateLargeDBProfile:   {"ord", 2, 4096, 40},
 		gateRemoteProfile:    {"ams", 1, 1024, 10},
 		gateVFSProfile:       {"ord", 2, 2048, 10},
+		gateWALResetProfile:  {"ord", 2, 2048, 10},
 	}
 	configs := map[string]string{}
 	for _, tc := range []struct {

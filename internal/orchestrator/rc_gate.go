@@ -23,6 +23,7 @@ const (
 	gateLargeDBProfile         = "gate-large-db"
 	gateRemoteProfile          = "gate-remote"
 	gateVFSProfile             = "gate-vfs"
+	gateWALResetProfile        = "gate-walreset"
 	gateUpgradeLaneProfile     = "gate-upgrade-lane"
 	gateUpgradeLaneNoL9Profile = "gate-upgrade-lane-nol9"
 	gateUpgradeFollowProfile   = "gate-upgrade-follow"
@@ -45,17 +46,21 @@ const (
 
 	runArchiveTypeRCGateTail = "rc_gate_tail"
 
-	rcGateVerdictPass         = "pass"
-	rcGateVerdictFail         = "fail"
-	rcGateVerdictIncomplete   = "incomplete"
-	rcGateVerdictRegression   = "regression"
-	rcGateVerdictBothFailing  = "both_failing"
-	rcGateSideMissing         = "missing"
-	rcGateSideNoCoverage      = "no_coverage"
-	rcGateSidePassing         = "passing"
-	rcGateSideFailing         = "failing"
-	rcGateVerificationHistory = 2000
-	rcGateWorkerEventHistory  = 2000
+	rcGateVerdictPass        = "pass"
+	rcGateVerdictFail        = "fail"
+	rcGateVerdictIncomplete  = "incomplete"
+	rcGateVerdictRegression  = "regression"
+	rcGateVerdictBothFailing = "both_failing"
+	// rcGateVerdictNoReproduction is the wal reset scenario's answer when the
+	// candidate is clean but the baseline never failed either: the cycle shape
+	// did not reproduce the bug, so a clean candidate proves nothing.
+	rcGateVerdictNoReproduction = "no_reproduction"
+	rcGateSideMissing           = "missing"
+	rcGateSideNoCoverage        = "no_coverage"
+	rcGateSidePassing           = "passing"
+	rcGateSideFailing           = "failing"
+	rcGateVerificationHistory   = 2000
+	rcGateWorkerEventHistory    = 2000
 
 	gateRoleCandidate = "candidate"
 	gateRoleBaseline  = "baseline"
@@ -130,16 +135,21 @@ type RCGateRequest struct {
 }
 
 type RCGateSideResult struct {
-	Source          string `json:"source"`
-	WorkerID        string `json:"worker_id,omitempty"`
-	Status          string `json:"status"`
-	Passed          int    `json:"passed"`
-	Failed          int    `json:"failed"`
+	Source   string `json:"source"`
+	WorkerID string `json:"worker_id,omitempty"`
+	Status   string `json:"status"`
+	Passed   int    `json:"passed"`
+	Failed   int    `json:"failed"`
+	// Reproduced counts wal reset failures that carry one of the check's
+	// own failure signatures, which is the evidence that a side reproduced
+	// the bug the scenario exists for.
+	Reproduced      int    `json:"reproduced,omitempty"`
 	RotationEnabled bool   `json:"rotation_enabled,omitempty"`
 	Reason          string `json:"reason,omitempty"`
 	ReasonDetail    string `json:"reason_detail,omitempty"`
 	coverageCheck   bool
 	vfsCheck        bool
+	walResetCheck   bool
 }
 
 type RCGateModeResult struct {
@@ -197,18 +207,20 @@ const (
 	gateCheckVFS        = "vfs"
 	gateModeVFSSnapshot = "vfs-snapshot"
 	gateModeVFSRead     = "vfs-read"
+	gateCheckWALReset   = "walreset"
+	gateModeWALReset    = "walreset-restore"
 )
 
 var (
 	// gateStandaloneChecks are scored only by their own scenarios: they never
 	// count as restore coverage and a wildcard filter skips them.
-	gateStandaloneChecks = []string{gateCheckCoverage, gateCheckVFS}
+	gateStandaloneChecks = []string{gateCheckCoverage, gateCheckVFS, gateCheckWALReset}
 	gateNonCurrentChecks = append([]string{gateCheckFollow, gateCheckHistorical}, gateStandaloneChecks...)
-	gateStandaloneModes  = []string{gateModeCoverage, gateModeVFSSnapshot, gateModeVFSRead}
+	gateStandaloneModes  = []string{gateModeCoverage, gateModeVFSSnapshot, gateModeVFSRead, gateModeWALReset}
 	gateVFSModes         = []string{gateModeVFSSnapshot, gateModeVFSRead}
 	// gateOptInProfiles are part of the gate fleet but run only when a request
 	// names them, so the default gate keeps its four-profile fleet.
-	gateOptInProfiles = []string{gateVFSProfile}
+	gateOptInProfiles = []string{gateVFSProfile, gateWALResetProfile}
 )
 
 type gateScenario struct {
@@ -218,6 +230,7 @@ type gateScenario struct {
 	txidOnly      bool
 	coverage      bool
 	vfs           bool
+	walReset      bool
 	requiredModes []string
 	candidate     gateSideFilter
 	baseline      gateSideFilter
@@ -231,12 +244,15 @@ var (
 		{name: "large-db", profile: gateLargeDBProfile},
 		{name: "remote", profile: gateRemoteProfile},
 		{name: "vfs", profile: gateVFSProfile},
+		{name: "walreset", profile: gateWALResetProfile},
 		ltxCoverageScenario(gateScenario{name: "overload-truncate0", profile: gateStressProfile, identity: "overload-truncate0"}),
 		ltxCoverageScenario(gateScenario{name: "pinned-reader", profile: gateStressProfile, identity: "pinned-reader"}),
 		ltxCoverageScenario(gateScenario{name: "large-db", profile: gateLargeDBProfile}),
 		ltxCoverageScenario(gateScenario{name: "remote", profile: gateRemoteProfile}),
 		ltxCoverageScenario(gateScenario{name: "vfs", profile: gateVFSProfile}),
+		ltxCoverageScenario(gateScenario{name: "walreset", profile: gateWALResetProfile}),
 		vfsReaderScenario(gateScenario{name: "vfs", profile: gateVFSProfile}),
+		walResetScenario(gateScenario{name: "walreset", profile: gateWALResetProfile}),
 	}
 	// The upgrade gate scores the lane worker's post-upgrade restores against
 	// its own pre-upgrade restores, its historical pre-upgrade txid restores
@@ -340,6 +356,18 @@ func vfsReaderScenario(base gateScenario) gateScenario {
 	base.requiredModes = slices.Clone(gateVFSModes)
 	base.candidate.checkType = gateCheckVFS
 	base.baseline.checkType = gateCheckVFS
+	return base
+}
+
+// walResetScenario scores the WAL reset cycles of the worker a restore
+// scenario runs on: the latest restore after Litestream was stopped with
+// SIGTERM and the application restarted the WAL several times.
+func walResetScenario(base gateScenario) gateScenario {
+	base.name += "-wal-reset"
+	base.walReset = true
+	base.requiredModes = []string{gateModeWALReset}
+	base.candidate.checkType = gateCheckWALReset
+	base.baseline.checkType = gateCheckWALReset
 	return base
 }
 
@@ -730,6 +758,35 @@ func rcGateWorkers() []DesiredWorker {
 				L0RetentionCheckInterval: "1m",
 				ReplicaLevelReporting:    true,
 				VFSReaderCheck:           true,
+				VolumeSizeGB:             10,
+				MemoryMB:                 2048,
+				CPUs:                     2,
+			},
+		},
+		{
+			Name:         "worker-gate-walreset",
+			ProfileName:  gateWALResetProfile,
+			Region:       "ord",
+			VolumeSizeGB: 10,
+			Workload: workload.Config{
+				LoadMode:                 "synthetic",
+				WriteRate:                10,
+				Pattern:                  "constant",
+				PayloadSize:              1024,
+				ReadRatio:                0.1,
+				Workers:                  1,
+				InitialSize:              "20MB",
+				VerifyInterval:           "30m",
+				VerifyType:               "integrity",
+				SnapshotInterval:         "8760h",
+				SyncInterval:             "1s",
+				L1CompactionInterval:     "30s",
+				L2CompactionInterval:     "5m",
+				L3CompactionInterval:     "1h",
+				L0Retention:              "10m",
+				L0RetentionCheckInterval: "1m",
+				ReplicaLevelReporting:    true,
+				WALResetCheck:            true,
 				VolumeSizeGB:             10,
 				MemoryMB:                 2048,
 				CPUs:                     2,
@@ -1267,11 +1324,14 @@ func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateR
 		if result.Verdict != rcGateVerdictIncomplete && len(result.Modes) > 0 {
 			result.Verdict = rcGateModesVerdict(result.Modes)
 		}
-		if scenario.coverage || scenario.vfs {
+		if scenario.coverage || scenario.vfs || scenario.walReset {
 			if scenario.coverage && !candidate.coverageCheck && !baseline.coverageCheck {
 				continue
 			}
 			if scenario.vfs && !candidate.vfsCheck && !baseline.vfsCheck {
+				continue
+			}
+			if scenario.walReset && !candidate.walResetCheck && !baseline.walResetCheck {
 				continue
 			}
 			for i := range result.Modes {
@@ -1279,10 +1339,16 @@ func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateR
 			}
 			result.Verdict = rcGateCoverageVerdict(result.Verdict, candidate, baseline)
 		}
+		if scenario.walReset {
+			for i := range result.Modes {
+				result.Modes[i].Verdict = rcGateWALResetVerdict(result.Modes[i].Verdict, result.Modes[i].Candidate, result.Modes[i].Baseline)
+			}
+			result.Verdict = rcGateWALResetVerdict(result.Verdict, candidate, baseline)
+		}
 		switch result.Verdict {
 		case rcGateVerdictRegression, rcGateVerdictBothFailing:
 			failing = true
-		case rcGateVerdictIncomplete:
+		case rcGateVerdictIncomplete, rcGateVerdictNoReproduction:
 			incomplete = true
 		}
 		results.Scenarios = append(results.Scenarios, result)
@@ -1335,6 +1401,7 @@ func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter g
 	if cfg, err := workload.ParseConfig(worker.ProfileConfig); err == nil {
 		side.coverageCheck = cfg.LTXCoverageCheck
 		side.vfsCheck = cfg.VFSReaderCheck
+		side.walResetCheck = cfg.WALResetCheck
 	}
 	verifications, err := db.ListVerificationsExcludingMeteringRuns(worker.ID, rcGateVerificationHistory)
 	if err != nil {
@@ -1366,6 +1433,10 @@ func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter g
 		case verification.Failed():
 			side.Failed++
 			modes[mode].Failed++
+			if walResetReproduction(verification) {
+				side.Reproduced++
+				modes[mode].Reproduced++
+			}
 		}
 	}
 	side.Reason, side.ReasonDetail, err = rcGateSideFault(db, gate, *worker, observed, end)
@@ -1760,6 +1831,37 @@ func rcGateModesVerdict(modes []RCGateModeResult) string {
 				return verdict
 			}
 		}
+	}
+	return rcGateVerdictPass
+}
+
+// walResetReproduction reports whether a failed verification is a wal reset
+// check that failed the way the reproduced bug fails: a corrupt or lost
+// latest restore, not a harness problem.
+func walResetReproduction(verification model.Verification) bool {
+	if strings.TrimSpace(verification.CheckType) != gateCheckWALReset {
+		return false
+	}
+	switch reporting.ClassifyVerificationFailure(verification.CheckType, verification.ErrorMessage).Signature {
+	case reporting.SignatureWALResetRestoreFailed, reporting.SignatureWALResetIntegrityFailed, reporting.SignatureWALResetLogicalMismatch:
+		return true
+	default:
+		return false
+	}
+}
+
+// rcGateWALResetVerdict scores the wal reset scenario: the baseline runs the
+// same cycle shape as the candidate, so a pass needs the candidate covered
+// and clean while the baseline reproduced the bug at least once. A clean
+// candidate against a clean baseline is no_reproduction, which the gate
+// treats like incomplete; a candidate failure stays a regression and failures
+// on both sides stay both_failing.
+func rcGateWALResetVerdict(verdict string, candidate, baseline RCGateSideResult) string {
+	if verdict != rcGateVerdictPass {
+		return verdict
+	}
+	if baseline.Reproduced == 0 {
+		return rcGateVerdictNoReproduction
 	}
 	return rcGateVerdictPass
 }

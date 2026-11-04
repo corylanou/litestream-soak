@@ -84,6 +84,8 @@ func inferProbableSubsystem(stage, signature string) string {
 		return "Litestream compaction / retention"
 	case strings.Contains(text, reporting.SignatureVFSSnapshotDrift) || strings.Contains(text, reporting.SignatureVFSReadMismatch):
 		return "Litestream VFS reader"
+	case strings.Contains(text, "walreset"):
+		return "Litestream WAL reset continuity"
 	case strings.Contains(text, "restore") || strings.Contains(text, "replica_") || strings.Contains(text, "ltx"):
 		return "Replication or restore path"
 	case strings.Contains(text, "integrity") || strings.Contains(text, "sqlite_index_mismatch") || strings.Contains(text, "validation_failed") || strings.Contains(text, "validation"):

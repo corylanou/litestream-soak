@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/reporting"
@@ -32,6 +34,10 @@ type Runner struct {
 	harnessWriters          *harnessWriterTracker
 	objectStore             *objectStoreMeter
 	lastReplicaLevels       *reporting.ReplicaLevelReport
+	checkGate               *checkGate
+	// plannedLitestreamDowntime is set while a check has stopped Litestream
+	// on purpose, so a failed metrics scrape in that window is not reported.
+	plannedLitestreamDowntime atomic.Bool
 }
 
 func NewRunner(cfg Config) *Runner {
@@ -40,6 +46,7 @@ func NewRunner(cfg Config) *Runner {
 		identity:       workerIdentity(cfg),
 		harnessWriters: harnessWriters,
 		objectStore:    newObjectStoreMeter(),
+		checkGate:      newCheckGate(),
 	}
 	runner.profiles = newPprofCapturer(&runner.cfg)
 	runner.profiles.objectStore = runner.objectStore
@@ -246,6 +253,25 @@ func (r *Runner) Run(ctx context.Context) error {
 	if cacheProbe != nil {
 		pausers = append(pausers, cacheProbe)
 	}
+	if r.walResetCheckEnabled() {
+		walReset := newWALResetCheck(r.cfg)
+		walReset.stop = func(ctx context.Context) (string, error) { return r.stopLitestreamForCheck(ctx, syscall.SIGTERM) }
+		walReset.start = func(ctx context.Context) error {
+			return r.ensureLitestreamForCheck(ctx, func() error {
+				if err := r.startLitestream(litestreamCtx); err != nil {
+					return err
+				}
+				r.monitorLitestream(runCtx, cancelRun)
+				return nil
+			})
+		}
+		walReset.validate = walResetValidator(r.cfg, r.objectStore, pausers)
+		walReset.uploaded = r.walResetUploadedCounter
+		walReset.acquireGate = r.checkGate.acquire
+		walReset.downtime = r.plannedLitestreamDowntime.Store
+		walReset.Start(runCtx, func(result VerificationResult) { r.reportWALResetResult(runCtx, result) })
+		defer walReset.Stop()
+	}
 	r.verifier = NewVerifier(r.cfg, pausers...)
 	r.verifier.objectStore = r.objectStore
 	if vfs != nil {
@@ -292,7 +318,12 @@ func (r *Runner) populate(ctx context.Context) error {
 		return err
 	}
 	if r.vfsReaderCheckEnabled() {
-		return ensureCacheProbe(ctx, r.cfg.DBPath)
+		if err := ensureCacheProbe(ctx, r.cfg.DBPath); err != nil {
+			return err
+		}
+	}
+	if r.walResetCheckEnabled() {
+		return ensureWALResetTable(ctx, r.cfg.DBPath)
 	}
 	return nil
 }
@@ -313,6 +344,10 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 			return nil
 		case <-timer.C:
 			cycleStarted := time.Now()
+			releaseGate, gateErr := r.checkGate.acquire(ctx)
+			if gateErr != nil {
+				continue
+			}
 			r.resetS3FaultProxyCycle()
 			result, err := r.verifier.RunCycle(ctx)
 			result = r.applyS3FaultProxyVerificationGuards(result)
@@ -339,6 +374,7 @@ func (r *Runner) runVerifyLoop(ctx context.Context) error {
 				r.sendVerification(context.WithoutCancel(ctx), coverage, nil)
 				r.recordLocalResult(coverage)
 			}
+			releaseGate()
 			if err != nil {
 				slog.Error("Verification cycle error", "error", err)
 			}
