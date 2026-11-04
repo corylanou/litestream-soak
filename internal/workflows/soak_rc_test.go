@@ -99,6 +99,8 @@ func TestSoakRCResolvesRefsToPinnedFullSHAs(t *testing.T) {
 		"large-db only":       {"PROFILES": "gate-large-db", "DURATION": "24h"},
 		"two profiles spaced": {"PROFILES": " gate-stress, gate-remote ", "TAIL": "true"},
 		"vfs only":            {"PROFILES": "gate-vfs", "DURATION": "2h"},
+		"walreset only":       {"PROFILES": "gate-walreset", "DURATION": "24h"},
+		"vfs and walreset":    {"PROFILES": "gate-vfs,gate-walreset", "DURATION": "24h"},
 		"metered large-db":    {"PROFILES": "gate-large-db", "DURATION": "24h", "OBSERVE_PROXY": "true"},
 	} {
 		t.Run(name, func(t *testing.T) {

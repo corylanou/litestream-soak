@@ -29,7 +29,7 @@ on:
         type: boolean
         default: false
       profiles:
-        description: Comma-separated subset of gate profiles to run (gate-stress, gate-manydb-500, gate-large-db, gate-remote, gate-vfs); empty runs the default four (gate-vfs only when named)
+        description: Comma-separated subset of gate profiles to run (gate-stress, gate-manydb-500, gate-large-db, gate-remote, gate-vfs, gate-walreset); empty runs the default four (gate-vfs and gate-walreset only when named)
         required: false
         type: string
         default: ""
@@ -84,10 +84,10 @@ jobs:
           profiles="${PROFILES//[[:space:]]/}"
           observe_proxy="${OBSERVE_PROXY:-false}"
           upstream_repo="benbjohnson/litestream"
-          gate_profile="gate-stress|gate-manydb-500|gate-large-db|gate-remote|gate-vfs"
+          gate_profile="gate-stress|gate-manydb-500|gate-large-db|gate-remote|gate-vfs|gate-walreset"
 
           if [ -n "${profiles}" ] && [[ ! "${profiles}" =~ ^(${gate_profile})(,(${gate_profile}))*$ ]]; then
-            echo "profiles must be a comma-separated subset of gate-stress, gate-manydb-500, gate-large-db, gate-remote, gate-vfs" >&2
+            echo "profiles must be a comma-separated subset of gate-stress, gate-manydb-500, gate-large-db, gate-remote, gate-vfs, gate-walreset" >&2
             exit 1
           fi
           if [ "${tail}" = "true" ] && [ -n "${profiles}" ] && [[ ! ",${profiles}," == *",gate-stress,"* ]]; then

@@ -28,6 +28,15 @@ const (
 	SignatureVFSHydrationIncomplete = "vfs_hydration_incomplete"
 	SignatureVFSReaderNotCaughtUp   = "vfs_reader_not_caught_up"
 
+	SignatureWALResetRestoreFailed           = "walreset_restore_failed"
+	SignatureWALResetIntegrityFailed         = "walreset_integrity_failed"
+	SignatureWALResetLogicalMismatch         = "walreset_logical_mismatch"
+	SignatureWALResetShapeNotReached         = "walreset_shape_not_reached"
+	SignatureWALResetLitestreamRestartFailed = "walreset_litestream_restart_failed"
+	SignatureWALResetCatchUpTimeout          = "walreset_catchup_timeout"
+	SignatureWALResetUnavailable             = "walreset_unavailable"
+	walResetFailurePrefix                    = "wal reset "
+
 	StageHarnessLock                  = "harness_lock"
 	SignatureRestoredComparisonLocked = "restored_comparison_locked"
 	restoredComparisonMarker          = "restored comparison:"
@@ -165,6 +174,8 @@ func InferFailureStage(checkType, errorMessage string) string {
 	switch {
 	case isDiskCapacityFailure(text):
 		return "disk_capacity"
+	case strings.HasPrefix(text, walResetFailurePrefix) && strings.TrimSpace(checkType) != "":
+		return strings.TrimSpace(checkType)
 	case strings.Contains(text, "wait for sync") || strings.Contains(text, "sync request") || strings.Contains(text, "decode sync response") || strings.Contains(text, "litestream.sock"):
 		return "sync"
 	case strings.Contains(text, "no matching backup files available") || strings.Contains(text, "transaction not available") || strings.Contains(text, "restore failed") || strings.Contains(text, "check_type=restore") || strings.Contains(text, "get ltx time bounds") || strings.Contains(text, "restore plan") || strings.Contains(text, "calc restore") ||
@@ -272,6 +283,12 @@ func inferFailureSignature(stage, text, original string) string {
 	switch {
 	case isDiskCapacityFailure(text):
 		return "disk_capacity_full"
+	case strings.HasPrefix(text, walResetFailurePrefix+"restore failed"):
+		return SignatureWALResetRestoreFailed
+	case strings.HasPrefix(text, walResetFailurePrefix+"integrity failed"):
+		return SignatureWALResetIntegrityFailed
+	case strings.HasPrefix(text, walResetFailurePrefix+"logical mismatch"):
+		return SignatureWALResetLogicalMismatch
 	case stage == "sync" && isS3TransportFailure(text):
 		return "s3_transport"
 	case strings.Contains(text, "latest restore behind boundary"):

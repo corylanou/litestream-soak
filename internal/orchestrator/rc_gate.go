@@ -23,6 +23,7 @@ const (
 	gateLargeDBProfile         = "gate-large-db"
 	gateRemoteProfile          = "gate-remote"
 	gateVFSProfile             = "gate-vfs"
+	gateWALResetProfile        = "gate-walreset"
 	gateUpgradeLaneProfile     = "gate-upgrade-lane"
 	gateUpgradeLaneNoL9Profile = "gate-upgrade-lane-nol9"
 	gateUpgradeFollowProfile   = "gate-upgrade-follow"
@@ -140,6 +141,7 @@ type RCGateSideResult struct {
 	ReasonDetail    string `json:"reason_detail,omitempty"`
 	coverageCheck   bool
 	vfsCheck        bool
+	walResetCheck   bool
 }
 
 type RCGateModeResult struct {
@@ -197,18 +199,20 @@ const (
 	gateCheckVFS        = "vfs"
 	gateModeVFSSnapshot = "vfs-snapshot"
 	gateModeVFSRead     = "vfs-read"
+	gateCheckWALReset   = "walreset"
+	gateModeWALReset    = "walreset-restore"
 )
 
 var (
 	// gateStandaloneChecks are scored only by their own scenarios: they never
 	// count as restore coverage and a wildcard filter skips them.
-	gateStandaloneChecks = []string{gateCheckCoverage, gateCheckVFS}
+	gateStandaloneChecks = []string{gateCheckCoverage, gateCheckVFS, gateCheckWALReset}
 	gateNonCurrentChecks = append([]string{gateCheckFollow, gateCheckHistorical}, gateStandaloneChecks...)
-	gateStandaloneModes  = []string{gateModeCoverage, gateModeVFSSnapshot, gateModeVFSRead}
+	gateStandaloneModes  = []string{gateModeCoverage, gateModeVFSSnapshot, gateModeVFSRead, gateModeWALReset}
 	gateVFSModes         = []string{gateModeVFSSnapshot, gateModeVFSRead}
 	// gateOptInProfiles are part of the gate fleet but run only when a request
 	// names them, so the default gate keeps its four-profile fleet.
-	gateOptInProfiles = []string{gateVFSProfile}
+	gateOptInProfiles = []string{gateVFSProfile, gateWALResetProfile}
 )
 
 type gateScenario struct {
@@ -218,6 +222,7 @@ type gateScenario struct {
 	txidOnly      bool
 	coverage      bool
 	vfs           bool
+	walReset      bool
 	requiredModes []string
 	candidate     gateSideFilter
 	baseline      gateSideFilter
@@ -231,12 +236,15 @@ var (
 		{name: "large-db", profile: gateLargeDBProfile},
 		{name: "remote", profile: gateRemoteProfile},
 		{name: "vfs", profile: gateVFSProfile},
+		{name: "walreset", profile: gateWALResetProfile},
 		ltxCoverageScenario(gateScenario{name: "overload-truncate0", profile: gateStressProfile, identity: "overload-truncate0"}),
 		ltxCoverageScenario(gateScenario{name: "pinned-reader", profile: gateStressProfile, identity: "pinned-reader"}),
 		ltxCoverageScenario(gateScenario{name: "large-db", profile: gateLargeDBProfile}),
 		ltxCoverageScenario(gateScenario{name: "remote", profile: gateRemoteProfile}),
 		ltxCoverageScenario(gateScenario{name: "vfs", profile: gateVFSProfile}),
+		ltxCoverageScenario(gateScenario{name: "walreset", profile: gateWALResetProfile}),
 		vfsReaderScenario(gateScenario{name: "vfs", profile: gateVFSProfile}),
+		walResetScenario(gateScenario{name: "walreset", profile: gateWALResetProfile}),
 	}
 	// The upgrade gate scores the lane worker's post-upgrade restores against
 	// its own pre-upgrade restores, its historical pre-upgrade txid restores
@@ -340,6 +348,18 @@ func vfsReaderScenario(base gateScenario) gateScenario {
 	base.requiredModes = slices.Clone(gateVFSModes)
 	base.candidate.checkType = gateCheckVFS
 	base.baseline.checkType = gateCheckVFS
+	return base
+}
+
+// walResetScenario scores the WAL reset cycles of the worker a restore
+// scenario runs on: the latest restore after Litestream was stopped with
+// SIGTERM and the application restarted the WAL several times.
+func walResetScenario(base gateScenario) gateScenario {
+	base.name += "-wal-reset"
+	base.walReset = true
+	base.requiredModes = []string{gateModeWALReset}
+	base.candidate.checkType = gateCheckWALReset
+	base.baseline.checkType = gateCheckWALReset
 	return base
 }
 
@@ -730,6 +750,35 @@ func rcGateWorkers() []DesiredWorker {
 				L0RetentionCheckInterval: "1m",
 				ReplicaLevelReporting:    true,
 				VFSReaderCheck:           true,
+				VolumeSizeGB:             10,
+				MemoryMB:                 2048,
+				CPUs:                     2,
+			},
+		},
+		{
+			Name:         "worker-gate-walreset",
+			ProfileName:  gateWALResetProfile,
+			Region:       "ord",
+			VolumeSizeGB: 10,
+			Workload: workload.Config{
+				LoadMode:                 "synthetic",
+				WriteRate:                10,
+				Pattern:                  "constant",
+				PayloadSize:              1024,
+				ReadRatio:                0.1,
+				Workers:                  1,
+				InitialSize:              "20MB",
+				VerifyInterval:           "30m",
+				VerifyType:               "integrity",
+				SnapshotInterval:         "1h",
+				SyncInterval:             "1s",
+				L1CompactionInterval:     "30s",
+				L2CompactionInterval:     "5m",
+				L3CompactionInterval:     "1h",
+				L0Retention:              "10m",
+				L0RetentionCheckInterval: "1m",
+				ReplicaLevelReporting:    true,
+				WALResetCheck:            true,
 				VolumeSizeGB:             10,
 				MemoryMB:                 2048,
 				CPUs:                     2,
@@ -1267,11 +1316,14 @@ func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateR
 		if result.Verdict != rcGateVerdictIncomplete && len(result.Modes) > 0 {
 			result.Verdict = rcGateModesVerdict(result.Modes)
 		}
-		if scenario.coverage || scenario.vfs {
+		if scenario.coverage || scenario.vfs || scenario.walReset {
 			if scenario.coverage && !candidate.coverageCheck && !baseline.coverageCheck {
 				continue
 			}
 			if scenario.vfs && !candidate.vfsCheck && !baseline.vfsCheck {
+				continue
+			}
+			if scenario.walReset && !candidate.walResetCheck && !baseline.walResetCheck {
 				continue
 			}
 			for i := range result.Modes {
@@ -1335,6 +1387,7 @@ func rcGateSide(db *model.DB, gate model.RCGate, scenario gateScenario, filter g
 	if cfg, err := workload.ParseConfig(worker.ProfileConfig); err == nil {
 		side.coverageCheck = cfg.LTXCoverageCheck
 		side.vfsCheck = cfg.VFSReaderCheck
+		side.walResetCheck = cfg.WALResetCheck
 	}
 	verifications, err := db.ListVerificationsExcludingMeteringRuns(worker.ID, rcGateVerificationHistory)
 	if err != nil {

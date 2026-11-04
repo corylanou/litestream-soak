@@ -30,6 +30,9 @@ type litestreamManager struct {
 	litestreamExit *reporting.ProcessExitSnapshot
 	litestreamLog  *lineBuffer
 	litestreamMu   sync.Mutex
+	// litestreamExpectedExit marks a stop the harness asked for, so the
+	// monitor does not treat the exit as a failure.
+	litestreamExpectedExit bool
 
 	s3FaultProxyEndpoint string
 }
@@ -401,6 +404,7 @@ func (m *litestreamManager) startLitestream(ctx context.Context) error {
 	m.litestreamMu.Lock()
 	m.litestreamDone = done
 	m.litestreamErr = nil
+	m.litestreamExpectedExit = false
 	m.litestreamMu.Unlock()
 
 	go func(cmd *exec.Cmd) {
@@ -432,16 +436,32 @@ func setCommandEnv(env []string, key, value string) []string {
 }
 
 func (m *litestreamManager) stopLitestream() {
+	m.stopLitestreamWithSignal(os.Interrupt)
+}
+
+// stopLitestreamWithSignal stops Litestream with sig and waits for it to
+// exit. The exit is expected, so the monitor started for this process does
+// not cancel the run.
+func (m *litestreamManager) stopLitestreamWithSignal(sig os.Signal) {
 	if m.litestreamCmd == nil || m.litestreamCmd.Process == nil {
 		return
 	}
-	slog.Info("Stopping Litestream")
-	if err := m.litestreamCmd.Process.Signal(os.Interrupt); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		slog.Warn("Failed to interrupt Litestream", "error", err)
+	slog.Info("Stopping Litestream", "signal", sig)
+	m.litestreamMu.Lock()
+	m.litestreamExpectedExit = true
+	m.litestreamMu.Unlock()
+	if err := m.litestreamCmd.Process.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		slog.Warn("Failed to signal Litestream", "signal", sig, "error", err)
 	}
 	if done := m.litestreamDoneChan(); done != nil {
 		<-done
 	}
+}
+
+func (m *litestreamManager) litestreamExitExpected() bool {
+	m.litestreamMu.Lock()
+	defer m.litestreamMu.Unlock()
+	return m.litestreamExpectedExit
 }
 
 func (m *litestreamManager) monitorLitestream(ctx context.Context, cancel context.CancelCauseFunc) {
@@ -452,7 +472,7 @@ func (m *litestreamManager) monitorLitestream(ctx context.Context, cancel contex
 
 	go func() {
 		<-done
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || m.litestreamExitExpected() {
 			return
 		}
 		if err := m.litestreamExitError(); err != nil {

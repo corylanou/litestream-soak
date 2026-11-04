@@ -135,6 +135,12 @@ var profileCharters = map[string]ProfileCharter{
 		GuardsAgainst: "Hydrated readers that see replicated updates mid-transaction once the table outgrows SQLite's page cache, and VFS reads that disagree with the primary at a known txid.",
 		WhyItMatters:  "Guards the benbjohnson/litestream#1608 fix: a reporting query that spans several statements must see one snapshot, and only the VFS path exercises hydration under a live writer.",
 	},
+	"gate-walreset": {
+		Synopsis:      "RC gate WAL reset lane (opt-in): steady writes at 10 writes/s with 30-second L1 compaction and 1-hour snapshots, and every 25 minutes a cycle that bursts about 12 MiB of 3.5 KB rows under Litestream with SQLite's default autocheckpoint, stops Litestream with SIGTERM mid-burst, keeps writing until the application's autocheckpoints have restarted the WAL at least three times (five targeted) with no generation reaching the saved position, restarts Litestream, waits for it to catch up with the primary, and restores the latest position with a full integrity check and a logical comparison.",
+		Stresses:      "Litestream's continuity judgement at startup after unobserved WAL resets, with the stale frame at its saved position still in the WAL because the application sets no journal_size_limit.",
+		GuardsAgainst: "A restart that resumes incrementally from a stale WAL frame and replicates a database whose latest restore fails integrity or loses committed rows, instead of taking a snapshot.",
+		WhyItMatters:  "Reproduces benbjohnson/litestream#1540 as reported from production (SIGTERM mid-burst, five WAL restarts, corrupt latest restore) so the fix in benbjohnson/litestream#1616 can be soaked against the baseline; each cycle also records the WAL reset count, the L9 snapshot count before and after, and the bytes uploaded, since the fix changes when Litestream snapshots after a reset.",
+	},
 	"gate-upgrade-lane": {
 		Synopsis:      "Upgrade gate lane: runs the baseline Litestream build with a 24-hour snapshot interval so the replica holds only legacy L0-L3 files, then switches to the candidate build on the same volume, database, and replica prefix after the warm-up.",
 		Stresses:      "The candidate's compactor, restore planner, and follow restore against a replica the baseline build wrote, with every report attributed to its phase and running Litestream SHA.",
