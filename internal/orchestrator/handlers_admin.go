@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,79 @@ type deploymentReadyRequest struct {
 	Repository    string `json:"repository"`
 	ImageRef      string `json:"image_ref"`
 	Trigger       string `json:"trigger"`
+}
+
+// deploymentReadyRecordTimeout bounds how long the ready notification waits
+// for its deployment to be recorded, well inside the platform proxy's
+// 120-second limit. The record and the rollout run as one background task
+// that outlives the request, so a notification that lands behind a
+// maintenance pass gets a 503 with Retry-After while the task keeps waiting
+// for the control database's writer and rolls the fleet once it has
+// recorded. A retry for the same deployment joins the task in flight;
+// recording is an upsert, so a retry after the task has finished is safe.
+var deploymentReadyRecordTimeout = 60 * time.Second
+
+const deploymentReadyRetryAfter = 15 * time.Second
+
+// The task retries a record that the database refused as busy (a deferred
+// transaction cannot wait for the write lock, so a maintenance checkpoint
+// answers SQLITE_BUSY at once) until it lands or deploymentReadyRecordDeadline
+// has elapsed; every wait on the record path honors that deadline.
+var (
+	deploymentReadyRecordRetryDelay = 2 * time.Second
+	deploymentReadyRecordDeadline   = 10 * time.Minute
+)
+
+func controlDatabaseBusy(err error) bool {
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "database is locked") || strings.Contains(text, "sqlite_busy")
+}
+
+// deploymentReadyTask records one deployment and then rolls its fleet; the
+// handler waits on recorded only, never on the database locks themselves.
+type deploymentReadyTask struct {
+	recorded chan struct{}
+	err      error
+}
+
+func (a *API) deploymentReadyTask(key string, record func(context.Context) (model.Deployment, error), rollout func(context.Context, model.Deployment)) *deploymentReadyTask {
+	a.rolloutMu.Lock()
+	if task := a.readyTasks[key]; task != nil {
+		a.rolloutMu.Unlock()
+		return task
+	}
+	if a.readyTasks == nil {
+		a.readyTasks = make(map[string]*deploymentReadyTask)
+	}
+	task := &deploymentReadyTask{recorded: make(chan struct{})}
+	a.readyTasks[key] = task
+	a.rolloutMu.Unlock()
+	a.runRollout(func(ctx context.Context) {
+		defer func() {
+			a.rolloutMu.Lock()
+			delete(a.readyTasks, key)
+			a.rolloutMu.Unlock()
+		}()
+		recordCtx, cancelRecord := context.WithTimeout(ctx, deploymentReadyRecordDeadline)
+		target, err := record(recordCtx)
+		for attempt := 1; err != nil && controlDatabaseBusy(err) && recordCtx.Err() == nil; attempt++ {
+			slog.Warn("Deployment ready record waiting for the control database", "attempt", attempt, "error", err)
+			select {
+			case <-recordCtx.Done():
+			case <-time.After(deploymentReadyRecordRetryDelay):
+			}
+			target, err = record(recordCtx)
+		}
+		cancelRecord()
+		task.err = err
+		close(task.recorded)
+		if err != nil {
+			slog.Error("Deployment ready not recorded", "error", err)
+			return
+		}
+		rollout(ctx, target)
+	})
+	return task
 }
 
 func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
@@ -86,17 +160,9 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 		trigger = "deploy_ready"
 	}
 
-	target, err := a.deployer.recordDeploymentReady(r.Context(), source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger, request.Repository, request.WorkloadSHA)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, errRCGateNotRegistered) || errors.Is(err, errRCGatePinned) || errors.Is(err, errRCGateClosed) {
-			status = http.StatusConflict
-		}
-		respondError(w, r, status, err, "record ready deployment")
-		return
-	}
-
-	a.runRollout(func(rolloutCtx context.Context) {
+	task := a.deploymentReadyTask(strings.Join([]string{source, request.SHA, request.LitestreamSHA, request.ImageRef, request.WorkloadSHA}, "\x00"), func(ctx context.Context) (model.Deployment, error) {
+		return a.deployer.recordDeploymentReady(ctx, source, request.SHA, request.LitestreamSHA, request.ImageRef, trigger, request.Repository, request.WorkloadSHA)
+	}, func(rolloutCtx context.Context, target model.Deployment) {
 		imageRef, err := a.deployer.rolloutDeploymentReady(rolloutCtx, target, trigger)
 		if err != nil {
 			slog.Error("Deployment ready rollout failed", "source", source, "sha", request.SHA, "litestream_sha", request.LitestreamSHA, "error", err)
@@ -106,6 +172,28 @@ func (a *API) handleDeploymentReady(w http.ResponseWriter, r *http.Request) {
 		a.observeLatestDeploymentState(source)
 		slog.Info("Deployment ready rollout complete", "source", source, "sha", request.SHA, "litestream_sha", request.LitestreamSHA, "image", imageRef, "trigger", trigger)
 	})
+	select {
+	case <-task.recorded:
+	case <-time.After(deploymentReadyRecordTimeout):
+		w.Header().Set("Retry-After", strconv.Itoa(int(deploymentReadyRetryAfter/time.Second)))
+		respondError(w, r, http.StatusServiceUnavailable, errors.New("ready deployment not recorded yet"), "control database busy, retry the ready notification")
+		return
+	case <-r.Context().Done():
+		return
+	}
+	if err := task.err; err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, errRCGateNotRegistered), errors.Is(err, errRCGatePinned), errors.Is(err, errRCGateClosed):
+			status = http.StatusConflict
+		case controlDatabaseBusy(err):
+			w.Header().Set("Retry-After", strconv.Itoa(int(deploymentReadyRetryAfter/time.Second)))
+			respondError(w, r, http.StatusServiceUnavailable, err, "control database busy, retry the ready notification")
+			return
+		}
+		respondError(w, r, status, err, "record ready deployment")
+		return
+	}
 
 	w.WriteHeader(http.StatusAccepted)
 	writeAPIJSON(w, map[string]any{

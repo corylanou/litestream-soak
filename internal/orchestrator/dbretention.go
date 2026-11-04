@@ -11,6 +11,13 @@ import (
 // deployment scorecards all operate well inside 7 days).
 const minDBRetentionDays = 7
 
+// dbRetentionStartupDelay keeps the first maintenance pass away from the
+// minutes right after a control plane deploy, when the worker image build
+// finishes and notify-worker-fleet posts the ready deployment: that write
+// must not queue behind the pass on the single writer connection. A var so
+// tests can run the loop at once.
+var dbRetentionStartupDelay = 10 * time.Minute
+
 func (m *Manager) RunDBRetentionLoop(ctx context.Context, retentionDays int) {
 	if retentionDays > 0 && retentionDays < minDBRetentionDays {
 		slog.Warn("Clamping DB retention to the lifecycle-safe minimum",
@@ -18,6 +25,13 @@ func (m *Manager) RunDBRetentionLoop(ctx context.Context, retentionDays int) {
 		retentionDays = minDBRetentionDays
 	}
 
+	if dbRetentionStartupDelay > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(dbRetentionStartupDelay):
+		}
+	}
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 
@@ -33,6 +47,10 @@ func (m *Manager) RunDBRetentionLoop(ctx context.Context, retentionDays int) {
 }
 
 func (m *Manager) pruneDBOnce(ctx context.Context, retentionDays int) {
+	started := time.Now()
+	defer func() {
+		slog.Info("Database maintenance pass finished", "duration", time.Since(started).Round(time.Millisecond), "retention_days", retentionDays)
+	}()
 	compacted, err := m.db.CompactRuntimeEvidence(ctx, 8)
 	if err != nil && ctx.Err() == nil {
 		slog.Error("Failed to compact runtime evidence", "rows_processed", compacted, "error", err)

@@ -70,8 +70,50 @@ payload="$(jq -n \
     workload_sha: $workload_sha
   }')"
 
-curl -sS --fail-with-body --max-time 180 -X POST \
-  "${auth_args[@]}" \
-  -H "Content-Type: application/json" \
-  "${base_url}/api/admin/deployments/ready" \
-  -d "$payload"
+# The control plane records the deployment and rolls the fleet as one
+# background task, and recording is an upsert, so posting again is safe and
+# a repeat joins the task in flight. Only a 202 proves that the task exists:
+# a post can die at the platform proxy's 120-second limit or get a 503 while
+# the control database is busy, so the script posts again until it is
+# accepted or the deadline passes. Between posts it reports whether the
+# deployment row is visible yet, as a diagnostic, never as acceptance.
+total_timeout="${NOTIFY_DEPLOYMENT_READY_TIMEOUT:-900}"
+poll_interval="${NOTIFY_DEPLOYMENT_READY_POLL_INTERVAL:-15}"
+deadline=$(( $(date +%s) + total_timeout ))
+workload_sha="$(printf '%s' "$workload_sha" | tr '[:upper:]' '[:lower:]')"
+
+recorded() {
+  curl -sS --max-time 30 "${auth_args[@]}" \
+    "${base_url}/api/deployments/latest?source=${source_name}" 2>/dev/null \
+    | jq -e --arg sha "$sha" --arg litestream_sha "$litestream_sha" --arg image_ref "$image_ref" --arg workload_sha "$workload_sha" \
+      '.deployment.git_sha == $sha and .deployment.litestream_sha == $litestream_sha and .deployment.image_ref == $image_ref and ((.deployment.workload_sha // "") | ascii_downcase) == $workload_sha' >/dev/null 2>&1
+}
+
+response_file="$(mktemp)"
+trap 'rm -f "$response_file"' EXIT
+
+attempt=0
+while :; do
+  attempt=$((attempt + 1))
+  status="$(curl -sS --max-time 100 -o "$response_file" -w '%{http_code}' -X POST \
+    "${auth_args[@]}" \
+    -H "Content-Type: application/json" \
+    "${base_url}/api/admin/deployments/ready" \
+    -d "$payload" || true)"
+  cat "$response_file"
+  echo
+  if [ "$status" = "202" ]; then
+    exit 0
+  fi
+  echo "notify attempt ${attempt} got HTTP ${status:-none}; only 202 is an acceptance" >&2
+  if recorded; then
+    echo "notify attempt ${attempt} was not accepted; deployment ${sha} / litestream ${litestream_sha} / workload ${workload_sha} is recorded for ${source_name}, posting again until the control plane accepts the rollout" >&2
+  else
+    echo "notify attempt ${attempt} was not accepted; deployment ${sha} is not recorded for ${source_name} yet" >&2
+  fi
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "deployment ${sha} was not accepted within ${total_timeout}s" >&2
+    exit 1
+  fi
+  sleep "$poll_interval"
+done

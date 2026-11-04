@@ -107,6 +107,10 @@ type Deployment struct {
 	StartedAt     time.Time  `json:"started_at"`
 	CompletedAt   *time.Time `json:"completed_at,omitempty"`
 	ErrorMessage  string     `json:"error_message,omitempty"`
+	// RolloutGeneration counts the records of this row; a rollout clears
+	// the pending flag only while the row is still at the generation it
+	// recorded, so a later record of the same row keeps its own rollout.
+	RolloutGeneration int `json:"-"`
 }
 
 type Event struct {

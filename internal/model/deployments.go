@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -98,7 +99,14 @@ func (d *DB) UpdateDeployment(id int64, status, imageRef, errMsg string) error {
 }
 
 func (d *DB) UpsertReadyDeployment(dep *Deployment) error {
-	tx, err := d.writer.Begin()
+	return d.UpsertReadyDeploymentContext(context.Background(), dep)
+}
+
+// UpsertReadyDeploymentContext records a ready deployment, waiting for the
+// writer connection and the database write lock only as long as ctx allows,
+// so a caller with a deadline is not held behind a long maintenance pass.
+func (d *DB) UpsertReadyDeploymentContext(ctx context.Context, dep *Deployment) error {
+	tx, err := d.writer.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -132,27 +140,86 @@ func (d *DB) UpsertReadyDeployment(dep *Deployment) error {
 	).Scan(&existingID)
 	switch {
 	case err == nil:
-		_, err = tx.Exec(`
+		_, err = tx.ExecContext(ctx, `
 			UPDATE deployments
-			SET status = 'ready', image_ref = ?, repository = ?, error_message = '', completed_at = datetime('now')
+			SET status = 'ready', image_ref = ?, repository = ?, error_message = '', completed_at = datetime('now'), rollout_pending = 1, pending_generation = pending_generation + 1
 			WHERE id = ?`,
 			dep.ImageRef,
 			repository,
 			existingID,
 		)
+		if err != nil {
+			return err
+		}
+		dep.ID = int(existingID)
+		if err := tx.QueryRowContext(ctx, `SELECT pending_generation FROM deployments WHERE id = ?`, existingID).Scan(&dep.RolloutGeneration); err != nil {
+			return err
+		}
 	case errors.Is(err, sql.ErrNoRows):
-		_, err = tx.Exec(`
-			INSERT INTO deployments (git_sha, litestream_sha, workload_sha, image_ref, source, repository, pr_number, status, started_at, completed_at, error_message)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', datetime('now'), datetime('now'), '')`,
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO deployments (git_sha, litestream_sha, workload_sha, image_ref, source, repository, pr_number, status, started_at, completed_at, error_message, rollout_pending, pending_generation)
+			VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', datetime('now'), datetime('now'), '', 1, 1)`,
 			dep.GitSHA, dep.LitestreamSHA, dep.WorkloadSHA, dep.ImageRef, dep.Source, repository, dep.PRNumber,
 		)
+		if err != nil {
+			return err
+		}
+		inserted, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		dep.ID = int(inserted)
+		dep.RolloutGeneration = 1
 	default:
 		return err
 	}
-	if err != nil {
-		return err
-	}
 	return tx.Commit()
+}
+
+type extraColumnScanner struct {
+	rows  *sql.Rows
+	extra []any
+}
+
+func (s extraColumnScanner) Scan(dest ...any) error {
+	return s.rows.Scan(append(dest, s.extra...)...)
+}
+
+// ListRolloutPendingDeployments returns the ready deployments that were
+// recorded but whose rollout has not completed, with the generation each
+// record is at, so a control plane that restarted in between can resume
+// them and clear exactly what it rolled out.
+func (d *DB) ListRolloutPendingDeployments() ([]Deployment, error) {
+	rows, err := d.query("SELECT " + deploymentColumns + ", pending_generation FROM deployments WHERE status = 'ready' AND rollout_pending = 1 ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var deployments []Deployment
+	for rows.Next() {
+		var dep Deployment
+		if err := scanDeployment(extraColumnScanner{rows: rows, extra: []any{&dep.RolloutGeneration}}, &dep); err != nil {
+			return nil, err
+		}
+		deployments = append(deployments, dep)
+	}
+	return deployments, rows.Err()
+}
+
+// ClearRolloutPending marks a deployment's rollout as handled (completed, or
+// superseded by a newer ready deployment of its source) only while the row
+// is still at the generation that rollout recorded; a later record of the
+// same row, with another image or the same one, keeps its own rollout
+// pending.
+func (d *DB) ClearRolloutPending(id, generation int) error {
+	_, err := d.exec(`UPDATE deployments SET rollout_pending = 0 WHERE id = ? AND pending_generation = ?`, id, generation)
+	return err
+}
+
+func (d *DB) RolloutPending(id int) (bool, error) {
+	var pending bool
+	err := d.queryRow(`SELECT rollout_pending FROM deployments WHERE id = ?`, id).Scan(&pending)
+	return pending, err
 }
 
 func (d *DB) GetDeploymentSourceRepository(source string) (string, error) {

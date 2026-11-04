@@ -1,11 +1,15 @@
 package workflows
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -189,6 +193,166 @@ func TestNotifyDeploymentReadyRequiresImageAndLitestreamSHA(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func notifyDeploymentReadyCommand(t *testing.T, baseURL string, env ...string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(filepath.Join("..", "..", "scripts", "notify-deployment-ready.sh"),
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "main", "manual", "registry.fly.io/example:image",
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "", "cccccccccccccccccccccccccccccccccccccccc")
+	cmd.Env = append(os.Environ(), "CONTROL_BASE_URL="+baseURL, "SOAK_ADMIN_BEARER_TOKEN=token", "NOTIFY_DEPLOYMENT_READY_POLL_INTERVAL=1")
+	cmd.Env = append(cmd.Env, env...)
+	return cmd
+}
+
+func TestNotifyDeploymentReadyPostsAgainUntilAccepted(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	posts, polls := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/admin/deployments/ready":
+			posts++
+			if posts < 3 {
+				w.Header().Set("Retry-After", "15")
+				http.Error(w, "control database busy, retry the ready notification", http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = fmt.Fprint(w, `{"accepted":true}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/deployments/latest":
+			polls++
+			if r.URL.Query().Get("source") != "main" {
+				http.Error(w, "unexpected source", http.StatusBadRequest)
+				return
+			}
+			_, _ = fmt.Fprint(w, `{"deployment":{"git_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","litestream_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","workload_sha":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","image_ref":"registry.fly.io/example:image","source":"main"},"status":"settling"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	output, err := notifyDeploymentReadyCommand(t, server.URL, "NOTIFY_DEPLOYMENT_READY_TIMEOUT=60").CombinedOutput()
+	if err != nil {
+		t.Fatalf("notify-deployment-ready.sh failed although the third post was accepted: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "is recorded for main, posting again until the control plane accepts the rollout") {
+		t.Fatalf("output %q does not report the recorded row as a diagnostic", output)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if posts != 3 || polls != 2 {
+		t.Fatalf("posts=%d polls=%d, want posting to continue past a recorded row until a 202", posts, polls)
+	}
+}
+
+func TestNotifyDeploymentReadyDoesNotAcceptAStaleRowWithAnotherWorkloadSHA(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"deployment":{"git_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","litestream_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","workload_sha":"dddddddddddddddddddddddddddddddddddddddd","image_ref":"registry.fly.io/example:image","source":"main"}}`)
+	}))
+	defer server.Close()
+
+	output, err := notifyDeploymentReadyCommand(t, server.URL, "NOTIFY_DEPLOYMENT_READY_TIMEOUT=2").CombinedOutput()
+	if err == nil {
+		t.Fatalf("notify-deployment-ready.sh succeeded without an acceptance:\n%s", output)
+	}
+	if !strings.Contains(string(output), "is not recorded for main yet") || !strings.Contains(string(output), "was not accepted within 2s") {
+		t.Fatalf("output %q does not report the stale row and the deadline", output)
+	}
+}
+
+func TestNotifyDeploymentReadyDoesNotAcceptARedirectOrAPlainOK(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{http.StatusFound, http.StatusOK} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					if status == http.StatusFound {
+						w.Header().Set("Location", "/login")
+					}
+					w.WriteHeader(status)
+					_, _ = fmt.Fprint(w, `{"accepted":true}`)
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			defer server.Close()
+
+			output, err := notifyDeploymentReadyCommand(t, server.URL, "NOTIFY_DEPLOYMENT_READY_TIMEOUT=2").CombinedOutput()
+			if err == nil {
+				t.Fatalf("notify-deployment-ready.sh accepted HTTP %d:\n%s", status, output)
+			}
+			if !strings.Contains(string(output), fmt.Sprintf("got HTTP %d; only 202 is an acceptance", status)) {
+				t.Fatalf("output %q does not report the non-202 status", output)
+			}
+		})
+	}
+}
+
+func TestNotifyDeploymentReadyGivesUpWhenTheDeploymentNeverLands(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"deployment":{"git_sha":"0000000000000000000000000000000000000000","litestream_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","image_ref":"registry.fly.io/example:image","source":"main"}}`)
+	}))
+	defer server.Close()
+
+	output, err := notifyDeploymentReadyCommand(t, server.URL, "NOTIFY_DEPLOYMENT_READY_TIMEOUT=2").CombinedOutput()
+	if err == nil {
+		t.Fatalf("notify-deployment-ready.sh succeeded although the deployment never landed:\n%s", output)
+	}
+	if !strings.Contains(string(output), "was not accepted within 2s") {
+		t.Fatalf("output %q does not report the deadline", output)
+	}
+}
+
+func TestNotifyDeploymentReadyAcceptsOnTheFirstPost(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	polls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Method == http.MethodPost {
+			if r.Header.Get("Authorization") != "Bearer token" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = fmt.Fprint(w, `{"accepted":true}`)
+			return
+		}
+		polls++
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	output, err := notifyDeploymentReadyCommand(t, server.URL).CombinedOutput()
+	if err != nil {
+		t.Fatalf("notify-deployment-ready.sh failed on an accepted post: %v\n%s", err, output)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if polls != 0 {
+		t.Fatalf("polled %d times after an accepted post", polls)
 	}
 }
 

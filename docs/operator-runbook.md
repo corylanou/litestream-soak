@@ -82,7 +82,16 @@ in ctl logs. The hourly retention pass deletes evidence from archived
 deployments only after two newer deployments for that source exist and the
 entire runtime window is older than the retention window. It preserves the
 current deployment and the previous deployment used by the latest comparison,
-including main soak history needed by scorecards and lifecycle checks.
+including main soak history needed by scorecards and lifecycle checks. It
+lists the eligible deployments on the `deployments` table and then deletes
+per deployment in 16-row batches through the evidence window indexes, each
+batch re-checking that the deployment is still eligible (a heartbeat that
+arrives mid-prune stops the rest of its deletion) and covering legacy rows
+journaled without a source, so heartbeat and report writes interleave
+between batches; the first
+pass after a control plane start waits ten minutes, so a deploy's
+`notify-worker-fleet` never queues behind it. `Database maintenance pass
+finished` logs each pass's duration.
 
 Compaction frees SQLite pages for reuse, but an existing database created with
 `auto_vacuum=NONE` does not return those pages to the volume. After compaction
@@ -614,8 +623,26 @@ The trusted deploy path for `main` is now:
 1. GitHub Actions builds the worker image with `flyctl deploy --build-only --push`.
 2. GitHub Actions deploys the control plane when control-plane code changed.
 3. GitHub Actions calls `POST /api/admin/deployments/ready`.
-4. The control plane records the ready deployment, performs the rolling update,
-   and resumes dormant workers into `probing`.
+4. The control plane starts one background task per deployment that records
+   the ready deployment (retrying a busy control database every 2 seconds
+   under a 10-minute deadline that every wait on that path honors) and then
+   performs the rolling update and resumes dormant workers into `probing`.
+   The record sets `rollout_pending` on the deployment row, cleared when the
+   rollout completes or the deployment is superseded, and `soakctl` resumes
+   every pending rollout at start (`Resuming deployment rollout recorded
+   before the restart` in ctl logs), so a restart between the record and the
+   rollout cannot strand a new PR or gate source without workers. The request
+   answers 202 once the record has landed, or 503 with `Retry-After` after
+   60 seconds while the task keeps going; a repeat post for the same
+   deployment joins the task in flight, and the record is an upsert, so
+   posting again is safe.
+   `scripts/notify-deployment-ready.sh` posts with a 100-second limit and
+   posts again every 15 seconds (`NOTIFY_DEPLOYMENT_READY_POLL_INTERVAL`) for
+   up to 15 minutes (`NOTIFY_DEPLOYMENT_READY_TIMEOUT`) until it gets a 202;
+   between posts it reports whether `GET /api/deployments/latest?source=<source>`
+   already shows the exact sha, litestream sha, workload sha and image, as a
+   diagnostic only. The fleet reconciler rolls any source to its latest ready
+   deployment every 10 minutes regardless.
 
 This matters because the worker fleet is a set of custom Fly Machines with
 per-worker env and volume bindings. A plain `fly deploy` on the app is not the

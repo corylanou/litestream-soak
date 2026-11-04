@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -908,6 +909,297 @@ func TestDeploymentReadyPersistsBeforeAcceptanceWhileSourceLocked(t *testing.T) 
 	after, err := buildDeploymentRollout(db, *oldDeployment)
 	if err != nil || after.Status != "superseded" {
 		t.Fatalf("old rollout = %s, %v; want superseded", after.Status, err)
+	}
+}
+
+func TestDeploymentReadyReturnsRetryableWhileTheWriterIsHeld(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := model.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	unlock, err := manager.lockSource(context.Background(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiCtx, cancelAPI := context.WithCancel(context.Background())
+	api := NewAPIWithContext(apiCtx, db, nil, nil, nil, manager, NewDeployer(manager, db, "litestream-soak", false))
+	defer func() { cancelAPI(); unlock(); waitForAPIRollouts(t, api) }()
+
+	holder, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(1000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Close() }()
+	ctx := context.Background()
+	holding, err := holder.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holding.Close() }()
+	if _, err := holding.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+
+	deploymentReadyRecordTimeout = 500 * time.Millisecond
+	deploymentReadyRecordRetryDelay = 20 * time.Millisecond
+	defer func() {
+		deploymentReadyRecordTimeout = 60 * time.Second
+		deploymentReadyRecordRetryDelay = 2 * time.Second
+	}()
+	started := time.Now()
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?source=main&sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil)
+	response := httptest.NewRecorder()
+	api.handleDeploymentReady(response, request)
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "15" {
+		t.Fatalf("status = %d retry-after %q: %s; want 503 with Retry-After while the writer is held", response.Code, response.Header().Get("Retry-After"), response.Body.String())
+	}
+	if elapsed := time.Since(started); elapsed < 400*time.Millisecond {
+		t.Fatalf("handler answered after %s, before the record timeout, so the task gave up instead of waiting for the writer", elapsed)
+	}
+	if elapsed := time.Since(started); elapsed > 40*time.Second {
+		t.Fatalf("handler held the request for %s with the writer busy", elapsed)
+	}
+	if latest, err := db.GetLatestReadyDeployment("main"); err != nil || latest != nil {
+		t.Fatalf("deployment recorded while the writer was held: %+v, %v", latest, err)
+	}
+	retry := httptest.NewRecorder()
+	api.handleDeploymentReady(retry, httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?source=main&sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil))
+	if retry.Code != http.StatusServiceUnavailable {
+		t.Fatalf("retry while the writer is still held = %d: %s; want 503", retry.Code, retry.Body.String())
+	}
+	api.rolloutMu.Lock()
+	inFlight := len(api.readyTasks)
+	api.rolloutMu.Unlock()
+	if inFlight != 1 {
+		t.Fatalf("%d record tasks in flight, want the retry to join the one task", inFlight)
+	}
+
+	if _, err := holding.ExecContext(ctx, "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	receivedEvents := func() int {
+		t.Helper()
+		events, err := db.ListEvents(50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		received := 0
+		for _, event := range events {
+			if event.EventType == "deploy_ready_received" {
+				received++
+			}
+		}
+		return received
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		latest, err := db.GetLatestReadyDeployment("main")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if latest != nil && latest.GitSHA == "2222222" && receivedEvents() > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the queued record task did not record the deployment after the writer was released, without another post")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if received := receivedEvents(); received != 1 {
+		t.Fatalf("deploy_ready_received events = %d, want one record for the two posts", received)
+	}
+	response = httptest.NewRecorder()
+	api.handleDeploymentReady(response, httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?source=main&sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("post after the record = %d: %s; want 202", response.Code, response.Body.String())
+	}
+}
+
+func TestDeploymentReadyTaskGivesUpAtTheRecordDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := model.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	api := NewAPI(db, nil, nil, nil, manager, NewDeployer(manager, db, "litestream-soak", false))
+	defer waitForAPIRollouts(t, api)
+
+	holder, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(1000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Close() }()
+	ctx := context.Background()
+	holding, err := holder.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holding.Close() }()
+	if _, err := holding.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	deploymentReadyRecordTimeout = 100 * time.Millisecond
+	deploymentReadyRecordRetryDelay = 20 * time.Millisecond
+	deploymentReadyRecordDeadline = 400 * time.Millisecond
+	defer func() {
+		deploymentReadyRecordTimeout = 60 * time.Second
+		deploymentReadyRecordRetryDelay = 2 * time.Second
+		deploymentReadyRecordDeadline = 10 * time.Minute
+	}()
+
+	response := httptest.NewRecorder()
+	api.handleDeploymentReady(response, httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?source=main&sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d: %s; want 503 while the writer is held", response.Code, response.Body.String())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		api.rolloutMu.Lock()
+		inFlight := len(api.readyTasks)
+		api.rolloutMu.Unlock()
+		if inFlight == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the record task did not give up at its deadline while the writer stayed held")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if latest, err := db.GetLatestReadyDeployment("main"); err != nil || latest != nil {
+		t.Fatalf("deployment recorded although the task gave up: %+v, %v", latest, err)
+	}
+	if _, err := holding.ExecContext(ctx, "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResumePendingRolloutsRollsADeploymentRecordedBeforeARestart(t *testing.T) {
+	db := openTestDB(t)
+	source := "pr-1228"
+	oldSHA := "0123456789abcdef0123456789abcdef01234567"
+	oldLitestreamSHA := "1111111111111111111111111111111111111111"
+	sha := "2222222222222222222222222222222222222222"
+	litestreamSHA := "3333333333333333333333333333333333333333"
+	imageRef := "registry.fly.io/litestream-soak:sha-222222222222-pr-1228"
+	createTestWorker(t, db, model.Worker{
+		ID:            "worker-pr-1228-sentinel-single",
+		AppName:       "litestream-soak",
+		Name:          "worker-pr-1228-sentinel-single",
+		Status:        model.WorkerRunning,
+		Source:        source,
+		GitSHA:        oldSHA,
+		LitestreamSHA: oldLitestreamSHA,
+		PRNumber:      1228,
+		ProfileName:   "sentinel-single",
+		ProfileConfig: workload.Config{LoadMode: "synthetic", InitialSize: "5MB"}.JSON(),
+		FlyMachineID:  "old-machine-low",
+		FlyVolumeID:   "old-volume-low",
+	})
+	fly := newDeployTestFlyServer(t, db, source, sha, litestreamSHA, imageRef)
+	deployer := NewDeployer(NewManager(fly.client, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", ""), db, "litestream-soak", false)
+
+	target, err := deployer.recordDeploymentReady(context.Background(), source, sha, litestreamSHA, imageRef, "github_actions_pr_soak", "benbjohnson/litestream", "")
+	if err != nil {
+		t.Fatalf("recordDeploymentReady() error = %v", err)
+	}
+	recorded := mustDeploymentByVersion(t, db, source, sha, litestreamSHA)
+	if pending, err := db.RolloutPending(recorded.ID); err != nil || !pending {
+		t.Fatalf("rollout_pending after the record = %v, %v; want set", pending, err)
+	}
+	if worker := mustWorker(t, db, "worker-pr-1228-sentinel-single"); worker.GitSHA != oldSHA {
+		t.Fatalf("worker rolled before the resume: %s", worker.GitSHA)
+	}
+
+	deployer.ResumePendingRollouts(context.Background())
+	if worker := mustWorker(t, db, "worker-pr-1228-sentinel-single"); worker.GitSHA != sha || worker.LitestreamSHA != litestreamSHA {
+		t.Fatalf("worker after the resumed rollout = %s / %s, want %s / %s", worker.GitSHA, worker.LitestreamSHA, sha, litestreamSHA)
+	}
+	if pending, err := db.RolloutPending(recorded.ID); err != nil || pending {
+		t.Fatalf("rollout_pending after the resumed rollout = %v, %v; want cleared", pending, err)
+	}
+	if target.GitSHA != sha {
+		t.Fatalf("recorded target = %+v", target)
+	}
+	if remaining, err := db.ListRolloutPendingDeployments(); err != nil || len(remaining) != 0 {
+		t.Fatalf("pending rollouts after the resume = %+v, %v", remaining, err)
+	}
+}
+
+func TestSupersededRolloutClearsOnlyItsOwnRowWhenWorkloadSHAsDiffer(t *testing.T) {
+	db := openTestDB(t)
+	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	deployer := NewDeployer(manager, db, "litestream-soak", false)
+	ctx := context.Background()
+	sha := "2222222222222222222222222222222222222222"
+	litestreamSHA := "3333333333333333333333333333333333333333"
+	older, err := deployer.recordDeploymentReady(ctx, "main", sha, litestreamSHA, "registry.fly.io/litestream-soak:sha-222222222222-ls-333333333333", "test", "", "cccccccccccccccccccccccccccccccccccccccc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer, err := deployer.recordDeploymentReady(ctx, "main", sha, litestreamSHA, "registry.fly.io/litestream-soak:sha-222222222222-ls-333333333333-w2", "test", "", "dddddddddddddddddddddddddddddddddddddddd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if older.ID == 0 || newer.ID == 0 || older.ID == newer.ID {
+		t.Fatalf("recorded rows %d and %d, want two distinct ids carried on the targets", older.ID, newer.ID)
+	}
+	if _, err := deployer.rolloutDeploymentReady(ctx, older, "test"); err != nil {
+		t.Fatalf("superseded rollout of the older deployment = %v", err)
+	}
+	if pending, err := db.RolloutPending(older.ID); err != nil || pending {
+		t.Fatalf("older row rollout_pending = %v, %v; want cleared by its superseded rollout", pending, err)
+	}
+	if pending, err := db.RolloutPending(newer.ID); err != nil || !pending {
+		t.Fatalf("newer row rollout_pending = %v, %v; want left for its own rollout", pending, err)
+	}
+	remaining, err := db.ListRolloutPendingDeployments()
+	if err != nil || len(remaining) != 1 || remaining[0].ID != newer.ID {
+		t.Fatalf("pending rollouts = %+v, %v; want only the newer deployment", remaining, err)
+	}
+	if err := deployer.clearRolloutPending(model.Deployment{Source: "main", GitSHA: sha, LitestreamSHA: litestreamSHA}); err != nil {
+		t.Fatalf("clearing without a recorded row = %v, want a no-op", err)
+	}
+	if pending, err := db.RolloutPending(newer.ID); err != nil || !pending {
+		t.Fatalf("newer row rollout_pending after a clear without a row id = %v, %v; want untouched, never resolved by a lookup", pending, err)
+	}
+}
+
+func TestSupersededRolloutKeepsANewerRecordOfTheSameRowPending(t *testing.T) {
+	db := openTestDB(t)
+	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	deployer := NewDeployer(manager, db, "litestream-soak", false)
+	ctx := context.Background()
+	sha := "2222222222222222222222222222222222222222"
+	litestreamSHA := "3333333333333333333333333333333333333333"
+	workloadSHA := "cccccccccccccccccccccccccccccccccccccccc"
+	imageA, err := deployer.recordDeploymentReady(ctx, "main", sha, litestreamSHA, "registry.fly.io/litestream-soak:sha-222222222222-ls-333333333333", "test", "", workloadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageB, err := deployer.recordDeploymentReady(ctx, "main", sha, litestreamSHA, "registry.fly.io/litestream-soak:sha-222222222222-ls-333333333333-b", "test", "", workloadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imageB.ID != imageA.ID || imageB.RolloutGeneration != imageA.RolloutGeneration+1 {
+		t.Fatalf("image b = row %d generation %d, want the reused row %d at generation %d", imageB.ID, imageB.RolloutGeneration, imageA.ID, imageA.RolloutGeneration+1)
+	}
+	if _, err := deployer.rolloutDeploymentReady(ctx, imageA, "test"); err != nil {
+		t.Fatalf("superseded rollout of image a = %v", err)
+	}
+	pending, err := db.ListRolloutPendingDeployments()
+	if err != nil || len(pending) != 1 || pending[0].ID != imageB.ID || pending[0].ImageRef != imageB.ImageRef || pending[0].RolloutGeneration != imageB.RolloutGeneration {
+		t.Fatalf("pending rollouts after image a's superseded rollout = %+v, %v; want image b's record still pending on the shared row", pending, err)
+	}
+	if err := deployer.clearRolloutPending(imageB); err != nil {
+		t.Fatal(err)
+	}
+	if remaining, err := db.ListRolloutPendingDeployments(); err != nil || len(remaining) != 0 {
+		t.Fatalf("pending rollouts after image b's own clear = %+v, %v", remaining, err)
 	}
 }
 

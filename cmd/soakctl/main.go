@@ -139,6 +139,7 @@ func main() {
 		Region:    s3Region,
 	}, controlBaseURL, platformLogToken)
 	deployer := orchestrator.NewDeployer(mgr, db, workerAppName, webhookDeployEnabled)
+	go deployer.ResumePendingRollouts(ctx)
 	webhookHandler := orchestrator.NewWebhookHandler(orchestrator.WebhookHandlerConfig{
 		Context:               ctx,
 		Secret:                webhookSecret,

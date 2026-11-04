@@ -410,6 +410,8 @@ func ensureDeploymentColumns(db *sql.DB) error {
 		`ALTER TABLE deployments ADD COLUMN workload_sha TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE deployments ADD COLUMN litestream_sha TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE deployments ADD COLUMN repository TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE deployments ADD COLUMN rollout_pending INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE deployments ADD COLUMN pending_generation INTEGER NOT NULL DEFAULT 0`,
 	}
 
 	for _, statement := range statements {

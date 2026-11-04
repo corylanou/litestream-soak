@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -292,8 +293,14 @@ func (d *DB) ActiveRCGateForSource(source string) (*RCGate, error) {
 }
 
 func (d *DB) PinRCGateBuild(id int64, source, imageRef, gitSHA string) (string, string, error) {
+	return d.PinRCGateBuildContext(context.Background(), id, source, imageRef, gitSHA)
+}
+
+// PinRCGateBuildContext pins a gate side's build, waiting for the database
+// only as long as ctx allows.
+func (d *DB) PinRCGateBuildContext(ctx context.Context, id int64, source, imageRef, gitSHA string) (string, string, error) {
 	var candidate, baseline string
-	if err := d.queryRow("SELECT candidate_source, baseline_source FROM rc_gates WHERE id = ?", id).Scan(&candidate, &baseline); err != nil {
+	if err := d.reader.QueryRowContext(ctx, "SELECT candidate_source, baseline_source FROM rc_gates WHERE id = ?", id).Scan(&candidate, &baseline); err != nil {
 		return "", "", err
 	}
 	var prefix string
@@ -306,17 +313,22 @@ func (d *DB) PinRCGateBuild(id int64, source, imageRef, gitSHA string) (string, 
 		return "", "", fmt.Errorf("source %s is not part of rc gate %d", source, id)
 	}
 	imageColumn, gitColumn := prefix+"_image_ref", prefix+"_git_sha"
-	if _, err := d.exec(
+	if _, err := d.writer.ExecContext(ctx,
 		"UPDATE rc_gates SET "+imageColumn+" = ?, "+gitColumn+" = ? WHERE id = ? AND "+imageColumn+" = '' AND "+rcGateOpenClause,
 		imageRef, gitSHA, id,
 	); err != nil {
 		return "", "", err
 	}
 	var pinnedImage, pinnedGit string
-	if err := d.queryRow("SELECT "+imageColumn+", "+gitColumn+" FROM rc_gates WHERE id = ?", id).Scan(&pinnedImage, &pinnedGit); err != nil {
+	if err := d.reader.QueryRowContext(ctx, "SELECT "+imageColumn+", "+gitColumn+" FROM rc_gates WHERE id = ?", id).Scan(&pinnedImage, &pinnedGit); err != nil {
 		return "", "", err
 	}
 	return pinnedImage, pinnedGit, nil
+}
+
+// ActiveRCGateForSourceContext is ActiveRCGateForSource bounded by ctx.
+func (d *DB) ActiveRCGateForSourceContext(ctx context.Context, source string) (*RCGate, error) {
+	return d.WithReadContext(ctx).ActiveRCGateForSource(source)
 }
 
 func (d *DB) MarkRCGateSideReady(id int64, source string, at time.Time) error {
