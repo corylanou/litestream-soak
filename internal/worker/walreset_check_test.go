@@ -245,15 +245,25 @@ type fakeWAL struct {
 	maxResets      uint32
 	resets         uint32
 	fatGeneration  uint32
-	overrun        bool
-	shrink         bool
-	saved          litestreamSavedPosition
-	savedFound     bool
-	savedStale     bool
-	readErr        error
-	downReadErr    error
-	downBurstErr   error
-	holdErr        error
+	// hiddenGrowthGeneration grows by hiddenGrowth frames after the harness
+	// sampled it and before the next restart, as background writes do;
+	// history keeps every superseded post-stop generation's real length so
+	// frameSalts can answer like the file would.
+	hiddenGrowthGeneration uint32
+	hiddenGrowth           int64
+	history                []fakeGeneration
+	savedFrames            int64
+	savedSalts             [2]uint32
+	scanErr                error
+	overrun                bool
+	shrink                 bool
+	saved                  litestreamSavedPosition
+	savedFound             bool
+	savedStale             bool
+	readErr                error
+	downReadErr            error
+	downBurstErr           error
+	holdErr                error
 
 	live              int
 	stopPending       bool
@@ -291,21 +301,85 @@ func (w *fakeWAL) holdReader(context.Context) (func() error, error) {
 	}, nil
 }
 
-// checkpoint is PRAGMA wal_checkpoint(PASSIVE): it backfills the WAL unless
-// a scripted reader keeps it from completing.
-func (w *fakeWAL) checkpoint(context.Context) error {
+// restartWrite is PRAGMA wal_checkpoint(PASSIVE) followed by a one-row write
+// on the same connection: the checkpoint backfills the WAL unless a scripted
+// reader keeps it from completing, and the write then restarts it unless a
+// reader is held.
+func (w *fakeWAL) restartWrite(ctx context.Context) (int, error) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	w.checkpoints++
 	if w.checkpointBusy > 0 {
 		w.checkpointBusy--
-		return nil
+	} else {
+		w.backfilled = true
 	}
-	w.backfilled = true
-	return nil
+	w.mu.Unlock()
+	return w.burst(ctx, 1)
+}
+
+type fakeGeneration struct {
+	salt1, salt2 uint32
+	frames       int64
+}
+
+// frameSalts answers like the WAL file: a slot belongs to the newest
+// generation that wrote it, and below every post-stop generation's end the
+// frames are the saved generation's.
+func (w *fakeWAL) frameSalts(from, to, frameSize int64, allowed [][2]uint32) (walResetSaltScan, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	scan := walResetSaltScan{from: from, to: to}
+	if w.scanErr != nil {
+		return scan, w.scanErr
+	}
+	for offset := from; offset+frameSize <= to; offset += frameSize {
+		frame := (offset - walHeaderSize) / frameSize
+		var owner [2]uint32
+		switch {
+		case frame < w.frames:
+			owner = [2]uint32{w.header.salt1, w.header.salt2}
+		default:
+			found := false
+			for i := len(w.history) - 1; i >= 0; i-- {
+				if frame < w.history[i].frames {
+					owner, found = [2]uint32{w.history[i].salt1, w.history[i].salt2}, true
+					break
+				}
+			}
+			if !found {
+				if frame >= w.savedFrames {
+					return scan, fmt.Errorf("read frame at %d: EOF", offset)
+				}
+				owner = w.savedSalts
+			}
+		}
+		scan.frames++
+		known := false
+		for _, salts := range allowed {
+			if salts == owner {
+				known = true
+			}
+		}
+		if !known {
+			if scan.foreignFrames == 0 {
+				scan.foreignOffset, scan.foreignSalt1, scan.foreignSalt2 = offset, owner[0], owner[1]
+			}
+			scan.foreignFrames++
+		}
+	}
+	scan.checked = true
+	return scan, nil
 }
 
 func (w *fakeWAL) restartGeneration(rows int) {
+	if w.down {
+		superseded := fakeGeneration{salt1: w.header.salt1, salt2: w.header.salt2, frames: w.frames}
+		if w.resets == w.hiddenGrowthGeneration && w.hiddenGrowth > 0 {
+			superseded.frames += w.hiddenGrowth
+			w.slots = max(w.slots, superseded.frames)
+		}
+		w.history = append(w.history, superseded)
+	}
 	w.resets++
 	w.header.checkpointSeq++
 	w.header.salt1++
@@ -378,6 +452,7 @@ func (w *fakeWAL) stop(context.Context) (string, error) {
 	}
 	w.frames++
 	w.slots = max(w.slots, w.frames)
+	w.savedFrames, w.savedSalts = w.frames, [2]uint32{w.header.salt1, w.header.salt2}
 	w.saved = litestreamSavedPosition{walOffsetEnd: walHeaderSize + w.frames*fakeFrameSize, salt1: w.header.salt1, salt2: w.header.salt2, found: true, file: "0000000000000001-0000000000000400.ltx"}
 	if w.savedStale {
 		w.saved.salt1--
@@ -454,7 +529,8 @@ func newTestWALResetCheck(script *walResetScript) *walResetCheck {
 	check.savedPosition = script.wal.savedPosition
 	check.burst = script.wal.burst
 	check.holdReader = script.wal.holdReader
-	check.checkpoint = script.wal.checkpoint
+	check.restartWrite = script.wal.restartWrite
+	check.frameSalts = script.wal.frameSalts
 	check.stop = func(ctx context.Context) (string, error) {
 		if script.stopErr != nil {
 			return "", script.stopErr
@@ -596,6 +672,33 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			wantSignature: reporting.SignatureWALResetShapeNotReached,
 			wantMessage:   "past the final generation's",
 			wantSummary:   []string{"shape_evidence=contradicted", "wal_resets=5"},
+			wantStarts:    1,
+		},
+		{
+			name: "an earlier generation that background writes extended after it was sampled is found in the wal file",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.hiddenGrowthGeneration = 2
+				wal.hiddenGrowth = 1500
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetShapeNotReached,
+			wantMessage:   fmt.Sprintf("carry other salts (first at %d: 1002/", walHeaderSize+(walResetGenerationBaseRows+5*walResetGenerationStepRows+1)*fakeFrameSize),
+			wantSummary:   []string{"shape_evidence=contradicted", "wal_resets=5"},
+			wantStarts:    1,
+		},
+		{
+			name: "wal frames that cannot be read before the restart leave the shape unverified",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.scanErr = errors.New("read frame at 4152: input/output error")
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetShapeNotReached,
+			wantMessage:   "shape unverified: the wal frames between the final generation's end",
+			wantSummary:   []string{"shape_evidence=unverified"},
 			wantStarts:    1,
 		},
 		{
@@ -1086,6 +1189,112 @@ func TestWALResetCycleStopsLitestreamOnlyAfterTheBurstIsDeepEnough(t *testing.T)
 	}
 	if observation.finalWAL.writtenEnd() != walHeaderSize+ends[len(ends)-1] || observation.maxEarlierGenerationWritten != walHeaderSize+ends[len(ends)-2] || observation.maxEarlierGenerationWritten >= observation.finalWAL.writtenEnd() {
 		t.Fatalf("final generation written end %d, earlier max %d, want %d and %d", observation.finalWAL.writtenEnd(), observation.maxEarlierGenerationWritten, walHeaderSize+ends[len(ends)-1], walHeaderSize+ends[len(ends)-2])
+	}
+}
+
+func TestScanWALFrameSaltsFindsAGenerationLitestreamDoesNotKnow(t *testing.T) {
+	build := func(earlierFrames int64) string {
+		b := newWALBuilder(false, 1000, 77)
+		for i := int64(0); i < 30; i++ {
+			b.appendFrame(uint32(i+1), true, false)
+		}
+		b.reset()
+		for i := int64(0); i < earlierFrames; i++ {
+			b.appendFrame(uint32(i+1), true, false)
+		}
+		b.reset()
+		for i := int64(0); i < 8; i++ {
+			b.appendFrame(uint32(i+1), true, false)
+		}
+		path := filepath.Join(t.TempDir(), "test.db-wal")
+		if err := os.WriteFile(path, b.buf, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	allowed := [][2]uint32{{1000, 77}, {1002, 77 + 2*7919}}
+	from, to := int64(walHeaderSize+8*fakeFrameSize), int64(walHeaderSize+30*fakeFrameSize)
+
+	scan, err := scanWALFrameSalts(build(12), from, to, fakeFrameSize, allowed)
+	if err != nil || !scan.checked || scan.frames != 22 || scan.foreignFrames != 4 || scan.foreignOffset != from || scan.foreignSalt1 != 1001 || scan.foreignSalt2 != 77+7919 {
+		t.Fatalf("longer earlier generation: scan=%+v err=%v", scan, err)
+	}
+	scan, err = scanWALFrameSalts(build(6), from, to, fakeFrameSize, allowed)
+	if err != nil || !scan.checked || scan.frames != 22 || scan.foreignFrames != 0 {
+		t.Fatalf("shorter earlier generation: scan=%+v err=%v", scan, err)
+	}
+	if _, err := scanWALFrameSalts(build(6), from, to+fakeFrameSize, fakeFrameSize, allowed); err == nil {
+		t.Fatal("a range past the end of the file passed as clean")
+	}
+}
+
+func TestHoldWALResetReaderPinsTheWALAcrossParentCancellation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	setup, err := openWALResetDB(path, "rwc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mode string
+	if err := setup.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&mode); err != nil || mode != "wal" {
+		t.Fatalf("journal mode %q: %v", mode, err)
+	}
+	if err := setup.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureWALResetTable(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	// The application keeps the database open throughout, so the wal-index
+	// survives between the cycle's own short-lived connections.
+	keeper, keeperConn, err := openWALResetConn(ctx, path, "rw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = keeperConn.Close(); _ = keeper.Close() }()
+	burst := func(rows int) {
+		t.Helper()
+		if _, err := writeWALResetBurst(ctx, path, rows); err != nil {
+			t.Fatal(err)
+		}
+	}
+	salt1 := func() uint32 {
+		t.Helper()
+		generation, err := readWALGeneration(path + "-wal")
+		if err != nil || !generation.header.valid {
+			t.Fatalf("wal header: %+v %v", generation.header, err)
+		}
+		return generation.header.salt1
+	}
+	burst(20)
+	before := salt1()
+
+	parent, cancelParent := context.WithCancel(ctx)
+	release, err := holdWALResetReader(parent, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelParent()
+	burst(5)
+	if _, err := checkpointAndWriteWALReset(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	burst(5)
+	if got := salt1(); got != before {
+		t.Fatalf("the wal restarted while the reader was held: salt1 %d -> %d", before, got)
+	}
+	if err := release(); err != nil {
+		t.Fatalf("release after the parent context ended = %v", err)
+	}
+	if _, err := checkpointAndWriteWALReset(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	burst(5)
+	if got := salt1(); got != before+1 {
+		t.Fatalf("the wal did not restart after the release: salt1 %d -> %d", before, got)
+	}
+	if generation, err := readWALGeneration(path + "-wal"); err != nil || generation.committedFrames < 6 || generation.committedFrames > 20 {
+		t.Fatalf("new generation has %d committed frames (%v), want only the restart write and one batch", generation.committedFrames, err)
 	}
 }
 

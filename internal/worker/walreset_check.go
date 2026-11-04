@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,7 +18,7 @@ import (
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/reporting"
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 )
 
 // The wal reset check reproduces the shape reported in
@@ -70,6 +71,7 @@ const (
 	walResetGenerationBaseRows = 200
 	walResetGenerationStepRows = 100
 	walResetRestartAttempts    = 40
+	walResetReaderOpenBudget   = 30 * time.Second
 	walResetDownBudget         = 4 * time.Minute
 	walResetHeaderPoll         = 50 * time.Millisecond
 	walResetStopBudget         = 3 * time.Minute
@@ -158,7 +160,12 @@ type walResetObservation struct {
 	// readerHeldAt is the committed WAL end when the read transaction held
 	// across the SIGTERM was opened.
 	readerHeldAt int64
-	resets       uint32
+	// tail is the frame-salt scan of the WAL file between the final
+	// generation's end and the saved position, read before the restart; the
+	// sampled generation ends above can miss a generation that background
+	// writes extended after it was sampled, the file cannot.
+	tail   walResetSaltScan
+	resets uint32
 	// checkpoints is the number of checkpoints that restarted the WAL while
 	// Litestream was down, which is the reset count; the header's checkpoint
 	// sequence is not used because SQLite starts it over when the wal-index
@@ -199,8 +206,14 @@ func (o walResetObservation) shapeEvidence() (string, string) {
 		return walResetShapeContradicted, fmt.Sprintf("a post-stop wal generation wrote up to %d bytes, at or past litestream's saved position %d", o.maxGenerationWritten, o.savedPosition)
 	case o.maxEarlierGenerationWritten > o.finalWAL.writtenEnd():
 		return walResetShapeContradicted, fmt.Sprintf("an earlier post-stop wal generation wrote up to %d bytes, past the final generation's %d, so its stale frames sit between the final generation and litestream's saved frames", o.maxEarlierGenerationWritten, o.finalWAL.writtenEnd())
+	case o.tail.err != "":
+		return walResetShapeUnverified, fmt.Sprintf("the wal frames between the final generation's end %d and litestream's saved position %d could not be read: %s", o.tail.from, o.tail.to, o.tail.err)
+	case !o.tail.checked:
+		return walResetShapeUnverified, "the wal frames between the final generation's end and litestream's saved position were not read"
+	case o.tail.foreignFrames > 0:
+		return walResetShapeContradicted, fmt.Sprintf("%d of the %d wal frames between the final generation's end %d and litestream's saved position %d carry other salts (first at %d: %d/%d), so litestream's startup scan meets a generation it does not know", o.tail.foreignFrames, o.tail.frames, o.tail.from, o.tail.to, o.tail.foreignOffset, o.tail.foreignSalt1, o.tail.foreignSalt2)
 	default:
-		return walResetShapeConfirmed, fmt.Sprintf("litestream's saved position %d is inside the %d-byte wal, every post-stop generation ended below it (max written %d) and the final generation is the longest (%d)", o.savedPosition, o.finalWAL.fileBytes, o.maxGenerationWritten, o.finalWAL.writtenEnd())
+		return walResetShapeConfirmed, fmt.Sprintf("litestream's saved position %d is inside the %d-byte wal, every post-stop generation ended below it (max written %d), the final generation is the longest (%d), and the %d frames between its end and the saved position carry the saved generation's salts", o.savedPosition, o.finalWAL.fileBytes, o.maxGenerationWritten, o.finalWAL.writtenEnd(), o.tail.frames)
 	}
 }
 
@@ -300,9 +313,12 @@ type walResetCheck struct {
 	generation    func() (walGeneration, error)
 	savedPosition func() (litestreamSavedPosition, error)
 	// holdReader opens a read transaction on the database and returns its
-	// release; checkpoint runs a PASSIVE checkpoint on a fresh connection.
-	holdReader func(ctx context.Context) (func() error, error)
-	checkpoint func(ctx context.Context) error
+	// release; restartWrite runs a PASSIVE checkpoint and then one row's
+	// write on the same connection, which restarts the WAL when nothing
+	// pins it; frameSalts reads the salts of the WAL frames in [from, to).
+	holdReader   func(ctx context.Context) (func() error, error)
+	restartWrite func(ctx context.Context) (int, error)
+	frameSalts   func(from, to, frameSize int64, allowed [][2]uint32) (walResetSaltScan, error)
 	// stop sends SIGTERM and waits for the exit, returning how the process
 	// ended; start makes sure exactly one Litestream is running and ready,
 	// whether none, a stopping one, or a started but not yet ready one exists.
@@ -358,7 +374,10 @@ func newWALResetCheck(cfg Config) *walResetCheck {
 	}
 	check.burst = func(ctx context.Context, rows int) (int, error) { return writeWALResetBurst(ctx, cfg.DBPath, rows) }
 	check.holdReader = func(ctx context.Context) (func() error, error) { return holdWALResetReader(ctx, cfg.DBPath) }
-	check.checkpoint = func(ctx context.Context) error { return checkpointWALReset(ctx, cfg.DBPath) }
+	check.restartWrite = func(ctx context.Context) (int, error) { return checkpointAndWriteWALReset(ctx, cfg.DBPath) }
+	check.frameSalts = func(from, to, frameSize int64, allowed [][2]uint32) (walResetSaltScan, error) {
+		return scanWALFrameSalts(cfg.DBPath+"-wal", from, to, frameSize, allowed)
+	}
 	check.generation = func() (walGeneration, error) { return readWALGeneration(cfg.DBPath + "-wal") }
 	check.savedPosition = func() (litestreamSavedPosition, error) { return readLitestreamSavedPosition(cfg.DBPath) }
 	check.stop = func(context.Context) (string, error) { return "", errWALResetUnavailable }
@@ -444,7 +463,7 @@ func (c *walResetCheck) run(ctx context.Context) (observation walResetObservatio
 			return observation, validation, fmt.Errorf("%w: read wal: %v", errWALResetUnavailable, walErr)
 		}
 		if wal.header.valid && observation.readerHeldAt == 0 && wal.generationEnd() >= c.readerHoldBytes {
-			release, holdErr := c.holdReader(burstCtx)
+			release, holdErr := c.holdReader(ctx)
 			if holdErr != nil {
 				return observation, validation, fmt.Errorf("%w: hold read transaction: %v", errWALResetUnavailable, holdErr)
 			}
@@ -561,6 +580,7 @@ func (c *walResetCheck) run(ctx context.Context) (observation walResetObservatio
 	observation.downDuration = c.clock().Sub(downStarted)
 	observation.resets = walResetCount(observation.savedHeader, observation.finalWAL.header)
 	observation.checkpoints = observation.resets
+	observation.tail = c.scanTail(observation)
 
 	// (4) Restart Litestream and wait until it has caught up with the primary.
 	// The preconditions for a result are that it was really stopped and
@@ -635,6 +655,25 @@ func (o *walResetObservation) recordGeneration(wal walGeneration, lastSalt2 *uin
 	}
 }
 
+// scanTail reads the WAL file's frame salts from the final generation's end
+// up to Litestream's saved position, the frames Litestream's startup scan
+// walks before it meets its own saved salts. The saved generation's salts
+// and the final generation's (background writes may have extended it since
+// it was sampled) are the only ones that may appear there; any other salt is
+// a generation Litestream does not know, which makes it snapshot.
+func (c *walResetCheck) scanTail(o walResetObservation) walResetSaltScan {
+	if o.savedPosition <= walHeaderSize || !o.finalWAL.header.valid || o.finalWAL.frameSize <= 0 {
+		return walResetSaltScan{}
+	}
+	allowed := [][2]uint32{{o.savedHeader.salt1, o.savedHeader.salt2}, {o.finalWAL.header.salt1, o.finalWAL.header.salt2}}
+	scan, err := c.frameSalts(o.finalWAL.writtenEnd(), o.savedPosition, o.finalWAL.frameSize, allowed)
+	if err != nil {
+		scan.err = err.Error()
+		scan.checked = false
+	}
+	return scan
+}
+
 // generationRows is the batch size of post-stop generation k: each one is
 // longer than the one before it, so the final generation is the longest.
 func (c *walResetCheck) generationRows(k uint32) int {
@@ -651,13 +690,10 @@ func (c *walResetCheck) restartWAL(ctx context.Context, observation *walResetObs
 		before = observation.finalWAL.header
 	}
 	for attempt := 0; attempt < walResetRestartAttempts; attempt++ {
-		if err := c.checkpoint(ctx); err != nil {
-			return fmt.Errorf("%w: checkpoint while litestream was down: %v", errWALResetUnavailable, err)
-		}
-		rows, err := c.burst(ctx, 1)
+		rows, err := c.restartWrite(ctx)
 		observation.downRows += rows
 		if err != nil {
-			return fmt.Errorf("%w: write after checkpoint while litestream was down: %v", errWALResetUnavailable, err)
+			return fmt.Errorf("%w: checkpoint and write while litestream was down: %v", errWALResetUnavailable, err)
 		}
 		wal, err := c.generation()
 		if err != nil {
@@ -832,6 +868,36 @@ func openWALResetDB(path, mode string) (*sql.DB, error) {
 	return db, nil
 }
 
+// openWALResetConn opens one connection to the database with PERSIST_WAL
+// set, so closing it, even as the last connection, keeps the WAL file and
+// its salts in place; the cycle's measurements live in that file, and
+// without this the driver deletes it on close whenever no other connection
+// holds a lock at that moment.
+func openWALResetConn(ctx context.Context, path, mode string) (*sql.DB, *sql.Conn, error) {
+	db, err := openWALResetDB(path, mode)
+	if err != nil {
+		return nil, nil, err
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, err
+	}
+	if err := conn.Raw(func(driverConn any) error {
+		control, ok := driverConn.(sqlite.FileControl)
+		if !ok {
+			return errors.New("sqlite driver does not expose file control")
+		}
+		_, err := control.FileControlPersistWAL("main", 1)
+		return err
+	}); err != nil {
+		_ = conn.Close()
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("persist wal: %w", err)
+	}
+	return db, conn, nil
+}
+
 // writeWALResetBurst commits rows of random payload in one transaction on a
 // connection with SQLite's default autocheckpoint and no journal_size_limit,
 // which is the application in the report: once Litestream's reader is gone,
@@ -839,12 +905,12 @@ func openWALResetDB(path, mode string) (*sql.DB, error) {
 // leaves the physical file at its full size.
 func writeWALResetBurst(ctx context.Context, path string, rows int) (int, error) {
 	defer harnessWriters.begin(walResetTable, path)()
-	db, err := openWALResetDB(path, "rw")
+	db, conn, err := openWALResetConn(ctx, path, "rw")
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = db.Close() }()
-	tx, err := db.BeginTx(ctx, nil)
+	defer func() { _ = conn.Close(); _ = db.Close() }()
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -871,45 +937,121 @@ func writeWALResetBurst(ctx context.Context, path string, rows int) (int, error)
 // at this moment and returns its release. While it is held, SQLite cannot
 // restart the WAL on any connection, because a restart needs no reader on a
 // read mark behind the end.
+// The transaction lives on a context that no caller deadline cancels, because
+// database/sql rolls a transaction back when its context ends and that would
+// drop the pin while Litestream is still shutting down; only the release ends
+// it. Opening the connection and taking the snapshot are bounded on their own.
 func holdWALResetReader(ctx context.Context, path string) (func() error, error) {
-	db, err := openWALResetDB(path, "rw")
+	holdCtx, cancelHold := context.WithCancel(context.WithoutCancel(ctx))
+	openCtx, cancelOpen := context.WithTimeout(holdCtx, walResetReaderOpenBudget)
+	defer cancelOpen()
+	db, conn, err := openWALResetConn(openCtx, path, "rw")
 	if err != nil {
+		cancelHold()
 		return nil, err
 	}
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err := conn.BeginTx(holdCtx, nil)
 	if err != nil {
 		_ = conn.Close()
 		_ = db.Close()
+		cancelHold()
 		return nil, err
 	}
 	var newest sql.NullInt64
-	if err := tx.QueryRowContext(ctx, "SELECT max(id) FROM "+walResetTable).Scan(&newest); err != nil {
+	if err := tx.QueryRowContext(openCtx, "SELECT max(id) FROM "+walResetTable).Scan(&newest); err != nil {
 		_ = tx.Rollback()
 		_ = conn.Close()
 		_ = db.Close()
+		cancelHold()
 		return nil, err
 	}
 	return func() error {
-		return errors.Join(tx.Rollback(), conn.Close(), db.Close())
+		err := errors.Join(tx.Rollback(), conn.Close(), db.Close())
+		cancelHold()
+		return err
 	}, nil
 }
 
-// checkpointWALReset runs a PASSIVE checkpoint on a fresh connection. The
-// result is not inspected: whether the backfill completed shows in the WAL
-// header after the next write.
-func checkpointWALReset(ctx context.Context, path string) error {
-	db, err := openWALResetDB(path, "rw")
-	if err != nil {
-		return err
+// walResetSaltScan is what reading the WAL file's frame salts between the
+// final generation's end and Litestream's saved position found: the frames
+// Litestream's startup scan meets before it reaches its own saved salts.
+type walResetSaltScan struct {
+	checked       bool
+	from, to      int64
+	frames        int64
+	foreignFrames int64
+	foreignOffset int64
+	foreignSalt1  uint32
+	foreignSalt2  uint32
+	err           string
+}
+
+// scanWALFrameSalts reads the salts of every frame in [from, to) of the WAL
+// file and counts the frames whose salts are not among allowed, keeping the
+// first such frame's offset and salts. A frame that cannot be read in full is
+// an error, so a file shorter than the range never passes as clean.
+func scanWALFrameSalts(path string, from, to, frameSize int64, allowed [][2]uint32) (walResetSaltScan, error) {
+	scan := walResetSaltScan{from: from, to: to}
+	if frameSize <= 0 {
+		return scan, fmt.Errorf("frame size %d", frameSize)
 	}
-	defer func() { _ = db.Close() }()
+	file, err := os.Open(path)
+	if err != nil {
+		return scan, err
+	}
+	defer func() { _ = file.Close() }()
+	header := make([]byte, 16)
+	for offset := from; offset+frameSize <= to; offset += frameSize {
+		if _, err := file.ReadAt(header, offset); err != nil {
+			return scan, fmt.Errorf("read frame at %d: %w", offset, err)
+		}
+		salt1, salt2 := binary.BigEndian.Uint32(header[8:12]), binary.BigEndian.Uint32(header[12:16])
+		scan.frames++
+		known := false
+		for _, salts := range allowed {
+			if salts[0] == salt1 && salts[1] == salt2 {
+				known = true
+				break
+			}
+		}
+		if known {
+			continue
+		}
+		if scan.foreignFrames == 0 {
+			scan.foreignOffset, scan.foreignSalt1, scan.foreignSalt2 = offset, salt1, salt2
+		}
+		scan.foreignFrames++
+	}
+	scan.checked = true
+	return scan, nil
+}
+
+// checkpointAndWriteWALReset runs a PASSIVE checkpoint and then writes one
+// row on the same connection. SQLite restarts the WAL for a writer whose
+// read mark is zero, which it is only when the checkpoint's backfill is
+// still recorded in the wal-index that writer reads; a connection that
+// closes between the two drops that record when it was the last one, so the
+// checkpoint and the write share the connection. The checkpoint result is
+// not inspected: whether the WAL restarted shows in its header.
+func checkpointAndWriteWALReset(ctx context.Context, path string) (int, error) {
+	defer harnessWriters.begin(walResetTable, path)()
+	db, conn, err := openWALResetConn(ctx, path, "rw")
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = conn.Close(); _ = db.Close() }()
 	var busy, frames, checkpointed int
-	return db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &frames, &checkpointed)
+	if err := conn.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &frames, &checkpointed); err != nil {
+		return 0, err
+	}
+	payload := make([]byte, walResetPayloadBytes)
+	if _, err := rand.Read(payload); err != nil {
+		return 0, err
+	}
+	if _, err := conn.ExecContext(ctx, "INSERT INTO "+walResetTable+" (written_at, payload) VALUES (?, ?)", time.Now().UnixNano(), payload); err != nil {
+		return 0, err
+	}
+	return 1, nil
 }
 
 // replicaL9 lists the replica's levels with the litestream binary and returns
