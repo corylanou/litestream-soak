@@ -34,6 +34,7 @@ const (
 	SignatureWALResetShapeNotReached         = "walreset_shape_not_reached"
 	SignatureWALResetLitestreamRestartFailed = "walreset_litestream_restart_failed"
 	SignatureWALResetCatchUpTimeout          = "walreset_catchup_timeout"
+	SignatureWALResetSnapshotInterference    = "walreset_snapshot_interference"
 	SignatureWALResetUnavailable             = "walreset_unavailable"
 	walResetFailurePrefix                    = "wal reset "
 

@@ -61,11 +61,11 @@ func TestLitestreamManagerMonitorCancelsRunContextOnUnexpectedExit(t *testing.T)
 
 	cfg := DefaultConfig()
 	manager := newLitestreamManager(&cfg)
-	done := make(chan struct{})
-	manager.litestreamDone = done
+	proc := &litestreamProcess{done: make(chan struct{})}
+	manager.litestreamProc = proc
 
 	manager.monitorLitestream(ctx, cancel)
-	close(done)
+	proc.finish(nil, nil)
 
 	if !waitUntil(2*time.Second, 10*time.Millisecond, func() bool {
 		return ctx.Err() != nil
