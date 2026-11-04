@@ -221,15 +221,17 @@ func (d *Deployer) rolloutDeploymentReady(ctx context.Context, target model.Depl
 // clearRolloutPending marks the recorded deployment's rollout as handled.
 // The flag is set when the deployment is recorded and stays set while the
 // rollout has not completed, so a control plane that restarts in between
-// resumes it from the row instead of from memory. Only the exact row the
-// record returned is cleared: deployments that share a source and both code
-// SHAs but differ in workload SHA are separate rows, and a lookup by version
-// could clear a newer one's flag.
+// resumes it from the row instead of from memory. Only the exact row and
+// generation the record returned are cleared: deployments that share a
+// source and both code SHAs but differ in workload SHA are separate rows, and
+// a record of another image (or the same one again) over an existing row
+// bumps its generation, so an older rollout of that row never clears the
+// newer record's flag.
 func (d *Deployer) clearRolloutPending(target model.Deployment) error {
-	if target.ID == 0 {
-		return fmt.Errorf("clear rollout pending: deployment %s %s/%s has no row id", target.Source, trimSHA(target.GitSHA), shortVersionValue(target.LitestreamSHA))
+	if target.ID == 0 || target.RolloutGeneration == 0 {
+		return fmt.Errorf("clear rollout pending: deployment %s %s/%s has no recorded row and generation", target.Source, trimSHA(target.GitSHA), shortVersionValue(target.LitestreamSHA))
 	}
-	if err := d.db.ClearRolloutPending(target.ID); err != nil {
+	if err := d.db.ClearRolloutPending(target.ID, target.RolloutGeneration); err != nil {
 		return fmt.Errorf("clear rollout pending: %w", err)
 	}
 	return nil

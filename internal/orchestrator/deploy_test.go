@@ -980,13 +980,27 @@ func TestDeploymentReadyReturnsRetryableWhileTheWriterIsHeld(t *testing.T) {
 	if _, err := holding.ExecContext(ctx, "ROLLBACK"); err != nil {
 		t.Fatal(err)
 	}
+	receivedEvents := func() int {
+		t.Helper()
+		events, err := db.ListEvents(50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		received := 0
+		for _, event := range events {
+			if event.EventType == "deploy_ready_received" {
+				received++
+			}
+		}
+		return received
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		latest, err := db.GetLatestReadyDeployment("main")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if latest != nil && latest.GitSHA == "2222222" {
+		if latest != nil && latest.GitSHA == "2222222" && receivedEvents() > 0 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -994,17 +1008,7 @@ func TestDeploymentReadyReturnsRetryableWhileTheWriterIsHeld(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	events, err := db.ListEvents(50)
-	if err != nil {
-		t.Fatal(err)
-	}
-	received := 0
-	for _, event := range events {
-		if event.EventType == "deploy_ready_received" {
-			received++
-		}
-	}
-	if received != 1 {
+	if received := receivedEvents(); received != 1 {
 		t.Fatalf("deploy_ready_received events = %d, want one record for the two posts", received)
 	}
 	response = httptest.NewRecorder()
@@ -1159,6 +1163,40 @@ func TestSupersededRolloutClearsOnlyItsOwnRowWhenWorkloadSHAsDiffer(t *testing.T
 	}
 	if err := deployer.clearRolloutPending(model.Deployment{Source: "main", GitSHA: sha, LitestreamSHA: litestreamSHA}); err == nil {
 		t.Fatal("clearing without a row id succeeded; it must never fall back to a lookup by version")
+	}
+}
+
+func TestSupersededRolloutKeepsANewerRecordOfTheSameRowPending(t *testing.T) {
+	db := openTestDB(t)
+	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	deployer := NewDeployer(manager, db, "litestream-soak", false)
+	ctx := context.Background()
+	sha := "2222222222222222222222222222222222222222"
+	litestreamSHA := "3333333333333333333333333333333333333333"
+	workloadSHA := "cccccccccccccccccccccccccccccccccccccccc"
+	imageA, err := deployer.recordDeploymentReady(ctx, "main", sha, litestreamSHA, "registry.fly.io/litestream-soak:sha-222222222222-ls-333333333333", "test", "", workloadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageB, err := deployer.recordDeploymentReady(ctx, "main", sha, litestreamSHA, "registry.fly.io/litestream-soak:sha-222222222222-ls-333333333333-b", "test", "", workloadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imageB.ID != imageA.ID || imageB.RolloutGeneration != imageA.RolloutGeneration+1 {
+		t.Fatalf("image b = row %d generation %d, want the reused row %d at generation %d", imageB.ID, imageB.RolloutGeneration, imageA.ID, imageA.RolloutGeneration+1)
+	}
+	if _, err := deployer.rolloutDeploymentReady(ctx, imageA, "test"); err != nil {
+		t.Fatalf("superseded rollout of image a = %v", err)
+	}
+	pending, err := db.ListRolloutPendingDeployments()
+	if err != nil || len(pending) != 1 || pending[0].ID != imageB.ID || pending[0].ImageRef != imageB.ImageRef || pending[0].RolloutGeneration != imageB.RolloutGeneration {
+		t.Fatalf("pending rollouts after image a's superseded rollout = %+v, %v; want image b's record still pending on the shared row", pending, err)
+	}
+	if err := deployer.clearRolloutPending(imageB); err != nil {
+		t.Fatal(err)
+	}
+	if remaining, err := db.ListRolloutPendingDeployments(); err != nil || len(remaining) != 0 {
+		t.Fatalf("pending rollouts after image b's own clear = %+v, %v", remaining, err)
 	}
 }
 

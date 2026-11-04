@@ -272,6 +272,36 @@ func TestNotifyDeploymentReadyDoesNotAcceptAStaleRowWithAnotherWorkloadSHA(t *te
 	}
 }
 
+func TestNotifyDeploymentReadyDoesNotAcceptARedirectOrAPlainOK(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{http.StatusFound, http.StatusOK} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					if status == http.StatusFound {
+						w.Header().Set("Location", "/login")
+					}
+					w.WriteHeader(status)
+					_, _ = fmt.Fprint(w, `{"accepted":true}`)
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			defer server.Close()
+
+			output, err := notifyDeploymentReadyCommand(t, server.URL, "NOTIFY_DEPLOYMENT_READY_TIMEOUT=2").CombinedOutput()
+			if err == nil {
+				t.Fatalf("notify-deployment-ready.sh accepted HTTP %d:\n%s", status, output)
+			}
+			if !strings.Contains(string(output), fmt.Sprintf("got HTTP %d; only 202 is an acceptance", status)) {
+				t.Fatalf("output %q does not report the non-202 status", output)
+			}
+		})
+	}
+}
+
 func TestNotifyDeploymentReadyGivesUpWhenTheDeploymentNeverLands(t *testing.T) {
 	t.Parallel()
 

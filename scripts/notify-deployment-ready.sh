@@ -89,17 +89,23 @@ recorded() {
       '.deployment.git_sha == $sha and .deployment.litestream_sha == $litestream_sha and .deployment.image_ref == $image_ref and ((.deployment.workload_sha // "") | ascii_downcase) == $workload_sha' >/dev/null 2>&1
 }
 
+response_file="$(mktemp)"
+trap 'rm -f "$response_file"' EXIT
+
 attempt=0
 while :; do
   attempt=$((attempt + 1))
-  if curl -sS --fail-with-body --max-time 100 -X POST \
+  status="$(curl -sS --max-time 100 -o "$response_file" -w '%{http_code}' -X POST \
     "${auth_args[@]}" \
     -H "Content-Type: application/json" \
     "${base_url}/api/admin/deployments/ready" \
-    -d "$payload"; then
+    -d "$payload" || true)"
+  cat "$response_file"
+  echo
+  if [ "$status" = "202" ]; then
     exit 0
   fi
-  echo >&2
+  echo "notify attempt ${attempt} got HTTP ${status:-none}; only 202 is an acceptance" >&2
   if recorded; then
     echo "notify attempt ${attempt} was not accepted; deployment ${sha} / litestream ${litestream_sha} / workload ${workload_sha} is recorded for ${source_name}, posting again until the control plane accepts the rollout" >&2
   else

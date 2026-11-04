@@ -22,7 +22,10 @@ func TestUpsertReadyDeploymentMarksRolloutPendingUntilCleared(t *testing.T) {
 	if flag, err := db.RolloutPending(pending[0].ID); err != nil || !flag {
 		t.Fatalf("rollout_pending = %v, %v; want set on record", flag, err)
 	}
-	if err := db.ClearRolloutPending(pending[0].ID); err != nil {
+	if pending[0].RolloutGeneration != 1 {
+		t.Fatalf("generation = %d, want 1 for the first record", pending[0].RolloutGeneration)
+	}
+	if err := db.ClearRolloutPending(pending[0].ID, pending[0].RolloutGeneration); err != nil {
 		t.Fatal(err)
 	}
 	if flag, err := db.RolloutPending(pending[0].ID); err != nil || flag {
@@ -34,8 +37,41 @@ func TestUpsertReadyDeploymentMarksRolloutPendingUntilCleared(t *testing.T) {
 	if err := db.UpsertReadyDeploymentContext(context.Background(), &Deployment{Source: "main", GitSHA: "aaaaaaa", LitestreamSHA: "bbbbbbb", ImageRef: "registry.fly.io/app:new", Status: "ready"}); err != nil {
 		t.Fatal(err)
 	}
-	if pending, err := db.ListRolloutPendingDeployments(); err != nil || len(pending) != 1 {
-		t.Fatalf("pending rollouts after a repeated record = %+v, %v; want the rollout pending again", pending, err)
+	if pending, err := db.ListRolloutPendingDeployments(); err != nil || len(pending) != 1 || pending[0].RolloutGeneration != 2 {
+		t.Fatalf("pending rollouts after a repeated record = %+v, %v; want the rollout pending again at generation 2", pending, err)
+	}
+}
+
+func TestClearRolloutPendingIsGuardedByTheRecordedGeneration(t *testing.T) {
+	db := seriesTestDB(t)
+	imageA := Deployment{Source: "main", GitSHA: "aaaaaaa", LitestreamSHA: "bbbbbbb", WorkloadSHA: "cccccccccccccccccccccccccccccccccccccccc", ImageRef: "registry.fly.io/app:a", Status: "ready"}
+	if err := db.UpsertReadyDeploymentContext(context.Background(), &imageA); err != nil {
+		t.Fatal(err)
+	}
+	imageB := imageA
+	imageB.ID, imageB.RolloutGeneration = 0, 0
+	imageB.ImageRef = "registry.fly.io/app:b"
+	if err := db.UpsertReadyDeploymentContext(context.Background(), &imageB); err != nil {
+		t.Fatal(err)
+	}
+	if imageB.ID != imageA.ID || imageB.RolloutGeneration != imageA.RolloutGeneration+1 {
+		t.Fatalf("image b recorded as row %d generation %d, want row %d at generation %d", imageB.ID, imageB.RolloutGeneration, imageA.ID, imageA.RolloutGeneration+1)
+	}
+	if err := db.ClearRolloutPending(imageA.ID, imageA.RolloutGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := db.RolloutPending(imageA.ID); err != nil || !pending {
+		t.Fatalf("rollout_pending after clearing the older generation = %v, %v; want image b's record kept", pending, err)
+	}
+	if err := db.ClearRolloutPending(imageB.ID, imageB.RolloutGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := db.RolloutPending(imageB.ID); err != nil || pending {
+		t.Fatalf("rollout_pending after clearing the current generation = %v, %v; want cleared", pending, err)
+	}
+	latest, err := db.GetLatestReadyDeployment("main")
+	if err != nil || latest == nil || latest.ImageRef != "registry.fly.io/app:b" {
+		t.Fatalf("latest ready = %+v, %v; want image b on the reused row", latest, err)
 	}
 }
 
@@ -60,7 +96,7 @@ func TestUpsertReadyDeploymentReturnsTheExactRowForEachWorkloadSHA(t *testing.T)
 	if again.ID != first.ID {
 		t.Fatalf("repeated record returned row %d, want the existing row %d", again.ID, first.ID)
 	}
-	if err := db.ClearRolloutPending(first.ID); err != nil {
+	if err := db.ClearRolloutPending(first.ID, first.RolloutGeneration); err != nil {
 		t.Fatal(err)
 	}
 	if pending, err := db.RolloutPending(second.ID); err != nil || !pending {
