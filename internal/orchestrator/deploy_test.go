@@ -1126,6 +1126,42 @@ func TestResumePendingRolloutsRollsADeploymentRecordedBeforeARestart(t *testing.
 	}
 }
 
+func TestSupersededRolloutClearsOnlyItsOwnRowWhenWorkloadSHAsDiffer(t *testing.T) {
+	db := openTestDB(t)
+	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")
+	deployer := NewDeployer(manager, db, "litestream-soak", false)
+	ctx := context.Background()
+	sha := "2222222222222222222222222222222222222222"
+	litestreamSHA := "3333333333333333333333333333333333333333"
+	older, err := deployer.recordDeploymentReady(ctx, "main", sha, litestreamSHA, "registry.fly.io/litestream-soak:sha-222222222222-ls-333333333333", "test", "", "cccccccccccccccccccccccccccccccccccccccc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer, err := deployer.recordDeploymentReady(ctx, "main", sha, litestreamSHA, "registry.fly.io/litestream-soak:sha-222222222222-ls-333333333333-w2", "test", "", "dddddddddddddddddddddddddddddddddddddddd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if older.ID == 0 || newer.ID == 0 || older.ID == newer.ID {
+		t.Fatalf("recorded rows %d and %d, want two distinct ids carried on the targets", older.ID, newer.ID)
+	}
+	if _, err := deployer.rolloutDeploymentReady(ctx, older, "test"); err != nil {
+		t.Fatalf("superseded rollout of the older deployment = %v", err)
+	}
+	if pending, err := db.RolloutPending(older.ID); err != nil || pending {
+		t.Fatalf("older row rollout_pending = %v, %v; want cleared by its superseded rollout", pending, err)
+	}
+	if pending, err := db.RolloutPending(newer.ID); err != nil || !pending {
+		t.Fatalf("newer row rollout_pending = %v, %v; want left for its own rollout", pending, err)
+	}
+	remaining, err := db.ListRolloutPendingDeployments()
+	if err != nil || len(remaining) != 1 || remaining[0].ID != newer.ID {
+		t.Fatalf("pending rollouts = %+v, %v; want only the newer deployment", remaining, err)
+	}
+	if err := deployer.clearRolloutPending(model.Deployment{Source: "main", GitSHA: sha, LitestreamSHA: litestreamSHA}); err == nil {
+		t.Fatal("clearing without a row id succeeded; it must never fall back to a lookup by version")
+	}
+}
+
 func TestDeploymentReadyRejectsPersistenceFailure(t *testing.T) {
 	db := openTestDB(t)
 	manager := NewManager(nil, db, nil, nil, "litestream-soak", ReplicaConfig{}, "", "")

@@ -39,6 +39,35 @@ func TestUpsertReadyDeploymentMarksRolloutPendingUntilCleared(t *testing.T) {
 	}
 }
 
+func TestUpsertReadyDeploymentReturnsTheExactRowForEachWorkloadSHA(t *testing.T) {
+	db := seriesTestDB(t)
+	first := Deployment{Source: "main", GitSHA: "aaaaaaa", LitestreamSHA: "bbbbbbb", WorkloadSHA: "cccccccccccccccccccccccccccccccccccccccc", ImageRef: "registry.fly.io/app:new", Status: "ready"}
+	second := first
+	second.WorkloadSHA = "dddddddddddddddddddddddddddddddddddddddd"
+	for _, dep := range []*Deployment{&first, &second} {
+		if err := db.UpsertReadyDeploymentContext(context.Background(), dep); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if first.ID == 0 || second.ID == 0 || first.ID == second.ID {
+		t.Fatalf("row ids = %d and %d, want two distinct rows for the two workload shas", first.ID, second.ID)
+	}
+	again := first
+	again.ID = 0
+	if err := db.UpsertReadyDeploymentContext(context.Background(), &again); err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != first.ID {
+		t.Fatalf("repeated record returned row %d, want the existing row %d", again.ID, first.ID)
+	}
+	if err := db.ClearRolloutPending(first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := db.RolloutPending(second.ID); err != nil || !pending {
+		t.Fatalf("second row's rollout_pending = %v, %v; want untouched by clearing the first", pending, err)
+	}
+}
+
 func TestRecordEventContextHonorsTheContextWhileASweepHoldsTheLock(t *testing.T) {
 	db := seriesTestDB(t)
 	db.blobs.sweep.Lock()

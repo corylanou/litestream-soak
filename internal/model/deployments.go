@@ -148,16 +148,25 @@ func (d *DB) UpsertReadyDeploymentContext(ctx context.Context, dep *Deployment) 
 			repository,
 			existingID,
 		)
+		if err != nil {
+			return err
+		}
+		dep.ID = int(existingID)
 	case errors.Is(err, sql.ErrNoRows):
-		_, err = tx.ExecContext(ctx, `
+		result, err := tx.ExecContext(ctx, `
 			INSERT INTO deployments (git_sha, litestream_sha, workload_sha, image_ref, source, repository, pr_number, status, started_at, completed_at, error_message, rollout_pending)
 			VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', datetime('now'), datetime('now'), '', 1)`,
 			dep.GitSHA, dep.LitestreamSHA, dep.WorkloadSHA, dep.ImageRef, dep.Source, repository, dep.PRNumber,
 		)
+		if err != nil {
+			return err
+		}
+		inserted, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		dep.ID = int(inserted)
 	default:
-		return err
-	}
-	if err != nil {
 		return err
 	}
 	return tx.Commit()
