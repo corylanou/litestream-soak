@@ -19,6 +19,7 @@ type API struct {
 	rolloutMu              sync.Mutex
 	rolloutTasks           int
 	rolloutsDone           chan struct{}
+	readyTasks             map[string]*deploymentReadyTask
 	db                     *model.DB
 	fly                    *flyapi.Client
 	metrics                *controlMetrics

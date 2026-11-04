@@ -206,7 +206,7 @@ func notifyDeploymentReadyCommand(t *testing.T, baseURL string, env ...string) *
 	return cmd
 }
 
-func TestNotifyDeploymentReadyPollsForTheRecordedDeploymentAfterAFailedPost(t *testing.T) {
+func TestNotifyDeploymentReadyPostsAgainUntilAccepted(t *testing.T) {
 	t.Parallel()
 
 	var mu sync.Mutex
@@ -217,19 +217,20 @@ func TestNotifyDeploymentReadyPollsForTheRecordedDeploymentAfterAFailedPost(t *t
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/admin/deployments/ready":
 			posts++
-			w.Header().Set("Retry-After", "15")
-			http.Error(w, "control database busy, retry the ready notification", http.StatusServiceUnavailable)
+			if posts < 3 {
+				w.Header().Set("Retry-After", "15")
+				http.Error(w, "control database busy, retry the ready notification", http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = fmt.Fprint(w, `{"accepted":true}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/deployments/latest":
 			polls++
 			if r.URL.Query().Get("source") != "main" {
 				http.Error(w, "unexpected source", http.StatusBadRequest)
 				return
 			}
-			sha := "0000000000000000000000000000000000000000"
-			if posts >= 2 {
-				sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-			}
-			_, _ = fmt.Fprintf(w, `{"deployment":{"git_sha":%q,"litestream_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","image_ref":"registry.fly.io/example:image","source":"main"},"status":"settling"}`, sha)
+			_, _ = fmt.Fprint(w, `{"deployment":{"git_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","litestream_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","workload_sha":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","image_ref":"registry.fly.io/example:image","source":"main"},"status":"settling"}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -238,15 +239,36 @@ func TestNotifyDeploymentReadyPollsForTheRecordedDeploymentAfterAFailedPost(t *t
 
 	output, err := notifyDeploymentReadyCommand(t, server.URL, "NOTIFY_DEPLOYMENT_READY_TIMEOUT=60").CombinedOutput()
 	if err != nil {
-		t.Fatalf("notify-deployment-ready.sh failed although the deployment was recorded: %v\n%s", err, output)
+		t.Fatalf("notify-deployment-ready.sh failed although the third post was accepted: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "is recorded for main") {
-		t.Fatalf("output %q does not report the recorded deployment", output)
+	if !strings.Contains(string(output), "is recorded for main, posting again until the control plane accepts the rollout") {
+		t.Fatalf("output %q does not report the recorded row as a diagnostic", output)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if posts != 2 || polls != 2 {
-		t.Fatalf("posts=%d polls=%d, want a second post after the first poll missed and success on the second poll", posts, polls)
+	if posts != 3 || polls != 2 {
+		t.Fatalf("posts=%d polls=%d, want posting to continue past a recorded row until a 202", posts, polls)
+	}
+}
+
+func TestNotifyDeploymentReadyDoesNotAcceptAStaleRowWithAnotherWorkloadSHA(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"deployment":{"git_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","litestream_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","workload_sha":"dddddddddddddddddddddddddddddddddddddddd","image_ref":"registry.fly.io/example:image","source":"main"}}`)
+	}))
+	defer server.Close()
+
+	output, err := notifyDeploymentReadyCommand(t, server.URL, "NOTIFY_DEPLOYMENT_READY_TIMEOUT=2").CombinedOutput()
+	if err == nil {
+		t.Fatalf("notify-deployment-ready.sh succeeded without an acceptance:\n%s", output)
+	}
+	if !strings.Contains(string(output), "is not recorded for main yet") || !strings.Contains(string(output), "was not accepted within 2s") {
+		t.Fatalf("output %q does not report the stale row and the deadline", output)
 	}
 }
 
@@ -266,7 +288,7 @@ func TestNotifyDeploymentReadyGivesUpWhenTheDeploymentNeverLands(t *testing.T) {
 	if err == nil {
 		t.Fatalf("notify-deployment-ready.sh succeeded although the deployment never landed:\n%s", output)
 	}
-	if !strings.Contains(string(output), "was not recorded within 2s") {
+	if !strings.Contains(string(output), "was not accepted within 2s") {
 		t.Fatalf("output %q does not report the deadline", output)
 	}
 }

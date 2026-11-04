@@ -620,15 +620,20 @@ The trusted deploy path for `main` is now:
 1. GitHub Actions builds the worker image with `flyctl deploy --build-only --push`.
 2. GitHub Actions deploys the control plane when control-plane code changed.
 3. GitHub Actions calls `POST /api/admin/deployments/ready`.
-4. The control plane records the ready deployment and answers 202, then
-   performs the rolling update in the background and resumes dormant workers
-   into `probing`. The record waits at most 60 seconds for the control
-   database's writer and answers 503 with `Retry-After` when it is busy; the
-   record is an upsert, so `scripts/notify-deployment-ready.sh` posts with a
-   100-second limit, checks `GET /api/deployments/latest?source=<source>` for
-   the exact sha, litestream sha and image after any failed post, and posts
-   again every 15 seconds (`NOTIFY_DEPLOYMENT_READY_POLL_INTERVAL`) for up to
-   15 minutes (`NOTIFY_DEPLOYMENT_READY_TIMEOUT`).
+4. The control plane starts one background task per deployment that records
+   the ready deployment (retrying a busy control database every 2 seconds for
+   up to 10 minutes) and then performs the rolling update and resumes dormant
+   workers into `probing`. The request answers 202 once the record has
+   landed, or 503 with `Retry-After` after 60 seconds while the task keeps
+   going; a repeat post for the same deployment joins the task in flight, and
+   the record is an upsert, so posting again is safe.
+   `scripts/notify-deployment-ready.sh` posts with a 100-second limit and
+   posts again every 15 seconds (`NOTIFY_DEPLOYMENT_READY_POLL_INTERVAL`) for
+   up to 15 minutes (`NOTIFY_DEPLOYMENT_READY_TIMEOUT`) until it gets a 202;
+   between posts it reports whether `GET /api/deployments/latest?source=<source>`
+   already shows the exact sha, litestream sha, workload sha and image, as a
+   diagnostic only. The fleet reconciler rolls any source to its latest ready
+   deployment every 10 minutes regardless.
 
 This matters because the worker fleet is a set of custom Fly Machines with
 per-worker env and volume bindings. A plain `fly deploy` on the app is not the

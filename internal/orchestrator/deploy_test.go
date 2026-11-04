@@ -944,7 +944,11 @@ func TestDeploymentReadyReturnsRetryableWhileTheWriterIsHeld(t *testing.T) {
 	}
 
 	deploymentReadyRecordTimeout = 500 * time.Millisecond
-	defer func() { deploymentReadyRecordTimeout = 60 * time.Second }()
+	deploymentReadyRecordRetryDelay = 20 * time.Millisecond
+	defer func() {
+		deploymentReadyRecordTimeout = 60 * time.Second
+		deploymentReadyRecordRetryDelay = 2 * time.Second
+	}()
 	started := time.Now()
 	request := httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?source=main&sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil)
 	response := httptest.NewRecorder()
@@ -952,24 +956,61 @@ func TestDeploymentReadyReturnsRetryableWhileTheWriterIsHeld(t *testing.T) {
 	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "15" {
 		t.Fatalf("status = %d retry-after %q: %s; want 503 with Retry-After while the writer is held", response.Code, response.Header().Get("Retry-After"), response.Body.String())
 	}
+	if elapsed := time.Since(started); elapsed < 400*time.Millisecond {
+		t.Fatalf("handler answered after %s, before the record timeout, so the task gave up instead of waiting for the writer", elapsed)
+	}
 	if elapsed := time.Since(started); elapsed > 40*time.Second {
 		t.Fatalf("handler held the request for %s with the writer busy", elapsed)
 	}
 	if latest, err := db.GetLatestReadyDeployment("main"); err != nil || latest != nil {
 		t.Fatalf("deployment recorded while the writer was held: %+v, %v", latest, err)
 	}
+	retry := httptest.NewRecorder()
+	api.handleDeploymentReady(retry, httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?source=main&sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil))
+	if retry.Code != http.StatusServiceUnavailable {
+		t.Fatalf("retry while the writer is still held = %d: %s; want 503", retry.Code, retry.Body.String())
+	}
+	api.rolloutMu.Lock()
+	inFlight := len(api.readyTasks)
+	api.rolloutMu.Unlock()
+	if inFlight != 1 {
+		t.Fatalf("%d record tasks in flight, want the retry to join the one task", inFlight)
+	}
 
 	if _, err := holding.ExecContext(ctx, "ROLLBACK"); err != nil {
 		t.Fatal(err)
 	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		latest, err := db.GetLatestReadyDeployment("main")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if latest != nil && latest.GitSHA == "2222222" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the queued record task did not record the deployment after the writer was released, without another post")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	events, err := db.ListEvents(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	received := 0
+	for _, event := range events {
+		if event.EventType == "deploy_ready_received" {
+			received++
+		}
+	}
+	if received != 1 {
+		t.Fatalf("deploy_ready_received events = %d, want one record for the two posts", received)
+	}
 	response = httptest.NewRecorder()
 	api.handleDeploymentReady(response, httptest.NewRequest(http.MethodPost, "/api/admin/deployments/ready?source=main&sha=2222222&litestream_sha=bbbbbbb&image=registry.fly.io/app:new", nil))
 	if response.Code != http.StatusAccepted {
-		t.Fatalf("retry status = %d: %s; want 202 once the writer is free", response.Code, response.Body.String())
-	}
-	latest, err := db.GetLatestReadyDeployment("main")
-	if err != nil || latest == nil || latest.GitSHA != "2222222" {
-		t.Fatalf("retried deployment not recorded: %+v, %v", latest, err)
+		t.Fatalf("post after the record = %d: %s; want 202", response.Code, response.Body.String())
 	}
 }
 
