@@ -257,6 +257,9 @@ type fakeWAL struct {
 	paused           bool
 	pauses, resumes  int
 	pauseErr         error
+	frozenInTx       int
+	holdsWriteLock   bool
+	drains           int
 	history          []fakeGeneration
 	savedFrames      int64
 	savedSalts       [2]uint32
@@ -380,7 +383,9 @@ func (w *fakeWAL) frameSalts(from, to, frameSize int64, allowed [][2]uint32) (wa
 	return scan, nil
 }
 
-// pauseLoad stops the background writers until the resume.
+// pauseLoad stops the background writers until the resume. With
+// frozenInTx the first that many pauses catch the load inside a write
+// transaction, so the drain cannot take the write lock until it is resumed.
 func (w *fakeWAL) pauseLoad(context.Context) (func(), error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -389,12 +394,32 @@ func (w *fakeWAL) pauseLoad(context.Context) (func(), error) {
 	}
 	w.paused = true
 	w.pauses++
+	w.holdsWriteLock = w.frozenInTx > 0
+	if w.frozenInTx > 0 {
+		w.frozenInTx--
+	}
 	return func() {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		w.paused = false
+		w.holdsWriteLock = false
 		w.resumes++
 	}, nil
+}
+
+// drainWriters is BEGIN IMMEDIATE on the check's own connection: it fails
+// while a frozen writer holds the lock.
+func (w *fakeWAL) drainWriters(context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.drains++
+	if !w.paused {
+		return errors.New("fake: drain without a pause")
+	}
+	if w.holdsWriteLock {
+		return errors.New("source boundary unavailable: acquire writer reservation: database is locked (5) (SQLITE_BUSY)")
+	}
+	return nil
 }
 
 func (w *fakeWAL) restartGeneration(rows int) {
@@ -558,6 +583,9 @@ func newTestWALResetCheck(script *walResetScript) *walResetCheck {
 	check.restartWrite = script.wal.restartWrite
 	check.frameSalts = script.wal.frameSalts
 	check.pauseLoad = script.wal.pauseLoad
+	check.drainWriters = script.wal.drainWriters
+	check.drainBudget = 50 * time.Millisecond
+	check.drainPause = 0
 	check.stop = func(ctx context.Context) (string, error) {
 		if script.stopErr != nil {
 			return "", script.stopErr
@@ -726,6 +754,29 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			wantSignature: reporting.SignatureWALResetShapeNotReached,
 			wantMessage:   fmt.Sprintf("carry other salts (first at %d: 1005/", walHeaderSize+(walResetGenerationBaseRows+5*walResetGenerationStepRows+1)*fakeFrameSize),
 			wantSummary:   []string{"shape_evidence=contradicted"},
+			wantStarts:    1,
+		},
+		{
+			name: "a load frozen inside a write transaction is resumed to finish and paused again",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.frozenInTx = 2
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:  "passed",
+			wantSummary: []string{"shape_evidence=confirmed"},
+			wantStarts:  1,
+		},
+		{
+			name: "a load that never finishes its write transaction makes the cycle inconclusive",
+			script: func() *walResetScript {
+				wal := newFakeWAL()
+				wal.frozenInTx = walResetDrainAttempts + 1
+				return &walResetScript{wal: wal}
+			},
+			wantStatus:    "aborted",
+			wantSignature: reporting.SignatureWALResetUnavailable,
+			wantMessage:   fmt.Sprintf("drain writers before the restart after %d pauses: source boundary unavailable", walResetDrainAttempts),
 			wantStarts:    1,
 		},
 		{
@@ -1355,6 +1406,67 @@ func TestHoldWALResetReaderPinsTheWALAcrossParentCancellation(t *testing.T) {
 	}
 	if generation, err := readWALGeneration(path + "-wal"); err != nil || generation.committedFrames < 6 || generation.committedFrames > 20 {
 		t.Fatalf("new generation has %d committed frames (%v), want only the restart write and one batch", generation.committedFrames, err)
+	}
+}
+
+func TestWALResetCycleDrainsAFrozenWriterBeforeTheScan(t *testing.T) {
+	wal := newFakeWAL()
+	wal.frozenInTx = 2
+	check := newTestWALResetCheck(&walResetScript{wal: wal})
+	observation, _, err := check.run(context.Background())
+	if err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+	if wal.pauses != 3 || wal.resumes != 3 || wal.drains != 3 || wal.paused {
+		t.Fatalf("pauses %d resumes %d drains %d paused %v, want two frozen pauses resumed and a third that drained, all resumed by the end", wal.pauses, wal.resumes, wal.drains, wal.paused)
+	}
+	if !observation.tail.checked || observation.tail.foreignFrames != 0 {
+		t.Fatalf("tail %+v, want a clean scan after the drain", observation.tail)
+	}
+}
+
+func TestDrainWALResetWritersWaitsForTheWriteLock(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	setup, err := openWALResetDB(path, "rwc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mode string
+	if err := setup.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := setup.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureWALResetTable(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	writerDB, writer, err := openWALResetConn(ctx, path, "rw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Close(); _ = writerDB.Close() }()
+	if _, err := writer.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(ctx, "INSERT INTO "+walResetTable+" (written_at, payload) VALUES (1, zeroblob(10))"); err != nil {
+		t.Fatal(err)
+	}
+	busyCtx, cancel := context.WithTimeout(ctx, 400*time.Millisecond)
+	err = drainWALResetWriters(busyCtx, path)
+	cancel()
+	if err == nil {
+		t.Fatal("drain succeeded while another connection held the write lock inside a transaction")
+	}
+	if _, err := writer.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatal(err)
+	}
+	if err := drainWALResetWriters(ctx, path); err != nil {
+		t.Fatalf("drain after the transaction committed = %v", err)
+	}
+	if _, err := writer.ExecContext(ctx, "INSERT INTO "+walResetTable+" (written_at, payload) VALUES (2, zeroblob(10))"); err != nil {
+		t.Fatalf("the drain kept the write lock: %v", err)
 	}
 }
 

@@ -72,14 +72,22 @@ const (
 	walResetGenerationStepRows = 100
 	walResetRestartAttempts    = 40
 	walResetReaderOpenBudget   = 30 * time.Second
-	walResetDownBudget         = 4 * time.Minute
-	walResetHeaderPoll         = 50 * time.Millisecond
-	walResetStopBudget         = 3 * time.Minute
-	walResetStartBudget        = 3 * time.Minute
-	walResetCatchUpBudget      = 10 * time.Minute
-	walResetCatchUpPoll        = 2 * time.Second
-	walResetGateBudget         = 15 * time.Minute
-	walResetBusyTimeout        = 5 * time.Second
+	// A paused load process is frozen wherever it was, possibly inside a
+	// write transaction. The drain takes SQLite's write lock on the check's
+	// own connection for up to walResetDrainBudget; while the frozen writer
+	// still holds it, the load is resumed for walResetDrainPause to finish
+	// and paused again, up to walResetDrainAttempts times.
+	walResetDrainBudget   = 15 * time.Second
+	walResetDrainPause    = 250 * time.Millisecond
+	walResetDrainAttempts = 8
+	walResetDownBudget    = 4 * time.Minute
+	walResetHeaderPoll    = 50 * time.Millisecond
+	walResetStopBudget    = 3 * time.Minute
+	walResetStartBudget   = 3 * time.Minute
+	walResetCatchUpBudget = 10 * time.Minute
+	walResetCatchUpPoll   = 2 * time.Second
+	walResetGateBudget    = 15 * time.Minute
+	walResetBusyTimeout   = 5 * time.Second
 
 	walResetShapeConfirmed    = "confirmed"
 	walResetShapeUnverified   = "unverified"
@@ -323,6 +331,9 @@ type walResetCheck struct {
 	// WAL layout holds still from the final sample through Litestream's
 	// startup verification.
 	pauseLoad func(ctx context.Context) (func(), error)
+	// drainWriters takes and releases SQLite's write lock on the check's own
+	// connection, which proves no write transaction is in flight.
+	drainWriters func(ctx context.Context) error
 	// stop sends SIGTERM and waits for the exit, returning how the process
 	// ended; start makes sure exactly one Litestream is running and ready,
 	// whether none, a stopping one, or a started but not yet ready one exists.
@@ -338,6 +349,8 @@ type walResetCheck struct {
 	pause           time.Duration
 	burstBytes      int64
 	readerHoldBytes int64
+	drainBudget     time.Duration
+	drainPause      time.Duration
 	burstBudget     time.Duration
 	downBudget      time.Duration
 	headerPoll      time.Duration
@@ -376,8 +389,11 @@ func newWALResetCheck(cfg Config) *walResetCheck {
 		acquireGate:     func(context.Context) (func(), error) { return func() {}, nil },
 		downtime:        func(bool) {},
 		pauseLoad:       func(context.Context) (func(), error) { return func() {}, nil },
+		drainBudget:     walResetDrainBudget,
+		drainPause:      walResetDrainPause,
 	}
 	check.burst = func(ctx context.Context, rows int) (int, error) { return writeWALResetBurst(ctx, cfg.DBPath, rows) }
+	check.drainWriters = func(ctx context.Context) error { return drainWALResetWriters(ctx, cfg.DBPath) }
 	check.holdReader = func(ctx context.Context) (func() error, error) { return holdWALResetReader(ctx, cfg.DBPath) }
 	check.restartWrite = func(ctx context.Context) (int, error) { return checkpointAndWriteWALReset(ctx, cfg.DBPath) }
 	check.frameSalts = func(from, to, frameSize int64, allowed [][2]uint32) (walResetSaltScan, error) {
@@ -584,14 +600,13 @@ func (c *walResetCheck) run(ctx context.Context) (observation walResetObservatio
 	}
 	observation.downDuration = c.clock().Sub(downStarted)
 
-	// The writers are paused from here until Litestream has read its
-	// position and caught up, so the layout the final sample and the file
-	// scan measure is the layout Litestream's startup verification sees.
-	resumeLoad, pauseErr := c.pauseLoad(ctx)
+	// The writers are paused and drained from here until Litestream has read
+	// its position and caught up, so the layout the final sample and the
+	// file scan measure is the layout Litestream's startup verification sees.
+	resumeLoad, pauseErr := c.pauseAndDrain(ctx)
 	if pauseErr != nil {
-		return observation, validation, fmt.Errorf("%w: pause load before the restart: %v", errWALResetUnavailable, pauseErr)
+		return observation, validation, fmt.Errorf("%w: %v", errWALResetUnavailable, pauseErr)
 	}
-	resumeLoad = releaseOnceFunc(resumeLoad)
 	defer resumeLoad()
 	if wal, walErr := c.generation(); walErr == nil && wal.header.valid {
 		observation.recordGeneration(wal, &lastSalt2)
@@ -750,6 +765,53 @@ func releaseOnceFunc(release func()) func() {
 
 // walResetLoadPauser pauses the workload's writers through the verifier's
 // pausers and returns the resume.
+// pauseAndDrain pauses the workload's writers and waits for their in-flight
+// write transaction to finish. The pause freezes the load process wherever it
+// is, possibly inside a transaction that holds SQLite's write lock with
+// frames not yet committed; that would stall Litestream's restart and put
+// uncommitted frames in the scan. Taking and releasing the write lock on the
+// check's own connection proves no transaction is in flight; while the
+// frozen writer still holds it, the load is resumed to finish and paused
+// again. The returned resume is safe to call more than once.
+func (c *walResetCheck) pauseAndDrain(ctx context.Context) (func(), error) {
+	var lastErr error
+	for attempt := 0; attempt < walResetDrainAttempts; attempt++ {
+		resume, err := c.pauseLoad(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("pause load before the restart: %w", err)
+		}
+		drainCtx, cancel := context.WithTimeout(ctx, c.drainBudget)
+		lastErr = c.drainWriters(drainCtx)
+		cancel()
+		if lastErr == nil {
+			return releaseOnceFunc(resume), nil
+		}
+		resume()
+		slog.Warn("WAL reset cycle paused the load inside a write transaction; letting it finish", "attempt", attempt+1, "error", lastErr)
+		if err := sleepContext(ctx, c.drainPause); err != nil {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("drain writers before the restart after %d pauses: %w", walResetDrainAttempts, lastErr)
+}
+
+// drainWALResetWriters takes SQLite's write lock with BEGIN IMMEDIATE on a
+// connection of its own, the way the verifier reserves the writer, and
+// releases it at once: holding it would block Litestream's own writes after
+// the restart, and the paused load starts no new transaction.
+func drainWALResetWriters(ctx context.Context, path string) error {
+	db, conn, err := openWALResetConn(ctx, path, "rw")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close(); _ = db.Close() }()
+	if err := acquireVerificationReservation(ctx, conn); err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, "ROLLBACK")
+	return err
+}
+
 func walResetLoadPauser(cfg Config, pausers []loadPauser) func(context.Context) (func(), error) {
 	return func(ctx context.Context) (func(), error) {
 		verifier := NewVerifier(cfg, pausers...)
