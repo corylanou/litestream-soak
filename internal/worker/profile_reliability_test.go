@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -138,7 +139,7 @@ func TestProfileIncidentFloodNeverStopsRun(t *testing.T) {
 	}
 	var summary string
 	for _, incident := range snapshot.ProfileIncidents {
-		if incident.ID == profileIncidentSummaryID(snapshot.ProfileEpoch, "profile_capture_error") {
+		if incident.ID == profileIncidentSummaryID(snapshot.ProfileEpoch, "profile_capture_error", r.identity, 1) {
 			summary = incident.Message
 		}
 	}
@@ -166,8 +167,85 @@ func TestProfileIncidentSummaryIsPersistedAgainAfterTheInterval(t *testing.T) {
 	if err != nil || len(entries) != profileIncidentsRetained+3 {
 		t.Fatalf("durable events=%d err=%v, want one summary per coalesced incident once the interval has passed", len(entries), err)
 	}
-	if got := r.profilingSnapshot().ProfileIncidentsCoalesced["profile_capture_error"]; got != 3 {
+	snapshot := r.profilingSnapshot()
+	if got := snapshot.ProfileIncidentsCoalesced["profile_capture_error"]; got != 3 {
 		t.Fatalf("coalesced %d, want 3", got)
+	}
+	if len(snapshot.ProfileIncidents) != profileIncidentsRetained+1 {
+		t.Fatalf("snapshot holds %d incidents, want the retained set plus only the latest window", len(snapshot.ProfileIncidents))
+	}
+	windows := map[string]string{}
+	for _, incident := range snapshot.ProfileIncidents {
+		if strings.Contains(incident.ID, ":summary:") {
+			windows[incident.ID] = incident.Message
+		}
+	}
+	latest := profileIncidentSummaryID(snapshot.ProfileEpoch, "profile_capture_error", r.identity, 3)
+	if len(windows) != 1 || !strings.HasPrefix(windows[latest], "3 profile_capture_error incidents coalesced") {
+		t.Fatalf("latest window missing: %v", windows)
+	}
+	for window := uint64(1); window <= 3; window++ {
+		id := profileIncidentSummaryID(snapshot.ProfileEpoch, "profile_capture_error", r.identity, window)
+		name := fmt.Sprintf("%x.json", sha256.Sum256([]byte(cfg.WorkerID+"\x00"+cfg.RunID+"\x00"+id)))
+		body, err := os.ReadFile(filepath.Join(cfg.DataDir, "churn-outbox", name))
+		if err != nil || !strings.Contains(string(body), fmt.Sprintf("%d profile_capture_error incidents coalesced", window)) {
+			t.Fatalf("window %d not persisted with its own id and count: %v %s", window, err, body)
+		}
+	}
+}
+
+func TestProfileIncidentSummariesAreKeyedByRunIdentity(t *testing.T) {
+	cfg := Config{DataDir: t.TempDir(), PprofCaptureEnabled: true, WorkerID: "worker", RunID: "current", MachineID: "machine"}
+	r := NewRunner(cfg)
+	_, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	r.observeProfiling(cancel)
+	for i := 0; i < profileIncidentsRetained; i++ {
+		r.profiles.publishProfileStatus("periodic", "capture-failed")
+	}
+	earlier := r.profiles.newRecord("hourly", "heap", "earlier.pprof")
+	earlier.RunID = "earlier"
+	earlier.Error = "incomplete capture: bytes=0 copy=context deadline exceeded close=<nil>"
+	r.profiles.onRecord(earlier)
+	r.profiles.onRecord(earlier)
+	r.profiles.publishProfileStatus("periodic", "capture-failed")
+	r.profiles.publishProfileStatus("periodic", "capture-failed")
+
+	snapshot := r.profilingSnapshot()
+	byRun := map[string]string{}
+	for _, incident := range snapshot.ProfileIncidents {
+		if strings.Contains(incident.ID, ":summary:") {
+			byRun[incident.Run.RunID] = incident.Message
+		}
+	}
+	if len(byRun) != 2 || !strings.HasPrefix(byRun["earlier"], "1 profile_capture_error incidents coalesced") || !strings.HasPrefix(byRun["current"], "2 profile_capture_error incidents coalesced") {
+		t.Fatalf("summaries by run = %v, want one per run identity with its own count", byRun)
+	}
+	if got := snapshot.ProfileIncidentsCoalesced["profile_capture_error"]; got != 3 {
+		t.Fatalf("coalesced %d, want 3 across both runs", got)
+	}
+	if len(snapshot.ProfileIncidents) != profileIncidentsRetained+2 {
+		t.Fatalf("snapshot holds %d incidents, want the retained set plus one summary per run", len(snapshot.ProfileIncidents))
+	}
+}
+
+func TestProfileIncidentDedupeSetIsBounded(t *testing.T) {
+	cfg := Config{DataDir: t.TempDir(), PprofCaptureEnabled: true, WorkerID: "worker", RunID: "run", MachineID: "machine"}
+	r := NewRunner(cfg)
+	_, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	r.observeProfiling(cancel)
+	record := r.profiles.newRecord("hourly", "heap", "retry.pprof")
+	record.Error = "incomplete capture"
+	for attempt := 0; attempt < profileIncidentsSeenMax+100; attempt++ {
+		record.addUploadFailure("artifact", errors.New("upload exited 75"))
+		r.profiles.onRecord(record)
+	}
+	r.profileEvidence.mu.Lock()
+	seen, order := len(r.profileEvidence.seen), len(r.profileEvidence.seenOrder)
+	r.profileEvidence.mu.Unlock()
+	if seen > profileIncidentsSeenMax || order > profileIncidentsSeenMax || seen != order {
+		t.Fatalf("seen=%d order=%d, want at most %d", seen, order, profileIncidentsSeenMax)
 	}
 }
 

@@ -18,22 +18,31 @@ import (
 // Profiling incidents are observations about the profiler, not about the
 // workload, so they never stop the run. The first profileIncidentsRetained
 // distinct incidents are kept in the snapshot and persisted one event each;
-// after that each kind is coalesced into one summary incident carrying the
-// count, the first and last time, and the latest message, persisted at most
-// once per profileIncidentSummaryInterval. An outbox that has no room left
-// drops the durable copy and counts the drop; the snapshot still carries the
-// incident. Any other persistence failure still stops the run.
+// after that the incidents of one kind from one run are coalesced into a
+// summary carrying the count, the first and last time, and the latest
+// message. The summary is published in windows of
+// profileIncidentSummaryInterval: each window is one incident with its own
+// id, persisted when it opens and kept live in the snapshot until the next
+// window replaces it, so a consumer that records an id once still gets a
+// fresh count every window.
+// An outbox that has no room left drops the durable copy and counts the
+// drop; the snapshot still carries the incident. Any other persistence
+// failure still stops the run. Ids that dedupe repeated record incidents are
+// remembered up to profileIncidentsSeenMax, oldest first out.
 const (
 	profileIncidentsRetained       = 256
 	profileIncidentSummaryInterval = 15 * time.Minute
+	profileIncidentsSeenMax        = 4096
 )
 
 type profileIncidentSummary struct {
+	kind          string
+	run           reporting.WorkerIdentity
 	count         uint64
 	first, last   time.Time
 	latest        string
-	run           reporting.WorkerIdentity
-	persisted     uint64
+	windows       uint64
+	windowID      string
 	lastPersisted time.Time
 }
 
@@ -42,18 +51,35 @@ type profileEvidenceState struct {
 	epoch                      string
 	active, complete, observed bool
 	seen                       map[string]bool
+	seenOrder                  []string
 	incidents                  map[string]reporting.ProfileIncident
 	coalesced                  map[string]*profileIncidentSummary
 	dropped                    uint64
 	summaryInterval            time.Duration
 }
 
-func profileIncidentSummaryID(epoch, kind string) string {
-	return "profile:" + epoch + ":summary:" + kind
+func profileIncidentSummaryKey(kind string, run reporting.WorkerIdentity) string {
+	return strings.Join([]string{kind, run.RunID, run.WorkerID, run.MachineID, fmt.Sprint(run.DeploymentID)}, "|")
 }
 
-func (s *profileIncidentSummary) incident(id, kind string) reporting.ProfileIncident {
-	return reporting.ProfileIncident{ID: id, Kind: kind, Message: fmt.Sprintf("%d %s incidents coalesced since %s, latest at %s: %s", s.count, kind, s.first.UTC().Format(time.RFC3339), s.last.UTC().Format(time.RFC3339), s.latest), At: s.last, Run: s.run}
+func profileIncidentSummaryID(epoch, kind string, run reporting.WorkerIdentity, window uint64) string {
+	return fmt.Sprintf("profile:%s:summary:%s:%s:%v:%d", epoch, kind, run.RunID, run.DeploymentID, window)
+}
+
+func (s *profileIncidentSummary) incident(id string) reporting.ProfileIncident {
+	return reporting.ProfileIncident{ID: id, Kind: s.kind, Message: fmt.Sprintf("%d %s incidents coalesced since %s, latest at %s: %s", s.count, s.kind, s.first.UTC().Format(time.RFC3339), s.last.UTC().Format(time.RFC3339), s.latest), At: s.last, Run: s.run}
+}
+
+func (s *profileEvidenceState) markSeen(id string) {
+	if s.seen[id] {
+		return
+	}
+	s.seen[id] = true
+	s.seenOrder = append(s.seenOrder, id)
+	if len(s.seenOrder) > profileIncidentsSeenMax {
+		delete(s.seen, s.seenOrder[0])
+		s.seenOrder = s.seenOrder[1:]
+	}
 }
 
 func (r *Runner) observeProfiling(cancelRun context.CancelCauseFunc) {
@@ -91,34 +117,31 @@ func (r *Runner) observeProfiling(cancelRun context.CancelCauseFunc) {
 			return
 		}
 		message = redactLogIncident(message)
+		if dedupe {
+			state.markSeen(id)
+		}
 		if len(state.incidents)-len(state.coalesced) < profileIncidentsRetained {
 			state.incidents[id] = reporting.ProfileIncident{ID: id, Kind: kind, Message: message, At: at, Run: identity}
-			if dedupe {
-				state.seen[id] = true
-			}
 			persist(id, kind, message, at, identity)
 			return
 		}
-		if dedupe {
-			state.seen[id] = true
-		}
-		summary := state.coalesced[kind]
+		key := profileIncidentSummaryKey(kind, identity)
+		summary := state.coalesced[key]
 		if summary == nil {
-			summary = &profileIncidentSummary{first: at, run: identity}
-			state.coalesced[kind] = summary
+			summary = &profileIncidentSummary{kind: kind, run: identity, first: at}
+			state.coalesced[key] = summary
 		}
 		summary.count++
 		summary.last = at
 		summary.latest = message
-		summaryID := profileIncidentSummaryID(state.epoch, kind)
-		incident := summary.incident(summaryID, kind)
-		state.incidents[summaryID] = incident
-		if summary.persisted == 0 || at.Sub(summary.lastPersisted) >= state.summaryInterval {
-			if persist(fmt.Sprintf("%s:%d", summaryID, summary.persisted+1), kind, incident.Message, at, identity) {
-				summary.persisted++
-				summary.lastPersisted = at
-			}
+		if summary.windows == 0 || at.Sub(summary.lastPersisted) >= state.summaryInterval {
+			delete(state.incidents, summary.windowID)
+			summary.windows++
+			summary.windowID = profileIncidentSummaryID(state.epoch, kind, identity, summary.windows)
+			summary.lastPersisted = at
+			persist(summary.windowID, kind, summary.incident(summary.windowID).Message, at, identity)
 		}
+		state.incidents[summary.windowID] = summary.incident(summary.windowID)
 	}
 	r.profiles.onRecord = func(record *profileRecord) {
 		state.mu.Lock()
@@ -156,11 +179,11 @@ func (r *Runner) profilingSnapshot() reporting.ProfilingEvidence {
 	for _, incident := range state.incidents {
 		result.ProfileIncidents = append(result.ProfileIncidents, incident)
 	}
-	for kind, summary := range state.coalesced {
+	for _, summary := range state.coalesced {
 		if result.ProfileIncidentsCoalesced == nil {
 			result.ProfileIncidentsCoalesced = make(map[string]uint64)
 		}
-		result.ProfileIncidentsCoalesced[kind] = summary.count
+		result.ProfileIncidentsCoalesced[summary.kind] += summary.count
 	}
 	result.ProfileEvidenceDropped = state.dropped
 	if state.active {
