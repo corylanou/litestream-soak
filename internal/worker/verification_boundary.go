@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
+	"strings"
 	"time"
 
 	"modernc.org/sqlite"
@@ -39,7 +41,7 @@ func (v *Verifier) captureVerificationBoundary(ctx context.Context, path string,
 		defer cancel()
 		_ = reservation.release(cleanup)
 	}()
-	if err := reservation.acquire(ctx); err != nil {
+	if err := v.acquireBoundaryReservation(ctx, reservation); err != nil {
 		return verificationBoundary{}, err
 	}
 	if err := reservation.release(ctx); err != nil {
@@ -49,7 +51,7 @@ func (v *Verifier) captureVerificationBoundary(ctx context.Context, path string,
 	if err != nil {
 		return verificationBoundary{}, fmt.Errorf("source boundary unavailable: paused sync: %w", err)
 	}
-	if err := reservation.acquire(ctx); err != nil {
+	if err := v.acquireBoundaryReservation(ctx, reservation); err != nil {
 		return verificationBoundary{}, err
 	}
 	if synced.TXID < txid {
@@ -119,8 +121,42 @@ func (r *verificationReservation) release(ctx context.Context) error {
 	return nil
 }
 
+// verificationReservationTimeout bounds one attempt to take the write lock;
+// a var so tests can shorten it.
+var verificationReservationTimeout = 15 * time.Second
+
+// acquireBoundaryReservation takes the writer reservation, and when a paused
+// load holds the write lock it cycles the pausers: the pause is a SIGSTOP
+// that can freeze the load process inside a write transaction, which would
+// otherwise hold the lock for the whole attempt and leave the cycle
+// inconclusive. The load is resumed for checkpointRetryDelay to finish its
+// transaction and paused again, up to reservationAttempts times.
+func (v *Verifier) acquireBoundaryReservation(ctx context.Context, reservation *verificationReservation) error {
+	for attempt := 1; ; attempt++ {
+		err := reservation.acquire(ctx)
+		if err == nil || len(v.pausers) == 0 || attempt >= v.reservationAttempts || ctx.Err() != nil || !reservationBlocked(err) {
+			return err
+		}
+		slog.Warn("Writer reservation blocked by the paused load; letting it finish its transaction", "attempt", attempt, "error", err)
+		v.resumeLoad()
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(v.checkpointRetryDelay):
+		}
+		if err := v.pauseLoad(ctx); err != nil {
+			return fmt.Errorf("source boundary unavailable: re-pause load for writer reservation: %w", err)
+		}
+	}
+}
+
+func reservationBlocked(err error) bool {
+	text := err.Error()
+	return errors.Is(err, context.DeadlineExceeded) || strings.Contains(text, "database is locked") || strings.Contains(text, "context deadline exceeded")
+}
+
 func acquireVerificationReservation(ctx context.Context, conn *sql.Conn) error {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, verificationReservationTimeout)
 	defer cancel()
 	for {
 		if err := ctx.Err(); err != nil {

@@ -99,6 +99,7 @@ type Verifier struct {
 	checkpointAttempts    int
 	checkpointRetryDelay  time.Duration
 	checkpointBusyTimeout time.Duration
+	reservationAttempts   int
 	syncRetryDelay        time.Duration
 }
 
@@ -129,6 +130,7 @@ func NewVerifier(cfg Config, pausers ...loadPauser) *Verifier {
 		checkpointAttempts:    3,
 		checkpointRetryDelay:  2 * time.Second,
 		checkpointBusyTimeout: 5 * time.Second,
+		reservationAttempts:   3,
 		syncRetryDelay:        2 * time.Second,
 	}
 	for _, pauser := range pausers {
