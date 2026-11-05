@@ -293,6 +293,7 @@ type walResetValidation struct {
 	pinnedPassed     bool
 	latestPassed     bool
 	latestTXID       uint64
+	latestAheadBy    uint64
 	restoreSignature string
 	steps            []reporting.VerificationStep
 }
@@ -305,6 +306,9 @@ func (v walResetValidation) summary() string {
 		return "failed"
 	}
 	summary := fmt.Sprintf("pinned_restore=%s latest_restore=%s restored_txid=%s latest_txid=%s", status(v.pinnedPassed), status(v.latestPassed), formatTXID(v.boundary), formatTXID(v.latestTXID))
+	if v.latestAheadBy > 0 {
+		summary += fmt.Sprintf(" latest_ahead_by=%d", v.latestAheadBy)
+	}
 	if v.restoreSignature != "" {
 		summary += " restore_signature=" + v.restoreSignature
 	}
@@ -1239,6 +1243,9 @@ func walResetValidator(cfg Config, objectStore *objectStoreMeter, pausers []load
 		latestSteps, latestTXID, latestErr := walResetLatestRestore(ctx, verifier, cfg, *verifier.boundary, latestPath)
 		validation.steps = append(validation.steps, latestSteps...)
 		validation.latestTXID = latestTXID
+		if latestTXID > validation.boundary {
+			validation.latestAheadBy = latestTXID - validation.boundary
+		}
 		if latestErr != nil {
 			if len(latestSteps) > 0 {
 				validation.phase = "latest_" + latestSteps[len(latestSteps)-1].Name
@@ -1307,10 +1314,23 @@ func walResetLatestRestore(ctx context.Context, verifier *Verifier, cfg Config, 
 	if restoreErr != nil {
 		return verifier.validationSteps, evidence.planTXID, restoreErr
 	}
-	if err := verifier.runValidationPhase(ctx, "boundary", cfg.verificationPhaseBudget("latest_marker", sourceSize), func(context.Context) error {
-		return checkWALResetLatestTXID(evidence.planTXID, boundary.txid)
+	latestBoundary := boundary
+	if err := verifier.runValidationPhase(ctx, "boundary", cfg.verificationPhaseBudget("latest_marker", sourceSize), func(phaseCtx context.Context) error {
+		ahead, err := checkWALResetLatestTXID(evidence.planTXID, boundary.txid)
+		if err != nil || ahead == 0 {
+			return err
+		}
+		fresh, err := walResetLatestBoundary(phaseCtx, verifier, cfg.DBPath, boundary, evidence.planTXID)
+		if err != nil {
+			return err
+		}
+		latestBoundary = fresh
+		return nil
 	}); err != nil {
 		return verifier.validationSteps, evidence.planTXID, err
+	}
+	if ahead := evidence.planTXID - boundary.txid; ahead > 0 && len(verifier.validationSteps) > 0 {
+		verifier.validationSteps[len(verifier.validationSteps)-1].OutputTail = fmt.Sprintf("latest restore landed on txid %s, %d past boundary %s, with the load paused; verified against the primary at txid %s", formatTXID(evidence.planTXID), ahead, formatTXID(boundary.txid), formatTXID(latestBoundary.txid))
 	}
 	if err := verifier.runValidationPhase(ctx, "integrity_check", cfg.verificationPhaseBudget("integrity_check", sourceSize), func(phaseCtx context.Context) error {
 		return checkRestoredIntegrity(phaseCtx, restoredPath)
@@ -1318,31 +1338,48 @@ func walResetLatestRestore(ctx context.Context, verifier *Verifier, cfg Config, 
 		return verifier.validationSteps, evidence.planTXID, err
 	}
 	if err := verifier.runValidationPhase(ctx, "compare", cfg.verificationPhaseBudget("compare", sourceSize), func(phaseCtx context.Context) error {
-		return verifier.compareRestoredLogical(phaseCtx, boundary.logicalSnapshot, restoredPath)
+		return verifier.compareRestoredLogical(phaseCtx, latestBoundary.logicalSnapshot, restoredPath)
 	}); err != nil {
 		return verifier.validationSteps, evidence.planTXID, err
 	}
 	return verifier.validationSteps, evidence.planTXID, nil
 }
 
-// checkWALResetLatestTXID requires the unpinned restore to have landed exactly
-// on the synced boundary. Behind it the replica lost committed data, which is
-// the failure the check exists for. Ahead of it proves nothing: Litestream's
-// own checkpoint (its _litestream_seq write) can add an LTX file while the
-// load is paused, so the latest point is simply newer than the boundary the
-// comparison was taken at. A restore log without a plan txid proves nothing
-// either.
-func checkWALResetLatestTXID(restored, boundary uint64) error {
+// checkWALResetLatestTXID places the unpinned restore against the synced
+// boundary. Behind it the replica lost committed data, which is the failure
+// the check exists for. At it the restore is compared with the boundary
+// snapshot. Ahead of it the extra txids were written while the load was
+// paused, so they are Litestream's own (a checkpoint's _litestream_seq row,
+// or the full-database recovery LTX benbjohnson/litestream#1616 writes after
+// a WAL reset), and the restore is verified against the primary at its own
+// txid instead; the distance is returned. A restore log without a plan txid
+// proves nothing.
+func checkWALResetLatestTXID(restored, boundary uint64) (uint64, error) {
 	switch {
 	case restored == 0:
-		return errWALResetMissingPlan
+		return 0, errWALResetMissingPlan
 	case restored < boundary:
-		return fmt.Errorf("latest restore landed on txid %s, behind boundary %s", formatTXID(restored), formatTXID(boundary))
-	case restored > boundary:
-		return fmt.Errorf("%w: latest restore landed on txid %s, boundary %s", errWALResetLatestAdvanced, formatTXID(restored), formatTXID(boundary))
+		return 0, fmt.Errorf("latest restore landed on txid %s, behind boundary %s", formatTXID(restored), formatTXID(boundary))
 	default:
-		return nil
+		return restored - boundary, nil
 	}
+}
+
+// walResetLatestBoundary captures the primary at the txid the latest restore
+// landed on: the writer reserved, Litestream synced to it, and the logical
+// snapshot taken there. The load has been paused since the boundary, so the
+// primary's tables must still equal the boundary snapshot; if they do not,
+// application writes resumed and the latest restore proves nothing. A
+// primary that cannot be captured at that txid proves nothing either.
+func walResetLatestBoundary(ctx context.Context, verifier *Verifier, dbPath string, boundary verificationBoundary, latestTXID uint64) (verificationBoundary, error) {
+	fresh, err := verifier.captureVerificationBoundary(ctx, dbPath, latestTXID)
+	if err != nil {
+		return verificationBoundary{}, fmt.Errorf("%w: latest restore landed on txid %s, %d past boundary %s, and the primary could not be captured there: %v", errWALResetLatestAdvanced, formatTXID(latestTXID), latestTXID-boundary.txid, formatTXID(boundary.txid), err)
+	}
+	if err := compareLogicalSnapshots(boundary.logicalSnapshot, fresh.logicalSnapshot); err != nil {
+		return verificationBoundary{}, fmt.Errorf("%w: latest restore landed on txid %s, %d past boundary %s, and the primary changed in between although the load was paused: %v", errWALResetLatestAdvanced, formatTXID(latestTXID), latestTXID-boundary.txid, formatTXID(boundary.txid), err)
+	}
+	return fresh, nil
 }
 
 // walResetValidationError keeps a validation failure as corruption evidence

@@ -187,17 +187,22 @@ func TestWALResetUploadedBytes(t *testing.T) {
 	}
 }
 
+func latestBoundaryErr(restored, boundary uint64) error {
+	_, err := checkWALResetLatestTXID(restored, boundary)
+	return err
+}
+
 func TestCheckWALResetLatestTXIDRequiresTheBoundary(t *testing.T) {
-	if err := checkWALResetLatestTXID(500, 500); err != nil {
-		t.Fatalf("exact boundary rejected: %v", err)
+	if ahead, err := checkWALResetLatestTXID(500, 500); err != nil || ahead != 0 {
+		t.Fatalf("exact boundary = %d, %v; want accepted at distance 0", ahead, err)
 	}
-	if err := checkWALResetLatestTXID(499, 500); err == nil || !strings.Contains(err.Error(), "landed on txid 00000000000001f3, behind boundary 00000000000001f4") || errors.Is(err, errWALResetMissingPlan) || errors.Is(err, errWALResetLatestAdvanced) {
+	if err := latestBoundaryErr(499, 500); err == nil || !strings.Contains(err.Error(), "landed on txid 00000000000001f3, behind boundary 00000000000001f4") || errors.Is(err, errWALResetMissingPlan) || errors.Is(err, errWALResetLatestAdvanced) {
 		t.Fatalf("behind the boundary = %v, want a restore failure", err)
 	}
-	if err := checkWALResetLatestTXID(501, 500); !errors.Is(err, errWALResetLatestAdvanced) {
-		t.Fatalf("ahead of the boundary = %v, want %v", err, errWALResetLatestAdvanced)
+	if ahead, err := checkWALResetLatestTXID(501, 500); err != nil || ahead != 1 {
+		t.Fatalf("one past the boundary = %d, %v; want accepted at distance 1 for the primary check", ahead, err)
 	}
-	if err := checkWALResetLatestTXID(0, 500); !errors.Is(err, errWALResetMissingPlan) {
+	if err := latestBoundaryErr(0, 500); !errors.Is(err, errWALResetMissingPlan) {
 		t.Fatalf("missing plan = %v, want %v", err, errWALResetMissingPlan)
 	}
 }
@@ -563,10 +568,13 @@ type walResetScript struct {
 	lagging  bool
 	phase    string
 	validErr error
-	l9       []walResetL9
-	uploaded []uint64
-	gateErr  error
-	downtime []bool
+	// latestTXID is where the unpinned restore landed when the validation
+	// passes; zero means the boundary itself.
+	latestTXID uint64
+	l9         []walResetL9
+	uploaded   []uint64
+	gateErr    error
+	downtime   []bool
 }
 
 func l9Of(objects ...string) walResetL9 {
@@ -619,6 +627,10 @@ func newTestWALResetCheck(script *walResetScript) *walResetCheck {
 		validation := walResetValidation{phase: script.phase, boundary: 500, steps: []reporting.VerificationStep{{Name: "restore", Status: "ok"}}}
 		if script.validErr == nil {
 			validation.pinnedPassed, validation.latestPassed, validation.latestTXID = true, true, 500
+			if script.latestTXID != 0 {
+				validation.latestTXID = script.latestTXID
+				validation.latestAheadBy = script.latestTXID - 500
+			}
 			return validation, nil
 		}
 		if strings.HasPrefix(script.phase, "latest_") {
@@ -1141,7 +1153,7 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 		{
 			name: "a latest restore behind the synced boundary is a restore failure",
 			script: func() *walResetScript {
-				return &walResetScript{wal: newFakeWAL(), phase: "latest_boundary", validErr: checkWALResetLatestTXID(499, 500)}
+				return &walResetScript{wal: newFakeWAL(), phase: "latest_boundary", validErr: latestBoundaryErr(499, 500)}
 			},
 			wantStatus:    "failed",
 			wantSignature: reporting.SignatureWALResetRestoreFailed,
@@ -1149,13 +1161,22 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 			wantStarts:    1,
 		},
 		{
-			name: "a latest restore ahead of the synced boundary is inconclusive",
+			name: "a latest restore one past the boundary that matches the primary at its own txid passes",
 			script: func() *walResetScript {
-				return &walResetScript{wal: newFakeWAL(), phase: "latest_boundary", validErr: checkWALResetLatestTXID(501, 500)}
+				return &walResetScript{wal: newFakeWAL(), latestTXID: 501}
+			},
+			wantStatus:  "passed",
+			wantSummary: []string{"pinned_restore=passed latest_restore=passed restored_txid=00000000000001f4 latest_txid=00000000000001f5 latest_ahead_by=1"},
+			wantStarts:  1,
+		},
+		{
+			name: "a latest restore past a boundary the primary moved away from is inconclusive",
+			script: func() *walResetScript {
+				return &walResetScript{wal: newFakeWAL(), phase: "latest_boundary", validErr: fmt.Errorf("%w: latest restore landed on txid 00000000000001f5, 1 past boundary 00000000000001f4, and the primary changed in between although the load was paused: logical schema mismatch", errWALResetLatestAdvanced)}
 			},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureWALResetUnavailable,
-			wantMessage:   "latest_boundary: latest advanced past the synced boundary: latest restore landed on txid 00000000000001f5, boundary 00000000000001f4",
+			wantMessage:   "latest_boundary: latest advanced past the synced boundary: latest restore landed on txid 00000000000001f5, 1 past boundary 00000000000001f4, and the primary changed in between",
 			wantStarts:    1,
 		},
 		{
@@ -1186,7 +1207,7 @@ func TestWALResetCycleStateMachine(t *testing.T) {
 		{
 			name: "a latest restore without a plan txid is inconclusive",
 			script: func() *walResetScript {
-				return &walResetScript{wal: newFakeWAL(), phase: "latest_boundary", validErr: checkWALResetLatestTXID(0, 500)}
+				return &walResetScript{wal: newFakeWAL(), phase: "latest_boundary", validErr: latestBoundaryErr(0, 500)}
 			},
 			wantStatus:    "aborted",
 			wantSignature: reporting.SignatureWALResetUnavailable,
