@@ -41,7 +41,7 @@ func (v *Verifier) captureVerificationBoundary(ctx context.Context, path string,
 		defer cancel()
 		_ = reservation.release(cleanup)
 	}()
-	if err := v.acquireBoundaryReservation(ctx, reservation); err != nil {
+	if err := v.acquireBoundaryReservation(ctx, reservation, true); err != nil {
 		return verificationBoundary{}, err
 	}
 	if err := reservation.release(ctx); err != nil {
@@ -51,7 +51,11 @@ func (v *Verifier) captureVerificationBoundary(ctx context.Context, path string,
 	if err != nil {
 		return verificationBoundary{}, fmt.Errorf("source boundary unavailable: paused sync: %w", err)
 	}
-	if err := v.acquireBoundaryReservation(ctx, reservation); err != nil {
+	// The snapshot below is labeled with this sync's txid, so from here on
+	// the writers must stay paused: a resume would let commits land that the
+	// txid does not cover. The pre-sync reservation already drained a frozen
+	// writer, so this attempt only ever waits on Litestream's own writes.
+	if err := v.acquireBoundaryReservation(ctx, reservation, false); err != nil {
 		return verificationBoundary{}, err
 	}
 	if synced.TXID < txid {
@@ -125,16 +129,19 @@ func (r *verificationReservation) release(ctx context.Context) error {
 // a var so tests can shorten it.
 var verificationReservationTimeout = 15 * time.Second
 
-// acquireBoundaryReservation takes the writer reservation, and when a paused
-// load holds the write lock it cycles the pausers: the pause is a SIGSTOP
-// that can freeze the load process inside a write transaction, which would
-// otherwise hold the lock for the whole attempt and leave the cycle
-// inconclusive. The load is resumed for checkpointRetryDelay to finish its
-// transaction and paused again, up to reservationAttempts times.
-func (v *Verifier) acquireBoundaryReservation(ctx context.Context, reservation *verificationReservation) error {
+// acquireBoundaryReservation takes the writer reservation. With cyclePausers
+// set, a paused load that holds the write lock is cycled: the pause is a
+// SIGSTOP that can freeze the load process inside a write transaction, which
+// would otherwise hold the lock for the whole attempt and leave the cycle
+// inconclusive, so the load is resumed for checkpointRetryDelay to finish its
+// transaction and paused again, up to reservationAttempts times. Without it
+// the reservation is tried once, for the attempt after the boundary sync,
+// where resuming the writers would let commits past the synced txid into
+// the snapshot.
+func (v *Verifier) acquireBoundaryReservation(ctx context.Context, reservation *verificationReservation, cyclePausers bool) error {
 	for attempt := 1; ; attempt++ {
 		err := reservation.acquire(ctx)
-		if err == nil || len(v.pausers) == 0 || attempt >= v.reservationAttempts || ctx.Err() != nil || !reservationBlocked(err) {
+		if err == nil || !cyclePausers || len(v.pausers) == 0 || attempt >= v.reservationAttempts || ctx.Err() != nil || !reservationBlocked(err) {
 			return err
 		}
 		slog.Warn("Writer reservation blocked by the paused load; letting it finish its transaction", "attempt", attempt, "error", err)

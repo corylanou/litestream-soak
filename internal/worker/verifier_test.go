@@ -971,7 +971,7 @@ func TestBoundaryReservationCyclesPausersWhenAFrozenWriterHoldsTheLock(t *testin
 		t.Fatal(err)
 	}
 	defer blocked.close()
-	if err := unpaused.acquireBoundaryReservation(context.Background(), blocked); err == nil || !strings.Contains(err.Error(), "acquire writer reservation") {
+	if err := unpaused.acquireBoundaryReservation(context.Background(), blocked, true); err == nil || !strings.Contains(err.Error(), "acquire writer reservation") {
 		t.Fatalf("reservation without pausers = %v, want the blocked reservation reported", err)
 	}
 
@@ -987,7 +987,10 @@ func TestBoundaryReservationCyclesPausersWhenAFrozenWriterHoldsTheLock(t *testin
 		t.Fatal(err)
 	}
 	defer reservation.close()
-	if err := verifier.acquireBoundaryReservation(context.Background(), reservation); err != nil {
+	if err := verifier.acquireBoundaryReservation(context.Background(), reservation, false); err == nil || pauser.resumeCalls.Load() != 0 {
+		t.Fatalf("post-sync reservation = %v with %d resumes, want the blocked reservation reported without resuming the writers", err, pauser.resumeCalls.Load())
+	}
+	if err := verifier.acquireBoundaryReservation(context.Background(), reservation, true); err != nil {
 		t.Fatalf("reservation with a frozen writer = %v, want the pausers cycled and the lock taken", err)
 	}
 	if pauser.resumeCalls.Load() != 1 || pauser.pauseCalls.Load() != 1 {
@@ -995,6 +998,70 @@ func TestBoundaryReservationCyclesPausersWhenAFrozenWriterHoldsTheLock(t *testin
 	}
 	if err := reservation.release(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBoundaryCaptureNeverResumesWritersAfterTheSync(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = dir
+	cfg.DBPath = filepath.Join(dir, "test.db")
+	cfg.SocketPath = filepath.Join("/tmp", fmt.Sprintf("litestream-soak-boundary-%d.sock", time.Now().UnixNano()))
+	createWALDatabaseWithPendingFrames(t, cfg.DBPath)
+
+	lockDB, err := sql.Open("sqlite", walDSN(cfg.DBPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lockMu sync.Mutex
+	var holding *sql.Conn
+	t.Cleanup(func() {
+		lockMu.Lock()
+		defer lockMu.Unlock()
+		if holding != nil {
+			_, _ = holding.ExecContext(context.Background(), "ROLLBACK")
+			_ = holding.Close()
+		}
+		_ = lockDB.Close()
+	})
+	// The fake Litestream answers the paused sync and, like a writer that
+	// commits right after it, takes the write lock before the post-sync
+	// reservation.
+	startTrackedUnixServer(t, cfg.SocketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sync" {
+			http.NotFound(w, r)
+			return
+		}
+		lockMu.Lock()
+		defer lockMu.Unlock()
+		conn, err := lockDB.Conn(context.Background())
+		if err == nil {
+			if _, err = conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err == nil {
+				_, err = conn.ExecContext(context.Background(), "INSERT INTO t (body) VALUES ('after sync')")
+			}
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		holding = conn
+		_, _ = w.Write([]byte(`{"status":"synced","txid":7,"replicated_txid":7}`))
+	}))
+
+	verificationReservationTimeout = 300 * time.Millisecond
+	defer func() { verificationReservationTimeout = 15 * time.Second }()
+	pauser := &releasingPauser{}
+	verifier := NewVerifier(cfg, pauser)
+	verifier.reservationAttempts = 3
+	verifier.checkpointRetryDelay = 20 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = verifier.captureVerificationBoundary(ctx, cfg.DBPath, 1)
+	if err == nil || !strings.Contains(err.Error(), "acquire writer reservation") {
+		t.Fatalf("captureVerificationBoundary() = %v, want the post-sync reservation reported as blocked", err)
+	}
+	if pauser.resumeCalls.Load() != 0 || pauser.pauseCalls.Load() != 0 {
+		t.Fatalf("resume calls %d pause calls %d, want the writers left paused after the sync", pauser.resumeCalls.Load(), pauser.pauseCalls.Load())
 	}
 }
 
