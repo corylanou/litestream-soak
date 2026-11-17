@@ -531,8 +531,14 @@ func TestUpgradeLaneBlockedSwitchIsABaselineFailureOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if results.Verdict != rcGateVerdictFail {
+		t.Fatalf("gate verdict = %s, want %s: a base build that failed before the upgrade is neither a pass nor an incomplete gate", results.Verdict, rcGateVerdictFail)
+	}
 	for _, scenario := range results.Scenarios {
 		if scenario.Scenario != "upgrade-lane" {
+			if scenario.Verdict == rcGateVerdictRegression || scenario.Verdict == rcGateVerdictBothFailing || scenario.Verdict == rcGateVerdictBaselineFailing {
+				t.Fatalf("%s verdict = %s, want only the lane's restore scenario to carry the baseline failure", scenario.Scenario, scenario.Verdict)
+			}
 			continue
 		}
 		if scenario.Baseline.Status != rcGateSideFailing || scenario.Baseline.Failed != 3 || scenario.Baseline.Reason != "" {
@@ -541,10 +547,34 @@ func TestUpgradeLaneBlockedSwitchIsABaselineFailureOnly(t *testing.T) {
 		if scenario.Candidate.Status != rcGateSideNoCoverage || scenario.Candidate.Failed != 0 || scenario.Candidate.Reason != "" {
 			t.Fatalf("candidate = %+v, want no coverage and no fault for a build that never ran", scenario.Candidate)
 		}
-		if scenario.Verdict == rcGateVerdictRegression || scenario.Verdict == rcGateVerdictBothFailing {
-			t.Fatalf("verdict = %s, want nothing held against the candidate", scenario.Verdict)
+		if scenario.Verdict != rcGateVerdictBaselineFailing {
+			t.Fatalf("verdict = %s, want %s", scenario.Verdict, rcGateVerdictBaselineFailing)
 		}
 		return
 	}
 	t.Fatalf("no upgrade-lane scenario in %+v", results.Scenarios)
+}
+
+func TestUpgradeLaneWithoutABlockedSwitchStaysIncomplete(t *testing.T) {
+	db := openTestDB(t)
+	gate := registerTestUpgradeGate(t, db, "", time.Now().UTC().Add(-3*time.Hour))
+	createTestGateFleet(t, db, gate)
+	inside := gate.StartedAt.Add(time.Hour)
+	recordUpgradeGateVerification(t, db, testUpgradeCandidate, gateUpgradeLaneProfile, "pre-upgrade", "", "integrity", "latest", "failed", inside)
+	stored, err := db.GetRCGate(gate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := buildRCGateResults(db, *stored, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results.Verdict != rcGateVerdictIncomplete {
+		t.Fatalf("gate verdict = %s, want %s while the lane has not reported a blocked switch", results.Verdict, rcGateVerdictIncomplete)
+	}
+	for _, scenario := range results.Scenarios {
+		if scenario.Scenario == "upgrade-lane" && scenario.Verdict != rcGateVerdictIncomplete {
+			t.Fatalf("upgrade-lane verdict = %s, want %s before the switch is blocked", scenario.Verdict, rcGateVerdictIncomplete)
+		}
+	}
 }

@@ -55,6 +55,12 @@ const (
 	rcGateVerdictIncomplete  = "incomplete"
 	rcGateVerdictRegression  = "regression"
 	rcGateVerdictBothFailing = "both_failing"
+	// rcGateVerdictBaselineFailing is an upgrade lane that never switched
+	// builds because its pre-upgrade phase kept failing: the base build
+	// failed and the upgrade was never exercised, which says nothing against
+	// the candidate and is not a gate that passed or merely ran short.
+	rcGateVerdictBaselineFailing    = "baseline_failing"
+	rcGateUpgradeSwitchBlockedEvent = "upgrade_switch_blocked"
 	// rcGateVerdictNoReproduction is the wal reset scenario's answer when the
 	// candidate is clean but the baseline never failed either: the cycle shape
 	// did not reproduce the bug, so a clean candidate proves nothing.
@@ -1363,8 +1369,17 @@ func buildRCGateResults(db *model.DB, gate model.RCGate, end time.Time) (rcGateR
 			}
 			result.Verdict = rcGateWALResetVerdict(result.Verdict, candidate, baseline)
 		}
+		if candidateFilter.phase == upgradePhasePost && baselineFilter.phase == upgradePhasePre && candidate.Status == rcGateSideNoCoverage && baseline.Status == rcGateSideFailing {
+			blocked, err := rcGateUpgradeSwitchBlocked(db, gate, baseline.WorkerID, end)
+			if err != nil {
+				return rcGateResults{}, err
+			}
+			if blocked {
+				result.Verdict = rcGateVerdictBaselineFailing
+			}
+		}
 		switch result.Verdict {
-		case rcGateVerdictRegression, rcGateVerdictBothFailing:
+		case rcGateVerdictRegression, rcGateVerdictBothFailing, rcGateVerdictBaselineFailing:
 			failing = true
 		case rcGateVerdictIncomplete, rcGateVerdictNoReproduction:
 			incomplete = true
@@ -1893,6 +1908,26 @@ func rcGateCoverageVerdict(verdict string, candidate, baseline RCGateSideResult)
 		return rcGateVerdictRegression
 	}
 	return verdict
+}
+
+// rcGateUpgradeSwitchBlocked reports whether the lane worker told the control
+// plane, inside the gate window, that it stayed on the base build because its
+// pre-upgrade baseline never completed.
+func rcGateUpgradeSwitchBlocked(db *model.DB, gate model.RCGate, workerID string, end time.Time) (bool, error) {
+	if workerID == "" {
+		return false, nil
+	}
+	events, err := db.ListWorkerEvents(workerID, rcGateWorkerEventHistory)
+	if err != nil {
+		return false, fmt.Errorf("list %s events: %w", workerID, err)
+	}
+	windowStart := gate.StartedAt.Truncate(time.Second)
+	for _, event := range events {
+		if event.EventType == rcGateUpgradeSwitchBlockedEvent && !event.CreatedAt.Before(windowStart) && !event.CreatedAt.After(end) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func rcGateOwnsWorker(gate model.RCGate, worker model.Worker) bool {
