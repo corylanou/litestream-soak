@@ -138,6 +138,8 @@ func TestRegisterUpgradeGate(t *testing.T) {
 	}{
 		{name: "defaults to 24h with a 2h warm-up", wantWarmup: 2 * time.Hour, wantTTL: 24 * time.Hour},
 		{name: "explicit warm-up", mutate: func(r *RCGateRequest) { r.Duration = "12h"; r.UpgradeWarmup = "30m" }, wantWarmup: 30 * time.Minute, wantTTL: 12 * time.Hour},
+		{name: "warm-up shorter than the lane's mode rotation leaves no pre-upgrade baseline", mutate: func(r *RCGateRequest) { r.Duration = "4h"; r.UpgradeWarmup = "15m" }, wantErr: "upgrade_warmup 15m0s must be at least 20m0s"},
+		{name: "warm-up at the minimum", mutate: func(r *RCGateRequest) { r.Duration = "4h"; r.UpgradeWarmup = "20m" }, wantWarmup: 20 * time.Minute, wantTTL: 4 * time.Hour},
 		{name: "warm-up must end before the TTL", mutate: func(r *RCGateRequest) { r.Duration = "2h"; r.UpgradeWarmup = "2h" }, wantErr: "must be shorter than duration"},
 		{name: "tail is not offered", mutate: func(r *RCGateRequest) { r.Tail = true }, wantErr: "do not support tail"},
 		{name: "unknown kind", mutate: func(r *RCGateRequest) { r.Kind = "canary" }, wantErr: "kind must be"},
@@ -202,6 +204,24 @@ func TestRegisterUpgradeGate(t *testing.T) {
 	}
 }
 
+func TestUpgradeLaneVerifiesEveryModeInsideTheWarmup(t *testing.T) {
+	for _, tc := range []struct{ warmup, want time.Duration }{
+		{20 * time.Minute, 5 * time.Minute},
+		{30 * time.Minute, 7 * time.Minute},
+		{45 * time.Minute, 11 * time.Minute},
+		{2 * time.Hour, 30 * time.Minute},
+		{6 * time.Hour, 30 * time.Minute},
+	} {
+		interval := upgradeLaneVerifyInterval(tc.warmup)
+		if interval != tc.want {
+			t.Fatalf("verify interval for a %s warm-up = %s, want %s", tc.warmup, interval, tc.want)
+		}
+		if cycles := int(tc.warmup / interval); cycles < len(gateRotatingRestoreModes)+1 {
+			t.Fatalf("a %s warm-up holds %d verifications at %s, want every restore mode plus a margin", tc.warmup, cycles, interval)
+		}
+	}
+}
+
 func TestUpgradeGateFleetAppliesRegisteredWarmup(t *testing.T) {
 	db := openTestDB(t)
 	gate := registerTestUpgradeGate(t, db, "45m", time.Now().UTC())
@@ -214,6 +234,12 @@ func TestUpgradeGateFleetAppliesRegisteredWarmup(t *testing.T) {
 		for _, worker := range spec.Workers {
 			if worker.Workload.UpgradeLane && worker.Workload.UpgradeWarmup != "45m0s" {
 				t.Fatalf("lane warm-up = %q, want the registered 45m", worker.Workload.UpgradeWarmup)
+			}
+			if worker.Workload.UpgradeLane && worker.Workload.VerifyInterval != "11m0s" {
+				t.Fatalf("lane verify interval = %q, want four cycles inside the 45m warm-up", worker.Workload.VerifyInterval)
+			}
+			if !worker.Workload.UpgradeLane && worker.Workload.VerifyInterval != "30m" {
+				t.Fatalf("follow verify interval = %q, want the default", worker.Workload.VerifyInterval)
 			}
 		}
 	}
@@ -479,5 +505,76 @@ func TestUpgradeGateWorkerEnvCarriesLaneSettings(t *testing.T) {
 	}
 	if env["FOLLOW_CHECK"] != "true" || env["SNAPSHOT_INTERVAL"] != "15m" {
 		t.Fatalf("follow worker env = %+v", env)
+	}
+}
+
+func TestUpgradeLaneBlockedSwitchIsABaselineFailureOnly(t *testing.T) {
+	db := openTestDB(t)
+	gate := registerTestUpgradeGate(t, db, "", time.Now().UTC().Add(-3*time.Hour))
+	createTestGateFleet(t, db, gate)
+	inside := gate.StartedAt.Add(time.Hour)
+	for i, v := range []struct{ mode, status string }{{"txid", "passed"}, {"timestamp", "failed"}, {"latest", "failed"}, {"timestamp", "failed"}} {
+		recordUpgradeGateVerification(t, db, testUpgradeCandidate, gateUpgradeLaneProfile, "pre-upgrade", "", "integrity", v.mode, v.status, inside.Add(time.Duration(i)*time.Minute))
+	}
+	lane := "worker-" + testUpgradeCandidate + "-" + gateUpgradeLaneProfile
+	if _, err := db.GetWorker(lane); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordEventAt(lane, "upgrade_switch_blocked", "upgrade lane stays on the base build: the pre-upgrade baseline was incomplete", "", inside.Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.GetRCGate(gate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := buildRCGateResults(db, *stored, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results.Verdict != rcGateVerdictFail {
+		t.Fatalf("gate verdict = %s, want %s: a base build that failed before the upgrade is neither a pass nor an incomplete gate", results.Verdict, rcGateVerdictFail)
+	}
+	for _, scenario := range results.Scenarios {
+		if scenario.Scenario != "upgrade-lane" {
+			if scenario.Verdict == rcGateVerdictRegression || scenario.Verdict == rcGateVerdictBothFailing || scenario.Verdict == rcGateVerdictBaselineFailing {
+				t.Fatalf("%s verdict = %s, want only the lane's restore scenario to carry the baseline failure", scenario.Scenario, scenario.Verdict)
+			}
+			continue
+		}
+		if scenario.Baseline.Status != rcGateSideFailing || scenario.Baseline.Failed != 3 || scenario.Baseline.Reason != "" {
+			t.Fatalf("baseline = %+v, want the base build's restore failures and no worker fault", scenario.Baseline)
+		}
+		if scenario.Candidate.Status != rcGateSideNoCoverage || scenario.Candidate.Failed != 0 || scenario.Candidate.Reason != "" {
+			t.Fatalf("candidate = %+v, want no coverage and no fault for a build that never ran", scenario.Candidate)
+		}
+		if scenario.Verdict != rcGateVerdictBaselineFailing {
+			t.Fatalf("verdict = %s, want %s", scenario.Verdict, rcGateVerdictBaselineFailing)
+		}
+		return
+	}
+	t.Fatalf("no upgrade-lane scenario in %+v", results.Scenarios)
+}
+
+func TestUpgradeLaneWithoutABlockedSwitchStaysIncomplete(t *testing.T) {
+	db := openTestDB(t)
+	gate := registerTestUpgradeGate(t, db, "", time.Now().UTC().Add(-3*time.Hour))
+	createTestGateFleet(t, db, gate)
+	inside := gate.StartedAt.Add(time.Hour)
+	recordUpgradeGateVerification(t, db, testUpgradeCandidate, gateUpgradeLaneProfile, "pre-upgrade", "", "integrity", "latest", "failed", inside)
+	stored, err := db.GetRCGate(gate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := buildRCGateResults(db, *stored, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results.Verdict != rcGateVerdictIncomplete {
+		t.Fatalf("gate verdict = %s, want %s while the lane has not reported a blocked switch", results.Verdict, rcGateVerdictIncomplete)
+	}
+	for _, scenario := range results.Scenarios {
+		if scenario.Scenario == "upgrade-lane" && scenario.Verdict != rcGateVerdictIncomplete {
+			t.Fatalf("upgrade-lane verdict = %s, want %s before the switch is blocked", scenario.Verdict, rcGateVerdictIncomplete)
+		}
 	}
 }

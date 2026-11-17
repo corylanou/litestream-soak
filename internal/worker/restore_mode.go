@@ -44,6 +44,11 @@ func (v *Verifier) restoreModeAt(at time.Time) string {
 	if !v.cfg.VerifyRestoreRotation {
 		return restoreModeTXID
 	}
+	if v.cfg.upgradePhase == UpgradePhasePre {
+		if mode := nextPreUpgradeRestoreMode(v.cfg.DataDir); mode != "" {
+			return mode
+		}
+	}
 	interval := v.cfg.VerifyInterval
 	if interval <= 0 {
 		interval = DefaultConfig().VerifyInterval

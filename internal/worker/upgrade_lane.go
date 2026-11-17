@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/reporting"
@@ -29,14 +31,21 @@ var errUpgradeWarmupEnded = errors.New("upgrade warm-up ended")
 // after the switch never runs the base build against candidate-written state,
 // and so the warm-up is measured from the lane's first start.
 type upgradeLaneState struct {
-	Phase            string              `json:"phase"`
-	StartedAt        time.Time           `json:"started_at"`
-	SwitchedAt       *time.Time          `json:"switched_at,omitempty"`
-	BaseSHA          string              `json:"base_litestream_sha"`
-	CandidateSHA     string              `json:"candidate_litestream_sha"`
-	PreUpgradeTXID   uint64              `json:"pre_upgrade_txid,omitempty"`
-	L9Purge          *replicaL9Purge     `json:"l9_purge,omitempty"`
-	FirstCandidateL9 *firstL9Observation `json:"first_candidate_l9,omitempty"`
+	Phase           string     `json:"phase"`
+	StartedAt       time.Time  `json:"started_at"`
+	SwitchedAt      *time.Time `json:"switched_at,omitempty"`
+	BaseSHA         string     `json:"base_litestream_sha"`
+	CandidateSHA    string     `json:"candidate_litestream_sha"`
+	PreUpgradeTXID  uint64     `json:"pre_upgrade_txid,omitempty"`
+	PreRestoreModes []string   `json:"pre_restore_modes,omitempty"`
+	SwitchBlockedAt *time.Time `json:"switch_blocked_at,omitempty"`
+	// SwitchBlockedReason and BlockedEventDeliveredAt keep the blocked event
+	// resendable: the control plane scores the block from that event, so it is
+	// retried, across restarts, until one delivery is on record.
+	SwitchBlockedReason     string              `json:"switch_blocked_reason,omitempty"`
+	BlockedEventDeliveredAt *time.Time          `json:"blocked_event_delivered_at,omitempty"`
+	L9Purge                 *replicaL9Purge     `json:"l9_purge,omitempty"`
+	FirstCandidateL9        *firstL9Observation `json:"first_candidate_l9,omitempty"`
 }
 
 // firstL9Observation records when the candidate build's first L9 snapshot
@@ -80,6 +89,44 @@ func writeUpgradeLaneState(dataDir string, state upgradeLaneState) error {
 	return nil
 }
 
+// upgradeLaneStateMu serializes every read-modify-write of the lane state:
+// the verification loop, the switch decision and the event delivery all
+// update the same file from different goroutines.
+var upgradeLaneStateMu sync.Mutex
+
+var errUpgradeSwitchBlocked = errors.New("upgrade lane switch is blocked")
+
+// updateUpgradeLaneState applies change to the persisted state under the lock
+// and writes it back when change reports a difference. A recorded block is
+// sticky: no update can clear or move it, undo its delivery record, or leave
+// the pre-upgrade phase.
+func updateUpgradeLaneState(dataDir string, change func(*upgradeLaneState) bool) (upgradeLaneState, error) {
+	upgradeLaneStateMu.Lock()
+	defer upgradeLaneStateMu.Unlock()
+	prev, err := readUpgradeLaneState(dataDir)
+	if err != nil {
+		return prev, err
+	}
+	next := prev
+	next.PreRestoreModes = slices.Clone(prev.PreRestoreModes)
+	if !change(&next) {
+		return prev, nil
+	}
+	if prev.SwitchBlockedAt != nil {
+		if next.Phase != prev.Phase {
+			return prev, fmt.Errorf("%w since %s", errUpgradeSwitchBlocked, prev.SwitchBlockedAt.Format(time.RFC3339))
+		}
+		next.SwitchBlockedAt, next.SwitchBlockedReason = prev.SwitchBlockedAt, prev.SwitchBlockedReason
+		if prev.BlockedEventDeliveredAt != nil {
+			next.BlockedEventDeliveredAt = prev.BlockedEventDeliveredAt
+		}
+	}
+	if err := writeUpgradeLaneState(dataDir, next); err != nil {
+		return prev, err
+	}
+	return next, nil
+}
+
 // writeFileDurable writes and fsyncs a file so the phase marker survives a
 // crash right after the switch; the caller renames it into place and syncs
 // the directory.
@@ -108,18 +155,169 @@ func syncDir(dir string) error {
 	return d.Sync()
 }
 
-// recordUpgradePreTXID remembers the newest verified pre-upgrade boundary so
-// post-upgrade cycles can keep restoring a txid written by the base build.
-func recordUpgradePreTXID(dataDir string, txid uint64) error {
+// The switch waits for the pre-upgrade phase to hold the baseline the gate
+// scores against: a passing restore in every rotating mode and a saved txid.
+// The warm-up is the earliest the switch can happen; past it the lane waits
+// until upgradeEvidenceGrace after the warm-up's end, measured from the
+// persisted start so a restart never extends it. A lane that still has no
+// baseline then stays on the base build for good: it records the block,
+// reports it once as upgradeSwitchBlockedEvent, and keeps verifying, so
+// the base build's failures stay pre-upgrade failures and nothing is
+// attributed to a candidate that never ran.
+var (
+	upgradeEvidencePoll           = 5 * time.Second
+	upgradeEvidenceGrace          = func(warmup time.Duration) time.Duration { return max(warmup, 30*time.Minute) }
+	upgradeBlockedEventBackoff    = 5 * time.Second
+	upgradeBlockedEventMaxBackoff = 5 * time.Minute
+)
+
+const upgradeSwitchBlockedEvent = "upgrade_switch_blocked"
+
+func recordUpgradePreEvidence(dataDir string, txid uint64, mode string) error {
+	_, err := updateUpgradeLaneState(dataDir, func(state *upgradeLaneState) bool {
+		if state.Phase != UpgradePhasePre {
+			return false
+		}
+		changed := false
+		if txid > state.PreUpgradeTXID {
+			state.PreUpgradeTXID, changed = txid, true
+		}
+		if slices.Contains(restoreModeRotation, mode) && !slices.Contains(state.PreRestoreModes, mode) {
+			state.PreRestoreModes, changed = append(state.PreRestoreModes, mode), true
+		}
+		return changed
+	})
+	return err
+}
+
+func (s upgradeLaneState) missingPreRestoreModes() []string {
+	var missing []string
+	for _, mode := range restoreModeRotation {
+		if !slices.Contains(s.PreRestoreModes, mode) {
+			missing = append(missing, mode)
+		}
+	}
+	return missing
+}
+
+func (s upgradeLaneState) preEvidenceComplete() bool {
+	return s.PreUpgradeTXID != 0 && len(s.missingPreRestoreModes()) == 0
+}
+
+// nextPreUpgradeRestoreMode is the first rotating mode the pre-upgrade phase
+// has no passing restore in yet, so the baseline fills by cycle, not by
+// where a cycle happens to land on the wall clock.
+func nextPreUpgradeRestoreMode(dataDir string) string {
 	state, err := readUpgradeLaneState(dataDir)
 	if err != nil {
+		return ""
+	}
+	if missing := state.missingPreRestoreModes(); len(missing) > 0 {
+		return missing[0]
+	}
+	return ""
+}
+
+// awaitUpgradeSwitch ends the pre-upgrade phase with errUpgradeWarmupEnded at
+// the warm-up's end when the baseline evidence is complete, or as soon as it
+// completes before the grace runs out. remaining is the time left until the
+// warm-up's end and is negative once it has passed. Past the grace it blocks
+// the switch durably and then delivers the blocked event, without ending the
+// phase.
+func awaitUpgradeSwitch(ctx context.Context, cfg Config, remaining time.Duration, cancel context.CancelCauseFunc) {
+	deadline := time.Now().Add(remaining + upgradeEvidenceGrace(cfg.UpgradeWarmup))
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(max(remaining, 0)):
+	}
+	for {
+		state, err := readUpgradeLaneState(cfg.DataDir)
+		if err == nil && state.SwitchBlockedAt == nil && !state.preEvidenceComplete() && !time.Now().Before(deadline) {
+			state, err = blockUpgradeSwitch(cfg)
+			if err != nil {
+				slog.Error("Failed to record the blocked upgrade switch", "error", err)
+			}
+		}
+		if err == nil && state.SwitchBlockedAt != nil {
+			deliverUpgradeSwitchBlocked(ctx, cfg)
+			return
+		}
+		if err == nil && state.preEvidenceComplete() {
+			cancel(errUpgradeWarmupEnded)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(upgradeEvidencePoll):
+		}
+	}
+}
+
+// blockUpgradeSwitch records the block unless the evidence completed, or the
+// block was recorded, since the caller last looked.
+func blockUpgradeSwitch(cfg Config) (upgradeLaneState, error) {
+	return updateUpgradeLaneState(cfg.DataDir, func(state *upgradeLaneState) bool {
+		if state.Phase != UpgradePhasePre || state.SwitchBlockedAt != nil || state.preEvidenceComplete() {
+			return false
+		}
+		blocked := time.Now().UTC()
+		state.SwitchBlockedAt = &blocked
+		state.SwitchBlockedReason = fmt.Sprintf("upgrade lane stays on the base build: the pre-upgrade baseline was incomplete %s after the %s warm-up (no passing restore in mode(s) %s, pre-upgrade txid %s)", upgradeEvidenceGrace(cfg.UpgradeWarmup), cfg.UpgradeWarmup, firstNonEmpty(strings.Join(state.missingPreRestoreModes(), ","), "none"), formatTXID(state.PreUpgradeTXID))
+		slog.Error(state.SwitchBlockedReason)
+		return true
+	})
+}
+
+// deliverUpgradeSwitchBlocked posts the blocked event until one delivery is
+// on record, backing off between attempts. It runs again after a restart, so
+// a failed POST never leaves the gate without the event it scores from.
+func deliverUpgradeSwitchBlocked(ctx context.Context, cfg Config) {
+	reporter := NewReporter(cfg)
+	if !reporter.Enabled() {
+		return
+	}
+	backoff := upgradeBlockedEventBackoff
+	for {
+		state, err := readUpgradeLaneState(cfg.DataDir)
+		if err == nil && (state.SwitchBlockedAt == nil || state.BlockedEventDeliveredAt != nil) {
+			return
+		}
+		if err == nil {
+			err = sendUpgradeSwitchBlocked(ctx, cfg, reporter, state)
+		}
+		if err == nil {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Warn("Failed to report the blocked upgrade switch; retrying", "error", err, "retry_in", backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, upgradeBlockedEventMaxBackoff)
+	}
+}
+
+func sendUpgradeSwitchBlocked(ctx context.Context, cfg Config, reporter *Reporter, state upgradeLaneState) error {
+	sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := reporter.SendEvent(sendCtx, reporting.WorkerEventPayload{EventType: upgradeSwitchBlockedEvent, Message: state.SwitchBlockedReason, SentAt: *state.SwitchBlockedAt}); err != nil {
 		return err
 	}
-	if state.Phase != UpgradePhasePre || txid <= state.PreUpgradeTXID {
-		return nil
-	}
-	state.PreUpgradeTXID = txid
-	return writeUpgradeLaneState(dataDir, state)
+	_, err := updateUpgradeLaneState(cfg.DataDir, func(state *upgradeLaneState) bool {
+		if state.BlockedEventDeliveredAt != nil {
+			return false
+		}
+		delivered := time.Now().UTC()
+		state.BlockedEventDeliveredAt = &delivered
+		return true
+	})
+	return err
 }
 
 func resolveLitestreamBaseSHA(fromEnv string) string {
@@ -216,18 +414,21 @@ func RunUpgradeLane(ctx context.Context, cfg Config, run func(context.Context, C
 // so the evidence says when (or whether) the candidate wrote its first
 // snapshot. It returns the observation on record, if any.
 func recordFirstCandidateL9(dataDir string, l9 reporting.ReplicaLevelSummary, now time.Time) (*firstL9Observation, error) {
-	state, err := readUpgradeLaneState(dataDir)
+	recorded := false
+	state, err := updateUpgradeLaneState(dataDir, func(state *upgradeLaneState) bool {
+		if state.FirstCandidateL9 != nil || state.L9Purge == nil || l9.ObjectCount == 0 {
+			return false
+		}
+		state.FirstCandidateL9 = &firstL9Observation{ObservedAt: now.UTC(), MaxTXID: formatTXID(l9.MaxTXIDDecimal), Objects: l9.ObjectCount}
+		recorded = true
+		return true
+	})
 	if err != nil {
 		return nil, err
 	}
-	if state.FirstCandidateL9 != nil || state.L9Purge == nil || l9.ObjectCount == 0 {
-		return state.FirstCandidateL9, nil
+	if recorded {
+		slog.Info("Candidate build wrote its first L9 snapshot", "max_txid", state.FirstCandidateL9.MaxTXID, "objects", l9.ObjectCount)
 	}
-	state.FirstCandidateL9 = &firstL9Observation{ObservedAt: now.UTC(), MaxTXID: formatTXID(l9.MaxTXIDDecimal), Objects: l9.ObjectCount}
-	if err := writeUpgradeLaneState(dataDir, state); err != nil {
-		return nil, err
-	}
-	slog.Info("Candidate build wrote its first L9 snapshot", "max_txid", state.FirstCandidateL9.MaxTXID, "objects", l9.ObjectCount)
 	return state.FirstCandidateL9, nil
 }
 
@@ -248,10 +449,14 @@ func purgeUntilClean(ctx context.Context, cfg Config, clock func() time.Time, pu
 			purge.Attempt = state.L9Purge.Attempt + 1
 		}
 		purge.Succeeded = err == nil
-		state.L9Purge = &purge
-		if writeErr := writeUpgradeLaneState(cfg.DataDir, *state); writeErr != nil {
+		updated, writeErr := updateUpgradeLaneState(cfg.DataDir, func(stored *upgradeLaneState) bool {
+			stored.L9Purge = &purge
+			return true
+		})
+		if writeErr != nil {
 			return errors.Join(err, writeErr)
 		}
+		*state = updated
 		if err == nil {
 			slog.Info("Replica L9 level emptied", "deleted", len(purge.Deleted), "listed", purge.Listed, "attempt", purge.Attempt)
 			return nil
@@ -292,16 +497,16 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, pur
 	if !cfg.UpgradeLane {
 		return errors.New("upgrade lane is not configured")
 	}
-	state, err := readUpgradeLaneState(cfg.DataDir)
+	now := clock().UTC()
+	state, err := updateUpgradeLaneState(cfg.DataDir, func(state *upgradeLaneState) bool {
+		if state.Phase != "" {
+			return false
+		}
+		*state = upgradeLaneState{Phase: UpgradePhasePre, StartedAt: now, BaseSHA: cfg.LitestreamBaseSHA, CandidateSHA: cfg.LitestreamSHA}
+		return true
+	})
 	if err != nil {
 		return err
-	}
-	now := clock().UTC()
-	if state.Phase == "" {
-		state = upgradeLaneState{Phase: UpgradePhasePre, StartedAt: now, BaseSHA: cfg.LitestreamBaseSHA, CandidateSHA: cfg.LitestreamSHA}
-		if err := writeUpgradeLaneState(cfg.DataDir, state); err != nil {
-			return err
-		}
 	}
 	if state.BaseSHA != cfg.LitestreamBaseSHA || state.CandidateSHA != cfg.LitestreamSHA {
 		return fmt.Errorf("upgrade lane state on this volume is for %s -> %s, not %s -> %s", state.BaseSHA, state.CandidateSHA, cfg.LitestreamBaseSHA, cfg.LitestreamSHA)
@@ -315,11 +520,16 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, pur
 		end := state.StartedAt.Add(cfg.UpgradeWarmup)
 		slog.Info("Starting upgrade lane pre-upgrade phase", "litestream_sha", pre.activeLitestreamSHA, "binary", pre.litestreamCommand(), "switch_at", end)
 		phaseCtx, cancel := context.WithCancelCause(ctx)
-		timer := time.AfterFunc(max(end.Sub(now), 0), func() { cancel(errUpgradeWarmupEnded) })
+		switchDecided := make(chan struct{})
+		go func() {
+			defer close(switchDecided)
+			awaitUpgradeSwitch(phaseCtx, cfg, end.Sub(now), cancel)
+		}()
 		err = run(phaseCtx, pre)
-		timer.Stop()
-		ended := errors.Is(context.Cause(phaseCtx), errUpgradeWarmupEnded)
+		cause := context.Cause(phaseCtx)
+		ended := errors.Is(cause, errUpgradeWarmupEnded)
 		cancel(nil)
+		<-switchDecided
 		switch {
 		case ctx.Err() != nil:
 			return nil
@@ -328,14 +538,13 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, pur
 		case !ended:
 			return nil
 		}
-		state, err = readUpgradeLaneState(cfg.DataDir)
-		if err != nil {
-			return err
-		}
 		switched := clock().UTC()
-		state.Phase = UpgradePhasePost
-		state.SwitchedAt = &switched
-		if err := writeUpgradeLaneState(cfg.DataDir, state); err != nil {
+		state, err = updateUpgradeLaneState(cfg.DataDir, func(state *upgradeLaneState) bool {
+			state.Phase = UpgradePhasePost
+			state.SwitchedAt = &switched
+			return true
+		})
+		if err != nil {
 			return err
 		}
 		slog.Info("Upgrade lane switching Litestream build", "from", cfg.LitestreamBaseSHA, "to", cfg.LitestreamSHA, "pre_upgrade_txid", formatTXID(state.PreUpgradeTXID))

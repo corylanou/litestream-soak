@@ -93,6 +93,10 @@ jobs:
           if [[ "${warmup}" == *h ]]; then
             warmup_minutes=$((warmup_minutes * 60))
           fi
+          if [ "${warmup_minutes}" -lt 20 ]; then
+            echo "warmup ${warmup} must be at least 20m: the lane needs a pre-upgrade restore in every mode as its baseline" >&2
+            exit 1
+          fi
           if [ "${warmup_minutes}" -ge $(( ${duration%h} * 60 )) ]; then
             echo "warmup ${warmup} must end before the ${duration} gate TTL" >&2
             exit 1
