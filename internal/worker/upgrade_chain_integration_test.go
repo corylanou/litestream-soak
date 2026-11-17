@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -83,6 +85,19 @@ func TestPreservedChainPinnedLitestream(t *testing.T) {
 	})
 }
 
+// chainKeyRange returns the txid range in an LTX key's file name.
+func chainKeyRange(t *testing.T, key string) (uint64, uint64) {
+	t.Helper()
+	name := strings.TrimSuffix(filepath.Base(key), ".ltx")
+	low, high, ok := strings.Cut(name, "-")
+	minTXID, errMin := strconv.ParseUint(low, 16, 64)
+	maxTXID, errMax := strconv.ParseUint(high, 16, 64)
+	if !ok || errMin != nil || errMax != nil {
+		t.Fatalf("unexpected LTX key %q", key)
+	}
+	return minTXID, maxTXID
+}
+
 func chainIntegrationConfig(t *testing.T, binary string) Config {
 	t.Helper()
 	dir := t.TempDir()
@@ -98,7 +113,7 @@ func chainIntegrationConfig(t *testing.T, binary string) Config {
 	cfg.LitestreamMetricsAddr = listener.Addr().String()
 	_ = listener.Close()
 	cfg.SyncInterval = 200 * time.Millisecond
-	cfg.SnapshotInterval = 2 * time.Second
+	cfg.SnapshotInterval = 5 * time.Second
 	cfg.L1CompactionInterval, cfg.L2CompactionInterval, cfg.L3CompactionInterval = time.Second, 2*time.Second, 3*time.Second
 	cfg.litestreamBinary = binary
 	return cfg
@@ -174,13 +189,47 @@ func runChainIntegration(t *testing.T, cfg Config, wantLevels []string) {
 	}) {
 		t.Fatalf("Litestream never wrote a snapshot under %s", snapshotLevel)
 	}
-	if !waitUntil(30*time.Second, 50*time.Millisecond, func() bool {
-		synced, err = v.syncOnceDB(ctx, time.Second, cfg.DBPath)
-		return err == nil && synced.TXID > 0 && synced.ReplicatedTXID >= synced.TXID
-	}) {
-		t.Fatalf("replica never caught up: %+v, %v", synced, err)
+	// The preserved target has to lie past the newest snapshot, so restoring
+	// it replays later LTX files on top of that snapshot. Snapshots keep
+	// coming every few seconds: write a burst, let it replicate, and stop
+	// Litestream while the newest snapshot is still behind the burst.
+	const lateRows, lateTXIDs = 12, 6
+	snapshotMax := func() uint64 {
+		objects, err := replicaObjectStats(ctx, cfg, replicaLTXKeys(cfg))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var highest uint64
+		for key := range objects {
+			if _, maxTXID := chainKeyRange(t, key); strings.HasPrefix(key, snapshotLevel) && maxTXID > highest {
+				highest = maxTXID
+			}
+		}
+		return highest
+	}
+	ahead := false
+	for round := 0; round < 12 && !ahead; round++ {
+		if round > 0 {
+			time.Sleep(300 * time.Millisecond)
+		}
+		for i := range lateRows {
+			if _, err := db.ExecContext(ctx, `INSERT INTO t(v) VALUES(?)`, fmt.Sprintf("late-%d-%d", round, i)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !waitUntil(30*time.Second, 20*time.Millisecond, func() bool {
+			synced, err = v.syncOnceDB(ctx, time.Second, cfg.DBPath)
+			return err == nil && synced.TXID > 0 && synced.ReplicatedTXID >= synced.TXID
+		}) {
+			t.Fatalf("replica never caught up: %+v, %v", synced, err)
+		}
+		ahead = snapshotMax()+lateTXIDs <= uint64(synced.ReplicatedTXID)
 	}
 	stop()
+	newestSnapshot := snapshotMax()
+	if !ahead || newestSnapshot == 0 || newestSnapshot+3 > uint64(synced.ReplicatedTXID) {
+		t.Fatalf("newest snapshot ends at %x and the replica at %x; want the replica well past the snapshot", newestSnapshot, synced.ReplicatedTXID)
+	}
 
 	everything, err := replicaObjectStats(ctx, cfg, nil)
 	if err != nil {
@@ -216,9 +265,79 @@ func runChainIntegration(t *testing.T, cfg Config, wantLevels []string) {
 	if err != nil || !record.succeeded() {
 		t.Fatalf("preserve() = %+v, %v; want the replica copied and restored by the same build", record, err)
 	}
-	if record.Objects != len(ltxObjects) || record.txid() < uint64(synced.ReplicatedTXID) {
-		t.Fatalf("record = %+v, want %d object(s) and a txid at or past the replicated %d", record, len(ltxObjects), synced.ReplicatedTXID)
+	if record.Objects != len(ltxObjects) || record.txid() != uint64(synced.ReplicatedTXID) || uint64(synced.TXID) != record.txid() {
+		t.Fatalf("record = %+v, want %d object(s) and the source's final txid %x", record, len(ltxObjects), synced.TXID)
 	}
+	target := record.txid()
+	if target <= newestSnapshot {
+		t.Fatalf("target %x is not past the newest snapshot's max txid %x: restoring it would replay nothing", target, newestSnapshot)
+	}
+	replayed := map[string]int{}
+	for key := range ltxObjects {
+		minTXID, maxTXID := chainKeyRange(t, key)
+		if !strings.HasPrefix(key, snapshotLevel) && minTXID > newestSnapshot && maxTXID <= target {
+			replayed[strings.TrimSuffix(key, "/"+filepath.Base(key))]++
+		}
+	}
+	later := 0
+	for _, n := range replayed {
+		later += n
+	}
+	if later < 3 {
+		t.Fatalf("%d LTX file(s) lie between the snapshot (%x) and the target (%x), want several to replay: %v", later, newestSnapshot, target, replayed)
+	}
+	t.Logf("snapshot level %s ends at txid %x; target txid %x; %d later LTX file(s) by level %v", snapshotLevel, newestSnapshot, target, later, replayed)
+
+	configPath, cleanupConfig, err := writePreservedChainConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupConfig()
+	restoredPath := filepath.Join(cfg.DataDir, "restored-from-chain.db")
+	restore := exec.CommandContext(ctx, cfg.litestreamCommand(), restoreArgs(configPath, restoreModeTXID, target, time.Time{}, restoredPath, cfg.DBPath)...)
+	if cfg.ReplicaType == "s3" {
+		restore.Env = cfg.s3CommandEnv("")
+	}
+	output, err := restore.CombinedOutput()
+	if err != nil {
+		t.Fatalf("restore txid %x from the preserved copy: %v\n%s", target, err, output)
+	}
+	rows := func(path string) []string {
+		handle, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = handle.Close() }()
+		result, err := handle.QueryContext(ctx, `SELECT id, v FROM t ORDER BY id`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = result.Close() }()
+		var out []string
+		for result.Next() {
+			var id int64
+			var v string
+			if err := result.Scan(&id, &v); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, fmt.Sprintf("%d=%s", id, v))
+		}
+		if err := result.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	want, got := rows(cfg.DBPath), rows(restoredPath)
+	lateInRestore := 0
+	for _, row := range got {
+		if strings.Contains(row, "=late-") {
+			lateInRestore++
+		}
+	}
+	if !slices.Equal(got, want) || lateInRestore < lateRows || uint64(len(want)) < target-newestSnapshot {
+		t.Fatalf("restored database has %d row(s), %d written after the snapshot; the source at txid %x has %d: the chain past the snapshot was not replayed exactly", len(got), lateInRestore, target, len(want))
+	}
+	t.Logf("restored %d row(s) at txid %x, identical to the source, %d of them written after the snapshot", len(got), target, lateInRestore)
 	copied, err := replicaObjectStats(ctx, preservedChainConfig(cfg), nil)
 	if err != nil {
 		t.Fatal(err)
