@@ -32,17 +32,21 @@ const (
 	// the candidate build starts on a legacy L0-L3-only replica.
 	upgradeLaneVariantNoL9 = "nol9"
 
-	rcGateCandidatePrefix      = "rc"
-	rcGateBaselinePrefix       = "rcbase"
-	upgradeGateCandidatePrefix = "up"
-	upgradeGateBaselinePrefix  = "upbase"
-	upgradeGateDefaultDuration = 24 * time.Hour
-	upgradeGateDefaultWarmup   = 2 * time.Hour
-	rcGateMaxDuration          = 7 * 24 * time.Hour
-	rcGateProvisionTimeout     = 2 * time.Hour
-	rcGateStressPhase          = "6h"
-	rcGateUpstreamRepository   = "benbjohnson/litestream"
-	rcGateTailDuration         = 7 * 24 * time.Hour
+	rcGateCandidatePrefix            = "rc"
+	rcGateBaselinePrefix             = "rcbase"
+	upgradeGateCandidatePrefix       = "up"
+	upgradeGateBaselinePrefix        = "upbase"
+	upgradeGateDefaultDuration       = 24 * time.Hour
+	upgradeGateDefaultWarmup         = 2 * time.Hour
+	upgradeGateLaneVerifyInterval    = 30 * time.Minute
+	upgradeGateLaneMinVerifyInterval = 5 * time.Minute
+	upgradeGateWarmupCycles          = 4
+	upgradeGateMinWarmup             = upgradeGateWarmupCycles * upgradeGateLaneMinVerifyInterval
+	rcGateMaxDuration                = 7 * 24 * time.Hour
+	rcGateProvisionTimeout           = 2 * time.Hour
+	rcGateStressPhase                = "6h"
+	rcGateUpstreamRepository         = "benbjohnson/litestream"
+	rcGateTailDuration               = 7 * 24 * time.Hour
 
 	runArchiveTypeRCGateTail = "rc_gate_tail"
 
@@ -845,6 +849,9 @@ func (m *Manager) RegisterRCGate(request RCGateRequest, now time.Time) (model.RC
 		if warmup >= duration {
 			return model.RCGate{}, false, fmt.Errorf("%w: upgrade_warmup %s must be shorter than duration %s", errRCGateInvalid, warmup, duration)
 		}
+		if warmup < upgradeGateMinWarmup {
+			return model.RCGate{}, false, fmt.Errorf("%w: upgrade_warmup %s must be at least %s: the pre-upgrade phase is the lane's baseline and needs a restore in every mode and a pre-upgrade txid for the historical check, and the lane cannot verify more often than every %s", errRCGateInvalid, warmup, upgradeGateMinWarmup, upgradeGateLaneMinVerifyInterval)
+		}
 	} else if strings.TrimSpace(request.UpgradeWarmup) != "" {
 		return model.RCGate{}, false, fmt.Errorf("%w: upgrade_warmup is only valid for upgrade gates", errRCGateInvalid)
 	}
@@ -947,6 +954,16 @@ func gateHasProfile(gate model.RCGate, profile string) bool {
 // applyGateWorkload overrides the fleet defaults with the per-gate settings an
 // operator chose at registration, so the attested profile config matches what
 // the worker actually runs.
+// upgradeLaneVerifyInterval is the lane's verification cadence for a warm-up.
+// The pre-upgrade phase is the lane's own baseline: the first verification
+// runs one interval after start, the restore mode rotates per interval, and
+// the last pre-upgrade verification saves the txid the historical check
+// restores, so the warm-up has to hold a verification in every mode with one
+// interval of margin. The default cadence is kept when it fits.
+func upgradeLaneVerifyInterval(warmup time.Duration) time.Duration {
+	return max(min(upgradeGateLaneVerifyInterval, (warmup/upgradeGateWarmupCycles).Truncate(time.Minute)), upgradeGateLaneMinVerifyInterval)
+}
+
 // applyGateWorkload pins a gate's workers to what was registered for it: the
 // registered warm-up on the upgrade lane, the observe proxy when the gate
 // opted in, and the volume size recorded in the gate's resources, so a later
@@ -956,6 +973,7 @@ func applyGateWorkload(gate model.RCGate, spec FleetSpec) FleetSpec {
 	for i := range spec.Workers {
 		if spec.Workers[i].Workload.UpgradeLane && gate.UpgradeWarmup > 0 {
 			spec.Workers[i].Workload.UpgradeWarmup = gate.UpgradeWarmup.String()
+			spec.Workers[i].Workload.VerifyInterval = upgradeLaneVerifyInterval(gate.UpgradeWarmup).String()
 		}
 		if gate.ObserveProxy {
 			if !spec.Workers[i].Workload.S3FaultProxyEnabled {
