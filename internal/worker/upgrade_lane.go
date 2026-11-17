@@ -45,6 +45,7 @@ type upgradeLaneState struct {
 	SwitchBlockedReason     string              `json:"switch_blocked_reason,omitempty"`
 	BlockedEventDeliveredAt *time.Time          `json:"blocked_event_delivered_at,omitempty"`
 	L9Purge                 *replicaL9Purge     `json:"l9_purge,omitempty"`
+	PreservedChain          *preservedChain     `json:"preserved_chain,omitempty"`
 	FirstCandidateL9        *firstL9Observation `json:"first_candidate_l9,omitempty"`
 }
 
@@ -542,12 +543,27 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, pur
 		state, err = updateUpgradeLaneState(cfg.DataDir, func(state *upgradeLaneState) bool {
 			state.Phase = UpgradePhasePost
 			state.SwitchedAt = &switched
+			if purger.chain != nil && preservedChainSupported(cfg) {
+				state.PreservedChain = &preservedChain{Prefix: replicaOwnPrefix(preservedChainConfig(cfg)), StartedAt: switched}
+			}
 			return true
 		})
 		if err != nil {
 			return err
 		}
 		slog.Info("Upgrade lane switching Litestream build", "from", cfg.LitestreamBaseSHA, "to", cfg.LitestreamSHA, "pre_upgrade_txid", formatTXID(state.PreUpgradeTXID))
+	}
+
+	// The pending record is written with the switch itself, so a lane that
+	// switched without one (an older worker, or an unsupported backend) is
+	// never copied after the candidate has written to its replica. The copy
+	// runs before the purge so it keeps the base build's L9 snapshot.
+	if purger.chain != nil && state.PreservedChain != nil && !state.PreservedChain.succeeded() {
+		if err := preserveUntilVerified(ctx, cfg, clock, purger.chain, &state); err != nil {
+			err = fmt.Errorf("upgrade lane pre-upgrade chain preservation: %w", err)
+			reportLaneHarnessFailure(ctx, cfg, err)
+			return err
+		}
 	}
 
 	// The purge runs only here: the base process has exited (the Runner
@@ -570,6 +586,10 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, pur
 		return err
 	}
 	post.upgradePreTXID = state.PreUpgradeTXID
-	slog.Info("Starting upgrade lane post-upgrade phase", "litestream_sha", post.activeLitestreamSHA, "binary", post.litestreamCommand(), "pre_upgrade_txid", formatTXID(post.upgradePreTXID))
+	if state.PreservedChain.succeeded() {
+		post.upgradePreTXID = state.PreservedChain.txid()
+		post.upgradePreservedChain = state.PreservedChain.Prefix
+	}
+	slog.Info("Starting upgrade lane post-upgrade phase", "litestream_sha", post.activeLitestreamSHA, "binary", post.litestreamCommand(), "pre_upgrade_txid", formatTXID(post.upgradePreTXID), "preserved_chain", post.upgradePreservedChain)
 	return run(ctx, post)
 }

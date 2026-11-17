@@ -55,10 +55,13 @@ func (p *replicaL9Purge) succeeded() bool {
 type replicaL9Purger struct {
 	list   func(context.Context, Config) ([]string, error)
 	remove func(context.Context, Config, string) error
+	// chain preserves the pre-upgrade replica before any purge. A lane
+	// without one keeps restoring its saved txid from the live replica.
+	chain *upgradeChainPreserver
 }
 
 func newReplicaL9Purger() replicaL9Purger {
-	return replicaL9Purger{list: listReplicaObjects, remove: removeReplicaObject}
+	return replicaL9Purger{list: listReplicaObjects, remove: removeReplicaObject, chain: newUpgradeChainPreserver()}
 }
 
 // replicaOwnPrefix is the only key prefix this worker may delete under.

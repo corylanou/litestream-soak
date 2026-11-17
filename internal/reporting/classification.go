@@ -52,7 +52,7 @@ var (
 	apiCodePattern                 = regexp.MustCompile(`(?i)api error\s+([A-Za-z0-9]+):`)
 	requestIDPattern               = regexp.MustCompile(`(?i)RequestID:\s*([^,\s]+)`)
 	s3URLPattern                   = regexp.MustCompile(`s3://([^/\s]+)/([^"'\s]+)`)
-	pinnedRestoreTargetLostPattern = regexp.MustCompile(`(?i)restore target (txid|timestamp) \S+ is no longer available`)
+	pinnedRestoreTargetLostPattern = regexp.MustCompile(`(?i)restore target (txid|timestamp) \S+ is no longer available|\btxid [0-9a-f]{16} unavailable \(nearest covered TXIDs: [^)]*\)`)
 	restoreOutputDiskFullPattern   = regexp.MustCompile(`(?i)(?:write|open|create|rename|sync|truncate) [^\s:]*\.restored(?:\.pre)?(?:\.tmp)?(?:-wal|-shm|-journal)?: no space left on device`)
 	sqliteLockPattern              = regexp.MustCompile(`(?i)database is locked|database table is locked|\bsqlite_busy\b|\bsqlite_locked\b`)
 	keyValuePattern                = regexp.MustCompile(`(?i)\b(operation|http_status|api_code|request_id|bucket|prefix|phase)=("[^"]+"|'[^']+'|[^\s,]+)`)
@@ -436,8 +436,17 @@ func restoreReplanFailureSignature(text string) string {
 	}
 }
 
+// PreservedChainRestoreSubject names a restore of the upgrade lane's preserved
+// pre-upgrade replica copy in its error and summary. Nothing writes to that
+// copy and the base build restored the same txid from it, so a target the
+// candidate reports unavailable there is a failure, never an aged-out target.
+const PreservedChainRestoreSubject = "preserved pre-upgrade chain"
+
 func PinnedRestoreTargetUnavailable(restoreMode, errorMessage string) bool {
 	if strings.EqualFold(strings.TrimSpace(restoreMode), "latest") {
+		return false
+	}
+	if strings.Contains(errorMessage, PreservedChainRestoreSubject) {
 		return false
 	}
 	if !pinnedRestoreTargetLostPattern.MatchString(errorMessage) {

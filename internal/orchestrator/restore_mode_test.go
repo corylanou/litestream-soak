@@ -317,6 +317,8 @@ func TestHandleVerificationPinnedRestoreTargetUnavailableIsInconclusive(t *testi
 		{name: "timestamp", mode: "timestamp", message: unavailable, inconclusive: true},
 		{name: "unreported mode", mode: "", message: unavailable, inconclusive: true},
 		{name: "latest", mode: "latest", message: unavailable},
+		{name: "explicit txid merged by compaction", mode: "txid", message: "restore failed: pre-upgrade txid 0000000000000433 (exit 1): Error: cannot calc restore plan: txid 0000000000000433 unavailable (nearest covered TXIDs: before=000000000000042f, after=0000000000000444): transaction not available", inconclusive: true},
+		{name: "preserved chain target unavailable", mode: "txid", message: "restore failed: preserved pre-upgrade chain txid 0000000000000444 (exit 1): Error: cannot calc restore plan: txid 0000000000000444 unavailable (nearest covered TXIDs: before=000000000000042f, after=0000000000000450): transaction not available"},
 		{name: "txid missing backup files", mode: "txid", message: "restore failed: validation failed (exit 1): Error: no matching backup files available"},
 		{name: "timestamp recalculate", mode: "timestamp", message: "restore failed: validation failed (exit 1): Error: cannot recalculate restore plan"},
 	}

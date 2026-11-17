@@ -584,6 +584,11 @@ func TestPinnedRestoreTargetUnavailable(t *testing.T) {
 		{"bare transaction not available", "txid", "restore failed: validation failed (exit 1): Error: transaction not available", false},
 		{"bare recalculate", "timestamp", "restore failed: validation failed (exit 1): Error: cannot recalculate restore plan", false},
 		{"recalculate for txid", "txid", "restore failed: cannot recalculate restore plan for txid 0000000000000042: transaction not available", false},
+		{"explicit txid merged by compaction", "txid", "restore failed: pre-upgrade txid 0000000000000433 (exit 1): Error: cannot calc restore plan: txid 0000000000000433 unavailable (nearest covered TXIDs: before=000000000000042f, after=0000000000000444): transaction not available", true},
+		{"explicit txid merged by compaction, bare litestream error", "txid", "restore failed: validation failed (exit 1): Error: cannot calc restore plan: txid 0000000000000433 unavailable (nearest covered TXIDs: before=000000000000042f, after=0000000000000444): transaction not available", true},
+		{"explicit txid on a latest restore", "latest", "restore failed: validation failed (exit 1): Error: cannot calc restore plan: txid 0000000000000433 unavailable (nearest covered TXIDs: before=000000000000042f, after=0000000000000444): transaction not available", false},
+		{"preserved chain target is never aged out", "txid", "restore failed: preserved pre-upgrade chain txid 0000000000000444 (exit 1): Error: cannot calc restore plan: txid 0000000000000444 unavailable (nearest covered TXIDs: before=000000000000042f, after=0000000000000450): transaction not available", false},
+		{"preserved chain legacy diagnostic", "txid", "restore failed: preserved pre-upgrade chain txid 0000000000000444 (exit 1): Error: no matching backup files available: restore target txid 0000000000000444 is no longer available: transaction not available", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := PinnedRestoreTargetUnavailable(tc.mode, tc.message); got != tc.want {

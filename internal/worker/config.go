@@ -166,6 +166,7 @@ type Config struct {
 	activeLitestreamSHA         string
 	litestreamBinary            string
 	upgradePreTXID              uint64
+	upgradePreservedChain       string
 
 	// Follow check: keep a `litestream restore -f` running between cycles and
 	// compare it with the source once the primary has written past a new L9.
