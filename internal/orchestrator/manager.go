@@ -14,6 +14,7 @@ import (
 
 	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/model"
+	"github.com/corylanou/litestream-soak/internal/reporting"
 	"github.com/corylanou/litestream-soak/internal/s3util"
 	"github.com/corylanou/litestream-soak/internal/workload"
 	"github.com/google/uuid"
@@ -411,18 +412,25 @@ func (m *Manager) clearWorkerReplicaPrefix(ctx context.Context, worker model.Wor
 	defer cancel()
 
 	replicaURL := fmt.Sprintf("s3://%s/%s/", bucket, prefix)
-	deleted, err := s3util.DeletePrefix(clearCtx, s3util.Config{
-		Bucket:    bucket,
-		Endpoint:  m.replica.Endpoint,
-		AccessKey: m.replica.AccessKey,
-		SecretKey: m.replica.SecretKey,
-		Region:    m.replica.Region,
-	}, prefix)
-	if clearCtx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("timed out clearing %s", replicaURL)
-	}
-	if err != nil {
-		return fmt.Errorf("clear %s: %w", replicaURL, err)
+	deleted := 0
+	// The upgrade lane keeps a copy of its replica in a sibling prefix that
+	// the trailing slash of the worker's own prefix does not cover.
+	for _, target := range []string{prefix, prefix + reporting.PreservedChainPrefixSuffix} {
+		targetURL := fmt.Sprintf("s3://%s/%s/", bucket, target)
+		n, err := s3util.DeletePrefix(clearCtx, s3util.Config{
+			Bucket:    bucket,
+			Endpoint:  m.replica.Endpoint,
+			AccessKey: m.replica.AccessKey,
+			SecretKey: m.replica.SecretKey,
+			Region:    m.replica.Region,
+		}, target)
+		deleted += n
+		if clearCtx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("timed out clearing %s", targetURL)
+		}
+		if err != nil {
+			return fmt.Errorf("clear %s: %w", targetURL, err)
+		}
 	}
 
 	if m.db != nil {

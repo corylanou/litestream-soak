@@ -578,3 +578,48 @@ func TestUpgradeLaneWithoutABlockedSwitchStaysIncomplete(t *testing.T) {
 		}
 	}
 }
+
+func TestUpgradeLaneBaseBuildFailingItsPreservedChainIsABaselineFailure(t *testing.T) {
+	db := openTestDB(t)
+	gate := registerTestUpgradeGate(t, db, "", time.Now().UTC().Add(-3*time.Hour))
+	createTestGateFleet(t, db, gate)
+	inside := gate.StartedAt.Add(time.Hour)
+	for i, mode := range []string{"txid", "timestamp", "latest"} {
+		recordUpgradeGateVerification(t, db, testUpgradeCandidate, gateUpgradeLaneProfile, "pre-upgrade", "", "integrity", mode, "passed", inside.Add(time.Duration(i)*time.Minute))
+	}
+	recordUpgradeGateVerification(t, db, testUpgradeCandidate, gateUpgradeLaneProfile, "pre-upgrade", "", "integrity", "txid", "failed", inside.Add(10*time.Minute))
+	lane := "worker-" + testUpgradeCandidate + "-" + gateUpgradeLaneProfile
+	if err := db.RecordEventAt(lane, "upgrade_switch_blocked", "upgrade lane stays on the base build: the base build could not restore the replica it wrote", "", inside.Add(11*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.GetRCGate(gate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := buildRCGateResults(db, *stored, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results.Verdict != rcGateVerdictFail {
+		t.Fatalf("gate verdict = %s, want %s", results.Verdict, rcGateVerdictFail)
+	}
+	seen := 0
+	for _, scenario := range results.Scenarios {
+		if scenario.Verdict == rcGateVerdictRegression || scenario.Verdict == rcGateVerdictBothFailing {
+			t.Fatalf("%s verdict = %s, want nothing held against a candidate that never ran", scenario.Scenario, scenario.Verdict)
+		}
+		if scenario.Scenario != "upgrade-lane" && scenario.Scenario != "upgrade-lane-historical" {
+			continue
+		}
+		seen++
+		if scenario.Verdict != rcGateVerdictBaselineFailing || scenario.Baseline.Status != rcGateSideFailing || scenario.Baseline.Reason != "" {
+			t.Fatalf("%s = verdict %s baseline %+v, want %s from the base build's failed restore and no worker fault", scenario.Scenario, scenario.Verdict, scenario.Baseline, rcGateVerdictBaselineFailing)
+		}
+		if scenario.Candidate.Status != rcGateSideNoCoverage || scenario.Candidate.Failed != 0 || scenario.Candidate.Reason != "" {
+			t.Fatalf("%s candidate = %+v, want no coverage and no fault", scenario.Scenario, scenario.Candidate)
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("scenarios = %+v, want both lane restore scenarios", results.Scenarios)
+	}
+}

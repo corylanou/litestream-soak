@@ -442,6 +442,11 @@ func restoreReplanFailureSignature(text string) string {
 // candidate reports unavailable there is a failure, never an aged-out target.
 const PreservedChainRestoreSubject = "preserved pre-upgrade chain"
 
+// PreservedChainPrefixSuffix is appended to a worker's replica prefix to name
+// the sibling prefix that holds that copy. The worker writes it and the
+// control plane deletes it with the replica prefix.
+const PreservedChainPrefixSuffix = "-pre-upgrade"
+
 func PinnedRestoreTargetUnavailable(restoreMode, errorMessage string) bool {
 	if strings.EqualFold(strings.TrimSpace(restoreMode), "latest") {
 		return false

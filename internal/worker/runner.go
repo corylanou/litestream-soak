@@ -159,8 +159,7 @@ func (r *Runner) Run(ctx context.Context) (runErr error) {
 		r.sendPreStartFailureEvent(err)
 		return err
 	}
-	defer r.stopLitestream()
-	defer cancelLitestream()
+	defer r.stopLitestreamThenCancel(cancelLitestream)
 	r.monitorLitestream(runCtx, cancelRun)
 	stopProfiles := r.startProfileCapture(runCtx)
 	defer stopProfiles()

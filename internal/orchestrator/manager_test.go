@@ -634,7 +634,7 @@ func TestClearOldWorkerReplicaPrefix(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
 				if r.Method == http.MethodGet {
-					gotPrefix.Store(r.URL.Query().Get("prefix"))
+					gotPrefix.CompareAndSwap("", r.URL.Query().Get("prefix"))
 				}
 				w.Header().Set("Content-Type", "application/xml")
 				w.WriteHeader(http.StatusOK)

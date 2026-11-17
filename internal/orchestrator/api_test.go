@@ -3887,6 +3887,8 @@ func TestHandleTeardownSourceArchivesAndDestroysRunningAndDormantWorkers(t *test
 	for _, prefix := range []string{
 		"soak/worker-pr-158-running/volume-pr-158-running/",
 		"soak/worker-pr-158-dormant/volume-pr-158-dormant/",
+		"soak/worker-pr-158-running/volume-pr-158-running-pre-upgrade/",
+		"soak/worker-pr-158-dormant/volume-pr-158-dormant-pre-upgrade/",
 	} {
 		if !prefixes[prefix] {
 			t.Fatalf("replica prefix %q was not cleared; got %v", prefix, fly.prefixes())

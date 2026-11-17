@@ -509,6 +509,25 @@ func (m *litestreamManager) stopLitestream() {
 	}
 }
 
+// litestreamStopGrace is how long a signalled Litestream may take to exit
+// before its context is canceled, which kills it.
+var litestreamStopGrace = 60 * time.Second
+
+// stopLitestreamThenCancel signals Litestream and waits for it to exit on its
+// own before canceling its context. Canceling first would kill the process
+// mid-upload; the upgrade lane copies the replica right after this returns
+// and needs the base build to have finished its writes. A process that
+// ignores the signal is still killed once litestreamStopGrace has passed.
+func (m *litestreamManager) stopLitestreamThenCancel(cancel context.CancelFunc) {
+	watchdog := time.AfterFunc(litestreamStopGrace, func() {
+		slog.Warn("Litestream did not exit after the stop signal; killing it", "grace", litestreamStopGrace)
+		cancel()
+	})
+	m.stopLitestream()
+	watchdog.Stop()
+	cancel()
+}
+
 var (
 	errLitestreamNotRunning        = errors.New("litestream is not running")
 	errLitestreamExitedBeforeStop  = errors.New("litestream exited before the stop signal was delivered")
