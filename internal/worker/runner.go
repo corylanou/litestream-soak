@@ -398,7 +398,7 @@ func (r *Runner) recordUpgradePreTXID(result VerificationResult) {
 	if r.cfg.upgradePhase != UpgradePhasePre || !result.Passed || result.restoreTXID() == 0 {
 		return
 	}
-	if err := recordUpgradePreTXID(r.cfg.DataDir, result.restoreTXID()); err != nil {
+	if err := recordUpgradePreEvidence(r.cfg.DataDir, result.restoreTXID(), result.RestoreMode); err != nil {
 		slog.Warn("Failed to record pre-upgrade txid", "error", err)
 	}
 }

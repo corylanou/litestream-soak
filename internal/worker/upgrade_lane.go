@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ type upgradeLaneState struct {
 	BaseSHA          string              `json:"base_litestream_sha"`
 	CandidateSHA     string              `json:"candidate_litestream_sha"`
 	PreUpgradeTXID   uint64              `json:"pre_upgrade_txid,omitempty"`
+	PreRestoreModes  []string            `json:"pre_restore_modes,omitempty"`
 	L9Purge          *replicaL9Purge     `json:"l9_purge,omitempty"`
 	FirstCandidateL9 *firstL9Observation `json:"first_candidate_l9,omitempty"`
 }
@@ -108,18 +110,96 @@ func syncDir(dir string) error {
 	return d.Sync()
 }
 
-// recordUpgradePreTXID remembers the newest verified pre-upgrade boundary so
-// post-upgrade cycles can keep restoring a txid written by the base build.
-func recordUpgradePreTXID(dataDir string, txid uint64) error {
+// The switch waits for the pre-upgrade phase to hold the baseline the gate
+// scores against: a passing restore in every rotating mode and a saved txid.
+// The warm-up is the earliest the switch can happen; past it the lane waits
+// up to upgradeEvidenceGrace longer and then fails instead of upgrading
+// without a baseline.
+var (
+	errUpgradeEvidenceMissing = errors.New("pre-upgrade baseline evidence incomplete")
+	upgradeEvidencePoll       = 5 * time.Second
+	upgradeEvidenceGrace      = func(warmup time.Duration) time.Duration { return max(warmup, 30*time.Minute) }
+)
+
+func recordUpgradePreEvidence(dataDir string, txid uint64, mode string) error {
 	state, err := readUpgradeLaneState(dataDir)
 	if err != nil {
 		return err
 	}
-	if state.Phase != UpgradePhasePre || txid <= state.PreUpgradeTXID {
+	if state.Phase != UpgradePhasePre {
 		return nil
 	}
-	state.PreUpgradeTXID = txid
+	changed := false
+	if txid > state.PreUpgradeTXID {
+		state.PreUpgradeTXID, changed = txid, true
+	}
+	if slices.Contains(restoreModeRotation, mode) && !slices.Contains(state.PreRestoreModes, mode) {
+		state.PreRestoreModes, changed = append(state.PreRestoreModes, mode), true
+	}
+	if !changed {
+		return nil
+	}
 	return writeUpgradeLaneState(dataDir, state)
+}
+
+func (s upgradeLaneState) missingPreRestoreModes() []string {
+	var missing []string
+	for _, mode := range restoreModeRotation {
+		if !slices.Contains(s.PreRestoreModes, mode) {
+			missing = append(missing, mode)
+		}
+	}
+	return missing
+}
+
+func (s upgradeLaneState) preEvidenceComplete() bool {
+	return s.PreUpgradeTXID != 0 && len(s.missingPreRestoreModes()) == 0
+}
+
+// nextPreUpgradeRestoreMode is the first rotating mode the pre-upgrade phase
+// has no passing restore in yet, so the baseline fills by cycle, not by
+// where a cycle happens to land on the wall clock.
+func nextPreUpgradeRestoreMode(dataDir string) string {
+	state, err := readUpgradeLaneState(dataDir)
+	if err != nil {
+		return ""
+	}
+	if missing := state.missingPreRestoreModes(); len(missing) > 0 {
+		return missing[0]
+	}
+	return ""
+}
+
+// awaitUpgradeSwitch ends the pre-upgrade phase: at the warm-up's end when
+// the baseline evidence is complete, as soon as it completes after that, or
+// with errUpgradeEvidenceMissing once the grace has passed.
+func awaitUpgradeSwitch(ctx context.Context, cfg Config, wait time.Duration, cancel context.CancelCauseFunc) {
+	deadline := time.Now().Add(max(wait, 0) + upgradeEvidenceGrace(cfg.UpgradeWarmup))
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(max(wait, 0)):
+	}
+	for {
+		state, err := readUpgradeLaneState(cfg.DataDir)
+		if err == nil && state.preEvidenceComplete() {
+			cancel(errUpgradeWarmupEnded)
+			return
+		}
+		if !time.Now().Before(deadline) {
+			detail := fmt.Sprintf("no passing restore in mode(s) %s, pre-upgrade txid %s", strings.Join(state.missingPreRestoreModes(), ","), formatTXID(state.PreUpgradeTXID))
+			if err != nil {
+				detail = err.Error()
+			}
+			cancel(fmt.Errorf("%w after the %s warm-up and %s of grace: %s", errUpgradeEvidenceMissing, cfg.UpgradeWarmup, upgradeEvidenceGrace(cfg.UpgradeWarmup), detail))
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(upgradeEvidencePoll):
+		}
+	}
 }
 
 func resolveLitestreamBaseSHA(fromEnv string) string {
@@ -315,14 +395,23 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, pur
 		end := state.StartedAt.Add(cfg.UpgradeWarmup)
 		slog.Info("Starting upgrade lane pre-upgrade phase", "litestream_sha", pre.activeLitestreamSHA, "binary", pre.litestreamCommand(), "switch_at", end)
 		phaseCtx, cancel := context.WithCancelCause(ctx)
-		timer := time.AfterFunc(max(end.Sub(now), 0), func() { cancel(errUpgradeWarmupEnded) })
+		switchDecided := make(chan struct{})
+		go func() {
+			defer close(switchDecided)
+			awaitUpgradeSwitch(phaseCtx, cfg, end.Sub(now), cancel)
+		}()
 		err = run(phaseCtx, pre)
-		timer.Stop()
-		ended := errors.Is(context.Cause(phaseCtx), errUpgradeWarmupEnded)
+		cause := context.Cause(phaseCtx)
+		ended := errors.Is(cause, errUpgradeWarmupEnded)
 		cancel(nil)
+		<-switchDecided
 		switch {
 		case ctx.Err() != nil:
 			return nil
+		case errors.Is(cause, errUpgradeEvidenceMissing):
+			err = fmt.Errorf("upgrade lane did not switch builds: %w", cause)
+			reportLaneHarnessFailure(ctx, cfg, err)
+			return err
 		case !ended && err != nil:
 			return fmt.Errorf("pre-upgrade phase: %w", err)
 		case !ended:

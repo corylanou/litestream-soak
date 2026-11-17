@@ -137,6 +137,11 @@ func TestUpgradeLaneNoL9PurgeOrdering(t *testing.T) {
 				switch phase.upgradePhase {
 				case UpgradePhasePre:
 					events = append(events, "pre start")
+					for _, mode := range restoreModeRotation {
+						if err := recordUpgradePreEvidence(dir, 0x42, mode); err != nil {
+							t.Error(err)
+						}
+					}
 					<-runCtx.Done()
 					events = append(events, "pre stopped")
 					if cause := context.Cause(runCtx); cause != nil && !errors.Is(cause, context.Canceled) {

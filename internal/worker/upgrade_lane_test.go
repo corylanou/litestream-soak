@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -179,7 +180,7 @@ func TestUpgradeLanePhaseSwitch(t *testing.T) {
 		},
 		{
 			name:         "restart after warm-up elapsed switches at once",
-			state:        &upgradeLaneState{Phase: UpgradePhasePre, StartedAt: start.Add(-3 * time.Hour), BaseSHA: testUpgradeBaseSHA, CandidateSHA: testUpgradeCandidateSHA, PreUpgradeTXID: 0x10},
+			state:        &upgradeLaneState{Phase: UpgradePhasePre, StartedAt: start.Add(-3 * time.Hour), BaseSHA: testUpgradeBaseSHA, CandidateSHA: testUpgradeCandidateSHA, PreUpgradeTXID: 0x10, PreRestoreModes: slices.Clone(restoreModeRotation)},
 			wantRuns:     []phaseRun{{phase: UpgradePhasePre, sha: testUpgradeBaseSHA, snapshot: 24 * time.Hour}, {phase: UpgradePhasePost, sha: testUpgradeCandidateSHA, preTXID: 0x10, snapshot: time.Hour}},
 			wantPhase:    UpgradePhasePost,
 			wantSwitched: true,
@@ -226,8 +227,10 @@ func TestUpgradeLanePhaseSwitch(t *testing.T) {
 						return tt.preErr
 					}
 					if tt.preTXID != 0 {
-						if err := recordUpgradePreTXID(dir, tt.preTXID); err != nil {
-							t.Fatal(err)
+						for _, mode := range restoreModeRotation {
+							if err := recordUpgradePreEvidence(dir, tt.preTXID, mode); err != nil {
+								t.Fatal(err)
+							}
 						}
 					}
 					<-runCtx.Done()
@@ -277,7 +280,7 @@ func TestRecordUpgradePreTXIDOnlyAdvancesDuringPreUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, txid := range []uint64{0x20, 0x10, 0x30} {
-		if err := recordUpgradePreTXID(dir, txid); err != nil {
+		if err := recordUpgradePreEvidence(dir, txid, restoreModeTXID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -289,7 +292,7 @@ func TestRecordUpgradePreTXIDOnlyAdvancesDuringPreUpgrade(t *testing.T) {
 	if err := writeUpgradeLaneState(dir, state); err != nil {
 		t.Fatal(err)
 	}
-	if err := recordUpgradePreTXID(dir, 0x40); err != nil {
+	if err := recordUpgradePreEvidence(dir, 0x40, restoreModeLatest); err != nil {
 		t.Fatal(err)
 	}
 	state, err = readUpgradeLaneState(dir)
@@ -310,5 +313,105 @@ func TestPhaseEndedSkipsWorkerFailureEvent(t *testing.T) {
 		if got := phaseEnded(tt.err); got != tt.want {
 			t.Fatalf("phaseEnded(%v) = %v, want %v", tt.err, got, tt.want)
 		}
+	}
+}
+
+func shortenUpgradeEvidenceWait(t *testing.T, grace time.Duration) {
+	t.Helper()
+	poll, graceFor := upgradeEvidencePoll, upgradeEvidenceGrace
+	upgradeEvidencePoll = 5 * time.Millisecond
+	upgradeEvidenceGrace = func(time.Duration) time.Duration { return grace }
+	t.Cleanup(func() { upgradeEvidencePoll, upgradeEvidenceGrace = poll, graceFor })
+}
+
+func TestUpgradeLaneWaitsForARestoreInEveryModeBeforeSwitching(t *testing.T) {
+	shortenUpgradeEvidenceWait(t, 5*time.Second)
+	dir := t.TempDir()
+	cfg := upgradeLaneConfig(t, dir)
+	cfg.UpgradeWarmup = 60 * time.Millisecond
+	cfg.VerifyRestoreRotation = true
+	cfg.VerifyInterval = 25 * time.Millisecond
+	const cycleDuration = 20 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := time.Now()
+	var modes []string
+	var cyclesAtWarmupEnd, preTXIDAtSwitch int
+	var switchedAfter time.Duration
+	run := func(runCtx context.Context, phase Config) error {
+		if phase.upgradePhase == UpgradePhasePost {
+			switchedAfter = time.Since(started)
+			preTXIDAtSwitch = int(phase.upgradePreTXID)
+			cancel()
+			return nil
+		}
+		verifier := &Verifier{cfg: phase}
+		for txid := uint64(1); ; txid++ {
+			select {
+			case <-runCtx.Done():
+				return context.Cause(runCtx)
+			case <-time.After(phase.VerifyInterval):
+			}
+			mode := verifier.restoreModeAt(time.Now())
+			time.Sleep(cycleDuration)
+			if runCtx.Err() != nil {
+				return context.Cause(runCtx)
+			}
+			if time.Since(started) < cfg.UpgradeWarmup {
+				cyclesAtWarmupEnd++
+			}
+			modes = append(modes, mode)
+			if err := recordUpgradePreEvidence(dir, txid, mode); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	if err := runUpgradeLane(ctx, cfg, time.Now, replicaL9Purger{}, run); err != nil {
+		t.Fatalf("runUpgradeLane() error = %v", err)
+	}
+	if cyclesAtWarmupEnd >= len(restoreModeRotation) {
+		t.Fatalf("%d cycles finished inside the warm-up; the test needs the warm-up to end before every mode has run", cyclesAtWarmupEnd)
+	}
+	if len(modes) < len(restoreModeRotation) || !slices.Equal(modes[:len(restoreModeRotation)], restoreModeRotation) {
+		t.Fatalf("pre-upgrade modes = %v, want one cycle per mode %v whatever the wall-clock slot", modes, restoreModeRotation)
+	}
+	if switchedAfter < cfg.UpgradeWarmup || switchedAfter < 3*(cfg.VerifyInterval+cycleDuration) {
+		t.Fatalf("switched after %s, want it held past the %s warm-up until the third cycle finished", switchedAfter, cfg.UpgradeWarmup)
+	}
+	if preTXIDAtSwitch < len(restoreModeRotation) {
+		t.Fatalf("pre-upgrade txid at the switch = %d, want the last pre-upgrade cycle's", preTXIDAtSwitch)
+	}
+	state, err := readUpgradeLaneState(dir)
+	if err != nil || state.Phase != UpgradePhasePost || !state.preEvidenceComplete() {
+		t.Fatalf("state = %+v, %v; want the switch recorded with complete evidence", state, err)
+	}
+}
+
+func TestUpgradeLaneFailsInsteadOfSwitchingWithoutABaseline(t *testing.T) {
+	shortenUpgradeEvidenceWait(t, 80*time.Millisecond)
+	dir := t.TempDir()
+	cfg := upgradeLaneConfig(t, dir)
+	cfg.UpgradeWarmup = 30 * time.Millisecond
+
+	var phases []string
+	run := func(runCtx context.Context, phase Config) error {
+		phases = append(phases, phase.upgradePhase)
+		if err := recordUpgradePreEvidence(dir, 7, restoreModeTXID); err != nil {
+			t.Error(err)
+		}
+		<-runCtx.Done()
+		return context.Cause(runCtx)
+	}
+	err := runUpgradeLane(context.Background(), cfg, time.Now, replicaL9Purger{}, run)
+	if err == nil || !errors.Is(err, errUpgradeEvidenceMissing) || !strings.Contains(err.Error(), "upgrade lane did not switch builds") || !strings.Contains(err.Error(), "no passing restore in mode(s) timestamp,latest") {
+		t.Fatalf("runUpgradeLane() error = %v, want the missing baseline named", err)
+	}
+	if len(phases) != 1 || phases[0] != UpgradePhasePre {
+		t.Fatalf("phases = %v, want the candidate build never started", phases)
+	}
+	state, err := readUpgradeLaneState(dir)
+	if err != nil || state.Phase != UpgradePhasePre || state.SwitchedAt != nil {
+		t.Fatalf("state = %+v, %v; want the lane still pre-upgrade", state, err)
 	}
 }
