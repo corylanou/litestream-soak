@@ -509,6 +509,38 @@ func (m *litestreamManager) stopLitestream() {
 	}
 }
 
+// A signalled Litestream gets litestreamStopGrace to exit when a phase ends
+// and the worker keeps running: the upgrade lane copies the replica right
+// afterwards and needs the base build to have finished its writes. When the
+// worker itself is shutting down the final heartbeat and the evidence flush
+// run after this wait, inside whatever kill grace the platform gives the
+// machine, so the wait is litestreamShutdownGrace, short enough to leave
+// them room even under Fly's five-second default.
+var (
+	litestreamStopGrace     = 60 * time.Second
+	litestreamShutdownGrace = 2 * time.Second
+)
+
+func litestreamStopGraceFor(cause error) time.Duration {
+	if phaseEnded(cause) {
+		return litestreamStopGrace
+	}
+	return litestreamShutdownGrace
+}
+
+// stopLitestreamThenCancel signals Litestream and waits for it to exit on its
+// own before canceling its context; canceling first would kill the process
+// mid-upload. A process still running after grace is killed.
+func (m *litestreamManager) stopLitestreamThenCancel(cancel context.CancelFunc, grace time.Duration) {
+	watchdog := time.AfterFunc(grace, func() {
+		slog.Warn("Litestream did not exit after the stop signal; killing it", "grace", grace)
+		cancel()
+	})
+	m.stopLitestream()
+	watchdog.Stop()
+	cancel()
+}
+
 var (
 	errLitestreamNotRunning        = errors.New("litestream is not running")
 	errLitestreamExitedBeforeStop  = errors.New("litestream exited before the stop signal was delivered")

@@ -868,6 +868,15 @@ func (v *Verifier) runPreUpgradeRestore(ctx context.Context) VerificationResult 
 		return result
 	}
 	defer cleanupConfig()
+	if v.cfg.upgradePreservedChain != "" {
+		preservedPath, cleanupPreserved, err := writePreservedChainConfig(v.cfg)
+		if err != nil {
+			v.failResult(ctx, &result, fmt.Sprintf("pre-upgrade restore config: %v", err))
+			return result
+		}
+		defer cleanupPreserved()
+		configPath = preservedPath
+	}
 	sourceSize := fileSize(v.cfg.DBPath) + fileSize(v.cfg.DBPath+"-wal")
 	_, err = v.restorePreUpgradeTXID(ctx, configPath, v.cfg.DBPath+".restored", v.cfg.DBPath, sourceSize)
 	if len(v.validationSteps) > 0 {
@@ -881,6 +890,9 @@ func (v *Verifier) runPreUpgradeRestore(ctx context.Context) VerificationResult 
 	result.Status = "passed"
 	result.Passed = true
 	result.Summary = fmt.Sprintf("pre-upgrade txid %016x restored with the current build and passed integrity check", v.cfg.upgradePreTXID)
+	if v.cfg.upgradePreservedChain != "" {
+		result.Summary = fmt.Sprintf("%s txid %016x restored with the current build from %s and passed integrity check", reporting.PreservedChainRestoreSubject, v.cfg.upgradePreTXID, v.cfg.upgradePreservedChain)
+	}
 	v.finalizeResult(&result)
 	return result
 }
@@ -899,6 +911,11 @@ func (v *Verifier) restorePreUpgradeTXID(ctx context.Context, configPath, restor
 		}
 	}()
 	v.logicalEvidence += fmt.Sprintf(" pre_upgrade_txid=%016x", v.cfg.upgradePreTXID)
+	subject := "pre-upgrade"
+	if v.cfg.upgradePreservedChain != "" {
+		subject = reporting.PreservedChainRestoreSubject
+		v.logicalEvidence += " pre_upgrade_chain=" + v.cfg.upgradePreservedChain
+	}
 	if err := v.runValidationPhase(ctx, "restore_pre_upgrade_preflight", v.cfg.verificationPhaseBudget("restore_preflight", sourceSize), func(context.Context) error {
 		return checkRestoreCapacity(preRestoredPath, sourcePath)
 	}); err != nil {
@@ -929,9 +946,9 @@ func (v *Verifier) restorePreUpgradeTXID(ctx context.Context, configPath, restor
 		metadata := validationStepMetadata(phaseCtx, cmd, []byte(evidence.text()), err)
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			metadata.err = fmt.Errorf("restore failed: pre-upgrade txid %016x (exit %d): %s", v.cfg.upgradePreTXID, exitErr.ExitCode(), evidence.finalError)
+			metadata.err = fmt.Errorf("restore failed: %s txid %016x (exit %d): %s", subject, v.cfg.upgradePreTXID, exitErr.ExitCode(), evidence.finalError)
 		} else {
-			metadata.err = fmt.Errorf("restore failed: pre-upgrade txid %016x: %w: %s", v.cfg.upgradePreTXID, err, evidence.finalError)
+			metadata.err = fmt.Errorf("restore failed: %s txid %016x: %w: %s", subject, v.cfg.upgradePreTXID, err, evidence.finalError)
 		}
 		switch {
 		case reporting.PinnedRestoreTargetUnavailable(restoreModeTXID, metadata.err.Error()):

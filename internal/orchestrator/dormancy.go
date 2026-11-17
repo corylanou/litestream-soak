@@ -421,6 +421,7 @@ func (m *Manager) createWorkerMachine(ctx context.Context, worker model.Worker, 
 				Port: 9091,
 				Path: "/metrics",
 			},
+			StopConfig: flyapi.WorkerStopConfig(),
 		},
 	}
 

@@ -1,8 +1,13 @@
 package orchestrator
 
 import (
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -82,5 +87,54 @@ func TestDefaultMainFleetStaysOnTigris(t *testing.T) {
 		if !worker.Workload.UsesTigrisReplica() {
 			t.Errorf("%s ReplicaBackend = %q; alternate backends run in the Actions coverage matrix, not on Fly", worker.ProfileName, worker.Workload.ReplicaBackend)
 		}
+	}
+}
+
+func TestClearWorkerReplicaPrefixDeletesThePreservedUpgradeChain(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var listed []string
+	var deleted []string
+	objects := map[string][]string{
+		"soak/worker-up-lane/vol_1/":             {"soak/worker-up-lane/vol_1/ltx/0000/a.ltx"},
+		"soak/worker-up-lane/vol_1-pre-upgrade/": {"soak/worker-up-lane/vol_1-pre-upgrade/ltx/0000/a.ltx", "soak/worker-up-lane/vol_1-pre-upgrade/ltx/0009/partial.ltx"},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.Header().Set("Content-Type", "application/xml")
+		if r.Method == http.MethodGet {
+			prefix := r.URL.Query().Get("prefix")
+			listed = append(listed, prefix)
+			var contents strings.Builder
+			for _, key := range objects[prefix] {
+				contents.WriteString("<Contents><Key>" + key + "</Key></Contents>")
+			}
+			_, _ = fmt.Fprintf(w, "<ListBucketResult><IsTruncated>false</IsTruncated>%s</ListBucketResult>", contents.String())
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		for _, part := range strings.Split(string(body), "<Key>")[1:] {
+			deleted = append(deleted, part[:strings.Index(part, "</Key>")])
+		}
+		_, _ = w.Write([]byte("<DeleteResult/>"))
+	}))
+	defer server.Close()
+
+	manager := &Manager{replica: ReplicaConfig{Bucket: "bucket", Endpoint: server.URL, AccessKey: "access", SecretKey: "secret"}}
+	worker := model.Worker{ID: "worker-up-lane", Name: "worker-up-lane", FlyVolumeID: "vol_1", ProfileConfig: "{}"}
+	if err := manager.clearWorkerReplicaPrefix(t.Context(), worker); err != nil {
+		t.Fatalf("clearWorkerReplicaPrefix() error = %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(listed, []string{"soak/worker-up-lane/vol_1/", "soak/worker-up-lane/vol_1-pre-upgrade/"}) {
+		t.Fatalf("listed prefixes = %v, want the replica prefix and its preserved pre-upgrade sibling", listed)
+	}
+	slices.Sort(deleted)
+	want := []string{"soak/worker-up-lane/vol_1-pre-upgrade/ltx/0000/a.ltx", "soak/worker-up-lane/vol_1-pre-upgrade/ltx/0009/partial.ltx", "soak/worker-up-lane/vol_1/ltx/0000/a.ltx"}
+	if !slices.Equal(deleted, want) {
+		t.Fatalf("deleted = %v, want %v, including a partial preserved copy", deleted, want)
 	}
 }

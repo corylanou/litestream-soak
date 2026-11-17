@@ -45,6 +45,8 @@ type upgradeLaneState struct {
 	SwitchBlockedReason     string              `json:"switch_blocked_reason,omitempty"`
 	BlockedEventDeliveredAt *time.Time          `json:"blocked_event_delivered_at,omitempty"`
 	L9Purge                 *replicaL9Purge     `json:"l9_purge,omitempty"`
+	PreservedChain          *preservedChain     `json:"preserved_chain,omitempty"`
+	BaseProofFailure        *baseProofFailure   `json:"base_proof_failure,omitempty"`
 	FirstCandidateL9        *firstL9Observation `json:"first_candidate_l9,omitempty"`
 }
 
@@ -255,6 +257,38 @@ func awaitUpgradeSwitch(ctx context.Context, cfg Config, remaining time.Duration
 	}
 }
 
+// baseProofFailure is the base build's failed restore of the preserved chain,
+// kept until it has been reported as a failed pre-upgrade txid restore: that
+// report is what puts the failure on the baseline side of the gate.
+type baseProofFailure struct {
+	TXID        string     `json:"txid"`
+	StartedAt   time.Time  `json:"started_at"`
+	CompletedAt time.Time  `json:"completed_at"`
+	Error       string     `json:"error"`
+	DeliveredAt *time.Time `json:"delivered_at,omitempty"`
+}
+
+// blockUpgradeSwitchForBaseProof keeps the lane on the base build because
+// that build could not restore the chain it wrote. The candidate never runs,
+// so this is the same blocked switch as a baseline that never completed.
+func blockUpgradeSwitchForBaseProof(cfg Config, record preservedChain) (upgradeLaneState, error) {
+	return updateUpgradeLaneState(cfg.DataDir, func(state *upgradeLaneState) bool {
+		if state.Phase != UpgradePhasePre {
+			return false
+		}
+		if state.BaseProofFailure == nil {
+			state.BaseProofFailure = &baseProofFailure{TXID: record.TXID, StartedAt: record.StartedAt, CompletedAt: record.CompletedAt, Error: record.Error}
+		}
+		if state.SwitchBlockedAt == nil {
+			blocked := time.Now().UTC()
+			state.SwitchBlockedAt = &blocked
+			state.SwitchBlockedReason = fmt.Sprintf("upgrade lane stays on the base build: the base build could not restore the replica it wrote (%s); the candidate build was never started", record.Error)
+			slog.Error(state.SwitchBlockedReason)
+		}
+		return true
+	})
+}
+
 // blockUpgradeSwitch records the block unless the evidence completed, or the
 // block was recorded, since the caller last looked.
 func blockUpgradeSwitch(cfg Config) (upgradeLaneState, error) {
@@ -270,9 +304,11 @@ func blockUpgradeSwitch(cfg Config) (upgradeLaneState, error) {
 	})
 }
 
-// deliverUpgradeSwitchBlocked posts the blocked event until one delivery is
-// on record, backing off between attempts. It runs again after a restart, so
-// a failed POST never leaves the gate without the event it scores from.
+// deliverUpgradeSwitchBlocked posts the blocked event, and the base build's
+// failed restore of the preserved chain when that is what blocked the switch,
+// until each has one delivery on record, backing off between attempts. It
+// runs again after a restart, so a failed POST never leaves the gate without
+// the reports it scores from.
 func deliverUpgradeSwitchBlocked(ctx context.Context, cfg Config) {
 	reporter := NewReporter(cfg)
 	if !reporter.Enabled() {
@@ -281,10 +317,14 @@ func deliverUpgradeSwitchBlocked(ctx context.Context, cfg Config) {
 	backoff := upgradeBlockedEventBackoff
 	for {
 		state, err := readUpgradeLaneState(cfg.DataDir)
-		if err == nil && (state.SwitchBlockedAt == nil || state.BlockedEventDeliveredAt != nil) {
+		proofPending := state.BaseProofFailure != nil && state.BaseProofFailure.DeliveredAt == nil
+		if err == nil && (state.SwitchBlockedAt == nil || (state.BlockedEventDeliveredAt != nil && !proofPending)) {
 			return
 		}
-		if err == nil {
+		if err == nil && proofPending {
+			err = sendBaseProofFailure(ctx, cfg, *state.BaseProofFailure)
+		}
+		if err == nil && state.BlockedEventDeliveredAt == nil {
 			err = sendUpgradeSwitchBlocked(ctx, cfg, reporter, state)
 		}
 		if err == nil {
@@ -315,6 +355,41 @@ func sendUpgradeSwitchBlocked(ctx context.Context, cfg Config, reporter *Reporte
 		}
 		delivered := time.Now().UTC()
 		state.BlockedEventDeliveredAt = &delivered
+		return true
+	})
+	return err
+}
+
+// sendBaseProofFailure reports the failed proof as a pre-upgrade txid restore
+// of the base build, so the ledger counts it as a baseline failure.
+func sendBaseProofFailure(ctx context.Context, cfg Config, failure baseProofFailure) error {
+	base, err := cfg.ForUpgradePhase(UpgradePhasePre)
+	if err != nil {
+		return err
+	}
+	classification := reporting.ClassifyVerificationFailure(base.VerifyType, failure.Error)
+	classification.RestoreMode = restoreModeTXID
+	sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := NewReporter(base).SendVerification(sendCtx, reporting.VerificationPayload{
+		StartedAt:             failure.StartedAt,
+		CompletedAt:           failure.CompletedAt,
+		CheckType:             base.VerifyType,
+		Status:                "failed",
+		Summary:               fmt.Sprintf("base build could not restore %s txid %s", reporting.PreservedChainRestoreSubject, failure.TXID),
+		ErrorMessage:          failure.Error,
+		DurationMS:            int(failure.CompletedAt.Sub(failure.StartedAt).Milliseconds()),
+		FailureClassification: &classification,
+		RestoreMode:           restoreModeTXID,
+	}); err != nil {
+		return err
+	}
+	_, err = updateUpgradeLaneState(cfg.DataDir, func(state *upgradeLaneState) bool {
+		if state.BaseProofFailure == nil || state.BaseProofFailure.DeliveredAt != nil {
+			return false
+		}
+		delivered := time.Now().UTC()
+		state.BaseProofFailure.DeliveredAt = &delivered
 		return true
 	})
 	return err
@@ -497,12 +572,12 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, pur
 	if !cfg.UpgradeLane {
 		return errors.New("upgrade lane is not configured")
 	}
-	now := clock().UTC()
+	started := clock().UTC()
 	state, err := updateUpgradeLaneState(cfg.DataDir, func(state *upgradeLaneState) bool {
 		if state.Phase != "" {
 			return false
 		}
-		*state = upgradeLaneState{Phase: UpgradePhasePre, StartedAt: now, BaseSHA: cfg.LitestreamBaseSHA, CandidateSHA: cfg.LitestreamSHA}
+		*state = upgradeLaneState{Phase: UpgradePhasePre, StartedAt: started, BaseSHA: cfg.LitestreamBaseSHA, CandidateSHA: cfg.LitestreamSHA}
 		return true
 	})
 	if err != nil {
@@ -512,11 +587,15 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, pur
 		return fmt.Errorf("upgrade lane state on this volume is for %s -> %s, not %s -> %s", state.BaseSHA, state.CandidateSHA, cfg.LitestreamBaseSHA, cfg.LitestreamSHA)
 	}
 
-	if state.Phase == UpgradePhasePre {
+	// The loop runs the pre-upgrade phase again only after the base build
+	// failed to restore the chain it wrote: the switch is then blocked for
+	// good and the base build keeps running, as for an incomplete baseline.
+	for state.Phase == UpgradePhasePre {
 		pre, err := cfg.ForUpgradePhase(UpgradePhasePre)
 		if err != nil {
 			return err
 		}
+		now := clock().UTC()
 		end := state.StartedAt.Add(cfg.UpgradeWarmup)
 		slog.Info("Starting upgrade lane pre-upgrade phase", "litestream_sha", pre.activeLitestreamSHA, "binary", pre.litestreamCommand(), "switch_at", end)
 		phaseCtx, cancel := context.WithCancelCause(ctx)
@@ -538,10 +617,39 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, pur
 		case !ended:
 			return nil
 		}
+		// The base process has exited and the lane is still pre-upgrade.
+		// The chain is copied and the base build restores it before the
+		// switch is committed, so a base build that cannot restore its own
+		// replica blocks the switch like any other missing baseline and the
+		// candidate, which never ran, takes no fault. A copy that cannot be
+		// made is the lane's own failure. The successful record is written
+		// with the switch itself: a lane that is post-upgrade without one
+		// (an older worker, or an unsupported backend) is never copied after
+		// the candidate has written to its replica.
+		var chain *preservedChain
+		if purger.chain != nil && preservedChainSupported(cfg) {
+			record, err := preserveUntilVerified(ctx, cfg, clock, purger.chain)
+			if errors.Is(err, errBaseProofFailed) {
+				if state, err = blockUpgradeSwitchForBaseProof(cfg, record); err != nil {
+					return err
+				}
+				continue
+			}
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
+				err = fmt.Errorf("upgrade lane pre-upgrade chain preservation: %w", err)
+				reportLaneHarnessFailure(ctx, cfg, err)
+				return err
+			}
+			chain = &record
+		}
 		switched := clock().UTC()
 		state, err = updateUpgradeLaneState(cfg.DataDir, func(state *upgradeLaneState) bool {
 			state.Phase = UpgradePhasePost
 			state.SwitchedAt = &switched
+			state.PreservedChain = chain
 			return true
 		})
 		if err != nil {
@@ -570,6 +678,10 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, pur
 		return err
 	}
 	post.upgradePreTXID = state.PreUpgradeTXID
-	slog.Info("Starting upgrade lane post-upgrade phase", "litestream_sha", post.activeLitestreamSHA, "binary", post.litestreamCommand(), "pre_upgrade_txid", formatTXID(post.upgradePreTXID))
+	if state.PreservedChain.succeeded() {
+		post.upgradePreTXID = state.PreservedChain.txid()
+		post.upgradePreservedChain = state.PreservedChain.Prefix
+	}
+	slog.Info("Starting upgrade lane post-upgrade phase", "litestream_sha", post.activeLitestreamSHA, "binary", post.litestreamCommand(), "pre_upgrade_txid", formatTXID(post.upgradePreTXID), "preserved_chain", post.upgradePreservedChain)
 	return run(ctx, post)
 }
