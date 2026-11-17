@@ -110,7 +110,7 @@ func (c *Client) CreateMachine(ctx context.Context, req CreateMachineRequest) (*
 }
 
 func (c *Client) StopMachine(ctx context.Context, id string) error {
-	if err := c.do(ctx, "POST", fmt.Sprintf("/apps/%s/machines/%s/stop", c.appName, id), nil, nil); err != nil {
+	if err := c.do(ctx, "POST", fmt.Sprintf("/apps/%s/machines/%s/stop", c.appName, id), WorkerStopConfig(), nil); err != nil {
 		return fmt.Errorf("stop machine %s: %w", id, err)
 	}
 	return nil

@@ -238,6 +238,9 @@ func TestCreateWorkerForksPRWorkerFromEligibleMainVolume(t *testing.T) {
 	if len(machines) != 1 {
 		t.Fatalf("machine requests=%d want 1", len(machines))
 	}
+	if stop := machines[0].Config.StopConfig; stop == nil || *stop != *flyapi.WorkerStopConfig() {
+		t.Fatalf("stop_config = %+v, want the explicit worker kill grace", stop)
+	}
 	if got := machines[0].Config.Env["S3_PATH"]; strings.Contains(got, "worker-main") {
 		t.Fatalf("S3_PATH=%q should not target a main prefix", got)
 	}
@@ -1012,6 +1015,11 @@ func (f *createWorkerFlyServer) handle(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		writeCreateWorkerJSON(w, flyapi.Machine{ID: id, Name: req.Name, State: "started", Config: req.Config})
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/stop"):
+		var stop flyapi.StopConfig
+		if err := json.NewDecoder(r.Body).Decode(&stop); err != nil || stop != *flyapi.WorkerStopConfig() {
+			http.Error(w, "stop request without the worker stop timeout", http.StatusBadRequest)
+			return
+		}
 		f.mu.Lock()
 		f.stoppedMachines++
 		f.mu.Unlock()
@@ -1267,6 +1275,9 @@ func TestRollingUpdateSourceReplacesSameDeploymentConfigDriftOnce(t *testing.T) 
 	machines := fly.machineRequests()
 	if len(machines) != 1 {
 		t.Fatalf("machine creates after first roll = %d, want 1", len(machines))
+	}
+	if stop := machines[0].Config.StopConfig; stop == nil || *stop != *flyapi.WorkerStopConfig() {
+		t.Fatalf("stop_config = %+v, want the explicit worker kill grace", stop)
 	}
 	if machines[0].Config.Env["WRITE_RATE"] != "10" {
 		t.Fatalf("WRITE_RATE = %q, want 10", machines[0].Config.Env["WRITE_RATE"])

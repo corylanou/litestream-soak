@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/reporting"
 )
 
@@ -721,8 +722,6 @@ func TestUpgradeChainCopyBudgetScalesWithTheReplica(t *testing.T) {
 }
 
 func TestStopLitestreamThenCancelLetsTheProcessExitOnItsOwn(t *testing.T) {
-	grace := litestreamStopGrace
-	t.Cleanup(func() { litestreamStopGrace = grace })
 	for _, tt := range []struct {
 		name, trap string
 		grace      time.Duration
@@ -732,7 +731,6 @@ func TestStopLitestreamThenCancelLetsTheProcessExitOnItsOwn(t *testing.T) {
 		{name: "process that ignores the signal is killed after the grace", trap: `trap '' INT`, grace: 100 * time.Millisecond},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			litestreamStopGrace = tt.grace
 			dir := t.TempDir()
 			marker := filepath.Join(dir, "marker")
 			ready := filepath.Join(dir, "ready")
@@ -763,7 +761,7 @@ func TestStopLitestreamThenCancelLetsTheProcessExitOnItsOwn(t *testing.T) {
 				time.Sleep(5 * time.Millisecond)
 			}
 			started := time.Now()
-			manager.stopLitestreamThenCancel(cancel)
+			manager.stopLitestreamThenCancel(cancel, tt.grace)
 			if manager.litestreamRunning() || ctx.Err() == nil {
 				t.Fatal("process still running or context still live after the stop")
 			}
@@ -772,5 +770,31 @@ func TestStopLitestreamThenCancelLetsTheProcessExitOnItsOwn(t *testing.T) {
 				t.Fatalf("process finished its shutdown work = %v, want %v (stop took %s)", clean, tt.wantClean, time.Since(started))
 			}
 		})
+	}
+}
+
+func TestLitestreamStopWaitFitsThePlatformKillGrace(t *testing.T) {
+	finalReports := 5*time.Second + 5*time.Second
+	for _, tt := range []struct {
+		name  string
+		cause error
+		want  time.Duration
+	}{
+		{name: "upgrade warm-up ended, the worker keeps running", cause: errUpgradeWarmupEnded, want: litestreamStopGrace},
+		{name: "stress scenario slot ended", cause: errStressScenarioPhaseEnded, want: litestreamStopGrace},
+		{name: "worker told to stop", cause: context.Canceled, want: litestreamShutdownGrace},
+		{name: "run failed on its own", cause: nil, want: litestreamShutdownGrace},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := litestreamStopGraceFor(tt.cause); got != tt.want {
+				t.Fatalf("litestreamStopGraceFor(%v) = %s, want %s", tt.cause, got, tt.want)
+			}
+		})
+	}
+	if litestreamShutdownGrace >= 5*time.Second {
+		t.Fatalf("shutdown wait %s does not fit inside Fly's default five-second kill grace", litestreamShutdownGrace)
+	}
+	if room := flyapi.WorkerStopTimeout - litestreamStopGrace - finalReports; room < time.Minute {
+		t.Fatalf("worker stop timeout %s leaves %s after the longest Litestream wait and the final reports, want at least a minute", flyapi.WorkerStopTimeout, room)
 	}
 }

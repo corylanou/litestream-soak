@@ -1,6 +1,9 @@
 package flyapi
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type Machine struct {
 	ID         string         `json:"id"`
@@ -22,6 +25,27 @@ type MachineConfig struct {
 	Mounts   []Mount           `json:"mounts,omitempty"`
 	Metrics  *MetricsConfig    `json:"metrics,omitempty"`
 	Services []Service         `json:"services,omitempty"`
+	// StopConfig sets how long Fly waits after the stop signal before it
+	// kills the machine. Without it Fly waits five seconds.
+	StopConfig *StopConfig `json:"stop_config,omitempty"`
+}
+
+// WorkerStopTimeout is the kill grace every worker machine is created with
+// and every stop request asks for. A worker that is told to stop lets
+// Litestream exit, sends its final heartbeat and flushes pending evidence;
+// a rollout deletes the old volume afterwards, so evidence still on it when
+// the machine is killed is lost. Fly allows at most five minutes.
+const WorkerStopTimeout = 150 * time.Second
+
+type StopConfig struct {
+	Timeout string `json:"timeout,omitempty"`
+	Signal  string `json:"signal,omitempty"`
+}
+
+// WorkerStopConfig is the stop configuration for worker machines and stop
+// requests.
+func WorkerStopConfig() *StopConfig {
+	return &StopConfig{Timeout: fmt.Sprintf("%ds", int(WorkerStopTimeout/time.Second)), Signal: "SIGTERM"}
 }
 
 type Guest struct {

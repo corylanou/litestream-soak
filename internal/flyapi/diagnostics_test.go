@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -81,5 +84,33 @@ func TestAPIErrorPublicFormattingExcludesBody(t *testing.T) {
 	}
 	if err.Body != "sentinel-private-body" {
 		t.Error("internal provider evidence lost")
+	}
+}
+
+func TestWorkerMachinesGetAnExplicitKillGrace(t *testing.T) {
+	body, err := json.Marshal(CreateMachineRequest{Config: MachineConfig{Image: "image", StopConfig: WorkerStopConfig()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"stop_config":{"timeout":"150s","signal":"SIGTERM"}`) {
+		t.Fatalf("create request = %s, want an explicit stop_config", body)
+	}
+	if WorkerStopTimeout > 5*time.Minute {
+		t.Fatalf("WorkerStopTimeout = %s, above the five minutes Fly allows", WorkerStopTimeout)
+	}
+
+	var stopBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		stopBody = r.URL.Path + " " + string(raw)
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer server.Close()
+	client := &Client{baseURL: server.URL, appName: "app", token: "token", httpClient: server.Client()}
+	if err := client.StopMachine(t.Context(), "machine-1"); err != nil {
+		t.Fatal(err)
+	}
+	if stopBody != `/apps/app/machines/machine-1/stop {"timeout":"150s","signal":"SIGTERM"}` {
+		t.Fatalf("stop request = %s, want the worker stop timeout on every stop", stopBody)
 	}
 }
