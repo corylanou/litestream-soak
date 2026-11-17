@@ -1,4 +1,4 @@
-FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS builder
+FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS builder
 ENV GOTOOLCHAIN=local
 RUN go version
 WORKDIR /src/soak
@@ -8,7 +8,7 @@ COPY . .
 RUN go build -ldflags "-s -w" -o /usr/local/bin/soakctl ./cmd/soakctl
 RUN go version -m /usr/local/bin/soakctl >/tmp/soakctl.buildinfo && cat /tmp/soakctl.buildinfo
 
-FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS flyctl
+FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS flyctl
 ENV GOTOOLCHAIN=local
 COPY scripts/build-flyctl.sh /opt/build/
 RUN bash /opt/build/build-flyctl.sh /src/flyctl /usr/local/bin/flyctl

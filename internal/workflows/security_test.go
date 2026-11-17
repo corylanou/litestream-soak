@@ -27,6 +27,18 @@ func TestBinarySecurityEvidence(t *testing.T) {
 {"finding":{"osv":"GO-2026-4883","trace":[{"module":"github.com/docker/docker","function":"init"}]}}`, status: "supported"},
 		{name: "residual ID wrong module", role: "operational", output: `{"config":{}}
 {"finding":{"osv":"GO-2026-4883","trace":[{"module":"example.org/module","function":"Run"}]}}`, status: "supported", wantFailure: true},
+		{name: "reviewed mcp client residual", role: "operational", output: `{"config":{}}
+{"finding":{"osv":"GO-2026-6911","trace":[{"module":"github.com/mark3labs/mcp-go","function":"NewStreamableHTTP"}]}}`, status: "supported"},
+		{name: "mcp residual ID wrong module", role: "operational", output: `{"config":{}}
+{"finding":{"osv":"GO-2026-6911","trace":[{"module":"example.org/module","function":"Run"}]}}`, status: "supported", wantFailure: true},
+		{name: "other mcp finding remains blocked", role: "operational", output: `{"config":{}}
+{"finding":{"osv":"GO-EXAMPLE","trace":[{"module":"github.com/mark3labs/mcp-go","function":"NewStreamableHTTP"}]}}`, status: "supported", wantFailure: true},
+		{name: "compress finding remains blocked", role: "operational", output: `{"config":{}}
+{"finding":{"osv":"GO-2026-6865","trace":[{"module":"github.com/klauspost/compress","function":"Decompress"}]}}`, status: "supported", wantFailure: true},
+		{name: "brotli finding remains blocked", role: "operational", output: `{"config":{}}
+{"finding":{"osv":"GO-2026-6888","trace":[{"module":"github.com/andybalholm/brotli","function":"Read"}]}}`, status: "supported", wantFailure: true},
+		{name: "kaniko finding remains blocked", role: "operational", output: `{"config":{}}
+{"finding":{"osv":"GO-2026-6902","trace":[{"module":"github.com/chainguard-dev/kaniko","function":"GetContainerRuntime"}]}}`, status: "supported", wantFailure: true},
 		{name: "containerd finding remains blocked", role: "operational", output: `{"config":{}}
 {"finding":{"osv":"GO-2026-6597","trace":[{"module":"github.com/containerd/containerd/v2","function":"Run"}]}}`, status: "supported", wantFailure: true},
 		{name: "grpc finding remains blocked", role: "operational", output: `{"config":{}}
@@ -103,7 +115,7 @@ func TestOperationalToolBuildIsExplicitlyPatched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"0284ecf29deec3209991ef9bb23ecb97765c7fc8", "github.com/containerd/containerd/v2@v2.3.6", "golang.org/x/net@v0.60.0", "0.4.114-soak.1", "go mod verify", "git diff -- go.mod go.sum"} {
+	for _, want := range []string{"0284ecf29deec3209991ef9bb23ecb97765c7fc8", "github.com/containerd/containerd/v2@v2.3.6", "golang.org/x/net@v0.62.0", "github.com/klauspost/compress@v1.20.2", "github.com/andybalholm/brotli@v1.2.7", "github.com/chainguard-dev/kaniko@v1.25.20", "0.4.114-soak.2", "go mod tidy", "go mod verify", "git diff -- go.mod go.sum"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("missing %s", want)
 		}

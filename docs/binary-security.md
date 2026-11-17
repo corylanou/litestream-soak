@@ -32,7 +32,7 @@ For a selected candidate or baseline, build its unchanged source using the same
 compiler and flags as the worker image, then run from the harness checkout:
 
 ```bash
-GOTOOLCHAIN=go1.26.10 bash scripts/scan-binary.sh candidate \
+GOTOOLCHAIN=go1.26.11 bash scripts/scan-binary.sh candidate \
   <full-source-sha> /absolute/path/to/litestream /absolute/path/to/evidence
 ```
 
@@ -46,20 +46,24 @@ never edits the candidate. No production credentials are needed for these checks
 
 The common build selects upstream v0.4.114, commit
 `0284ecf29deec3209991ef9bb23ecb97765c7fc8`, then updates containerd/v2 from v2.3.5
-to v2.3.6, golang.org/x/net to v0.60.0, and the effective module Go directive to
-1.26.10. Upstream
-already includes gRPC v1.84.0 and x/crypto v0.57.0, so the
-previous x/crypto override is removed. The result identifies itself as
-`0.4.114-soak.1` with a patched commit suffix and dirty VCS build metadata.
+to v2.3.6, golang.org/x/net to v0.62.0, klauspost/compress from v1.19.2 to
+v1.20.2, andybalholm/brotli from v1.2.0 to v1.2.7, chainguard-dev/kaniko from
+v1.25.16 to v1.25.20, and the effective module Go directive to 1.26.11. The
+build then runs `go mod tidy`, because those versions raise the minimum
+versions of other modules in the graph (x/crypto to v0.58.0, x/sys, x/text,
+the AWS SDK, go-git and others); the retained dependency patch lists every one.
+Upstream already includes gRPC v1.84.0. The result identifies itself as
+`0.4.114-soak.2` with a patched commit suffix and dirty VCS build metadata.
 The control image retains the dependency patch, effective go.mod/go.sum, and
 module graph. CI attaches binary scans; the optional source scan records the
 additional call traces.
 
-Deployment jobs use the same build script and Go 1.26.10 compiler, required by
+Deployment jobs use the same build script and Go 1.26.11 compiler, required by
 containerd v2.3.6. The harness, workload, and Litestream builders also use Go
-1.26.10 to address the standard library advisories GO-2026-6608 through
-GO-2026-6617 and GO-2026-6809 (crypto/x509 distrust of compromised
-intermediates, fixed in Go 1.26.10). Flyctl
+1.26.11 to address the standard library advisories GO-2026-6608 through
+GO-2026-6617, GO-2026-6809 (crypto/x509 distrust of compromised
+intermediates, fixed in Go 1.26.10), and GO-2026-6859 (net/http HTTP/1 server
+crash from a MaxBytesReader header race, fixed in Go 1.26.11). Flyctl
 retains symbols
 for binary scan fidelity; stripped Go 1.26 macOS scans were observed to report
 additional module-wide symbols absent from the unstripped scan. This patch
@@ -70,6 +74,18 @@ The additional containerd patch fixes GO-2026-6597, which remains in the latest
 upstream release at the time of this update. Existing SSH fixes GO-2026-6354 and
 GO-2026-6355 remain covered by upstream's newer x/crypto. The selected Litestream
 candidate may still contain advisories; candidate findings remain visible.
+
+Four advisories published on 2026-11-05, after the last passing scan of this
+binary, have symbols in it. Three have fixed versions and are patched in the
+build: GO-2026-6865 (klauspost/compress panic on two-block frames, fixed in
+v1.20.2), GO-2026-6888 (brotli excessive allocation on crafted streams, fixed
+in v1.2.7) and GO-2026-6902 (kaniko Azure token sent to lookalike ACR hosts,
+fixed in v1.25.20). The fourth, GO-2026-6911, has no fixed version and is a
+reviewed residual below. The x/net update also clears the module-level
+findings GO-2026-6860 and GO-2026-6866. No upstream flyctl release clears
+these: v0.5.11, the latest at the time of this update, still pins brotli
+v1.2.6 and compress v1.20.1, has no fixed mcp-go to move to, and requires
+Go 1.27.
 
 The control plane invokes `logs -a <app> --json --no-tail`: upstream selects its
 HTTP polling path, not the NATS/WireGuard tailing path, and emits JSON log entries
@@ -84,10 +100,10 @@ live deployment; the coordinator owns that validation.
 
 ## Reviewed residuals
 
-Only these three advisory IDs are permitted for the flyctl binary at the pinned
-source SHA, scoped to the exact modules below. The v0.4.114 update keeps the same
-Docker v28.5.2, credential helpers v0.9.8, ACR helper revision, and remote-only
-operational usage; no advisory IDs or module scopes are added. They remain
+Only these four advisory IDs are permitted for the flyctl binary at the pinned
+source SHA, scoped to the exact modules below. The build keeps the same
+Docker v28.5.2, credential helpers v0.9.8, ACR helper revision, mcp-go v1.1.0,
+and remote-only operational usage. They remain
 in all raw evidence
 and summaries. Any other operational symbol finding fails CI. Package/module-only
 findings are retained for review rather than equated with executable paths.
@@ -105,6 +121,10 @@ implementation; the same narrow assessment applies and the attribution is retain
 | Advisory | Scope and operational assessment |
 | --- | --- |
 | GO-2026-6225 | `github.com/chrismellard/docker-credential-acr-env` can leak Azure tokens to a malicious registry hostname containing `.azurecr.io`. No fixed version is reported. These jobs use `registry.fly.io`, contain no Azure/AAD credentials, and do not configure ACR credential helpers. Do not use this exception for ACR builds or provide Azure credentials to these processes. |
+
+| Advisory | Scope and operational assessment |
+| --- | --- |
+| GO-2026-6911 | `github.com/mark3labs/mcp-go/client/transport`: the streamable HTTP MCP client follows a server's 3xx redirect to any host and resends configured headers and OAuth tokens (SSRF and credential disclosure). No fixed version is reported; v1.5.0, the latest release, predates the advisory. In flyctl the symbols are linked only by `internal/command/mcp/proxy`, the client behind the `fly mcp` proxy commands. The harness runs `flyctl logs`, `deploy` and `machine list` only, never an `mcp` subcommand, so no MCP client is constructed and no MCP server can answer it. Do not use this exception if a job starts running `fly mcp`. |
 
 These exceptions do not assess the remote builder daemon: its patching remains
 Fly's responsibility. Reassess these IDs when changing build mode, introducing a
