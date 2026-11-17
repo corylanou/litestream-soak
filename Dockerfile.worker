@@ -3,7 +3,7 @@ ARG LITESTREAM_BASE_SHA=
 ARG WORKLOAD_SHA=ae88b164dd6304bcbb654a681df767ee59042eed
 
 # Stage 1: Build litestream + litestream-test from source
-FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS litestream-builder
+FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS litestream-builder
 ENV GOTOOLCHAIN=local
 RUN go version
 ARG LITESTREAM_SHA
@@ -33,7 +33,7 @@ RUN CGO_ENABLED=1 go build \
 # Stage 1b: Optional second litestream build for the upgrade gate lane. With an
 # empty LITESTREAM_BASE_SHA the stage produces an empty /out and the runtime
 # image carries only the pinned build.
-FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS litestream-base-builder
+FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS litestream-base-builder
 ENV GOTOOLCHAIN=local
 ARG LITESTREAM_BASE_SHA
 WORKDIR /src/litestream-base
@@ -49,7 +49,7 @@ RUN mkdir -p /out && \
         -o /out/litestream-base ./cmd/litestream && \
       go version -m /out/litestream-base >/out/litestream-base.buildinfo && cat /out/litestream-base.buildinfo; \
     fi
-FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS workload-builder
+FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS workload-builder
 ENV GOTOOLCHAIN=local
 RUN go version
 ARG WORKLOAD_SHA
@@ -72,7 +72,7 @@ RUN go build \
 RUN go version -m /usr/local/bin/litestream-test-populate >/tmp/litestream-test-populate.buildinfo && cat /tmp/litestream-test-populate.buildinfo
 
 # Stage 2: Build soakworker
-FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS soakworker-builder
+FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS soakworker-builder
 ENV GOTOOLCHAIN=local
 RUN go version
 WORKDIR /src/soak

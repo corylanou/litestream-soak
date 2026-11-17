@@ -40,7 +40,7 @@ func TestOverlapSamplerFinalEvidence(t *testing.T) {
 	}
 	dir := t.TempDir()
 	files := map[string]string{
-		"go.mod":     "module sampler\ngo 1.26.10\n",
+		"go.mod":     "module sampler\ngo 1.26.11\n",
 		"sampler.go": body.String(),
 		"sampler_test.go": `package sampler
 import ("errors"; "os"; "testing")
@@ -143,7 +143,7 @@ func TestRestoreRetentionReplanJSONL(t *testing.T) {
 	}
 	dir := t.TempDir()
 	files := map[string]string{
-		"go.mod":     "module fixture\ngo 1.26.10\n",
+		"go.mod":     "module fixture\ngo 1.26.11\n",
 		"fixture.go": body.String(),
 		"fixture_test.go": `package fixture
 import ("bytes";"context";"encoding/json";"io";"log/slog";"testing")
