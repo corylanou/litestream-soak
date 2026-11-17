@@ -26,6 +26,8 @@ type Config struct {
 	AccessKey string
 	SecretKey string
 	Region    string
+	// SessionToken is sent with temporary credentials and left out otherwise.
+	SessionToken string
 }
 
 type Client struct {
@@ -228,6 +230,9 @@ func (c *Client) sign(req *http.Request, body []byte) {
 
 	req.Header.Set("X-Amz-Date", amzDate)
 	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
+	if token := strings.TrimSpace(c.cfg.SessionToken); token != "" {
+		req.Header.Set("X-Amz-Security-Token", token)
+	}
 
 	canonicalURI := req.URL.EscapedPath()
 	canonicalQueryString := canonicalQuery(req.URL.Query())
@@ -260,10 +265,11 @@ func (c *Client) sign(req *http.Request, body []byte) {
 }
 
 func canonicalHeaders(req *http.Request) (string, string) {
-	headers := map[string]string{
-		"host":                 req.URL.Host,
-		"x-amz-content-sha256": req.Header.Get("X-Amz-Content-Sha256"),
-		"x-amz-date":           req.Header.Get("X-Amz-Date"),
+	headers := map[string]string{"host": req.URL.Host}
+	for name := range req.Header {
+		if lower := strings.ToLower(name); strings.HasPrefix(lower, "x-amz-") {
+			headers[lower] = req.Header.Get(name)
+		}
 	}
 	if contentMD5 := req.Header.Get("Content-MD5"); contentMD5 != "" {
 		headers["content-md5"] = contentMD5

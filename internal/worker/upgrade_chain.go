@@ -1,8 +1,6 @@
 package worker
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,12 +17,22 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/reporting"
+	"github.com/corylanou/litestream-soak/internal/s3util"
 )
 
-const preservedChainDrainChecks = 6
+const (
+	preservedChainDrainChecks = 6
+	preservedChainCopyWorkers = 8
+	// replicaLTXTree is the part of a replica prefix Litestream restores
+	// from: the LTX levels, L9 snapshots included. The worker keeps other
+	// objects under the same prefix, such as profile evidence, and those are
+	// never copied.
+	replicaLTXTree = "ltx/"
+)
 
 var (
 	preservedChainSettle = 5 * time.Second
@@ -112,7 +120,7 @@ func preservedChainConfig(cfg Config) Config {
 }
 
 // preserve must only run once the base build has exited. It waits for the
-// replica listing to stop changing, brings the copy up to date (keeping
+// replica's LTX tree to stop changing, brings the copy of that tree up to date (keeping
 // objects an earlier attempt already copied), checks the copy object by
 // object, confirms the replica did not change underneath the copy, and then
 // has the base build restore the newest txid from the copy.
@@ -154,14 +162,14 @@ func (p *upgradeChainPreserver) preserve(ctx context.Context, cfg, base Config, 
 		}
 		return finish(fmt.Errorf("copy replica to %s: %w", record.Prefix, err))
 	}
-	copied, err := replicaObjectStats(ctx, preserved)
+	copied, err := replicaObjectStats(ctx, preserved, "")
 	if err != nil {
 		return finish(fmt.Errorf("list preserved objects: %w", err))
 	}
 	if err := matchReplicaObjects(drained, copied, cfg.ReplicaType != "file"); err != nil {
 		return finish(fmt.Errorf("preserved copy under %s does not match the replica: %w", record.Prefix, err))
 	}
-	after, err := replicaObjectStats(ctx, cfg)
+	after, err := replicaObjectStats(ctx, cfg, replicaLTXTree)
 	if err != nil {
 		return finish(fmt.Errorf("list replica objects after the copy: %w", err))
 	}
@@ -178,7 +186,7 @@ func (p *upgradeChainPreserver) preserve(ctx context.Context, cfg, base Config, 
 // preservedChainSettle apart agree on every object's size and ETag, so an
 // upload the stopped base build had in flight has either landed or not.
 func drainedReplicaObjects(ctx context.Context, cfg Config) (map[string]replicaObject, error) {
-	previous, err := replicaObjectStats(ctx, cfg)
+	previous, err := replicaObjectStats(ctx, cfg, replicaLTXTree)
 	if err != nil {
 		return nil, fmt.Errorf("list replica objects: %w", err)
 	}
@@ -189,7 +197,7 @@ func drainedReplicaObjects(ctx context.Context, cfg Config) (map[string]replicaO
 			return nil, ctx.Err()
 		case <-time.After(preservedChainSettle):
 		}
-		current, err := replicaObjectStats(ctx, cfg)
+		current, err := replicaObjectStats(ctx, cfg, replicaLTXTree)
 		if err != nil {
 			return nil, fmt.Errorf("list replica objects: %w", err)
 		}
@@ -243,65 +251,52 @@ func maxLTXObjectTXID(keys []string) uint64 {
 	return highest
 }
 
-// replicaObjectStats lists every object under the config's replica prefix,
-// keyed relative to that prefix.
-func replicaObjectStats(ctx context.Context, cfg Config) (map[string]replicaObject, error) {
+// replicaObjectStats lists the objects under the config's replica prefix,
+// keyed relative to that prefix. tree limits the listing to one subtree, such
+// as replicaLTXTree; an empty tree lists everything.
+func replicaObjectStats(ctx context.Context, cfg Config, tree string) (map[string]replicaObject, error) {
 	if cfg.ReplicaType == "file" {
-		return fileReplicaObjectStats(ctx, replicaOwnPrefix(cfg))
+		return fileReplicaObjectStats(ctx, replicaOwnPrefix(cfg), tree)
 	}
-	args, err := s3cmdArgs(cfg)
+	client, err := replicaS3Client(cfg)
 	if err != nil {
 		return nil, err
 	}
 	prefix := replicaOwnPrefix(cfg) + "/"
-	args = append(args, "ls", "--recursive", "--list-md5", fmt.Sprintf("s3://%s/%s", cfg.S3Bucket, prefix))
-	ctx, cancel := context.WithTimeout(ctx, replicaLevelListTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "s3cmd", args...)
-	cmd.WaitDelay = replicaLevelKillGrace
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("%w: %s", err, tailString(strings.TrimSpace(stderr.String()), 512))
+	listed, err := client.ListObjects(ctx, prefix+tree)
+	if err != nil {
+		return nil, err
 	}
-	return parseS3ObjectStats(&stdout, "s3://"+cfg.S3Bucket+"/"+prefix)
+	objects := make(map[string]replicaObject, len(listed))
+	for _, object := range listed {
+		objects[strings.TrimPrefix(object.Key, prefix)] = replicaObject{Size: object.Size, ETag: object.ETag}
+	}
+	return objects, nil
 }
 
-// parseS3ObjectStats reads `s3cmd ls --recursive --list-md5` rows: DATE TIME
-// SIZE MD5 URL, where the URL may contain spaces.
-func parseS3ObjectStats(r io.Reader, marker string) (map[string]replicaObject, error) {
-	objects := map[string]replicaObject{}
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64<<10), 1<<20)
-	for scanner.Scan() {
-		line := scanner.Text()
-		at := strings.Index(line, marker)
-		if at < 0 {
-			continue
-		}
-		fields := strings.Fields(line[:at])
-		if len(fields) != 4 {
-			return nil, fmt.Errorf("unexpected s3cmd listing row %q", line)
-		}
-		size, err := strconv.ParseInt(fields[2], 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("unexpected size in s3cmd listing row %q", line)
-		}
-		objects[line[at+len(marker):]] = replicaObject{Size: size, ETag: fields[3]}
-	}
-	return objects, scanner.Err()
+// replicaS3Client talks to the replica's object store directly with the
+// worker's own credentials.
+func replicaS3Client(cfg Config) (*s3util.Client, error) {
+	return s3util.NewClient(s3util.Config{
+		Bucket:       cfg.S3Bucket,
+		Endpoint:     cfg.directS3Endpoint(),
+		AccessKey:    cfg.S3AccessKey,
+		SecretKey:    cfg.S3SecretKey,
+		Region:       cfg.S3Region,
+		SessionToken: cfg.S3SessionToken,
+	})
 }
 
-func fileReplicaObjectStats(ctx context.Context, root string) (map[string]replicaObject, error) {
+func fileReplicaObjectStats(ctx context.Context, root, tree string) (map[string]replicaObject, error) {
 	keys, err := listFileReplicaObjects(Config{ReplicaType: "file", ReplicaPath: root})
 	if err != nil {
 		return nil, err
 	}
 	objects := make(map[string]replicaObject, len(keys))
 	for _, key := range keys {
+		if !strings.HasPrefix(key, tree) {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -331,33 +326,71 @@ func fileReplicaObject(name string) (replicaObject, error) {
 // syncReplicaObjects makes the preserved prefix hold exactly the source
 // objects. Objects that already match are left alone, so a retry after a
 // timeout continues where the last attempt stopped; anything else under the
-// prefix, such as a copy left by an earlier lane, is removed.
+// prefix, such as a copy left by an earlier lane, is removed. S3 objects are
+// copied server side, one CopyObject each.
 func syncReplicaObjects(ctx context.Context, cfg, preserved Config, source map[string]replicaObject) error {
 	if cfg.ReplicaType == "file" {
 		return syncFileReplica(ctx, replicaOwnPrefix(cfg), replicaOwnPrefix(preserved), source)
 	}
-	args, err := s3cmdArgs(cfg)
+	client, err := replicaS3Client(cfg)
 	if err != nil {
 		return err
 	}
-	args = append(args, "sync", "--delete-removed",
-		fmt.Sprintf("s3://%s/%s/", cfg.S3Bucket, replicaOwnPrefix(cfg)),
-		fmt.Sprintf("s3://%s/%s/", preserved.S3Bucket, replicaOwnPrefix(preserved)))
-	cmd := exec.CommandContext(ctx, "s3cmd", args...)
-	cmd.WaitDelay = replicaLevelKillGrace
-	var output bytes.Buffer
-	cmd.Stdout, cmd.Stderr = io.Discard, &output
-	if err := cmd.Run(); err != nil {
+	existing, err := replicaObjectStats(ctx, preserved, "")
+	if err != nil {
+		return fmt.Errorf("list preserved objects: %w", err)
+	}
+	sourcePrefix, preservedPrefix := replicaOwnPrefix(cfg)+"/", replicaOwnPrefix(preserved)+"/"
+	var stale []string
+	for key := range existing {
+		if _, ok := source[key]; !ok {
+			stale = append(stale, preservedPrefix+key)
+		}
+	}
+	slices.Sort(stale)
+	if err := client.DeleteObjects(ctx, stale); err != nil {
+		return fmt.Errorf("remove %d stale object(s): %w", len(stale), err)
+	}
+	var pending []string
+	for _, key := range slices.Sorted(maps.Keys(source)) {
+		if matchReplicaObjects(map[string]replicaObject{key: source[key]}, map[string]replicaObject{key: existing[key]}, true) != nil {
+			pending = append(pending, key)
+		}
+	}
+	copyCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	keys := make(chan string)
+	var workers sync.WaitGroup
+	for range min(preservedChainCopyWorkers, len(pending)) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for key := range keys {
+				if copyCtx.Err() != nil {
+					continue
+				}
+				if err := client.CopyObject(copyCtx, sourcePrefix+key, preservedPrefix+key); err != nil {
+					cancel(err)
+				}
+			}
+		}()
+	}
+	for _, key := range pending {
+		keys <- key
+	}
+	close(keys)
+	workers.Wait()
+	if err := context.Cause(copyCtx); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return fmt.Errorf("%w: %s", err, tailString(strings.TrimSpace(output.String()), 512))
+		return err
 	}
 	return nil
 }
 
 func syncFileReplica(ctx context.Context, sourceRoot, destinationRoot string, source map[string]replicaObject) error {
-	existing, err := fileReplicaObjectStats(ctx, destinationRoot)
+	existing, err := fileReplicaObjectStats(ctx, destinationRoot, "")
 	if err != nil {
 		return err
 	}
@@ -484,22 +517,40 @@ func restorePreservedChain(ctx context.Context, base, _ Config, txid uint64) err
 	return nil
 }
 
-// preserveUntilVerified copies and proves the chain up to
-// replicaL9PurgeAttempts times, persisting every attempt, and returns the
-// last attempt's record. The lane is still pre-upgrade while this runs: only
-// a successful record lets it commit the switch.
+// preserveUntilVerified copies and proves the chain, persisting every attempt
+// before it starts and again when it ends, and returns the last attempt's
+// record. The lane gets replicaL9PurgeAttempts attempts in total, counted
+// across restarts, so a worker that dies mid-attempt cannot retry forever.
+// The lane is still pre-upgrade while this runs: only a successful record
+// lets it commit the switch.
 func preserveUntilVerified(ctx context.Context, cfg Config, clock func() time.Time, preserver *upgradeChainPreserver) (preservedChain, error) {
 	base, err := cfg.ForUpgradePhase(UpgradePhasePre)
 	if err != nil {
 		return preservedChain{}, err
 	}
+	stored, err := readUpgradeLaneState(cfg.DataDir)
+	if err != nil {
+		return preservedChain{}, err
+	}
 	var record preservedChain
 	var attemptErr error
-	for attempt := 1; attempt <= replicaL9PurgeAttempts; attempt++ {
+	used := 0
+	if stored.PreservedChain != nil {
+		record, used = *stored.PreservedChain, stored.PreservedChain.Attempt
+		attemptErr = errors.New(firstNonEmpty(record.Error, "an earlier attempt did not finish"))
+	}
+	for attempt := used + 1; attempt <= replicaL9PurgeAttempts; attempt++ {
 		if ctx.Err() != nil {
 			return record, errors.Join(attemptErr, ctx.Err())
 		}
 		slog.Info("Preserving the pre-upgrade replica chain before the switch", "prefix", replicaOwnPrefix(preservedChainConfig(cfg)), "attempt", attempt)
+		started := preservedChain{Prefix: replicaOwnPrefix(preservedChainConfig(cfg)), StartedAt: clock().UTC(), Attempt: attempt, Error: "attempt did not finish"}
+		if _, writeErr := updateUpgradeLaneState(cfg.DataDir, func(stored *upgradeLaneState) bool {
+			stored.PreservedChain = &started
+			return true
+		}); writeErr != nil {
+			return record, errors.Join(attemptErr, writeErr)
+		}
 		record, attemptErr = preserver.preserve(ctx, cfg, base, clock)
 		record.Attempt = attempt
 		if _, writeErr := updateUpgradeLaneState(cfg.DataDir, func(stored *upgradeLaneState) bool {

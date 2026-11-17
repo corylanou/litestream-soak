@@ -413,6 +413,7 @@ func (m *Manager) clearWorkerReplicaPrefix(ctx context.Context, worker model.Wor
 
 	replicaURL := fmt.Sprintf("s3://%s/%s/", bucket, prefix)
 	deleted := 0
+	var cleared []string
 	// The upgrade lane keeps a copy of its replica in a sibling prefix that
 	// the trailing slash of the worker's own prefix does not cover.
 	for _, target := range []string{prefix, prefix + reporting.PreservedChainPrefixSuffix} {
@@ -425,6 +426,7 @@ func (m *Manager) clearWorkerReplicaPrefix(ctx context.Context, worker model.Wor
 			Region:    m.replica.Region,
 		}, target)
 		deleted += n
+		cleared = append(cleared, fmt.Sprintf("%d from %s", n, targetURL))
 		if clearCtx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("timed out clearing %s", targetURL)
 		}
@@ -434,7 +436,7 @@ func (m *Manager) clearWorkerReplicaPrefix(ctx context.Context, worker model.Wor
 	}
 
 	if m.db != nil {
-		_ = m.db.RecordEvent(worker.ID, "replica_prefix_cleared", fmt.Sprintf("Cleared %d object(s) from replica prefix %s", deleted, replicaURL), "")
+		_ = m.db.RecordEvent(worker.ID, "replica_prefix_cleared", fmt.Sprintf("Cleared %d object(s) from replica prefix %s (%s)", deleted, replicaURL, strings.Join(cleared, ", ")), "")
 	}
 	slog.Info("Cleared worker replica prefix", "worker_id", worker.ID, "prefix", replicaURL, "objects", deleted)
 	return nil

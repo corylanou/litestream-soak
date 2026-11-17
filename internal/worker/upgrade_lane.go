@@ -47,6 +47,7 @@ type upgradeLaneState struct {
 	L9Purge                 *replicaL9Purge     `json:"l9_purge,omitempty"`
 	PreservedChain          *preservedChain     `json:"preserved_chain,omitempty"`
 	BaseProofFailure        *baseProofFailure   `json:"base_proof_failure,omitempty"`
+	LaneFault               *laneFault          `json:"lane_fault,omitempty"`
 	FirstCandidateL9        *firstL9Observation `json:"first_candidate_l9,omitempty"`
 }
 
@@ -481,8 +482,100 @@ func (c Config) ForUpgradePhase(phase string) (Config, error) {
 	return next, nil
 }
 
+// RunUpgradeLane runs the lane until the context ends. A lane that halted on
+// a harness failure of its own stays up and idle: exiting would have the
+// platform restart the machine into the same failure until its restart limit.
 func RunUpgradeLane(ctx context.Context, cfg Config, run func(context.Context, Config) error) error {
-	return runUpgradeLane(ctx, cfg, time.Now, newReplicaL9Purger(), run)
+	err := runUpgradeLane(ctx, cfg, time.Now, newReplicaL9Purger(), run)
+	if !errors.Is(err, errUpgradeLaneHalted) {
+		return err
+	}
+	slog.Error("Upgrade lane halted; idling until the worker is stopped", "error", err)
+	backoff := upgradeBlockedEventBackoff
+	for {
+		if deliverErr := deliverLaneFault(ctx, cfg); deliverErr == nil {
+			break
+		} else {
+			slog.Warn("Failed to report the upgrade lane harness failure; retrying", "error", deliverErr, "retry_in", backoff)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, upgradeBlockedEventMaxBackoff)
+	}
+	<-ctx.Done()
+	return nil
+}
+
+// laneFault is a harness failure that ended the lane: the replica copy or
+// the L9 purge could not be done. It is terminal. The lane reports it once
+// and never retries the work, across restarts too.
+type laneFault struct {
+	At          time.Time  `json:"at"`
+	Error       string     `json:"error"`
+	DeliveredAt *time.Time `json:"delivered_at,omitempty"`
+}
+
+var errUpgradeLaneHalted = errors.New("upgrade lane halted on a harness failure")
+
+// failUpgradeLane records the fault, reports it, and returns the halted
+// error every later start of this lane returns as well.
+func failUpgradeLane(ctx context.Context, cfg Config, cause error) error {
+	state, err := updateUpgradeLaneState(cfg.DataDir, func(state *upgradeLaneState) bool {
+		if state.LaneFault != nil {
+			return false
+		}
+		state.LaneFault = &laneFault{At: time.Now().UTC(), Error: cause.Error()}
+		return true
+	})
+	if err != nil {
+		return errors.Join(cause, err)
+	}
+	return haltedUpgradeLane(ctx, cfg, state)
+}
+
+func haltedUpgradeLane(ctx context.Context, cfg Config, state upgradeLaneState) error {
+	if err := deliverLaneFault(ctx, cfg); err != nil {
+		slog.Warn("Failed to report upgrade lane harness failure", "error", err)
+	}
+	return fmt.Errorf("%w: %s", errUpgradeLaneHalted, state.LaneFault.Error)
+}
+
+// deliverLaneFault tells the control plane, once, that the lane itself, not
+// Litestream, stopped the switch, so the gate shows a harness failure rather
+// than a silent missing worker.
+func deliverLaneFault(ctx context.Context, cfg Config) error {
+	state, err := readUpgradeLaneState(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	if state.LaneFault == nil || state.LaneFault.DeliveredAt != nil {
+		return nil
+	}
+	reporter := NewReporter(cfg)
+	if !reporter.Enabled() {
+		return nil
+	}
+	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := reporter.SendEvent(reportCtx, reporting.WorkerEventPayload{
+		EventType: "worker_failed",
+		Message:   "upgrade lane harness failure: " + state.LaneFault.Error,
+		SentAt:    state.LaneFault.At,
+	}); err != nil {
+		return err
+	}
+	_, err = updateUpgradeLaneState(cfg.DataDir, func(state *upgradeLaneState) bool {
+		if state.LaneFault == nil || state.LaneFault.DeliveredAt != nil {
+			return false
+		}
+		delivered := time.Now().UTC()
+		state.LaneFault.DeliveredAt = &delivered
+		return true
+	})
+	return err
 }
 
 // recordFirstCandidateL9 notes the first L9 object seen after a purged switch,
@@ -549,25 +642,6 @@ func purgeUntilClean(ctx context.Context, cfg Config, clock func() time.Time, pu
 	return fmt.Errorf("%d attempt(s) failed, replica may still hold base-written L9 objects: %w", replicaL9PurgeAttempts, attemptErr)
 }
 
-// reportLaneHarnessFailure tells the control plane that the lane itself,
-// not Litestream, stopped the switch, so the gate shows a harness failure
-// rather than a silent missing worker.
-func reportLaneHarnessFailure(ctx context.Context, cfg Config, err error) {
-	reporter := NewReporter(cfg)
-	if !reporter.Enabled() {
-		return
-	}
-	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	if sendErr := reporter.SendEvent(reportCtx, reporting.WorkerEventPayload{
-		EventType: "worker_failed",
-		Message:   "upgrade lane harness failure: " + err.Error(),
-		SentAt:    time.Now().UTC(),
-	}); sendErr != nil {
-		slog.Warn("Failed to report upgrade lane harness failure", "error", sendErr)
-	}
-}
-
 func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, purger replicaL9Purger, run func(context.Context, Config) error) error {
 	if !cfg.UpgradeLane {
 		return errors.New("upgrade lane is not configured")
@@ -582,6 +656,9 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, pur
 	})
 	if err != nil {
 		return err
+	}
+	if state.LaneFault != nil {
+		return haltedUpgradeLane(ctx, cfg, state)
 	}
 	if state.BaseSHA != cfg.LitestreamBaseSHA || state.CandidateSHA != cfg.LitestreamSHA {
 		return fmt.Errorf("upgrade lane state on this volume is for %s -> %s, not %s -> %s", state.BaseSHA, state.CandidateSHA, cfg.LitestreamBaseSHA, cfg.LitestreamSHA)
@@ -639,9 +716,7 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, pur
 				if ctx.Err() != nil {
 					return nil
 				}
-				err = fmt.Errorf("upgrade lane pre-upgrade chain preservation: %w", err)
-				reportLaneHarnessFailure(ctx, cfg, err)
-				return err
+				return failUpgradeLane(ctx, cfg, fmt.Errorf("upgrade lane pre-upgrade chain preservation: %w", err))
 			}
 			chain = &record
 		}
@@ -667,9 +742,7 @@ func runUpgradeLane(ctx context.Context, cfg Config, clock func() time.Time, pur
 	// objects the candidate writes are never deleted.
 	if cfg.UpgradeDeleteL9AtSwitch && !state.L9Purge.succeeded() {
 		if err := purgeUntilClean(ctx, cfg, clock, purger, &state); err != nil {
-			err = fmt.Errorf("upgrade lane L9 purge: %w", err)
-			reportLaneHarnessFailure(ctx, cfg, err)
-			return err
+			return failUpgradeLane(ctx, cfg, fmt.Errorf("upgrade lane L9 purge: %w", err))
 		}
 	}
 
