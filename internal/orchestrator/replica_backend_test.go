@@ -122,10 +122,16 @@ func TestClearWorkerReplicaPrefixDeletesThePreservedUpgradeChain(t *testing.T) {
 	}))
 	defer server.Close()
 
-	manager := &Manager{replica: ReplicaConfig{Bucket: "bucket", Endpoint: server.URL, AccessKey: "access", SecretKey: "secret"}}
+	db := openTestDB(t)
+	manager := &Manager{db: db, replica: ReplicaConfig{Bucket: "bucket", Endpoint: server.URL, AccessKey: "access", SecretKey: "secret"}}
 	worker := model.Worker{ID: "worker-up-lane", Name: "worker-up-lane", FlyVolumeID: "vol_1", ProfileConfig: "{}"}
+	createTestWorker(t, db, worker)
 	if err := manager.clearWorkerReplicaPrefix(t.Context(), worker); err != nil {
 		t.Fatalf("clearWorkerReplicaPrefix() error = %v", err)
+	}
+	event := requireWorkerEvent(t, db, worker.ID, "replica_prefix_cleared")
+	if want := "Cleared 3 object(s) from replica prefix s3://bucket/soak/worker-up-lane/vol_1/ (1 from s3://bucket/soak/worker-up-lane/vol_1/, 2 from s3://bucket/soak/worker-up-lane/vol_1-pre-upgrade/)"; event.Message != want {
+		t.Fatalf("event = %q\nwant    %q", event.Message, want)
 	}
 	mu.Lock()
 	defer mu.Unlock()

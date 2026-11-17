@@ -343,7 +343,7 @@ func (r *Runner) sendWorkerFailureEvent(err error) {
 // runtime payload still carries the startup phase, so the control plane can
 // tell a harness pre-start failure from a Litestream or verification failure.
 func (r *Runner) sendPreStartFailureEvent(err error) {
-	if r.reporter == nil || !r.reporter.Enabled() {
+	if r.reporter == nil || !r.reporter.Enabled() || phaseEnded(err) {
 		return
 	}
 

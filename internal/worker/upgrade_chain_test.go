@@ -9,13 +9,16 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/corylanou/litestream-soak/internal/flyapi"
 	"github.com/corylanou/litestream-soak/internal/reporting"
+	"github.com/corylanou/litestream-soak/internal/s3util/s3fake"
 )
 
 func quickenChainPreservation(t *testing.T) {
@@ -306,7 +309,7 @@ func TestUpgradeLaneCopyFailureIsALaneFaultBeforeTheSwitch(t *testing.T) {
 		return nil
 	}
 	err := runUpgradeLane(context.Background(), cfg, time.Now, chainLanePurger(&calls, func() error { return errors.New("restore did not finish inside its 30m0s budget") }), run)
-	if err == nil || !strings.Contains(err.Error(), "pre-upgrade chain preservation") {
+	if !errors.Is(err, errUpgradeLaneHalted) || !strings.Contains(err.Error(), "pre-upgrade chain preservation") {
 		t.Fatalf("runUpgradeLane() error = %v, want the failed preservation", err)
 	}
 	for _, call := range calls {
@@ -359,9 +362,8 @@ func TestUpgradeLaneBaseProofFailureBlocksTheSwitchAsABaselineFailure(t *testing
 	defer server.Close()
 	cfg.ControlBaseURL = server.URL
 	reported := func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(events) > 0 && len(verifications) > 0
+		state, err := readUpgradeLaneState(cfg.DataDir)
+		return err == nil && state.BlockedEventDeliveredAt != nil && state.BaseProofFailure != nil && state.BaseProofFailure.DeliveredAt != nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -594,105 +596,136 @@ func TestRestorePreservedChainSeparatesBuildFailuresFromHarnessLimits(t *testing
 	}
 }
 
-const fakeChainS3cmd = `#!/bin/sh
-verb=""
-for arg in "$@"; do
-  case "$arg" in
-    ls|sync|cp|del) verb="$arg" ;;
-  esac
-  last="$arg"
-done
-printf '%s\n' "$*" >> "$S3CMD_LOG"
-case "$verb" in
-  ls)
-    case "$last" in
-      *worker-a-pre-upgrade/) cat "$S3CMD_COPIED" ;;
-      *) cat "$S3CMD_SOURCE" ;;
-    esac ;;
-  sync)
-    case "${S3CMD_SYNC:-ok}" in
-      slow) exec sleep 30 ;;
-      torn) sed -e 's#soak/worker-a/#soak/worker-a-pre-upgrade/#' -e 's# aaaa # ffff #' "$S3CMD_SOURCE" > "$S3CMD_COPIED" ;;
-      racing) sed 's#soak/worker-a/#soak/worker-a-pre-upgrade/#' "$S3CMD_SOURCE" > "$S3CMD_COPIED"
-        echo '2026-11-17 03:01 7 eeee s3://bkt/soak/worker-a/ltx/0000/0000000000000445-0000000000000445.ltx' >> "$S3CMD_SOURCE" ;;
-      *) sed -e 's#soak/worker-a/#soak/worker-a-pre-upgrade/#' -e 's# bbbb-3 # cccc #' "$S3CMD_SOURCE" > "$S3CMD_COPIED" ;;
-    esac ;;
-esac
-`
+const laneS3Prefix = "soak/worker-a/vol_1"
 
-func s3Lane(t *testing.T, snapshotBytes int64) (Config, Config, string) {
+func s3Lane(t *testing.T) (Config, Config, *s3fake.Server) {
 	t.Helper()
 	quickenChainPreservation(t)
+	store := s3fake.New("bkt")
+	t.Cleanup(store.Close)
 	dir := t.TempDir()
 	cfg := upgradeLaneConfig(t, dir)
 	cfg.ReplicaType = "s3"
 	cfg.S3Bucket = "bkt"
-	cfg.S3Path = "soak/worker-a"
-	cfg.S3Endpoint = "http://minio:9000"
-	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "s3cmd"), []byte(fakeChainS3cmd), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	log := filepath.Join(dir, "s3cmd.log")
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("S3CMD_LOG", log)
-	t.Setenv("S3CMD_SOURCE", filepath.Join(dir, "source.list"))
-	t.Setenv("S3CMD_COPIED", filepath.Join(dir, "copied.list"))
-	listing := "2026-11-17 03:00 100 aaaa s3://bkt/soak/worker-a/ltx/0000/0000000000000444-0000000000000444.ltx\n" +
-		fmt.Sprintf("2026-11-17 03:00 %d bbbb-3 s3://bkt/soak/worker-a/ltx/0009/0000000000000001-000000000000042f.ltx\n", snapshotBytes)
-	if err := os.WriteFile(filepath.Join(dir, "source.list"), []byte(listing), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "copied.list"), []byte("2026-11-10 01:00 5 dddd s3://bkt/soak/worker-a-pre-upgrade/ltx/0000/0000000000000999-0000000000000999.ltx\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	cfg.S3Path = laneS3Prefix
+	cfg.S3Endpoint = store.URL
+	cfg.S3AccessKey = "access"
+	cfg.S3SecretKey = "secret"
+	store.Put(laneS3Prefix+"/ltx/0000/0000000000000444-0000000000000444.ltx", []byte("l0"), "")
+	store.Put(laneS3Prefix+"/ltx/0009/0000000000000001-000000000000042f.ltx", []byte("snapshot"), "bbbb-3")
+	store.Put(laneS3Prefix+"/profiles/2026-11-17T06:28:01Z_verification-failed heap+cpu 'q'.pprof.json", []byte("{}"), "")
+	store.Put(laneS3Prefix+"/ltx-not-the-tree.txt", []byte("x"), "")
+	store.Put(laneS3Prefix+"-pre-upgrade/ltx/0000/0000000000000999-0000000000000999.ltx", []byte("left by an earlier lane"), "")
+	store.Put(laneS3Prefix+"-pre-upgrade/profiles/partial.pprof.json", []byte("left by a failed copy"), "")
 	base, err := cfg.ForUpgradePhase(UpgradePhasePre)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return cfg, base, log
+	return cfg, base, store
 }
 
-func TestUpgradeChainPreserveSyncsAnS3PrefixAndChecksSizesAndETags(t *testing.T) {
+func TestUpgradeChainPreserveCopiesOnlyTheLTXTreeOfAnS3Replica(t *testing.T) {
+	cfg, base, store := s3Lane(t)
+	var restoredFrom string
+	preserver := &upgradeChainPreserver{restore: func(_ context.Context, _, preserved Config, _ uint64) error {
+		restoredFrom = preserved.ReplicaURL()
+		return nil
+	}}
+	record, err := preserver.preserve(context.Background(), cfg, base, time.Now)
+	if err != nil || !record.succeeded() || record.TXID != "0000000000000444" || record.Objects != 2 || record.Bytes != 10 || record.Prefix != laneS3Prefix+"-pre-upgrade" {
+		t.Fatalf("record = %+v, %v", record, err)
+	}
+	if restoredFrom != "s3://bkt/"+laneS3Prefix+"-pre-upgrade" {
+		t.Fatalf("base restore replica = %q", restoredFrom)
+	}
+	want := []string{
+		laneS3Prefix + "-pre-upgrade/ltx/0000/0000000000000444-0000000000000444.ltx",
+		laneS3Prefix + "-pre-upgrade/ltx/0009/0000000000000001-000000000000042f.ltx",
+	}
+	if got := store.Keys(laneS3Prefix + "-pre-upgrade/"); !slices.Equal(got, want) {
+		t.Fatalf("preserved objects = %v\nwant %v: the LTX tree only, with stale and non-LTX objects gone", got, want)
+	}
+	for _, call := range store.Calls() {
+		if strings.Contains(call, "pprof.json") && strings.HasPrefix(call, "copy ") || strings.Contains(call, "ltx-not-the-tree") {
+			t.Fatalf("copied a non-LTX object: %s", call)
+		}
+	}
+	if len(store.Keys(laneS3Prefix+"/")) != 4 {
+		t.Fatalf("source objects = %v, want the replica untouched", store.Keys(laneS3Prefix+"/"))
+	}
+
+	before := len(store.Calls())
+	if record, err := preserver.preserve(context.Background(), cfg, base, time.Now); err != nil || !record.succeeded() {
+		t.Fatalf("second preserve: record = %+v, %v", record, err)
+	}
+	if after := store.Calls(); len(after) != before {
+		t.Fatalf("second preserve repeated work: %v", after[before:])
+	}
+}
+
+func TestUpgradeChainPreserveChecksAnS3CopyBySizeAndETag(t *testing.T) {
+	l0 := "ltx/0000/0000000000000444-0000000000000444.ltx"
 	tests := []struct {
-		name, sync string
-		wantErr    string
+		name    string
+		onCopy  func(store *s3fake.Server) func(source, destination string) error
+		after   func(store *s3fake.Server)
+		wantErr string
 	}{
-		{name: "copy matches, multipart snapshot re-tagged by the copy"},
-		{name: "copied object has different content", sync: "torn", wantErr: "does not match the replica: ltx/0000/0000000000000444-0000000000000444.ltx has ETag ffff, want aaaa"},
-		{name: "replica changed during the copy", sync: "racing", wantErr: "changed while it was being copied: 3 object(s), want 2"},
+		{name: "copy fails", onCopy: func(*s3fake.Server) func(string, string) error {
+			return func(source, _ string) error {
+				if strings.HasSuffix(source, l0) {
+					return errors.New("we encountered an internal error")
+				}
+				return nil
+			}
+		}, wantErr: "copy replica to " + laneS3Prefix + "-pre-upgrade: copy object failed: HTTP 500"},
+		{name: "replica changed during the copy", onCopy: func(store *s3fake.Server) func(string, string) error {
+			return func(string, string) error {
+				store.Put(laneS3Prefix+"/ltx/0000/0000000000000445-0000000000000445.ltx", []byte("late upload"), "")
+				return nil
+			}
+		}, wantErr: "changed while it was being copied: 3 object(s), want 2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg, base, log := s3Lane(t, 900)
-			t.Setenv("S3CMD_SYNC", tt.sync)
-			var restoredFrom string
-			preserver := &upgradeChainPreserver{restore: func(_ context.Context, _, preserved Config, _ uint64) error {
-				restoredFrom = preserved.ReplicaURL()
+			cfg, base, store := s3Lane(t)
+			store.OnCopy = tt.onCopy(store)
+			restores := 0
+			preserver := &upgradeChainPreserver{restore: func(context.Context, Config, Config, uint64) error {
+				restores++
 				return nil
 			}}
 			record, err := preserver.preserve(context.Background(), cfg, base, time.Now)
-			calls, readErr := os.ReadFile(log)
-			if readErr != nil {
-				t.Fatal(readErr)
-			}
-			if !strings.Contains(string(calls), "sync --delete-removed s3://bkt/soak/worker-a/ s3://bkt/soak/worker-a-pre-upgrade/") || strings.Contains(string(calls), " del ") || !strings.Contains(string(calls), "--list-md5") {
-				t.Fatalf("s3cmd calls, want one resumable sync that also clears stale objects, and listings with ETags:\n%s", calls)
-			}
-			if tt.wantErr != "" {
-				if err == nil || record.succeeded() || record.BaseProofFailed || !strings.Contains(err.Error(), tt.wantErr) || restoredFrom != "" {
-					t.Fatalf("record = %+v, %v, restored from %q; want a lane fault containing %q and no base restore", record, err, restoredFrom, tt.wantErr)
-				}
-				return
-			}
-			if err != nil || !record.succeeded() || record.TXID != "0000000000000444" || record.Objects != 2 || record.Bytes != 1000 || record.Prefix != "soak/worker-a-pre-upgrade" {
-				t.Fatalf("record = %+v, %v", record, err)
-			}
-			if restoredFrom != "s3://bkt/soak/worker-a-pre-upgrade" {
-				t.Fatalf("base restore replica = %q", restoredFrom)
+			if err == nil || record.succeeded() || record.BaseProofFailed || !strings.Contains(err.Error(), tt.wantErr) || restores != 0 {
+				t.Fatalf("record = %+v, %v, %d restore(s); want a lane fault containing %q and no base restore", record, err, restores, tt.wantErr)
 			}
 		})
 	}
+
+	t.Run("copied object has different content", func(t *testing.T) {
+		cfg, _, store := s3Lane(t)
+		source, err := replicaObjectStats(context.Background(), cfg, replicaLTXTree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := syncReplicaObjects(context.Background(), cfg, preservedChainConfig(cfg), source); err != nil {
+			t.Fatal(err)
+		}
+		store.Put(laneS3Prefix+"-pre-upgrade/"+l0, []byte("zz"), "")
+		copied, err := replicaObjectStats(context.Background(), preservedChainConfig(cfg), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := matchReplicaObjects(source, copied, true); err == nil || !strings.Contains(err.Error(), l0+" has ETag") {
+			t.Fatalf("matchReplicaObjects() = %v, want the same-size object with different content caught", err)
+		}
+		if err := syncReplicaObjects(context.Background(), cfg, preservedChainConfig(cfg), source); err != nil {
+			t.Fatal(err)
+		}
+		if body, _ := store.Get(laneS3Prefix + "-pre-upgrade/" + l0); string(body) != "l0" {
+			t.Fatalf("mismatched object = %q, want it copied again", body)
+		}
+	})
 }
 
 func TestUpgradeChainCopyBudgetScalesWithTheReplica(t *testing.T) {
@@ -705,19 +738,184 @@ func TestUpgradeChainCopyBudgetScalesWithTheReplica(t *testing.T) {
 		{name: "three gigabyte replica", snapshotBytes: 3 << 30, wantBudget: "timed out after 240ms"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg, base, _ := s3Lane(t, tt.snapshotBytes)
+			cfg, base, store := s3Lane(t)
 			cfg.LogicalTimeout = 60 * time.Millisecond
-			t.Setenv("S3CMD_SYNC", "slow")
+			store.SetSize(laneS3Prefix+"/ltx/0009/0000000000000001-000000000000042f.ltx", tt.snapshotBytes)
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			store.OnCopy = func(string, string) error {
+				select {
+				case <-release:
+				case <-time.After(5 * time.Second):
+				}
+				return nil
+			}
 			preserver := &upgradeChainPreserver{restore: func(context.Context, Config, Config, uint64) error { return nil }}
-			started := time.Now()
 			record, err := preserver.preserve(context.Background(), cfg, base, time.Now)
 			if err == nil || record.BaseProofFailed || !strings.Contains(err.Error(), tt.wantBudget) || !strings.Contains(err.Error(), "resumes from the objects already copied") {
 				t.Fatalf("record = %+v, %v; want %q", record, err, tt.wantBudget)
 			}
-			if time.Since(started) > 20*time.Second {
-				t.Fatalf("copy ran %s past its budget", time.Since(started))
-			}
 		})
+	}
+}
+
+func TestFileReplicaPreservationLeavesNonLTXObjectsBehind(t *testing.T) {
+	cfg, base := fileLane(t)
+	seedLaneReplica(t, cfg)
+	writeLaneFile(t, filepath.Join(cfg.ReplicaPath, "profiles", "cpu.pprof.json"), "{}")
+	writeLaneFile(t, preservedLaneFile(cfg, "profiles/partial.pprof.json"), "left by a failed copy")
+	preserver := &upgradeChainPreserver{restore: func(context.Context, Config, Config, uint64) error { return nil }}
+	record, err := preserver.preserve(context.Background(), cfg, base, time.Now)
+	if err != nil || record.Objects != len(laneReplicaKeys) {
+		t.Fatalf("record = %+v, %v", record, err)
+	}
+	copied, err := listFileReplicaObjects(preservedChainConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(copied)
+	if !slices.Equal(copied, laneReplicaKeys) {
+		t.Fatalf("preserved files = %v, want only %v", copied, laneReplicaKeys)
+	}
+}
+
+func TestUpgradeLaneFaultIsTerminalAcrossRestarts(t *testing.T) {
+	shortenUpgradeEvidenceWait(t, time.Second)
+	cfg, _ := fileLane(t)
+	seedLaneReplica(t, cfg)
+	switchedLaneState(t, cfg, nil)
+	var mu sync.Mutex
+	var events []reporting.WorkerEventPayload
+	failing := true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var event reporting.WorkerEventPayload
+		_ = json.NewDecoder(r.Body).Decode(&event)
+		mu.Lock()
+		defer mu.Unlock()
+		if failing {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		events = append(events, event)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	cfg.ControlBaseURL = server.URL
+
+	var calls []string
+	run := func(ctx context.Context, phase Config) error {
+		calls = append(calls, "run "+phase.upgradePhase)
+		if phase.upgradePhase == UpgradePhasePre {
+			<-ctx.Done()
+		}
+		return nil
+	}
+	purger := chainLanePurger(&calls, func() error { return errors.New("copy object failed: HTTP 403 SignatureDoesNotMatch") })
+	err := runUpgradeLane(context.Background(), cfg, time.Now, purger, run)
+	if !errors.Is(err, errUpgradeLaneHalted) || !strings.Contains(err.Error(), "3 attempt(s) failed") {
+		t.Fatalf("runUpgradeLane() error = %v, want the lane halted after its attempts", err)
+	}
+	first := slices.Clone(calls)
+	want := []string{"run pre-upgrade", "base-restore 0000000000000444", "base-restore 0000000000000444", "base-restore 0000000000000444"}
+	if !slices.Equal(first, want) {
+		t.Fatalf("calls = %v, want %v", first, want)
+	}
+
+	mu.Lock()
+	failing = false
+	mu.Unlock()
+	for range 3 {
+		if err := runUpgradeLane(context.Background(), cfg, time.Now, purger, run); !errors.Is(err, errUpgradeLaneHalted) {
+			t.Fatalf("restarted runUpgradeLane() error = %v, want the lane still halted", err)
+		}
+	}
+	if !slices.Equal(calls, first) {
+		t.Fatalf("calls after restarts = %v, want no base build start and no further copy attempt beyond %v", calls, first)
+	}
+	state, err := readUpgradeLaneState(cfg.DataDir)
+	if err != nil || state.LaneFault == nil || state.LaneFault.DeliveredAt == nil || state.Phase != UpgradePhasePre || state.PreservedChain.Attempt != replicaL9PurgeAttempts {
+		t.Fatalf("state = %+v, %v; want a delivered, terminal lane fault", state, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 1 || events[0].EventType != "worker_failed" || !strings.Contains(events[0].Message, "SignatureDoesNotMatch") {
+		t.Fatalf("events = %+v, want the fault reported exactly once", events)
+	}
+}
+
+func TestRunUpgradeLaneIdlesOnAHaltedLaneInsteadOfExiting(t *testing.T) {
+	cfg, _ := fileLane(t)
+	switchedLaneState(t, cfg, func(state *upgradeLaneState) {
+		state.LaneFault = &laneFault{At: time.Now().UTC(), Error: "upgrade lane pre-upgrade chain preservation: 3 attempt(s) failed"}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunUpgradeLane(ctx, cfg, func(context.Context, Config) error {
+			t.Error("a halted lane started a build")
+			return nil
+		})
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("RunUpgradeLane() returned %v; an exit would have the platform restart the machine", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunUpgradeLane() error = %v after shutdown, want a clean exit", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunUpgradeLane() did not return after shutdown")
+	}
+}
+
+func TestUpgradeChainAttemptsAreCountedAcrossRestarts(t *testing.T) {
+	cfg, _ := fileLane(t)
+	seedLaneReplica(t, cfg)
+	switchedLaneState(t, cfg, func(state *upgradeLaneState) {
+		state.PreservedChain = &preservedChain{Prefix: "p", Attempt: 2, Error: "attempt did not finish"}
+	})
+	restores := 0
+	preserver := &upgradeChainPreserver{restore: func(context.Context, Config, Config, uint64) error {
+		restores++
+		if state, err := readUpgradeLaneState(cfg.DataDir); err != nil || state.PreservedChain == nil || state.PreservedChain.Attempt != 3 || state.PreservedChain.Error == "" {
+			t.Errorf("state during the attempt = %+v, %v; want attempt 3 on record before it finishes", state.PreservedChain, err)
+		}
+		return errors.New("restore capacity: no room")
+	}}
+	record, err := preserveUntilVerified(context.Background(), cfg, time.Now, preserver)
+	if err == nil || restores != 1 || record.Attempt != 3 {
+		t.Fatalf("record = %+v, %v, %d restore(s); want only the one attempt the lane had left", record, err, restores)
+	}
+	record, err = preserveUntilVerified(context.Background(), cfg, time.Now, preserver)
+	if err == nil || restores != 1 || !strings.Contains(err.Error(), "restore capacity: no room") {
+		t.Fatalf("record = %+v, %v, %d restore(s); want no attempt once the lane has used them all", record, err, restores)
+	}
+}
+
+func TestPhaseEndDuringStartupIsNotAWorkerFailure(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.ControlBaseURL = server.URL
+	runner := NewRunner(cfg)
+	runner.reporter = NewReporter(cfg)
+	runner.sendPreStartFailureEvent(fmt.Errorf("wait for first sync: %w", errUpgradeWarmupEnded))
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("events = %d, want none when the warm-up ends while the base build is starting", got)
+	}
+	runner.sendPreStartFailureEvent(errors.New("wait for first sync: litestream exited"))
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("events = %d, want a real startup failure still reported", got)
 	}
 }
 
