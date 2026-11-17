@@ -507,3 +507,44 @@ func TestUpgradeGateWorkerEnvCarriesLaneSettings(t *testing.T) {
 		t.Fatalf("follow worker env = %+v", env)
 	}
 }
+
+func TestUpgradeLaneBlockedSwitchIsABaselineFailureOnly(t *testing.T) {
+	db := openTestDB(t)
+	gate := registerTestUpgradeGate(t, db, "", time.Now().UTC().Add(-3*time.Hour))
+	createTestGateFleet(t, db, gate)
+	inside := gate.StartedAt.Add(time.Hour)
+	for i, v := range []struct{ mode, status string }{{"txid", "passed"}, {"timestamp", "failed"}, {"latest", "failed"}, {"timestamp", "failed"}} {
+		recordUpgradeGateVerification(t, db, testUpgradeCandidate, gateUpgradeLaneProfile, "pre-upgrade", "", "integrity", v.mode, v.status, inside.Add(time.Duration(i)*time.Minute))
+	}
+	lane := "worker-" + testUpgradeCandidate + "-" + gateUpgradeLaneProfile
+	if _, err := db.GetWorker(lane); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordEventAt(lane, "upgrade_switch_blocked", "upgrade lane stays on the base build: the pre-upgrade baseline was incomplete", "", inside.Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.GetRCGate(gate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := buildRCGateResults(db, *stored, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range results.Scenarios {
+		if scenario.Scenario != "upgrade-lane" {
+			continue
+		}
+		if scenario.Baseline.Status != rcGateSideFailing || scenario.Baseline.Failed != 3 || scenario.Baseline.Reason != "" {
+			t.Fatalf("baseline = %+v, want the base build's restore failures and no worker fault", scenario.Baseline)
+		}
+		if scenario.Candidate.Status != rcGateSideNoCoverage || scenario.Candidate.Failed != 0 || scenario.Candidate.Reason != "" {
+			t.Fatalf("candidate = %+v, want no coverage and no fault for a build that never ran", scenario.Candidate)
+		}
+		if scenario.Verdict == rcGateVerdictRegression || scenario.Verdict == rcGateVerdictBothFailing {
+			t.Fatalf("verdict = %s, want nothing held against the candidate", scenario.Verdict)
+		}
+		return
+	}
+	t.Fatalf("no upgrade-lane scenario in %+v", results.Scenarios)
+}

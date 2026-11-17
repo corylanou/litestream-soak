@@ -388,30 +388,94 @@ func TestUpgradeLaneWaitsForARestoreInEveryModeBeforeSwitching(t *testing.T) {
 	}
 }
 
-func TestUpgradeLaneFailsInsteadOfSwitchingWithoutABaseline(t *testing.T) {
+func TestUpgradeLaneStaysOnTheBaseBuildWithoutABaseline(t *testing.T) {
 	shortenUpgradeEvidenceWait(t, 80*time.Millisecond)
 	dir := t.TempDir()
 	cfg := upgradeLaneConfig(t, dir)
 	cfg.UpgradeWarmup = 30 * time.Millisecond
 
-	var phases []string
-	run := func(runCtx context.Context, phase Config) error {
-		phases = append(phases, phase.upgradePhase)
-		if err := recordUpgradePreEvidence(dir, 7, restoreModeTXID); err != nil {
+	blocked := func() *time.Time {
+		state, err := readUpgradeLaneState(dir)
+		if err != nil {
 			t.Error(err)
 		}
-		<-runCtx.Done()
-		return context.Cause(runCtx)
+		return state.SwitchBlockedAt
 	}
-	err := runUpgradeLane(context.Background(), cfg, time.Now, replicaL9Purger{}, run)
-	if err == nil || !errors.Is(err, errUpgradeEvidenceMissing) || !strings.Contains(err.Error(), "upgrade lane did not switch builds") || !strings.Contains(err.Error(), "no passing restore in mode(s) timestamp,latest") {
-		t.Fatalf("runUpgradeLane() error = %v, want the missing baseline named", err)
+	var phases []string
+	run := func(complete bool) func(context.Context, Config) error {
+		return func(runCtx context.Context, phase Config) error {
+			phases = append(phases, phase.upgradePhase)
+			modes := []string{restoreModeTXID}
+			if complete {
+				modes = restoreModeRotation
+			}
+			for _, mode := range modes {
+				if err := recordUpgradePreEvidence(dir, 7, mode); err != nil {
+					t.Error(err)
+				}
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for blocked() == nil && time.Now().Before(deadline) && runCtx.Err() == nil {
+				time.Sleep(5 * time.Millisecond)
+			}
+			time.Sleep(40 * time.Millisecond)
+			if cause := context.Cause(runCtx); cause != nil {
+				return cause
+			}
+			return nil
+		}
 	}
-	if len(phases) != 1 || phases[0] != UpgradePhasePre {
-		t.Fatalf("phases = %v, want the candidate build never started", phases)
+	started := time.Now()
+	if err := runUpgradeLane(context.Background(), cfg, time.Now, replicaL9Purger{}, run(false)); err != nil {
+		t.Fatalf("runUpgradeLane() error = %v, want the lane left running on the base build", err)
+	}
+	firstBlock := blocked()
+	if firstBlock == nil || time.Since(started) < cfg.UpgradeWarmup+80*time.Millisecond {
+		t.Fatalf("blocked at %v after %s, want the block recorded only after the warm-up and the grace", firstBlock, time.Since(started))
+	}
+
+	if err := runUpgradeLane(context.Background(), cfg, time.Now, replicaL9Purger{}, run(true)); err != nil {
+		t.Fatalf("restarted runUpgradeLane() error = %v", err)
 	}
 	state, err := readUpgradeLaneState(dir)
-	if err != nil || state.Phase != UpgradePhasePre || state.SwitchedAt != nil {
-		t.Fatalf("state = %+v, %v; want the lane still pre-upgrade", state, err)
+	if err != nil || state.Phase != UpgradePhasePre || state.SwitchedAt != nil || state.SwitchBlockedAt == nil || !state.SwitchBlockedAt.Equal(*firstBlock) {
+		t.Fatalf("state = %+v, %v; want the lane still pre-upgrade with the first block kept", state, err)
+	}
+	if len(phases) != 2 || phases[0] != UpgradePhasePre || phases[1] != UpgradePhasePre {
+		t.Fatalf("phases = %v, want the candidate build never started, even once the evidence completed after the block", phases)
+	}
+}
+
+func TestUpgradeLaneRestartDoesNotExtendTheEvidenceGrace(t *testing.T) {
+	shortenUpgradeEvidenceWait(t, time.Hour)
+	dir := t.TempDir()
+	cfg := upgradeLaneConfig(t, dir)
+	cfg.UpgradeWarmup = time.Hour
+	started := time.Now().UTC().Add(-2*time.Hour - time.Minute)
+	if err := writeUpgradeLaneState(dir, upgradeLaneState{Phase: UpgradePhasePre, StartedAt: started, BaseSHA: testUpgradeBaseSHA, CandidateSHA: testUpgradeCandidateSHA, PreUpgradeTXID: 7, PreRestoreModes: []string{restoreModeTXID}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	run := func(runCtx context.Context, phase Config) error {
+		if phase.upgradePhase != UpgradePhasePre {
+			t.Errorf("phase %s started without a baseline", phase.upgradePhase)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if state, err := readUpgradeLaneState(dir); err == nil && state.SwitchBlockedAt != nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+		return nil
+	}
+	if err := runUpgradeLane(ctx, cfg, time.Now, replicaL9Purger{}, run); err != nil {
+		t.Fatalf("runUpgradeLane() error = %v", err)
+	}
+	state, err := readUpgradeLaneState(dir)
+	if err != nil || state.SwitchBlockedAt == nil {
+		t.Fatalf("state = %+v, %v; want a restart past start + warm-up + grace blocked at once instead of given a fresh hour", state, err)
 	}
 }
