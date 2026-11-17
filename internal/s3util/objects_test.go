@@ -86,3 +86,62 @@ func TestListCopyAndDeleteObjects(t *testing.T) {
 		t.Fatal("ListObjects() with an empty prefix succeeded")
 	}
 }
+
+func TestListObjectsFailsOnABodyThatIsNotAListing(t *testing.T) {
+	for _, tt := range []struct {
+		name, body, wantErr string
+		wantObjects         int
+	}{
+		{name: "error document with status 200", body: "<Error><Code>InternalError</Code><Message>slow down</Message></Error>", wantErr: "not a ListBucketResult"},
+		{name: "empty body", body: "", wantErr: "not a ListBucketResult"},
+		{name: "html error page", body: "<html><body>Bad Gateway</body></html>", wantErr: "not a ListBucketResult"},
+		{name: "json", body: `{"objects":[]}`, wantErr: "not a ListBucketResult"},
+		{name: "namespaced listing", body: `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>bucket</Name><Prefix>soak/a/</Prefix><KeyCount>1</KeyCount><IsTruncated>false</IsTruncated><Contents><Key>soak/a/0000/0000000000000001-0000000000000001.ltx</Key><Size>7</Size><ETag>&quot;abc&quot;</ETag></Contents></ListBucketResult>`, wantObjects: 1},
+		{name: "empty listing", body: "<ListBucketResult><KeyCount>0</KeyCount><IsTruncated>false</IsTruncated></ListBucketResult>"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+			client, err := NewClient(Config{Bucket: "bucket", Endpoint: server.URL, AccessKey: "access", SecretKey: "secret"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			objects, err := client.ListObjects(context.Background(), "soak/a/")
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ListObjects() = %+v, %v; want an error containing %q, not an empty listing", objects, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || len(objects) != tt.wantObjects {
+				t.Fatalf("ListObjects() = %+v, %v; want %d object(s)", objects, err, tt.wantObjects)
+			}
+		})
+	}
+}
+
+func TestListObjectsFollowsContinuationTokens(t *testing.T) {
+	var queries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		if r.URL.Query().Get("continuation-token") == "" {
+			_, _ = w.Write([]byte("<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next/page=2</NextContinuationToken><Contents><Key>soak/a/0000/1.ltx</Key><Size>1</Size></Contents></ListBucketResult>"))
+			return
+		}
+		_, _ = w.Write([]byte("<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>soak/a/0000/2.ltx</Key><Size>2</Size></Contents></ListBucketResult>"))
+	}))
+	defer server.Close()
+	client, err := NewClient(Config{Bucket: "bucket", Endpoint: server.URL, AccessKey: "access", SecretKey: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects, err := client.ListObjects(context.Background(), "soak/a/")
+	if err != nil || len(objects) != 2 || objects[1].Key != "soak/a/0000/2.ltx" {
+		t.Fatalf("ListObjects() = %+v, %v", objects, err)
+	}
+	if len(queries) != 2 || queries[0] != "list-type=2&max-keys=1000&prefix=soak%2Fa%2F" || queries[1] != "continuation-token=next%2Fpage%3D2&list-type=2&max-keys=1000&prefix=soak%2Fa%2F" {
+		t.Fatalf("queries = %q, want sorted, percent-encoded query strings", queries)
+	}
+}

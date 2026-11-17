@@ -11,7 +11,6 @@ import (
 	"maps"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -27,11 +26,6 @@ import (
 const (
 	preservedChainDrainChecks = 6
 	preservedChainCopyWorkers = 8
-	// replicaLTXTree is the part of a replica prefix Litestream restores
-	// from: the LTX levels, L9 snapshots included. The worker keeps other
-	// objects under the same prefix, such as profile evidence, and those are
-	// never copied.
-	replicaLTXTree = "ltx/"
 )
 
 var (
@@ -42,8 +36,15 @@ var (
 	// build could not restore the copy or the restored database failed the
 	// integrity check. Everything else (listing, copying, capacity, budgets)
 	// is a fault of the lane, not of either build.
-	errBaseProofFailed   = errors.New("base build failed to restore the preserved pre-upgrade chain")
-	ltxObjectNamePattern = regexp.MustCompile(`^[0-9a-f]{16}-([0-9a-f]{16})\.ltx$`)
+	errBaseProofFailed = errors.New("base build failed to restore the preserved pre-upgrade chain")
+	// Litestream lays a replica out differently per backend. Its S3 client
+	// writes <path>/<level as four hex digits>/<min>-<max>.ltx, with no ltx
+	// directory; its file client writes <path>/ltx/<level>/<min>-<max>.ltx.
+	// Only keys of that shape are replica data. The worker keeps other
+	// objects under the same prefix, such as profile evidence, and those are
+	// never copied.
+	s3LTXKeyPattern   = regexp.MustCompile(`^[0-9a-f]{4}/[0-9a-f]{16}-([0-9a-f]{16})\.ltx$`)
+	fileLTXKeyPattern = regexp.MustCompile(`^ltx/[0-9]+/[0-9a-f]{16}-([0-9a-f]{16})\.ltx$`)
 )
 
 // replicaObject is what a listing knows about one replica object. ETag is the
@@ -120,7 +121,7 @@ func preservedChainConfig(cfg Config) Config {
 }
 
 // preserve must only run once the base build has exited. It waits for the
-// replica's LTX tree to stop changing, brings the copy of that tree up to date (keeping
+// replica's LTX objects to stop changing, brings the copy of them up to date (keeping
 // objects an earlier attempt already copied), checks the copy object by
 // object, confirms the replica did not change underneath the copy, and then
 // has the base build restore the newest txid from the copy.
@@ -144,7 +145,13 @@ func (p *upgradeChainPreserver) preserve(ctx context.Context, cfg, base Config, 
 	if err != nil {
 		return finish(err)
 	}
-	txid := maxLTXObjectTXID(slices.Collect(maps.Keys(drained)))
+	txid := maxLTXObjectTXID(cfg, slices.Collect(maps.Keys(drained)))
+	if txid == 0 {
+		if everything, listErr := replicaObjectStats(ctx, cfg, nil); listErr == nil {
+			sample := slices.Sorted(maps.Keys(everything))
+			return finish(fmt.Errorf("replica under %s holds no LTX objects to preserve: %d object(s) listed, none shaped like %s (first keys: %s)", source, len(everything), replicaLTXKeyPattern(cfg), strings.Join(sample[:min(len(sample), 5)], ", ")))
+		}
+	}
 	if txid == 0 {
 		return finish(fmt.Errorf("replica under %s holds no LTX objects to preserve (%d object(s) listed)", source, len(drained)))
 	}
@@ -162,14 +169,14 @@ func (p *upgradeChainPreserver) preserve(ctx context.Context, cfg, base Config, 
 		}
 		return finish(fmt.Errorf("copy replica to %s: %w", record.Prefix, err))
 	}
-	copied, err := replicaObjectStats(ctx, preserved, "")
+	copied, err := replicaObjectStats(ctx, preserved, nil)
 	if err != nil {
 		return finish(fmt.Errorf("list preserved objects: %w", err))
 	}
 	if err := matchReplicaObjects(drained, copied, cfg.ReplicaType != "file"); err != nil {
 		return finish(fmt.Errorf("preserved copy under %s does not match the replica: %w", record.Prefix, err))
 	}
-	after, err := replicaObjectStats(ctx, cfg, replicaLTXTree)
+	after, err := replicaObjectStats(ctx, cfg, replicaLTXKeys(cfg))
 	if err != nil {
 		return finish(fmt.Errorf("list replica objects after the copy: %w", err))
 	}
@@ -186,7 +193,7 @@ func (p *upgradeChainPreserver) preserve(ctx context.Context, cfg, base Config, 
 // preservedChainSettle apart agree on every object's size and ETag, so an
 // upload the stopped base build had in flight has either landed or not.
 func drainedReplicaObjects(ctx context.Context, cfg Config) (map[string]replicaObject, error) {
-	previous, err := replicaObjectStats(ctx, cfg, replicaLTXTree)
+	previous, err := replicaObjectStats(ctx, cfg, replicaLTXKeys(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("list replica objects: %w", err)
 	}
@@ -197,7 +204,7 @@ func drainedReplicaObjects(ctx context.Context, cfg Config) (map[string]replicaO
 			return nil, ctx.Err()
 		case <-time.After(preservedChainSettle):
 		}
-		current, err := replicaObjectStats(ctx, cfg, replicaLTXTree)
+		current, err := replicaObjectStats(ctx, cfg, replicaLTXKeys(cfg))
 		if err != nil {
 			return nil, fmt.Errorf("list replica objects: %w", err)
 		}
@@ -234,13 +241,23 @@ func matchReplicaObjects(want, got map[string]replicaObject, copiedMultipart boo
 	return nil
 }
 
-func maxLTXObjectTXID(keys []string) uint64 {
+// replicaLTXKeyPattern matches a key, relative to the replica prefix, that
+// Litestream wrote as an LTX file on this backend.
+func replicaLTXKeyPattern(cfg Config) *regexp.Regexp {
+	if cfg.ReplicaType == "file" {
+		return fileLTXKeyPattern
+	}
+	return s3LTXKeyPattern
+}
+
+func replicaLTXKeys(cfg Config) func(string) bool {
+	return replicaLTXKeyPattern(cfg).MatchString
+}
+
+func maxLTXObjectTXID(cfg Config, keys []string) uint64 {
 	var highest uint64
 	for _, key := range keys {
-		if _, ok := replicaLevelOfKey(key); !ok {
-			continue
-		}
-		match := ltxObjectNamePattern.FindStringSubmatch(path.Base(key))
+		match := replicaLTXKeyPattern(cfg).FindStringSubmatch(key)
 		if match == nil {
 			continue
 		}
@@ -252,24 +269,26 @@ func maxLTXObjectTXID(keys []string) uint64 {
 }
 
 // replicaObjectStats lists the objects under the config's replica prefix,
-// keyed relative to that prefix. tree limits the listing to one subtree, such
-// as replicaLTXTree; an empty tree lists everything.
-func replicaObjectStats(ctx context.Context, cfg Config, tree string) (map[string]replicaObject, error) {
+// keyed relative to that prefix. keep selects the keys to return, such as
+// replicaLTXKeys; nil returns everything.
+func replicaObjectStats(ctx context.Context, cfg Config, keep func(string) bool) (map[string]replicaObject, error) {
 	if cfg.ReplicaType == "file" {
-		return fileReplicaObjectStats(ctx, replicaOwnPrefix(cfg), tree)
+		return fileReplicaObjectStats(ctx, replicaOwnPrefix(cfg), keep)
 	}
 	client, err := replicaS3Client(cfg)
 	if err != nil {
 		return nil, err
 	}
 	prefix := replicaOwnPrefix(cfg) + "/"
-	listed, err := client.ListObjects(ctx, prefix+tree)
+	listed, err := client.ListObjects(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
 	objects := make(map[string]replicaObject, len(listed))
 	for _, object := range listed {
-		objects[strings.TrimPrefix(object.Key, prefix)] = replicaObject{Size: object.Size, ETag: object.ETag}
+		if key := strings.TrimPrefix(object.Key, prefix); keep == nil || keep(key) {
+			objects[key] = replicaObject{Size: object.Size, ETag: object.ETag}
+		}
 	}
 	return objects, nil
 }
@@ -287,14 +306,14 @@ func replicaS3Client(cfg Config) (*s3util.Client, error) {
 	})
 }
 
-func fileReplicaObjectStats(ctx context.Context, root, tree string) (map[string]replicaObject, error) {
+func fileReplicaObjectStats(ctx context.Context, root string, keep func(string) bool) (map[string]replicaObject, error) {
 	keys, err := listFileReplicaObjects(Config{ReplicaType: "file", ReplicaPath: root})
 	if err != nil {
 		return nil, err
 	}
 	objects := make(map[string]replicaObject, len(keys))
 	for _, key := range keys {
-		if !strings.HasPrefix(key, tree) {
+		if keep != nil && !keep(key) {
 			continue
 		}
 		if err := ctx.Err(); err != nil {
@@ -336,7 +355,7 @@ func syncReplicaObjects(ctx context.Context, cfg, preserved Config, source map[s
 	if err != nil {
 		return err
 	}
-	existing, err := replicaObjectStats(ctx, preserved, "")
+	existing, err := replicaObjectStats(ctx, preserved, nil)
 	if err != nil {
 		return fmt.Errorf("list preserved objects: %w", err)
 	}
@@ -390,7 +409,7 @@ func syncReplicaObjects(ctx context.Context, cfg, preserved Config, source map[s
 }
 
 func syncFileReplica(ctx context.Context, sourceRoot, destinationRoot string, source map[string]replicaObject) error {
-	existing, err := fileReplicaObjectStats(ctx, destinationRoot, "")
+	existing, err := fileReplicaObjectStats(ctx, destinationRoot, nil)
 	if err != nil {
 		return err
 	}

@@ -29,10 +29,10 @@ func quickenChainPreservation(t *testing.T) {
 }
 
 var laneReplicaKeys = []string{
-	"ltx/0000/0000000000000443-0000000000000443.ltx",
-	"ltx/0000/0000000000000444-0000000000000444.ltx",
-	"ltx/0001/0000000000000430-0000000000000442.ltx",
-	"ltx/0009/0000000000000001-000000000000042f.ltx",
+	"ltx/0/0000000000000443-0000000000000443.ltx",
+	"ltx/0/0000000000000444-0000000000000444.ltx",
+	"ltx/1/0000000000000430-0000000000000442.ltx",
+	"ltx/9/0000000000000001-000000000000042f.ltx",
 }
 
 func seedLaneReplica(t *testing.T, cfg Config) {
@@ -72,7 +72,7 @@ func fileLane(t *testing.T) (Config, Config) {
 func TestUpgradeChainPreserveCopiesTheReplicaAndProvesItWithTheBaseBuild(t *testing.T) {
 	cfg, base := fileLane(t)
 	seedLaneReplica(t, cfg)
-	writeLaneFile(t, preservedLaneFile(cfg, "ltx/0000/0000000000000999-0000000000000999.ltx"), "left by an earlier lane")
+	writeLaneFile(t, preservedLaneFile(cfg, "ltx/0/0000000000000999-0000000000000999.ltx"), "left by an earlier lane")
 	writeLaneFile(t, preservedLaneFile(cfg, laneReplicaKeys[0]), "torn copy of the same length as nothing")
 	kept := preservedLaneFile(cfg, laneReplicaKeys[3])
 	writeLaneFile(t, kept, laneReplicaKeys[3])
@@ -109,7 +109,7 @@ func TestUpgradeChainPreserveCopiesTheReplicaAndProvesItWithTheBaseBuild(t *test
 	if len(restored) != 1 || restored[0] != 0x444 {
 		t.Fatalf("base restores = %x, want one restore of txid 444", restored)
 	}
-	if _, err := os.Stat(preservedLaneFile(cfg, "ltx/0000/0000000000000999-0000000000000999.ltx")); !os.IsNotExist(err) {
+	if _, err := os.Stat(preservedLaneFile(cfg, "ltx/0/0000000000000999-0000000000000999.ltx")); !os.IsNotExist(err) {
 		t.Fatalf("object from an earlier lane survived in the preserved prefix: %v", err)
 	}
 	if info, err := os.Stat(kept); err != nil || !info.ModTime().Equal(copiedEarlier) {
@@ -160,7 +160,7 @@ func TestUpgradeChainPreserveWaitsForTheReplicaToStopChanging(t *testing.T) {
 				return
 			default:
 			}
-			_ = os.WriteFile(filepath.Join(cfg.ReplicaPath, "ltx", "0000", fmt.Sprintf("%016x-%016x.ltx", 0x500+i, 0x500+i)), []byte("late upload"), 0o644)
+			_ = os.WriteFile(filepath.Join(cfg.ReplicaPath, "ltx", "0", fmt.Sprintf("%016x-%016x.ltx", 0x500+i, 0x500+i)), []byte("late upload"), 0o644)
 			time.Sleep(200 * time.Microsecond)
 		}
 	}()
@@ -236,10 +236,10 @@ func switchedLaneState(t *testing.T, cfg Config, mutate func(*upgradeLaneState))
 
 func TestUpgradeLaneHandsTheCandidateThePreservedChain(t *testing.T) {
 	shortenUpgradeEvidenceWait(t, time.Second)
-	cfg, _ := fileLane(t)
+	cfg, _, store := s3Lane(t)
 	cfg.UpgradeDeleteL9AtSwitch = true
-	seedLaneReplica(t, cfg)
 	switchedLaneState(t, cfg, nil)
+	const snapshot = "/0009/0000000000000001-000000000000042f.ltx"
 
 	var calls []string
 	var post []Config
@@ -252,28 +252,42 @@ func TestUpgradeLaneHandsTheCandidateThePreservedChain(t *testing.T) {
 		<-ctx.Done()
 		return nil
 	}
-	purger := chainLanePurger(&calls, func() error {
-		if state, err := readUpgradeLaneState(cfg.DataDir); err != nil || state.Phase != UpgradePhasePre || state.SwitchedAt != nil {
-			t.Errorf("state = %+v, %v while the base build proves the copy; want the switch not committed yet", state, err)
-		}
-		return nil
-	})
+	purger := replicaL9Purger{
+		list: func(_ context.Context, cfg Config) ([]string, error) {
+			return store.Keys(replicaOwnPrefix(cfg) + "/"), nil
+		},
+		remove: func(_ context.Context, _ Config, key string) error {
+			calls = append(calls, "purge "+key)
+			store.Delete(key)
+			return nil
+		},
+		chain: &upgradeChainPreserver{restore: func(_ context.Context, _, _ Config, txid uint64) error {
+			calls = append(calls, "base-restore "+formatTXID(txid))
+			if state, err := readUpgradeLaneState(cfg.DataDir); err != nil || state.Phase != UpgradePhasePre || state.SwitchedAt != nil {
+				t.Errorf("state = %+v, %v while the base build proves the copy; want the switch not committed yet", state, err)
+			}
+			return nil
+		}},
+	}
 	for range 2 {
 		if err := runUpgradeLane(context.Background(), cfg, time.Now, purger, run); err != nil {
 			t.Fatalf("runUpgradeLane() error = %v", err)
 		}
 	}
-	want := []string{"run pre-upgrade", "base-restore 0000000000000444", "purge ltx/0009/0000000000000001-000000000000042f.ltx", "run post-upgrade", "run post-upgrade"}
+	want := []string{"run pre-upgrade", "base-restore 0000000000000444", "purge " + laneS3Prefix + snapshot, "run post-upgrade", "run post-upgrade"}
 	if strings.Join(calls, "; ") != strings.Join(want, "; ") {
 		t.Fatalf("calls = %v\nwant    %v: the chain is copied and proven once, before the purge and before the candidate", calls, want)
 	}
 	for _, phase := range post {
-		if phase.upgradePreTXID != 0x444 || phase.upgradePreservedChain != cfg.ReplicaPath+reporting.PreservedChainPrefixSuffix {
+		if phase.upgradePreTXID != 0x444 || phase.upgradePreservedChain != laneS3Prefix+reporting.PreservedChainPrefixSuffix {
 			t.Fatalf("post-upgrade config txid %x chain %q, want the preserved chain's proven txid, not the saved boundary 433", phase.upgradePreTXID, phase.upgradePreservedChain)
 		}
 	}
-	if _, err := os.Stat(preservedLaneFile(cfg, "ltx/0009/0000000000000001-000000000000042f.ltx")); err != nil {
-		t.Fatalf("preserved chain lost the base build's snapshot to the L9 purge: %v", err)
+	if _, ok := store.Get(laneS3Prefix + reporting.PreservedChainPrefixSuffix + snapshot); !ok {
+		t.Fatal("preserved chain lost the base build's snapshot to the L9 purge")
+	}
+	if _, ok := store.Get(laneS3Prefix + snapshot); ok {
+		t.Fatal("L9 purge left the live replica's snapshot in place")
 	}
 	state, err := readUpgradeLaneState(cfg.DataDir)
 	if err != nil || !state.PreservedChain.succeeded() || state.PreservedChain.Attempt != 1 || state.SwitchBlockedAt != nil {
@@ -611,11 +625,13 @@ func s3Lane(t *testing.T) (Config, Config, *s3fake.Server) {
 	cfg.S3Endpoint = store.URL
 	cfg.S3AccessKey = "access"
 	cfg.S3SecretKey = "secret"
-	store.Put(laneS3Prefix+"/ltx/0000/0000000000000444-0000000000000444.ltx", []byte("l0"), "")
-	store.Put(laneS3Prefix+"/ltx/0009/0000000000000001-000000000000042f.ltx", []byte("snapshot"), "bbbb-3")
+	store.Put(laneS3Prefix+"/0000/0000000000000444-0000000000000444.ltx", []byte("l0"), "")
+	store.Put(laneS3Prefix+"/0009/0000000000000001-000000000000042f.ltx", []byte("snapshot"), "bbbb-3")
 	store.Put(laneS3Prefix+"/profiles/2026-11-17T06:28:01Z_verification-failed heap+cpu 'q'.pprof.json", []byte("{}"), "")
 	store.Put(laneS3Prefix+"/ltx-not-the-tree.txt", []byte("x"), "")
-	store.Put(laneS3Prefix+"-pre-upgrade/ltx/0000/0000000000000999-0000000000000999.ltx", []byte("left by an earlier lane"), "")
+	store.Put(laneS3Prefix+"/ltx/0/0000000000000444-0000000000000444.ltx", []byte("file replica layout, not what the S3 client writes"), "")
+	store.Put(laneS3Prefix+"/0000/notes.txt", []byte("x"), "")
+	store.Put(laneS3Prefix+"-pre-upgrade/0000/0000000000000999-0000000000000999.ltx", []byte("left by an earlier lane"), "")
 	store.Put(laneS3Prefix+"-pre-upgrade/profiles/partial.pprof.json", []byte("left by a failed copy"), "")
 	base, err := cfg.ForUpgradePhase(UpgradePhasePre)
 	if err != nil {
@@ -639,18 +655,18 @@ func TestUpgradeChainPreserveCopiesOnlyTheLTXTreeOfAnS3Replica(t *testing.T) {
 		t.Fatalf("base restore replica = %q", restoredFrom)
 	}
 	want := []string{
-		laneS3Prefix + "-pre-upgrade/ltx/0000/0000000000000444-0000000000000444.ltx",
-		laneS3Prefix + "-pre-upgrade/ltx/0009/0000000000000001-000000000000042f.ltx",
+		laneS3Prefix + "-pre-upgrade/0000/0000000000000444-0000000000000444.ltx",
+		laneS3Prefix + "-pre-upgrade/0009/0000000000000001-000000000000042f.ltx",
 	}
 	if got := store.Keys(laneS3Prefix + "-pre-upgrade/"); !slices.Equal(got, want) {
 		t.Fatalf("preserved objects = %v\nwant %v: the LTX tree only, with stale and non-LTX objects gone", got, want)
 	}
 	for _, call := range store.Calls() {
-		if strings.Contains(call, "pprof.json") && strings.HasPrefix(call, "copy ") || strings.Contains(call, "ltx-not-the-tree") {
+		if strings.HasPrefix(call, "copy ") && (strings.Contains(call, "pprof.json") || strings.Contains(call, "ltx-not-the-tree") || strings.Contains(call, "/ltx/0/") || strings.Contains(call, "notes.txt")) {
 			t.Fatalf("copied a non-LTX object: %s", call)
 		}
 	}
-	if len(store.Keys(laneS3Prefix+"/")) != 4 {
+	if len(store.Keys(laneS3Prefix+"/")) != 6 {
 		t.Fatalf("source objects = %v, want the replica untouched", store.Keys(laneS3Prefix+"/"))
 	}
 
@@ -664,7 +680,7 @@ func TestUpgradeChainPreserveCopiesOnlyTheLTXTreeOfAnS3Replica(t *testing.T) {
 }
 
 func TestUpgradeChainPreserveChecksAnS3CopyBySizeAndETag(t *testing.T) {
-	l0 := "ltx/0000/0000000000000444-0000000000000444.ltx"
+	l0 := "0000/0000000000000444-0000000000000444.ltx"
 	tests := []struct {
 		name    string
 		onCopy  func(store *s3fake.Server) func(source, destination string) error
@@ -681,7 +697,7 @@ func TestUpgradeChainPreserveChecksAnS3CopyBySizeAndETag(t *testing.T) {
 		}, wantErr: "copy replica to " + laneS3Prefix + "-pre-upgrade: copy object failed: HTTP 500"},
 		{name: "replica changed during the copy", onCopy: func(store *s3fake.Server) func(string, string) error {
 			return func(string, string) error {
-				store.Put(laneS3Prefix+"/ltx/0000/0000000000000445-0000000000000445.ltx", []byte("late upload"), "")
+				store.Put(laneS3Prefix+"/0000/0000000000000445-0000000000000445.ltx", []byte("late upload"), "")
 				return nil
 			}
 		}, wantErr: "changed while it was being copied: 3 object(s), want 2"},
@@ -704,7 +720,7 @@ func TestUpgradeChainPreserveChecksAnS3CopyBySizeAndETag(t *testing.T) {
 
 	t.Run("copied object has different content", func(t *testing.T) {
 		cfg, _, store := s3Lane(t)
-		source, err := replicaObjectStats(context.Background(), cfg, replicaLTXTree)
+		source, err := replicaObjectStats(context.Background(), cfg, replicaLTXKeys(cfg))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -712,7 +728,7 @@ func TestUpgradeChainPreserveChecksAnS3CopyBySizeAndETag(t *testing.T) {
 			t.Fatal(err)
 		}
 		store.Put(laneS3Prefix+"-pre-upgrade/"+l0, []byte("zz"), "")
-		copied, err := replicaObjectStats(context.Background(), preservedChainConfig(cfg), "")
+		copied, err := replicaObjectStats(context.Background(), preservedChainConfig(cfg), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -740,7 +756,7 @@ func TestUpgradeChainCopyBudgetScalesWithTheReplica(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, base, store := s3Lane(t)
 			cfg.LogicalTimeout = 60 * time.Millisecond
-			store.SetSize(laneS3Prefix+"/ltx/0009/0000000000000001-000000000000042f.ltx", tt.snapshotBytes)
+			store.SetSize(laneS3Prefix+"/0009/0000000000000001-000000000000042f.ltx", tt.snapshotBytes)
 			release := make(chan struct{})
 			t.Cleanup(func() { close(release) })
 			store.OnCopy = func(string, string) error {
@@ -994,5 +1010,50 @@ func TestLitestreamStopWaitFitsThePlatformKillGrace(t *testing.T) {
 	}
 	if room := flyapi.WorkerStopTimeout - litestreamStopGrace - finalReports; room < time.Minute {
 		t.Fatalf("worker stop timeout %s leaves %s after the longest Litestream wait and the final reports, want at least a minute", flyapi.WorkerStopTimeout, room)
+	}
+}
+
+func TestPreservationReportsWhatAReplicaWithoutLTXObjectsHolds(t *testing.T) {
+	cfg, base, store := s3Lane(t)
+	for _, key := range store.Keys(laneS3Prefix + "/") {
+		if s3LTXKeyPattern.MatchString(strings.TrimPrefix(key, laneS3Prefix+"/")) {
+			store.Delete(key)
+		}
+	}
+	preserver := &upgradeChainPreserver{restore: func(context.Context, Config, Config, uint64) error { return nil }}
+	record, err := preserver.preserve(context.Background(), cfg, base, time.Now)
+	if err == nil || record.succeeded() {
+		t.Fatalf("record = %+v, %v", record, err)
+	}
+	for _, want := range []string{"4 object(s) listed, none shaped like", "0000/notes.txt", "ltx/0/0000000000000444-0000000000000444.ltx"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want it to say what the prefix does hold (%q)", err, want)
+		}
+	}
+}
+
+func TestReplicaLTXKeyLayoutMatchesLitestream(t *testing.T) {
+	for _, tt := range []struct {
+		backend, key string
+		want         bool
+		txid         uint64
+	}{
+		{backend: "s3", key: "0000/0000000000000443-0000000000000444.ltx", want: true, txid: 0x444},
+		{backend: "s3", key: "0009/0000000000000001-000000000000042f.ltx", want: true, txid: 0x42f},
+		{backend: "s3", key: "ltx/0/0000000000000443-0000000000000444.ltx"},
+		{backend: "s3", key: "ltx/0000/0000000000000443-0000000000000444.ltx"},
+		{backend: "s3", key: "profiles/x.pprof.json"},
+		{backend: "s3", key: "0000/0000000000000443-0000000000000444.ltx.tmp"},
+		{backend: "file", key: "ltx/0/0000000000000443-0000000000000444.ltx", want: true, txid: 0x444},
+		{backend: "file", key: "ltx/9/0000000000000001-000000000000042f.ltx", want: true, txid: 0x42f},
+		{backend: "file", key: "0000/0000000000000443-0000000000000444.ltx"},
+	} {
+		cfg := Config{ReplicaType: tt.backend}
+		if got := replicaLTXKeys(cfg)(tt.key); got != tt.want {
+			t.Errorf("%s key %q is LTX = %v, want %v", tt.backend, tt.key, got, tt.want)
+		}
+		if got := maxLTXObjectTXID(cfg, []string{tt.key}); got != tt.txid {
+			t.Errorf("%s key %q txid = %x, want %x", tt.backend, tt.key, got, tt.txid)
+		}
 	}
 }

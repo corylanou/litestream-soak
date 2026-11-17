@@ -18,8 +18,9 @@ type Object struct {
 }
 
 type listObjectsResult struct {
-	IsTruncated           bool   `xml:"IsTruncated"`
-	NextContinuationToken string `xml:"NextContinuationToken"`
+	XMLName               xml.Name `xml:"ListBucketResult"`
+	IsTruncated           bool     `xml:"IsTruncated"`
+	NextContinuationToken string   `xml:"NextContinuationToken"`
 	Contents              []struct {
 		Key  string `xml:"Key"`
 		Size int64  `xml:"Size"`
@@ -57,9 +58,11 @@ func (c *Client) ListObjects(ctx context.Context, prefix string) ([]Object, erro
 		if err != nil {
 			return nil, err
 		}
+		// The body has to be a listing. An error document or any other body
+		// sent with a success status must not read as an empty prefix.
 		var result listObjectsResult
 		if err := xml.Unmarshal(body, &result); err != nil {
-			return nil, fmt.Errorf("decode list objects response: %w", err)
+			return nil, fmt.Errorf("list objects under %q: response is not a ListBucketResult: %w: %s", prefix, err, strings.TrimSpace(string(body[:min(len(body), 512)])))
 		}
 		for _, object := range result.Contents {
 			if strings.TrimSpace(object.Key) != "" {
