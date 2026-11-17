@@ -391,7 +391,7 @@ func TestRuntimeStagesPrepareWritableDataDir(t *testing.T) {
 
 func TestControlDockerfileRebuildsPinnedFlyctl(t *testing.T) {
 	build := string(readFile(t, "scripts/build-flyctl.sh"))
-	for _, want := range []string{"source_sha=0284ecf29deec3209991ef9bb23ecb97765c7fc8", "version=0.4.114-soak.1", `git -C "$source_dir" checkout --detach "$source_sha"`, "CGO_ENABLED=0 go build", `go version -m "$binary"`, "go mod edit -require=github.com/containerd/containerd/v2@v2.3.6", "go mod edit -require=golang.org/x/net@v0.60.0"} {
+	for _, want := range []string{"source_sha=0284ecf29deec3209991ef9bb23ecb97765c7fc8", "version=0.4.114-soak.2", `git -C "$source_dir" checkout --detach "$source_sha"`, "CGO_ENABLED=0 go build", `go version -m "$binary"`, "go mod edit -require=github.com/containerd/containerd/v2@v2.3.6", "go mod edit -require=golang.org/x/net@v0.62.0", "go mod edit -require=github.com/klauspost/compress@v1.20.2", "go mod edit -require=github.com/andybalholm/brotli@v1.2.7", "go mod edit -require=github.com/chainguard-dev/kaniko@v1.25.20"} {
 		if !strings.Contains(build, want) {
 			t.Errorf("maintained tool build missing %q", want)
 		}

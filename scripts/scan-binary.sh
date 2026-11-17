@@ -58,6 +58,8 @@ if [[ "$role" = operational ]]; then
           .osv == "GO-2026-4883" or .osv == "GO-2026-4887"
         elif .trace[0].module == "github.com/chrismellard/docker-credential-acr-env" then
           .osv == "GO-2026-6225"
+        elif .trace[0].module == "github.com/mark3labs/mcp-go" then
+          .osv == "GO-2026-6911"
         else false end;
       [.[] | select(.finding) | .finding | select(.trace[0].function != null) |
        select(($name == "flyctl" and $sha == "0284ecf29deec3209991ef9bb23ecb97765c7fc8" and reviewed) | not)] | length == 0
