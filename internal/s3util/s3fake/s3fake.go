@@ -69,6 +69,12 @@ func (s *Server) Get(key string) ([]byte, bool) {
 	return slices.Clone(o.body), ok
 }
 
+func (s *Server) Delete(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.objects, key)
+}
+
 func (s *Server) Keys(prefix string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
