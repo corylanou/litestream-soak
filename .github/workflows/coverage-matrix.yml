@@ -1,14 +1,6 @@
 name: coverage-matrix
 
 on:
-  pull_request:
-    paths:
-      - .github/workflows/coverage-matrix.yml
-      - scripts/coverage-*.sh
-      - cmd/soakcoverage/**
-      - internal/coverage/**
-  schedule:
-    - cron: "41 5 * * *"
   workflow_dispatch:
     inputs:
       litestream_ref:
